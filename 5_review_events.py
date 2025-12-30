@@ -1,0 +1,214 @@
+"""
+STEP 5 — Interactive Event Review & Edit
+
+Keyboard controls:
+  Left/Right: move cursor by 0.1s
+  Up/Down: move cursor by 1.0s
+  n/p: next/previous event
+  e: edit selected event (terminal prompts)
+  d: delete selected event
+  s: save events.csv
+  q: quit
+"""
+
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from utils.events_audit import log_event_edit
+from utils.label_schema import (
+    ACTION_REST,
+    FINGER_NONE,
+    event_type_for,
+)
+
+EVENTS_PATH = Path("events.csv")
+FEATURES_PATH = Path("eeg_features.csv")
+
+meta_path = Path("session_meta.json")
+if meta_path.exists():
+    meta = json.loads(meta_path.read_text())
+    events_candidate = Path(meta.get("events_path", str(EVENTS_PATH)))
+    features_candidate = Path(meta.get("features_path", str(FEATURES_PATH)))
+    if events_candidate.exists():
+        EVENTS_PATH = events_candidate
+    if features_candidate.exists():
+        FEATURES_PATH = features_candidate
+
+if not EVENTS_PATH.exists():
+    raise FileNotFoundError(f"events.csv not found: {EVENTS_PATH}")
+if not FEATURES_PATH.exists():
+    raise FileNotFoundError(f"eeg_features.csv not found: {FEATURES_PATH}")
+
+events_df = pd.read_csv(EVENTS_PATH)
+
+required_cols = [
+    "onset_s", "duration_s", "type", "channel",
+    "confidence", "notes", "finger_id", "action_id", "source"
+]
+for col in required_cols:
+    if col not in events_df.columns:
+        raise ValueError(f"Missing column: {col}")
+
+features = pd.read_csv(FEATURES_PATH)
+if "time_s" in features.columns:
+    times = features["time_s"].values
+else:
+    times = np.arange(len(features)) / 256.0
+
+signal = features[["ch1", "ch2", "ch3", "ch4"]].values
+signal_mean = signal.mean(axis=1)
+
+events = events_df.to_dict(orient="records")
+cursor_t = times[0]
+selected_idx = 0 if events else None
+
+fig, ax = plt.subplots(figsize=(12, 4))
+ax.plot(times, signal_mean, linewidth=0.5, color="black")
+cursor_line = ax.axvline(cursor_t, color="red", linestyle="--")
+span_patches = []
+
+
+def redraw_spans():
+    global span_patches
+    for patch in span_patches:
+        patch.remove()
+    span_patches = []
+    for idx, e in enumerate(events):
+        start = e["onset_s"]
+        end = start + e["duration_s"]
+        color = "orange" if idx == selected_idx else "blue"
+        patch = ax.axvspan(start, end, alpha=0.15, color=color)
+        span_patches.append(patch)
+    fig.canvas.draw_idle()
+
+
+def update_cursor(new_t):
+    global cursor_t
+    cursor_t = max(times[0], min(times[-1], new_t))
+    cursor_line.set_xdata([cursor_t, cursor_t])
+    fig.canvas.draw_idle()
+
+
+def select_event(idx):
+    global selected_idx
+    if not events:
+        selected_idx = None
+        return
+    selected_idx = max(0, min(idx, len(events) - 1))
+    update_cursor(events[selected_idx]["onset_s"])
+    redraw_spans()
+
+
+def save_events():
+    pd.DataFrame(events).to_csv(EVENTS_PATH, index=False)
+    print(f"✅ Saved {len(events)} events to {EVENTS_PATH}")
+
+
+def normalize_event(event):
+    override = event.get("type")
+    if override in {"artifact", "calibration", "rest"}:
+        event["action_id"] = ACTION_REST
+        event["finger_id"] = FINGER_NONE
+    else:
+        event["type"] = event_type_for(
+            int(event["action_id"]),
+            int(event["finger_id"]),
+            None
+        )
+    return event
+
+
+def edit_event():
+    if selected_idx is None:
+        print("No events to edit")
+        return
+    event = events[selected_idx]
+    before = dict(event)
+    try:
+        onset = input(f"onset_s [{event['onset_s']}]: ").strip()
+        duration = input(f"duration_s [{event['duration_s']}]: ").strip()
+        action_id = input(f"action_id [{event['action_id']}]: ").strip()
+        finger_id = input(f"finger_id [{event['finger_id']}]: ").strip()
+        notes = input(f"notes [{event['notes']}]: ").strip()
+        override_type = input(f"type [{event['type']}]: ").strip()
+
+        if onset:
+            event["onset_s"] = float(onset)
+        if duration:
+            event["duration_s"] = float(duration)
+        if action_id:
+            event["action_id"] = int(action_id)
+        if finger_id:
+            event["finger_id"] = int(finger_id)
+        if notes:
+            event["notes"] = notes
+        if override_type:
+            event["type"] = override_type
+
+        event = normalize_event(event)
+        events[selected_idx] = event
+        log_event_edit("edit", before, dict(event))
+        redraw_spans()
+    except Exception as e:
+        print(f"⚠️ Edit failed: {e}")
+
+
+def delete_event():
+    global selected_idx
+    if selected_idx is None:
+        return
+    before = events[selected_idx]
+    events.pop(selected_idx)
+    log_event_edit("delete", before, {})
+    if events:
+        selected_idx = min(selected_idx, len(events) - 1)
+    else:
+        selected_idx = None
+    redraw_spans()
+
+
+def on_key(event):
+    global selected_idx
+    if event.key == "left":
+        update_cursor(cursor_t - 0.1)
+    elif event.key == "right":
+        update_cursor(cursor_t + 0.1)
+    elif event.key == "up":
+        update_cursor(cursor_t + 1.0)
+    elif event.key == "down":
+        update_cursor(cursor_t - 1.0)
+    elif event.key == "n":
+        if selected_idx is not None:
+            select_event(selected_idx + 1)
+    elif event.key == "p":
+        if selected_idx is not None:
+            select_event(selected_idx - 1)
+    elif event.key == "e":
+        edit_event()
+    elif event.key == "d":
+        delete_event()
+    elif event.key == "s":
+        save_events()
+    elif event.key == "q":
+        save_events()
+        plt.close(fig)
+
+
+fig.canvas.mpl_connect("key_press_event", on_key)
+
+if events:
+    select_event(0)
+else:
+    redraw_spans()
+
+ax.set_title("EEG Event Review (mean channel)")
+ax.set_xlabel("Time (s)")
+ax.set_ylabel("Mean amplitude")
+
+print("Event review started. Focus the plot window for keyboard controls.")
+plt.show()

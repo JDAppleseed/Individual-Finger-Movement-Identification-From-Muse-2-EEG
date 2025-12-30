@@ -1,0 +1,29 @@
+numpy>=1.23,<2.0
+pandas>=1.5
+scipy>=1.9
+scikit-learn>=1.2,<1.8
+joblib>=1.2
+torch>=2.0
+matplotlib>=3.7
+seaborn>=0.12
+deepchecks>=0.17
+pylsl>=1.16
+tqdm>=4.65
+pynput>=1.7
+
+# Non-Python dependencies (LaTeX)
+# Install via tlmgr (BasicTeX/MacTeX): tlmgr install <package>
+geometry
+amsmath
+amsfonts
+graphics
+booktabs
+hyperref
+microtype
+xcolor
+titlesec
+tocloft
+parskip
+setspace
+float
+latexmk

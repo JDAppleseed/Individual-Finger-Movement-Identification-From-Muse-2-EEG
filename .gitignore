@@ -1,0 +1,26 @@
+*.aux
+*.toc
+*.out
+*.log
+*.fls
+*.fdb_latexmk
+
+.DS_Store
+
+__pycache__/
+*.pyc
+# Pipeline outputs
+logs/
+reports/subjects/
+data/raw/
+data/processed/
+eeg_features.csv
+eeg_windows.csv
+eeg_windows.npz
+events.csv
+events_autosave.csv
+session_meta.json
+finger_action_model.pt
+scaler.save
+test_predictions.npz
+calibration_state*.json
