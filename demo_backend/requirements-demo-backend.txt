@@ -1,0 +1,9 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+websockets>=12.0
+numpy>=1.23,<2.0
+torch>=2.0
+joblib>=1.2
+pylsl>=1.16
+jsonschema>=4.21
+pytest>=7.4

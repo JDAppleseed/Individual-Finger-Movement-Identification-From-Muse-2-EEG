@@ -29,10 +29,11 @@ WINDOW_SEC = 0.25
 STEP_SEC = 0.05
 
 # Label assignment robustness
-MIN_OVERLAP_FRAC = 0.60   # require >=60% of window covered by the chosen event (unless REST by exclusion)
+MIN_OVERLAP_RATIO = 0.20   # fraction of WINDOW_SEC required for non-REST labels
 GUARD_BAND_SEC = 0.15     # skip windows within ± this time of any movement event boundary
 ARTIFACT_MIN_OVERLAP_FRAC = 0.20  # if artifact overlaps >=20% of window, drop window
 
+MIN_OVERLAP_SEC = MIN_OVERLAP_RATIO * WINDOW_SEC
 WINDOW_SAMPLES = int(FS * WINDOW_SEC)
 STEP_SAMPLES = max(1, int(FS * STEP_SEC))
 
@@ -51,6 +52,7 @@ if meta_path.exists():
     FS = int(session_meta.get("sampling_rate", FS))
     WINDOW_SEC = float(session_meta.get("window_sec", WINDOW_SEC))
     WINDOW_SAMPLES = int(FS * WINDOW_SEC)
+    MIN_OVERLAP_SEC = MIN_OVERLAP_RATIO * WINDOW_SEC
     STEP_SAMPLES = max(1, int(FS * STEP_SEC))
 
     feature_path = Path(session_meta.get("features_path", RAW_FILE))
@@ -95,6 +97,9 @@ for _, row in events_df.iterrows():
         "confidence": row.get("confidence", np.nan),
         "source": str(row.get("source", "")).strip() or "unknown",
         "notes": str(row.get("notes", "")).strip() if "notes" in row else "",
+        "session_mode": str(row.get("session_mode", "")).strip() if "session_mode" in row else "",
+        "trial_id": int(row.get("trial_id", 0)) if "trial_id" in row else 0,
+        "block_id": int(row.get("block_id", 0)) if "block_id" in row else 0,
     }
     events.append(e)
 
@@ -166,6 +171,9 @@ overlap_fracs = []
 event_onsets = []
 event_durations = []
 event_sources = []
+session_modes = []
+trial_ids = []
+block_ids = []
 
 max_idx = len(signal) - WINDOW_SAMPLES
 
@@ -218,6 +226,9 @@ for start_idx in range(0, max_idx + 1, STEP_SAMPLES):
     best_onset = np.nan
     best_dur = np.nan
     best_source = ""
+    best_session_mode = ""
+    best_trial_id = 0
+    best_block_id = 0
 
     if overlapping:
         # Sort by: overlap desc, priority asc, later onset desc (helps boundary alignment), longer duration desc
@@ -236,7 +247,7 @@ for start_idx in range(0, max_idx + 1, STEP_SAMPLES):
         else:
             # Minimum overlap gating:
             # If overlap is weak, treat as REST by exclusion.
-            if best_ov_frac >= MIN_OVERLAP_FRAC or int(best["action_id"]) == int(ACTION_REST):
+            if best_ov >= MIN_OVERLAP_SEC or int(best["action_id"]) == int(ACTION_REST):
                 action_id = int(best["action_id"])
                 finger_id = int(best["finger_id"])
                 confidence_hint = best.get("confidence", np.nan)
@@ -244,12 +255,18 @@ for start_idx in range(0, max_idx + 1, STEP_SAMPLES):
                 best_onset = float(best["onset_s"])
                 best_dur = float(best["duration_s"])
                 best_source = str(best.get("source", ""))
+                best_session_mode = str(best.get("session_mode", ""))
+                best_trial_id = int(best.get("trial_id", 0))
+                best_block_id = int(best.get("block_id", 0))
 
             else:
                 # Not enough overlap: leave REST/NONE
                 action_id = int(ACTION_REST)
                 finger_id = int(FINGER_NONE)
                 assigned_type = "rest_by_low_overlap"
+                best_session_mode = str(best.get("session_mode", ""))
+                best_trial_id = int(best.get("trial_id", 0))
+                best_block_id = int(best.get("block_id", 0))
 
     if artifact_flag:
         continue
@@ -285,6 +302,9 @@ for start_idx in range(0, max_idx + 1, STEP_SAMPLES):
     event_onsets.append(float(best_onset) if np.isfinite(best_onset) else np.nan)
     event_durations.append(float(best_dur) if np.isfinite(best_dur) else np.nan)
     event_sources.append(str(best_source) if best_source is not None else "")
+    session_modes.append(str(best_session_mode) if best_session_mode is not None else "")
+    trial_ids.append(int(best_trial_id))
+    block_ids.append(int(best_block_id))
 
     windows.append({
         "ch1": float(features[0]),
@@ -307,6 +327,9 @@ for start_idx in range(0, max_idx + 1, STEP_SAMPLES):
         "event_onset_s": float(best_onset) if np.isfinite(best_onset) else np.nan,
         "event_duration_s": float(best_dur) if np.isfinite(best_dur) else np.nan,
         "event_source": str(best_source),
+        "session_mode": str(best_session_mode),
+        "trial_id": int(best_trial_id),
+        "block_id": int(best_block_id),
     })
 
 # =========================
@@ -341,13 +364,16 @@ if sequence_windows:
         event_onset_s=np.array(event_onsets, dtype=np.float32),
         event_duration_s=np.array(event_durations, dtype=np.float32),
         event_source=np.array(event_sources, dtype="U"),
+        session_mode=np.array(session_modes, dtype="U"),
+        trial_id=np.array(trial_ids, dtype=np.int64),
+        block_id=np.array(block_ids, dtype=np.int64),
 
         fs=np.array(FS, dtype=np.int64),
         window_sec=np.array(WINDOW_SEC, dtype=np.float32),
         step_sec=np.array(STEP_SEC, dtype=np.float32),
         channel_names=np.array(["ch1", "ch2", "ch3", "ch4"], dtype="U"),
         config=np.array([json.dumps({
-            "min_overlap_frac": MIN_OVERLAP_FRAC,
+            "min_overlap_ratio": MIN_OVERLAP_RATIO,
             "guard_band_sec": GUARD_BAND_SEC,
             "artifact_min_overlap_frac": ARTIFACT_MIN_OVERLAP_FRAC,
             "window_sec": WINDOW_SEC,

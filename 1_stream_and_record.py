@@ -195,6 +195,8 @@ current_action_id = ACTION_REST
 current_override = None
 stream_start_ts = None
 clock_offset = None
+trial_id_counter = 0
+BLOCK_ID = 0
 
 def save_events_csv(path, items):
     header = [
@@ -206,6 +208,8 @@ def save_events_csv(path, items):
         "notes",
         "finger_id",
         "action_id",
+        "trial_id",
+        "block_id",
         "source",
     ]
     with open(path, "w", newline="") as f:
@@ -221,6 +225,8 @@ def save_events_csv(path, items):
                 item.get("notes", ""),
                 int(item["finger_id"]),
                 int(item["action_id"]),
+                int(item.get("trial_id", 0)),
+                int(item.get("block_id", 0)),
                 item["source"],
             ])
 
@@ -239,6 +245,9 @@ def finalize_event(duration_s):
         current_event["finger_id"],
         current_event.get("override_type"),
     )
+    trial_id_counter += 1
+    current_event["trial_id"] = int(trial_id_counter)
+    current_event["block_id"] = int(BLOCK_ID)
 
     with events_lock:
         events.append(current_event)

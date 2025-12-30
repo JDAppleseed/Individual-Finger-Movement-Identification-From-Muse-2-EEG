@@ -1,0 +1,164 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+TICK_SCHEMA = {
+    "type": "object",
+    "required": ["type", "ts_utc", "mode", "session", "prediction", "safety", "diagnostics"],
+    "properties": {
+        "type": {"const": "tick"},
+        "ts_utc": {"type": "string"},
+        "mode": {"type": "string", "enum": ["replay", "live", "idle"]},
+        "session": {
+            "type": "object",
+            "required": ["subject_id", "experiment_hash", "window_index", "window_start_s", "window_end_s"],
+            "properties": {
+                "subject_id": {"type": "string"},
+                "experiment_hash": {"type": "string"},
+                "window_index": {"type": "integer"},
+                "window_start_s": {"type": "number"},
+                "window_end_s": {"type": "number"},
+            },
+        },
+        "prediction": {
+            "type": "object",
+            "required": [
+                "action_id",
+                "action_name",
+                "finger_id",
+                "finger_name",
+                "action_confidence",
+                "action_uncertainty",
+                "finger_confidence",
+                "finger_uncertainty",
+            ],
+            "properties": {
+                "action_id": {"type": "integer"},
+                "action_name": {"type": "string"},
+                "finger_id": {"type": "integer"},
+                "finger_name": {"type": "string"},
+                "action_confidence": {"type": "number"},
+                "action_uncertainty": {"type": "number"},
+                "finger_confidence": {"type": "number"},
+                "finger_uncertainty": {"type": "number"},
+            },
+        },
+        "safety": {
+            "type": "object",
+            "required": [
+                "base_threshold",
+                "adaptive_threshold",
+                "allow_actuation",
+                "stability_frames",
+                "stability_ok",
+                "velocity",
+            ],
+            "properties": {
+                "base_threshold": {"type": "number"},
+                "adaptive_threshold": {"type": "number"},
+                "allow_actuation": {"type": "boolean"},
+                "stability_frames": {"type": "integer"},
+                "stability_ok": {"type": "boolean"},
+                "velocity": {"type": "number"},
+            },
+        },
+        "diagnostics": {
+            "type": "object",
+            "required": [
+                "latency_ms",
+                "fps_target",
+                "fps_actual",
+                "health_score",
+                "lsl_connected",
+                "artifact_suppression",
+                "notes",
+            ],
+            "properties": {
+                "latency_ms": {"type": "number"},
+                "fps_target": {"type": "number"},
+                "fps_actual": {"type": "number"},
+                "health_score": {"type": "number"},
+                "lsl_connected": {"type": "boolean"},
+                "artifact_suppression": {"type": ["boolean", "null"]},
+                "notes": {"type": "string"},
+            },
+        },
+    },
+}
+
+STATUS_SCHEMA = {
+    "type": "object",
+    "required": ["type", "ts_utc", "level", "message", "details"],
+    "properties": {
+        "type": {"const": "status"},
+        "ts_utc": {"type": "string"},
+        "level": {"type": "string", "enum": ["info", "warning", "error"]},
+        "message": {"type": "string"},
+        "details": {"type": "object"},
+    },
+}
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def sample_tick():
+    return {
+        "type": "tick",
+        "ts_utc": _now_iso(),
+        "mode": "replay",
+        "session": {
+            "subject_id": "1-M19",
+            "experiment_hash": "abc123def456",
+            "window_index": 1234,
+            "window_start_s": 12.3,
+            "window_end_s": 12.55,
+        },
+        "prediction": {
+            "action_id": 1,
+            "action_name": "OPEN",
+            "finger_id": 2,
+            "finger_name": "INDEX",
+            "action_confidence": 0.82,
+            "action_uncertainty": 0.05,
+            "finger_confidence": 0.77,
+            "finger_uncertainty": 0.08,
+        },
+        "safety": {
+            "base_threshold": 0.75,
+            "adaptive_threshold": 0.79,
+            "allow_actuation": True,
+            "stability_frames": 3,
+            "stability_ok": True,
+            "velocity": 0.78,
+        },
+        "diagnostics": {
+            "latency_ms": 12.4,
+            "fps_target": 20,
+            "fps_actual": 19.6,
+            "health_score": 0.91,
+            "lsl_connected": False,
+            "artifact_suppression": None,
+            "notes": "",
+        },
+    }
+
+
+def sample_status():
+    return {
+        "type": "status",
+        "ts_utc": _now_iso(),
+        "level": "info",
+        "message": "LSL stream not found; staying idle.",
+        "details": {},
+    }
+
+
+def schema_bundle():
+    return {
+        "tick": TICK_SCHEMA,
+        "status": STATUS_SCHEMA,
+        "sample_tick": sample_tick(),
+        "sample_status": sample_status(),
+    }

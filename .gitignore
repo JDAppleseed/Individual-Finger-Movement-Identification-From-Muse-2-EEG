@@ -24,3 +24,14 @@ finger_action_model.pt
 scaler.save
 test_predictions.npz
 calibration_state*.json
+
+
+# Demo backend artifacts
+demo_backend/logs/
+demo_backend/recordings/
+
+# Demo app artifacts
+demo_app/node_modules/
+demo_app/dist/
+demo_app/.vite/
+demo_app/src-tauri/target/

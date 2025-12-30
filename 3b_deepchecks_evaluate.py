@@ -86,6 +86,7 @@ train_ds = Dataset(
     features=feature_names,
     label_type="multiclass",
     label_classes=class_names,
+    cat_features=[],
 )
 
 test_ds = Dataset(
@@ -94,6 +95,7 @@ test_ds = Dataset(
     features=feature_names,
     label_type="multiclass",
     label_classes=class_names,
+    cat_features=[],
 )
 
 # =========================

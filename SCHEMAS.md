@@ -57,6 +57,9 @@ Required columns:
 - `notes` (string)
 - `finger_id` (int)
 - `action_id` (int)
+- `trial_id` (int, optional) — defaults to 0 when unavailable
+- `block_id` (int, optional) — defaults to 0 when unavailable
+- `session_mode` (string, optional) — `physical` or `imagery` if provided
 - `source` (string)
 
 ## 4) Window Extraction Outputs (Step 1b)
@@ -74,13 +77,16 @@ Contents:
 - `window_end` (float32)
 - `confidence_hint` (float32)
 - `artifact_flag` (int64)
+- `session_mode` (string, optional)
+- `trial_id` (int64, optional)
+- `block_id` (int64, optional)
 - `fs` (int64)
 - `window_sec` (float32)
 - `step_sec` (float32)
 - `channel_names` (string array)
 
 Diagnostic summary:
-- `eeg_windows.csv` — columns `ch1..ch4` (window means), `action_id`, `finger_id`, `subject_id`, `experiment_hash`, `window_start`, `window_end`, `confidence_hint`, `artifact_flag`
+- `eeg_windows.csv` — columns `ch1..ch4` (window means), `action_id`, `finger_id`, `subject_id`, `experiment_hash`, `window_start`, `window_end`, `confidence_hint`, `artifact_flag`, `session_mode`, `trial_id`, `block_id`
 
 ## 5) Normalization
 
