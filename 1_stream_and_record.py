@@ -5,6 +5,10 @@ Optional: CNN/LSTM inference + latency + MC-dropout uncertainty
 Also: keyboard event marking (space=hold event), autosave events
 """
 
+# Work around duplicate libomp on macOS (MKL/torch/scipy); must be set before imports.
+import os
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 # =========================
 # ===== CONFIG FLAGS ======
 # =========================
@@ -50,7 +54,6 @@ EVENTS_CHANNEL = "n/a"
 import threading
 import time
 import csv
-import os
 import json
 import shutil
 from collections import deque
@@ -102,9 +105,10 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # =========================
 
 GENDER = "M"     # M / F / X
-AGE = 19         # integer only
+AGE = 16         # integer only
+SUBJECT_ID_OVERRIDE = "6-M16"  # Set to None to use auto-increment registry
 
-subject_id = get_subject_id(GENDER, AGE)
+subject_id = SUBJECT_ID_OVERRIDE or get_subject_id(GENDER, AGE)
 
 experiment_config = {
     "sampling_rate": SAMPLING_RATE,
@@ -469,26 +473,16 @@ raw_file = None
 raw_writer = None
 
 if SAVE_TO_DISK:
-    csv_file = open(FEATURES_PATH, "w", newline="")
-    csv_writer = csv.writer(csv_file)
+    features_exists = FEATURES_PATH.exists()
     FEATURES_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-    archive_file = open(FEATURES_ARCHIVE_PATH, "w", newline="")
-    archive_writer = csv.writer(archive_file)
-    csv_writer.writerow([
-        "lsl_timestamp",
-        "time_s",
-        "ch1", "ch2", "ch3", "ch4",
-        "pred_action",
-        "pred_finger",
-        "action_confidence",
-        "action_uncertainty",
-        "finger_confidence",
-        "finger_uncertainty",
-        "velocity",
-        "latency_ms"
-    ])
+    archive_exists = FEATURES_ARCHIVE_PATH.exists()
 
-    archive_writer.writerow([
+    csv_file = open(FEATURES_PATH, "a", newline="")
+    csv_writer = csv.writer(csv_file)
+    archive_file = open(FEATURES_ARCHIVE_PATH, "a", newline="")
+    archive_writer = csv.writer(archive_file)
+
+    header = [
         "lsl_timestamp",
         "time_s",
         "ch1", "ch2", "ch3", "ch4",
@@ -500,15 +494,22 @@ if SAVE_TO_DISK:
         "finger_uncertainty",
         "velocity",
         "latency_ms"
-    ])
+    ]
+
+    if not features_exists:
+        csv_writer.writerow(header)
+    if not archive_exists:
+        archive_writer.writerow(header)
 
 if SAVE_RAW:
     raw_dir = Path("data/raw")
     raw_dir.mkdir(parents=True, exist_ok=True)
     raw_path = RAW_ARCHIVE_PATH
-    raw_file = open(raw_path, "w", newline="")
+    raw_exists = raw_path.exists()
+    raw_file = open(raw_path, "a", newline="")
     raw_writer = csv.writer(raw_file)
-    raw_writer.writerow(["lsl_timestamp", "ch1", "ch2", "ch3", "ch4"])
+    if not raw_exists:
+        raw_writer.writerow(["lsl_timestamp", "ch1", "ch2", "ch3", "ch4"])
 
 # =========================
 # ===== ICA SETUP =========
@@ -714,6 +715,9 @@ try:
             for i in range(CHANNELS):
                 lines[i].set_data(range(len(cleaned)), cleaned[:, i])
             ax.set_xlim(0, len(cleaned))
+            ax.relim()
+            ax.autoscale_view()
+            ax.set_ylim(-100, 100)
             latency_text.set_text(f"Latency: {latency_ms:.1f} ms" if DEMO_MODE else "")
             info_text.set_text(
                 f"Act: {ACTION_NAMES.get(pred_action, '?')}  "
