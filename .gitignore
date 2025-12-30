@@ -11,7 +11,7 @@ __pycache__/
 *.pyc
 # Pipeline outputs
 logs/
-reports/subjects/
+reports/
 data/raw/
 data/processed/
 eeg_features.csv
