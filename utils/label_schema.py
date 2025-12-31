@@ -32,6 +32,8 @@ FINGER_NAMES = {
 def is_valid_action_finger(action_id: int, finger_id: int) -> bool:
     if action_id == ACTION_REST:
         return finger_id == FINGER_NONE
+    if finger_id == FINGER_NONE:
+        return action_id in {ACTION_OPEN, ACTION_CLOSE}
     return finger_id in {
         FINGER_THUMB,
         FINGER_INDEX,

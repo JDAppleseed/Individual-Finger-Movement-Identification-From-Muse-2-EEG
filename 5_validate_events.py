@@ -157,9 +157,7 @@ def repair_event(row):
         row["finger_id"] = FINGER_NONE
         row["type"] = "rest"
     elif action_id != ACTION_REST and finger_id == FINGER_NONE:
-        row["action_id"] = ACTION_REST
-        row["finger_id"] = FINGER_NONE
-        row["type"] = "rest"
+        row["type"] = event_type_for(int(row["action_id"]), int(row["finger_id"]))
     else:
         row["type"] = event_type_for(int(row["action_id"]), int(row["finger_id"]))
 
