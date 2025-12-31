@@ -105,9 +105,9 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # ===== SUBJECT INFO ======
 # =========================
 
-GENDER = "F"     # M / F / X
-AGE = 17         # integer only
-SUBJECT_ID_OVERRIDE = "1-F17"  # Set to None to use auto-increment registry
+GENDER = "M"     # M / F / X
+AGE = 16         # integer only
+SUBJECT_ID_OVERRIDE = "3-M16"  # Set to None to use auto-increment registry
 
 subject_id = SUBJECT_ID_OVERRIDE or get_subject_id(GENDER, AGE)
 
@@ -133,6 +133,7 @@ session_id = None
 segment_id = 0
 total_elapsed_s = 0.0
 last_time_s = -1.0
+BLOCK_ID = 0
 experiment_hash = None
 features_path_state = None
 events_path_state = None
@@ -288,7 +289,6 @@ TIME_EPS = 1e-4
 last_event_clock_s = 0.0
 last_written_time_s = float(last_time_s)
 time_s_backwards_skips = 0
-BLOCK_ID = 0
 
 def save_events_csv(path, items):
     header = [
