@@ -28,6 +28,7 @@ from utils.label_schema import (
 
 EVENTS_PATH = Path("events.csv")
 FEATURES_PATH = Path("eeg_features.csv")
+DEFAULT_FS = 256.0
 
 meta_path = Path("session_meta.json")
 if meta_path.exists():
@@ -56,16 +57,50 @@ for col in required_cols:
 
 features = pd.read_csv(FEATURES_PATH)
 if "time_s" in features.columns:
-    times = features["time_s"].values
+    times = features["time_s"].to_numpy(dtype=float)
 else:
-    times = np.arange(len(features)) / 256.0
+    times = np.arange(len(features), dtype=float) / DEFAULT_FS
+
+# If timestamps are flat/invalid, fall back to sample-derived time.
+if np.nanmax(times) - np.nanmin(times) < 1e-6:
+    times = np.arange(len(features), dtype=float) / DEFAULT_FS
 
 signal = features[["ch1", "ch2", "ch3", "ch4"]].values
 signal_mean = signal.mean(axis=1)
 
 events = events_df.to_dict(orient="records")
+
+# Align signal timeline to event timeline if ranges differ significantly.
+if events:
+    events_start = min(e["onset_s"] for e in events)
+    events_end = max(e["onset_s"] + e["duration_s"] for e in events)
+else:
+    events_start = None
+    events_end = None
+
+times_start = float(times[0])
+times_end = float(times[-1])
+times_range = times_end - times_start
+if events and times_range > 0:
+    events_range = events_end - events_start
+    # Rescale if events extend beyond the signal or are much longer.
+    if events_end > times_end or events_start < times_start or events_range > times_range * 1.25:
+        scale = events_range / times_range
+        times = (times - times_start) * scale + events_start
+        times_start = float(times[0])
+        times_end = float(times[-1])
+
 cursor_t = times[0]
 selected_idx = 0 if events else None
+
+# Align the plotted signal timeline to the event timeline if they don't overlap.
+if events:
+    events_start = min(e["onset_s"] for e in events)
+    events_end = max(e["onset_s"] + e["duration_s"] for e in events)
+    times_start = float(times[0])
+    times_end = float(times[-1])
+    if events_start > times_end or events_end < times_start:
+        times = times - times_start + events_start
 
 fig, ax = plt.subplots(figsize=(12, 4))
 ax.plot(times, signal_mean, linewidth=0.5, color="black")
@@ -209,6 +244,8 @@ else:
 ax.set_title("EEG Event Review (mean channel)")
 ax.set_xlabel("Time (s)")
 ax.set_ylabel("Mean amplitude")
+if events:
+    ax.set_xlim(min(times[0], events_start), max(times[-1], events_end))
 
 print("Event review started. Focus the plot window for keyboard controls.")
 plt.show()

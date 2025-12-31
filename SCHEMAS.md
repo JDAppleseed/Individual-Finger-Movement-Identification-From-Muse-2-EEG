@@ -5,7 +5,7 @@ This document defines canonical artifacts, filenames, and schemas used across th
 ## 1) Raw EEG Stream (Step 1)
 
 Primary archive path (per session):
-- `data/raw/<subject_id>_<experiment_hash>_raw.csv`
+- `data/raw/<subject_id>_<session_id>_raw.csv`
 
 Columns:
 - `lsl_timestamp` (float) — raw LSL timestamp
@@ -16,11 +16,8 @@ Sampling:
 
 ## 2) Cleaned Feature Stream (Step 1)
 
-Working file (latest session):
-- `eeg_features.csv`
-
-Archived file (per session):
-- `data/processed/<subject_id>_<experiment_hash>_eeg_features.csv`
+Per-session file (appendable):
+- `data/processed/<subject_id>_<session_id>_eeg_features.csv`
 
 Columns:
 - `lsl_timestamp` (float)
@@ -41,12 +38,9 @@ Notes:
 
 ## 3) Event Marking (Step 1 UI)
 
-Working files:
-- `events.csv`
-- `events_autosave.csv`
-
-Archive file:
-- `data/processed/<subject_id>_<experiment_hash>_events.csv`
+Per-session files:
+- `data/processed/<subject_id>_<session_id>_events_autosave.csv`
+- `data/processed/<subject_id>_<session_id>_events.csv`
 
 Required columns:
 - `onset_s` (float)
@@ -105,6 +99,7 @@ Diagnostic summary:
 - `logs/experiments/<experiment_hash>.json` — step-wise experiment log
 - `logs/calibration/<subject_id>_<experiment_hash>.json` — per-subject calibration stream
 - `logs/calibration/calibration_state_<subject>_<experiment>.json` — online threshold state
+- `logs/session_state_<subject_id>.json` — append/resume state (session_id, block_id, segment_id, total_elapsed_s, last_time_s, features_path, events_path, raw_path, created_utc, updated_utc)
 
 ## 8) Reports
 
@@ -115,6 +110,6 @@ Diagnostic summary:
 ## 9) Session Metadata
 
 - `session_meta.json` contains:
-  - `subject_id`, `experiment_hash`
+  - `subject_id`, `session_id`, `segment_id`, `experiment_hash`
   - `sampling_rate`, `window_sec`, `channels`
   - `features_path`, `events_path`, `raw_path`

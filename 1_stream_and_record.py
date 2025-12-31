@@ -12,7 +12,7 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 # =========================
 # ===== CONFIG FLAGS ======
 # =========================
-
+#                                          
 TRAINING_MODE = False          # If True, allows optional interactive correctness feedback for calibrator
 DEMO_MODE = False              # If True, loads model and runs inference/uncertainty
 ENABLE_PLOT = True
@@ -43,8 +43,8 @@ MC_DROPOUT_PASSES = 10         # MC passes for uncertainty
 # =========================
 
 EVENT_MARKING_ENABLED = True
-EVENTS_CSV_PATH = "events.csv"
-EVENTS_AUTOSAVE_PATH = "events_autosave.csv"
+EVENTS_CSV_PATH = None
+EVENTS_AUTOSAVE_PATH = None
 EVENTS_CHANNEL = "n/a"
 
 # =========================
@@ -56,6 +56,7 @@ import time
 import csv
 import json
 import shutil
+from datetime import datetime
 from collections import deque
 from pathlib import Path
 
@@ -117,16 +118,55 @@ experiment_config = {
     "model": "CNNLSTMFingerActionNet + ICA",
 }
 
-experiment_hash = generate_experiment_hash(subject_id, experiment_config)
+SESSION_STATE_DIR = Path("logs")
+SESSION_STATE_DIR.mkdir(parents=True, exist_ok=True)
+SESSION_STATE_PATH = SESSION_STATE_DIR / f"session_state_{subject_id}.json"
 
-FEATURES_PATH = Path("eeg_features.csv")
+session_state = {}
+if SESSION_STATE_PATH.exists():
+    try:
+        session_state = json.loads(SESSION_STATE_PATH.read_text())
+    except Exception as e:
+        print(f"⚠️ Failed to load session state: {e}")
+
+session_id = None
+segment_id = 0
+total_elapsed_s = 0.0
+last_time_s = -1.0
+experiment_hash = None
+features_path_state = None
+events_path_state = None
+raw_path_state = None
+created_utc = session_state.get("created_utc")
+
+if session_state.get("subject_id") == subject_id:
+    session_id = session_state.get("session_id")
+    BLOCK_ID = int(session_state.get("block_id", 0))
+    segment_id = int(session_state.get("segment_id", -1)) + 1
+    total_elapsed_s = float(session_state.get("total_elapsed_s", 0.0))
+    last_time_s = float(session_state.get("last_time_s", -1.0))
+    experiment_hash = session_state.get("experiment_hash")
+    features_path_state = session_state.get("features_path")
+    events_path_state = session_state.get("events_path")
+    raw_path_state = session_state.get("raw_path")
+
+if not session_id:
+    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+if experiment_hash is None:
+    experiment_hash = generate_experiment_hash(subject_id, experiment_config)
+
 FEATURES_ARCHIVE_DIR = Path("data/processed")
-FEATURES_ARCHIVE_PATH = FEATURES_ARCHIVE_DIR / f"{subject_id}_{experiment_hash}_eeg_features.csv"
-EVENTS_ARCHIVE_PATH = FEATURES_ARCHIVE_DIR / f"{subject_id}_{experiment_hash}_events.csv"
-RAW_ARCHIVE_PATH = Path("data/raw") / f"{subject_id}_{experiment_hash}_raw.csv"
+FEATURES_ARCHIVE_PATH = Path(features_path_state) if features_path_state else FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_eeg_features.csv"
+EVENTS_ARCHIVE_PATH = Path(events_path_state) if events_path_state else FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_events.csv"
+EVENTS_AUTOSAVE_PATH = str(FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_events_autosave.csv")
+EVENTS_CSV_PATH = str(EVENTS_ARCHIVE_PATH)
+FEATURES_PATH = FEATURES_ARCHIVE_PATH
+RAW_ARCHIVE_PATH = Path(raw_path_state) if raw_path_state else Path("data/raw") / f"{subject_id}_{session_id}_raw.csv"
 
 session_meta = {
     "subject_id": subject_id,
+    "session_id": session_id,
+    "segment_id": segment_id,
     "experiment_hash": experiment_hash,
     "sampling_rate": SAMPLING_RATE,
     "window_sec": WINDOW_SEC,
@@ -137,9 +177,53 @@ session_meta = {
 }
 Path("session_meta.json").write_text(json.dumps(session_meta, indent=2))
 
-print(f"🧪 Subject ID: {subject_id}")
-print(f"🔐 Experiment Hash: {experiment_hash}")
-print(f"🖥️ Device: {DEVICE}")
+resume_session = bool(session_state.get("subject_id") == subject_id)
+resume_flag = "YES" if resume_session else "NO"
+channel_list = "TP9, AF7, AF8, TP10"
+
+print("-" * 50)
+print("🧠 EEG SESSION INITIALIZED")
+print("-" * 50)
+print(f"Subject ID        : {subject_id}")
+print(f"Session ID        : {session_id}")
+print(f"Experiment Hash   : {experiment_hash}")
+print("")
+print(f"Resume Session    : {resume_flag}")
+print(f"Current Block ID  : {BLOCK_ID}")
+print(f"Total Elapsed Time: {total_elapsed_s:.2f} s")
+print("")
+print(f"EEG Channels      : {channel_list} ({CHANNELS})")
+print(f"Sampling Rate     : {SAMPLING_RATE} Hz")
+print(f"Window Length     : {WINDOW_SEC} s")
+print("")
+print("Modes:")
+print(f"  Event Marking   : {'ENABLED' if EVENT_MARKING_ENABLED else 'DISABLED'}")
+print(f"  Demo Mode       : {'ON' if DEMO_MODE else 'OFF'}")
+print(f"  Training Mode   : {'ON' if TRAINING_MODE else 'OFF'}")
+print(f"  Actuation       : {'ENABLED' if ENABLE_ACTUATION else 'DISABLED'}")
+print("")
+print("Output Paths:")
+print(f"  Features CSV    : {FEATURES_ARCHIVE_PATH}")
+print(f"  Events CSV      : {EVENTS_ARCHIVE_PATH}")
+print(f"  Raw EEG CSV     : {RAW_ARCHIVE_PATH}")
+print(f"  Session State   : {SESSION_STATE_PATH}")
+print("")
+print("Controls:")
+print("  SPACE  = hold event")
+print("  O/C/R  = OPEN / CLOSE / REST")
+print("  1–5    = assign finger")
+print("  A      = artifact")
+print("  N      = clear override")
+print("  Q or ESC = end stream safely")
+print("")
+print("Status:")
+print("  ✔ LSL EEG connected")
+print("  ✔ Time base aligned (event clock)")
+print("  ✔ Resume-safe logging enabled")
+print("-" * 50)
+print("▶ Streaming started…")
+print("-" * 50)
+print("Type 'q' or press ESC to stop and safely close the session.")
 
 log_experiment(
     subject_id,
@@ -200,6 +284,10 @@ current_override = None
 stream_start_ts = None
 clock_offset = None
 trial_id_counter = 0
+TIME_EPS = 1e-4
+last_event_clock_s = 0.0
+last_written_time_s = float(last_time_s)
+time_s_backwards_skips = 0
 BLOCK_ID = 0
 
 def save_events_csv(path, items):
@@ -234,12 +322,12 @@ def save_events_csv(path, items):
                 item["source"],
             ])
 
-    if EVENTS_ARCHIVE_PATH and str(path) == str(EVENTS_CSV_PATH):
+    if EVENTS_ARCHIVE_PATH and str(path) != str(EVENTS_ARCHIVE_PATH):
         FEATURES_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, EVENTS_ARCHIVE_PATH)
 
 def finalize_event(duration_s):
-    global current_event, last_event_index
+    global current_event, last_event_index, trial_id_counter
     if current_event is None:
         return
 
@@ -309,6 +397,12 @@ def on_key_press(key):
         return
 
     key_char = key_char.lower()
+
+    # Quick stop hotkey (avoids stdin conflicts)
+    if key == keyboard.Key.esc or key_char == "q":
+        print("🛑 Stop requested (ESC/q).")
+        stop_event.set()
+        return
 
     # Action modes
     if key_char in {"o", "c", "r"}:
@@ -445,11 +539,43 @@ if DEMO_MODE:
 # ===== LSL SETUP =========
 # =========================
 
+def resolve_eeg_channel_indices(info, expected):
+    try:
+        ch = info.desc().child("channels").child("channel")
+    except Exception:
+        ch = None
+    labels = []
+    if ch is not None:
+        for _ in range(info.channel_count()):
+            labels.append(ch.child_value("label"))
+            ch = ch.next_sibling()
+    if labels:
+        label_map = {label.lower(): idx for idx, label in enumerate(labels) if label}
+        indices = []
+        for name in expected:
+            idx = label_map.get(name.lower())
+            if idx is None:
+                return None
+            indices.append(idx)
+        return indices
+    return None
+
 print("🔍 Resolving EEG stream...")
 streams = resolve_streams()
 eeg_stream = next(s for s in streams if "EEG" in s.type() or "EEG" in s.name())
 inlet = StreamInlet(eeg_stream)
-print("✅ EEG connected")
+info = inlet.info()
+expected_labels = ["TP9", "AF7", "AF8", "TP10"]
+channel_indices = resolve_eeg_channel_indices(info, expected_labels)
+if channel_indices is None:
+    if info.channel_count() >= CHANNELS:
+        channel_indices = list(range(CHANNELS))
+        print("⚠️ EEG channel labels not found; using first four channels by index.")
+    else:
+        raise RuntimeError(
+            f"LSL EEG stream has {info.channel_count()} channels; expected at least {CHANNELS}."
+        )
+print(f"✅ EEG connected ({info.channel_count()} channels, using indices {channel_indices})")
 
 # =========================
 # ===== BUFFERS ===========
@@ -473,14 +599,12 @@ raw_file = None
 raw_writer = None
 
 if SAVE_TO_DISK:
-    features_exists = FEATURES_PATH.exists()
+    features_exists = FEATURES_PATH.exists() and FEATURES_PATH.stat().st_size > 0
     FEATURES_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-    archive_exists = FEATURES_ARCHIVE_PATH.exists()
 
     csv_file = open(FEATURES_PATH, "a", newline="")
     csv_writer = csv.writer(csv_file)
-    archive_file = open(FEATURES_ARCHIVE_PATH, "a", newline="")
-    archive_writer = csv.writer(archive_file)
+    archive_writer = None
 
     header = [
         "lsl_timestamp",
@@ -498,8 +622,6 @@ if SAVE_TO_DISK:
 
     if not features_exists:
         csv_writer.writerow(header)
-    if not archive_exists:
-        archive_writer.writerow(header)
 
 if SAVE_RAW:
     raw_dir = Path("data/raw")
@@ -549,13 +671,20 @@ if ENABLE_PLOT:
 # ===== MAIN LOOP =========
 # =========================
 
-print("▶ Streaming — type 'end_stream' to stop")
+print("▶ Streaming — type 'q' to stop")
 
 try:
     while not stop_event.is_set():
         sample, lsl_ts = inlet.pull_sample(timeout=0.0)
         if sample is None:
             continue
+
+        if len(sample) < max(channel_indices) + 1:
+            raise RuntimeError(
+                f"LSL EEG sample has {len(sample)} channels; expected at least {max(channel_indices)+1}."
+            )
+        if len(sample) != CHANNELS:
+            sample = [sample[i] for i in channel_indices]
 
         # align local clock to stream time for event marking
         if stream_start_ts is None:
@@ -692,7 +821,19 @@ try:
 
         # ===== SAVE =====
         if SAVE_TO_DISK and csv_writer:
-            time_s = (lsl_ts - stream_start_ts) if stream_start_ts else 0.0
+            event_clock_s = _event_time_seconds()
+            if event_clock_s is None:
+                continue
+            last_event_clock_s = event_clock_s
+            time_s = total_elapsed_s + event_clock_s
+            if last_written_time_s >= 0 and time_s < (last_written_time_s - TIME_EPS):
+                time_s_backwards_skips += 1
+                if time_s_backwards_skips <= 5:
+                    print(
+                        f"⚠️ time_s went backwards ({time_s:.6f} < {last_written_time_s:.6f}); clamping."
+                    )
+                time_s = last_written_time_s + TIME_EPS
+
             row = [
                 lsl_ts,
                 time_s,
@@ -706,9 +847,12 @@ try:
                 velocity,
                 latency_ms
             ]
+            if len(row) != len(header):
+                raise RuntimeError(
+                    f"Feature row length {len(row)} does not match header length {len(header)}"
+                )
             csv_writer.writerow(row)
-            if archive_writer:
-                archive_writer.writerow(row)
+            last_written_time_s = time_s
 
         # ===== PLOT =====
         if ENABLE_PLOT:
@@ -739,10 +883,6 @@ if csv_file:
     csv_file.flush()
     csv_file.close()
 
-if archive_file:
-    archive_file.flush()
-    archive_file.close()
-
 if raw_file:
     raw_file.flush()
     raw_file.close()
@@ -756,5 +896,24 @@ if EVENT_MARKING_ENABLED:
     with events_lock:
         save_events_csv(EVENTS_CSV_PATH, events)
     print(f"📝 Events saved to {EVENTS_CSV_PATH}")
+
+segment_duration = max(0.0, float(last_event_clock_s))
+last_time_s_updated = last_written_time_s if last_written_time_s >= 0 else last_time_s
+total_elapsed_s_updated = total_elapsed_s + segment_duration
+
+SESSION_STATE_PATH.write_text(json.dumps({
+    "subject_id": subject_id,
+    "session_id": session_id,
+    "experiment_hash": experiment_hash,
+    "block_id": int(BLOCK_ID) + 1,
+    "segment_id": int(segment_id),
+    "total_elapsed_s": float(total_elapsed_s_updated),
+    "last_time_s": float(last_time_s_updated),
+    "features_path": str(FEATURES_ARCHIVE_PATH),
+    "events_path": str(EVENTS_ARCHIVE_PATH),
+    "raw_path": str(RAW_ARCHIVE_PATH),
+    "created_utc": created_utc or datetime.utcnow().isoformat() + "Z",
+    "updated_utc": datetime.utcnow().isoformat() + "Z",
+}, indent=2))
 
 print("✅ Stream terminated cleanly")
