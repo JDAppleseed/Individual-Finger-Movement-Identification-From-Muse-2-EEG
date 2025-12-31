@@ -29,6 +29,8 @@ WINDOW_SEC = 0.25
 STEP_SEC = 0.05
 
 # Label assignment robustness
+LABEL_GATED = True  # If True, drop unlabeled windows instead of REST-by-exclusion
+KEEP_BASELINE_REST_EVENTS = 2  # Keep REST only if overlapping first N rest events
 MIN_OVERLAP_RATIO = 0.20   # fraction of WINDOW_SEC required for non-REST labels
 GUARD_BAND_SEC = 0.15     # skip windows within ± this time of any movement event boundary
 ARTIFACT_MIN_OVERLAP_FRAC = 0.20  # if artifact overlaps >=20% of window, drop window
@@ -115,6 +117,16 @@ for e in events:
         movement_boundaries.append(float(e["end_s"]))
 movement_boundaries = np.array(sorted(set(movement_boundaries)), dtype=float)
 
+# Baseline REST allow-list (first N rest events by onset)
+baseline_rest_events = []
+if KEEP_BASELINE_REST_EVENTS > 0:
+    rest_events = [
+        e for e in events
+        if int(e["action_id"]) == int(ACTION_REST) and e["type"] == "rest"
+    ]
+    rest_events.sort(key=lambda x: float(x["onset_s"]))
+    baseline_rest_events = rest_events[:KEEP_BASELINE_REST_EVENTS]
+
 # =========================
 # ===== HELPERS ===========
 # =========================
@@ -150,6 +162,16 @@ def event_priority(e: dict) -> int:
         return 3
     return 4
 
+
+def is_baseline_rest_window(window_start, window_end) -> bool:
+    if not baseline_rest_events:
+        return False
+    for e in baseline_rest_events:
+        ov = overlap_s(window_start, window_end, e["onset_s"], e["end_s"])
+        if ov >= MIN_OVERLAP_SEC:
+            return True
+    return False
+
 # =========================
 # ===== WINDOW LOOP =======
 # =========================
@@ -182,7 +204,16 @@ if max_idx <= 0:
         f"Not enough samples in {RAW_FILE}: got {len(signal)} rows, need at least {WINDOW_SAMPLES}."
     )
 
+total_windows = 0
+kept_windows = 0
+drop_no_overlap = 0
+drop_artifact = 0
+drop_guard_band = 0
+drop_invalid_label = 0
+drop_short_segment = 0
+
 for start_idx in range(0, max_idx + 1, STEP_SAMPLES):
+    total_windows += 1
     end_idx = start_idx + WINDOW_SAMPLES
 
     window_start = float(times[start_idx])
@@ -191,6 +222,7 @@ for start_idx in range(0, max_idx + 1, STEP_SAMPLES):
 
     # Guard band skip (optional but recommended)
     if GUARD_BAND_SEC > 0 and in_guard_band(window_start, window_end):
+        drop_guard_band += 1
         continue
 
     # Compute overlaps with events
@@ -212,6 +244,7 @@ for start_idx in range(0, max_idx + 1, STEP_SAMPLES):
         overlapping.append((ov, ov_frac, e))
 
     if any_artifact_flag:
+        drop_artifact += 1
         continue
 
     # Default label if no overlap: REST/NONE
@@ -230,6 +263,14 @@ for start_idx in range(0, max_idx + 1, STEP_SAMPLES):
     best_trial_id = 0
     best_block_id = 0
 
+    if LABEL_GATED and not overlapping:
+        # No overlaps: drop unless it is within baseline rest events
+        if is_baseline_rest_window(window_start, window_end):
+            assigned_type = "baseline_rest"
+        else:
+            drop_no_overlap += 1
+            continue
+
     if overlapping:
         # Sort by: overlap desc, priority asc, later onset desc (helps boundary alignment), longer duration desc
         overlapping.sort(
@@ -246,8 +287,8 @@ for start_idx in range(0, max_idx + 1, STEP_SAMPLES):
             artifact_flag = 1
         else:
             # Minimum overlap gating:
-            # If overlap is weak, treat as REST by exclusion.
-            if best_ov >= MIN_OVERLAP_SEC or int(best["action_id"]) == int(ACTION_REST):
+            # If overlap is weak, drop window (label-gated) or REST by exclusion (legacy).
+            if best_ov >= MIN_OVERLAP_SEC:
                 action_id = int(best["action_id"])
                 finger_id = int(best["finger_id"])
                 confidence_hint = best.get("confidence", np.nan)
@@ -258,9 +299,30 @@ for start_idx in range(0, max_idx + 1, STEP_SAMPLES):
                 best_session_mode = str(best.get("session_mode", ""))
                 best_trial_id = int(best.get("trial_id", 0))
                 best_block_id = int(best.get("block_id", 0))
+            elif int(best["action_id"]) == int(ACTION_REST):
+                if LABEL_GATED:
+                    if is_baseline_rest_window(window_start, window_end):
+                        action_id = int(ACTION_REST)
+                        finger_id = int(FINGER_NONE)
+                        assigned_type = "baseline_rest"
+                        best_session_mode = str(best.get("session_mode", ""))
+                        best_trial_id = int(best.get("trial_id", 0))
+                        best_block_id = int(best.get("block_id", 0))
+                    else:
+                        drop_no_overlap += 1
+                        continue
+                else:
+                    action_id = int(ACTION_REST)
+                    finger_id = int(FINGER_NONE)
+                    assigned_type = "rest_by_exclusion"
+                    best_session_mode = str(best.get("session_mode", ""))
+                    best_trial_id = int(best.get("trial_id", 0))
+                    best_block_id = int(best.get("block_id", 0))
 
             else:
-                # Not enough overlap: leave REST/NONE
+                if LABEL_GATED:
+                    drop_no_overlap += 1
+                    continue
                 action_id = int(ACTION_REST)
                 finger_id = int(FINGER_NONE)
                 assigned_type = "rest_by_low_overlap"
@@ -269,14 +331,17 @@ for start_idx in range(0, max_idx + 1, STEP_SAMPLES):
                 best_block_id = int(best.get("block_id", 0))
 
     if artifact_flag:
+        drop_artifact += 1
         continue
 
     # Enforce label validity (multi-head invariants)
     if not is_valid_action_finger(action_id, finger_id):
+        drop_invalid_label += 1
         continue
 
     segment = signal[start_idx:end_idx]
     if segment.shape[0] != WINDOW_SAMPLES:
+        drop_short_segment += 1
         continue
 
     # Tabular features (kept consistent with your original schema)
@@ -331,12 +396,28 @@ for start_idx in range(0, max_idx + 1, STEP_SAMPLES):
         "trial_id": int(best_trial_id),
         "block_id": int(best_block_id),
     })
+    kept_windows += 1
 
 # =========================
 # ===== SAVE CSV ==========
 # =========================
 pd.DataFrame(windows).to_csv(OUT_FILE, index=False)
 print(f"✅ Saved {len(windows)} windows → {OUT_FILE}")
+
+action_dist = pd.Series(action_labels).value_counts().sort_index().to_dict()
+finger_dist = pd.Series(finger_labels).value_counts().sort_index().to_dict()
+print("---- Window Extraction Summary ----")
+print(f"Total windows considered: {total_windows}")
+print(f"Windows kept: {kept_windows}")
+print(
+    "Dropped windows (no-overlap): "
+    f"{drop_no_overlap}, artifact-overlap: {drop_artifact}, guard-band: {drop_guard_band}, "
+    f"invalid label: {drop_invalid_label}, short segment: {drop_short_segment}"
+)
+print(f"Kept class distribution (action_id): {action_dist}")
+print(f"Kept class distribution (finger_id): {finger_dist}")
+if KEEP_BASELINE_REST_EVENTS == 0:
+    print("Sanity: KEEP_BASELINE_REST_EVENTS=0 → no REST windows are kept.")
 
 # =========================
 # ===== SAVE NPZ ==========

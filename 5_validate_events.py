@@ -5,6 +5,10 @@ Use --apply to fix issues in-place and write edit logs.
 """
 
 import argparse
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
 import pandas as pd
 
 from utils.events_audit import log_event_edit
@@ -15,14 +19,83 @@ from utils.label_schema import (
     event_type_for,
 )
 
+DEFAULT_FS = 256
+
+
+def load_session_meta():
+    meta_path = Path("session_meta.json")
+    if not meta_path.exists():
+        return None
+    try:
+        return json.loads(meta_path.read_text())
+    except Exception:
+        return None
+
+
+def resolve_paths(events_override=None, features_override=None):
+    session_meta = load_session_meta()
+    session_used = False
+    events_path = None
+    features_path = None
+
+    if events_override:
+        events_path = Path(events_override)
+    if features_override:
+        features_path = Path(features_override)
+
+    if session_meta:
+        session_used = True
+        if events_path is None:
+            candidate = Path(session_meta.get("events_path", ""))
+            if candidate.exists():
+                events_path = candidate
+        if features_path is None:
+            candidate = Path(session_meta.get("features_path", ""))
+            if candidate.exists():
+                features_path = candidate
+
+    if events_path is None:
+        candidate = Path("events.csv")
+        if candidate.exists():
+            events_path = candidate
+
+    if features_path is None:
+        candidate = Path("eeg_features.csv")
+        if candidate.exists():
+            features_path = candidate
+
+    return session_used, events_path, features_path
+
 
 def validate_events(events):
     issues = []
+    warnings = []
+
+    required_cols = {"onset_s", "duration_s", "type", "finger_id", "action_id"}
+    optional_cols = {"trial_id", "block_id", "session_mode", "channel", "confidence", "notes", "source"}
+
+    missing_required = sorted(required_cols - set(events.columns))
+    missing_optional = sorted(optional_cols - set(events.columns))
+
+    if missing_required:
+        warnings.append(f"Missing required columns: {missing_required}")
+    if missing_optional:
+        warnings.append(f"Missing optional columns: {missing_optional}")
+
     for idx, row in events.iterrows():
-        onset = float(row["onset_s"])
-        duration = float(row["duration_s"])
-        action_id = int(row["action_id"])
-        finger_id = int(row["finger_id"])
+        try:
+            onset = float(row.get("onset_s", 0))
+            duration = float(row.get("duration_s", 0))
+        except Exception:
+            issues.append((idx, "non_numeric_time"))
+            continue
+
+        try:
+            action_id = int(row.get("action_id", 0))
+            finger_id = int(row.get("finger_id", 0))
+        except Exception:
+            issues.append((idx, "non_integer_label"))
+            continue
 
         if onset < 0:
             issues.append((idx, "negative_onset"))
@@ -30,7 +103,38 @@ def validate_events(events):
             issues.append((idx, "negative_duration"))
         if not is_valid_action_finger(action_id, finger_id):
             issues.append((idx, "invalid_action_finger"))
-    return issues
+
+    if "onset_s" in events.columns:
+        onset_series = pd.to_numeric(events["onset_s"], errors="coerce")
+        if onset_series.isna().any():
+            warnings.append("Found NaNs in onset_s after coercion")
+        else:
+            if (onset_series.diff().fillna(0) < 0).any():
+                warnings.append("onset_s is non-monotonic (decreases at least once)")
+
+    duplicate_cols = [c for c in ["onset_s", "duration_s", "action_id", "finger_id", "type"] if c in events.columns]
+    if duplicate_cols:
+        dup_mask = events.duplicated(subset=duplicate_cols, keep=False)
+        if dup_mask.any():
+            warnings.append(f"Duplicate exact events found (cols={duplicate_cols})")
+
+    if {"onset_s", "duration_s"}.issubset(events.columns):
+        events_sorted = events.copy()
+        events_sorted["onset_s"] = pd.to_numeric(events_sorted["onset_s"], errors="coerce")
+        events_sorted["duration_s"] = pd.to_numeric(events_sorted["duration_s"], errors="coerce")
+        events_sorted = events_sorted.dropna(subset=["onset_s", "duration_s"]).sort_values("onset_s")
+        prev_end = None
+        for idx, row in events_sorted.iterrows():
+            onset = float(row["onset_s"])
+            duration = float(row["duration_s"])
+            end = onset + max(0.0, duration)
+            action_id = int(row.get("action_id", 0))
+            if prev_end is not None and onset < prev_end and action_id != ACTION_REST:
+                warnings.append("Overlapping events detected (non-REST overlap)")
+                break
+            prev_end = max(prev_end or 0.0, end)
+
+    return issues, warnings, missing_required, missing_optional
 
 
 def repair_event(row):
@@ -51,45 +155,178 @@ def repair_event(row):
     return before, row
 
 
+def alignment_check(features_path, events):
+    if features_path is None or not Path(features_path).exists():
+        return None, ["features file missing"]
+
+    df = pd.read_csv(features_path)
+    warnings = []
+    if "time_s" in df.columns:
+        time_s = pd.to_numeric(df["time_s"], errors="coerce")
+        time_s = time_s.dropna()
+        if time_s.empty:
+            warnings.append("features time_s is empty after coercion")
+            return None, warnings
+        feat_start, feat_end = float(time_s.min()), float(time_s.max())
+    else:
+        feat_start = 0.0
+        feat_end = float(len(df)) / float(DEFAULT_FS)
+
+    if events.empty:
+        return {
+            "features_start": feat_start,
+            "features_end": feat_end,
+            "events_start": 0.0,
+            "events_end": 0.0,
+            "overlap_seconds": 0.0,
+            "coverage_pct": 0.0,
+        }, warnings
+
+    onset = pd.to_numeric(events["onset_s"], errors="coerce")
+    duration = pd.to_numeric(events["duration_s"], errors="coerce")
+    onset = onset.dropna()
+    duration = duration.dropna()
+    if onset.empty or duration.empty:
+        warnings.append("events timing columns not numeric")
+        return None, warnings
+
+    ev_start = float(onset.min())
+    ev_end = float((onset + duration).max())
+
+    overlap_seconds = max(0.0, min(feat_end, ev_end) - max(feat_start, ev_start))
+    span = max(0.0, ev_end - ev_start)
+    coverage_pct = overlap_seconds / span if span > 0 else 0.0
+
+    metrics = {
+        "features_start": feat_start,
+        "features_end": feat_end,
+        "events_start": ev_start,
+        "events_end": ev_end,
+        "overlap_seconds": overlap_seconds,
+        "coverage_pct": coverage_pct,
+    }
+
+    if coverage_pct < 0.6 and span > 0:
+        warnings.append(
+            "Low event/feature overlap (<60%); possible mis-paired features/events. "
+            "Consider running scripts/repair_features_timebase.py."
+        )
+
+    return metrics, warnings
+
+
+def summary_counts(events):
+    summary = {
+        "total_events": int(len(events)),
+        "counts_by_action_id": events["action_id"].value_counts().sort_index().to_dict() if "action_id" in events.columns else {},
+        "counts_by_finger_id": events["finger_id"].value_counts().sort_index().to_dict() if "finger_id" in events.columns else {},
+        "counts_by_type": events["type"].value_counts().head(10).to_dict() if "type" in events.columns else {},
+    }
+    if "action_id" in events.columns:
+        summary["non_rest_count"] = int((events["action_id"] != ACTION_REST).sum())
+    else:
+        summary["non_rest_count"] = 0
+    return summary
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true", help="Apply fixes in-place")
+    parser.add_argument("--events", type=str, default=None, help="Override events path")
+    parser.add_argument("--features", type=str, default=None, help="Override features path")
+    parser.add_argument("--strict", action="store_true", help="Exit with code 1 on warnings")
+    parser.add_argument("--json-report", type=str, default=None, help="Write JSON report to path")
     args = parser.parse_args()
 
-    events = pd.read_csv("events.csv")
-    issues = validate_events(events)
+    session_used, events_path, features_path = resolve_paths(args.events, args.features)
 
-    if not issues:
-        print("✅ No issues found.")
+    print(f"Session meta used: {'YES' if session_used else 'NO'}")
+    if events_path is None or not Path(events_path).exists():
+        print("No events file found (session_meta or repo root).")
+        raise SystemExit(2)
+
+    print(f"Validating events file: {events_path}")
+    if features_path is not None and Path(features_path).exists():
+        print(f"Using features file: {features_path}")
+
+    events = pd.read_csv(events_path)
+    if events.empty:
+        print("⚠ events file is empty; nothing to validate.")
         return
 
-    print("⚠ Issues detected:")
-    for idx, issue in issues:
-        print(f"- row {idx}: {issue}")
+    issues, warnings, missing_required, missing_optional = validate_events(events)
+
+    alignment_metrics = None
+    alignment_warnings = []
+    if features_path is not None and Path(features_path).exists():
+        alignment_metrics, alignment_warnings = alignment_check(features_path, events)
+
+    warnings.extend(alignment_warnings)
+
+    if issues:
+        print("⚠ Issues detected:")
+        for idx, issue in issues:
+            print(f"- row {idx}: {issue}")
+
+    if warnings:
+        print("⚠ Warnings:")
+        for warn in warnings:
+            print(f"- {warn}")
 
     if not args.apply:
-        print("Run with --apply to fix.")
-        return
+        print("Run with --apply to fix safe issues.")
 
-    for idx, issue in issues:
-        row = events.loc[idx].copy()
-        if issue in {"invalid_action_finger"}:
-            before, after = repair_event(row)
-            events.loc[idx] = after
-            log_event_edit("repair", before, dict(after), note=issue)
-        if issue == "negative_onset":
-            before = dict(row)
-            events.at[idx, "onset_s"] = 0.0
-            after = dict(events.loc[idx])
-            log_event_edit("repair", before, after, note=issue)
-        if issue == "negative_duration":
-            before = dict(row)
-            events.at[idx, "duration_s"] = 0.0
-            after = dict(events.loc[idx])
-            log_event_edit("repair", before, after, note=issue)
+    if args.apply and issues:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        backup_path = Path(f"{events_path}.bak.{timestamp}")
+        backup_path.write_text(Path(events_path).read_text())
 
-    events.to_csv("events.csv", index=False)
-    print("✅ Applied fixes and saved events.csv")
+        for idx, issue in issues:
+            row = events.loc[idx].copy()
+            if issue in {"invalid_action_finger"}:
+                before, after = repair_event(row)
+                events.loc[idx] = after
+                log_event_edit("repair", before, dict(after), note=issue)
+            if issue == "negative_onset":
+                before = dict(row)
+                events.at[idx, "onset_s"] = 0.0
+                after = dict(events.loc[idx])
+                log_event_edit("repair", before, after, note=issue)
+            if issue == "negative_duration":
+                before = dict(row)
+                events.at[idx, "duration_s"] = 0.0
+                after = dict(events.loc[idx])
+                log_event_edit("repair", before, after, note=issue)
+
+        events.to_csv(events_path, index=False)
+        print(f"✅ Applied fixes and saved {events_path}")
+        print(f"✅ Backup saved to {backup_path}")
+
+    summary = summary_counts(events)
+    print("\nSummary:")
+    print(f"  total_events: {summary['total_events']}")
+    print(f"  non_rest_count: {summary['non_rest_count']}")
+    print(f"  counts_by_action_id: {summary['counts_by_action_id']}")
+    print(f"  counts_by_finger_id: {summary['counts_by_finger_id']}")
+    print(f"  counts_by_type (top 10): {summary['counts_by_type']}")
+
+    report = {
+        "events_path": str(events_path),
+        "features_path": str(features_path) if features_path else None,
+        "session_meta_used": session_used,
+        "issues": [{"row": int(idx), "type": issue} for idx, issue in issues],
+        "warnings": warnings,
+        "summary": summary,
+        "alignment": alignment_metrics,
+    }
+
+    if args.json_report:
+        report_path = Path(args.json_report)
+        report_path.write_text(json.dumps(report, indent=2))
+        print(f"✅ JSON report written: {report_path}")
+
+    if args.strict and warnings:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
