@@ -11,6 +11,7 @@ Key upgrades:
 """
 
 import json
+import argparse
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -47,24 +48,52 @@ OUT_NPZ = "eeg_windows.npz"
 # =========================
 # ===== SESSION META ======
 # =========================
+parser = argparse.ArgumentParser()
+parser.add_argument("--features", type=str, default=None, help="Override features path")
+parser.add_argument("--events", type=str, default=None, help="Override events path")
+args = parser.parse_args()
+
 session_meta = {}
 meta_path = Path("session_meta.json")
 if meta_path.exists():
-    session_meta = json.loads(meta_path.read_text())
-    FS = int(session_meta.get("sampling_rate", FS))
-    WINDOW_SEC = float(session_meta.get("window_sec", WINDOW_SEC))
-    WINDOW_SAMPLES = int(FS * WINDOW_SEC)
-    MIN_OVERLAP_SEC = MIN_OVERLAP_RATIO * WINDOW_SEC
-    STEP_SAMPLES = max(1, int(FS * STEP_SEC))
+    try:
+        session_meta = json.loads(meta_path.read_text())
+    except Exception:
+        session_meta = {}
 
-    feature_path = Path(session_meta.get("features_path", RAW_FILE))
-    if feature_path.exists():
-        RAW_FILE = str(feature_path)
+FS = int(session_meta.get("sampling_rate", FS)) if session_meta else FS
+WINDOW_SEC = float(session_meta.get("window_sec", WINDOW_SEC)) if session_meta else WINDOW_SEC
+WINDOW_SAMPLES = int(FS * WINDOW_SEC)
+MIN_OVERLAP_SEC = MIN_OVERLAP_RATIO * WINDOW_SEC
+STEP_SAMPLES = max(1, int(FS * STEP_SEC))
 
-    events_path = Path(session_meta.get("events_path", EVENT_FILE))
-    if events_path.exists():
-        EVENT_FILE = str(events_path)
+raw_candidate = Path(args.features) if args.features else None
+if raw_candidate is None and session_meta:
+    raw_candidate = Path(session_meta.get("features_path", RAW_FILE))
+if raw_candidate is None:
+    raw_candidate = Path(RAW_FILE)
 
+if not raw_candidate.exists():
+    print("No features file found. Run: python 1_stream_and_record.py to create a new session, then re-run 1b_extract_windows.py.")
+    raise SystemExit(2)
+
+RAW_FILE = str(raw_candidate)
+
+if args.events:
+    events_candidate = Path(args.events)
+else:
+    events_candidate = Path(session_meta.get("events_path", EVENT_FILE)) if session_meta else Path(EVENT_FILE)
+
+if LABEL_GATED and (events_candidate is None or not events_candidate.exists()):
+    print("No events file found. Provide --events PATH or run Step 1 to create events before extraction.")
+    raise SystemExit(2)
+
+if events_candidate and events_candidate.exists():
+    EVENT_FILE = str(events_candidate)
+
+print(f"Session meta used: {'YES' if session_meta else 'NO'}")
+print(f"Using features file: {RAW_FILE}")
+print(f"Using events file: {EVENT_FILE}")
 # =========================
 # ===== LOAD DATA =========
 # =========================
