@@ -24,6 +24,15 @@ export default function App() {
   const [mcPasses, setMcPasses] = useState<number>(10);
   const [replayPath, setReplayPath] = useState<string>("eeg_windows.npz");
   const [ws, setWs] = useState<WebSocket | null>(null);
+  const [smoothingEnabled, setSmoothingEnabled] = useState<boolean>(true);
+  const [smoothingMethod, setSmoothingMethod] = useState<string>("vote");
+  const [smoothingWindow, setSmoothingWindow] = useState<number>(5);
+  const [hysteresisEnabled, setHysteresisEnabled] = useState<boolean>(true);
+  const [userSetHysteresis, setUserSetHysteresis] = useState<boolean>(false);
+  const [hysteresisFrames, setHysteresisFrames] = useState<number>(3);
+  const [thresholdAction, setThresholdAction] = useState<number>(0.75);
+  const [thresholdFinger, setThresholdFinger] = useState<number>(0.75);
+  const [adjacencyEnabled, setAdjacencyEnabled] = useState<boolean>(true);
 
   useEffect(() => {
     const socket = connectWS(WS_URL, {
@@ -49,26 +58,45 @@ export default function App() {
 
   const calibrationLoaded = tick?.diagnostics.notes.includes("calibration_loaded") ?? false;
 
-  async function handleStart() {
+  async function sendControl(overrides: Record<string, unknown>) {
+    const payload: Record<string, unknown> = {
+      mode,
+      replay_path: replayPath,
+      fps,
+      device: "cpu",
+      mc_passes: mcPasses,
+      smoothing_enabled: smoothingEnabled,
+      smoothing_method: smoothingMethod,
+      smoothing_window: smoothingWindow,
+      threshold_action: thresholdAction,
+      threshold_finger: thresholdFinger,
+      adjacency_enabled: adjacencyEnabled,
+      ...overrides
+    };
+
+    const hasHysteresisOverride = Object.prototype.hasOwnProperty.call(overrides, "hysteresis_enabled") ||
+      Object.prototype.hasOwnProperty.call(overrides, "hysteresis_frames");
+    const overrideAny = overrides as Record<string, unknown> & {
+      hysteresis_enabled?: boolean;
+      hysteresis_frames?: number;
+    };
+    if (userSetHysteresis || hasHysteresisOverride) {
+      payload.hysteresis_enabled = overrideAny.hysteresis_enabled ?? hysteresisEnabled;
+      payload.hysteresis_frames = overrideAny.hysteresis_frames ?? hysteresisFrames;
+    }
+
     await fetch(API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        mode,
-        replay_path: replayPath,
-        fps,
-        device: "cpu",
-        mc_passes: mcPasses
-      })
+      body: JSON.stringify(payload)
     });
   }
 
+  async function handleStart() {
+    await sendControl({});
+  }
   async function handleStop() {
-    await fetch(API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "idle" })
-    });
+    await sendControl({ mode: "idle" });
   }
 
   return (
@@ -128,17 +156,73 @@ export default function App() {
         </section>
 
         <section className="panel">
+
+          <div className="card-title">Decision</div>
+          <div className="status-text">{tick?.diagnostics.decision_reason ?? ""}</div>
+          <div className="status-text">Action: {tick?.prediction.action_name ?? "IDLE"} ({Math.round((tick?.prediction.action_confidence ?? 0) * 100)}%)</div>
+          <div className="status-text">Finger: {tick?.prediction.finger_name ?? "NONE"} ({Math.round((tick?.prediction.finger_confidence ?? 0) * 100)}%)</div>
           <ControlPanel
             mode={mode}
-            onModeChange={setMode}
+            onModeChange={(next) => {
+              setMode(next);
+              sendControl({ mode: next });
+            }}
             onStart={handleStart}
             onStop={handleStop}
             replayPath={replayPath}
             onReplayPathChange={setReplayPath}
             fps={fps}
-            onFpsChange={setFps}
+            onFpsChange={(value) => {
+              setFps(value);
+              sendControl({ fps: value });
+            }}
             mcPasses={mcPasses}
-            onMcPassesChange={setMcPasses}
+            onMcPassesChange={(value) => {
+              setMcPasses(value);
+              sendControl({ mc_passes: value });
+            }}
+            smoothingEnabled={smoothingEnabled}
+            onSmoothingEnabledChange={(value) => {
+              setSmoothingEnabled(value);
+              sendControl({ smoothing_enabled: value });
+            }}
+            smoothingMethod={smoothingMethod}
+            onSmoothingMethodChange={(value) => {
+              setSmoothingMethod(value);
+              sendControl({ smoothing_method: value });
+            }}
+            smoothingWindow={smoothingWindow}
+            onSmoothingWindowChange={(value) => {
+              setSmoothingWindow(value);
+              sendControl({ smoothing_window: value });
+            }}
+            hysteresisEnabled={hysteresisEnabled}
+            onHysteresisEnabledChange={(value) => {
+              setHysteresisEnabled(value);
+              setUserSetHysteresis(true);
+              sendControl({ hysteresis_enabled: value });
+            }}
+            hysteresisFrames={hysteresisFrames}
+            onHysteresisFramesChange={(value) => {
+              setHysteresisFrames(value);
+              setUserSetHysteresis(true);
+              sendControl({ hysteresis_frames: value });
+            }}
+            thresholdAction={thresholdAction}
+            onThresholdActionChange={(value) => {
+              setThresholdAction(value);
+              sendControl({ threshold_action: value });
+            }}
+            thresholdFinger={thresholdFinger}
+            onThresholdFingerChange={(value) => {
+              setThresholdFinger(value);
+              sendControl({ threshold_finger: value });
+            }}
+            adjacencyEnabled={adjacencyEnabled}
+            onAdjacencyEnabledChange={(value) => {
+              setAdjacencyEnabled(value);
+              sendControl({ adjacency_enabled: value });
+            }}
           />
         </section>
 

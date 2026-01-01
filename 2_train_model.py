@@ -28,6 +28,7 @@ BATCH_SIZE = 64
 EPOCHS = 60
 LR = 1e-3
 LOSS_ACTION_WEIGHT = 1.0
+REST_WEIGHT = 1.0
 
 subject_id = "ANON"
 
@@ -76,6 +77,7 @@ def build_arg_parser():
     parser.add_argument("--lr", type=float, default=LR, help="Learning rate")
     parser.add_argument("--seed", type=int, default=SEED, help="Random seed")
     parser.add_argument("--loss-action-weight", type=float, default=LOSS_ACTION_WEIGHT, help="Action loss weight")
+    parser.add_argument("--rest-weight", type=float, default=REST_WEIGHT, help="Class weight for REST action (0=ignore)")
     parser.add_argument("--test-size", type=float, default=0.2, help="Test split fraction")
     parser.add_argument("--non-rest-only", action="store_true", help="Train only on non-REST windows")
     parser.add_argument("--save-model", type=str, default="finger_action_model.pt", help="Model output path")
@@ -145,7 +147,10 @@ def main():
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     loss_f = nn.CrossEntropyLoss()
-    loss_a = nn.CrossEntropyLoss()
+    action_weights = torch.ones(n_actions, dtype=torch.float32)
+    if ACTION_REST < n_actions:
+        action_weights[ACTION_REST] = max(0.0, float(args.rest_weight))
+    loss_a = nn.CrossEntropyLoss(weight=action_weights.to(device))
 
     for epoch in range(args.epochs):
         model.train()
@@ -204,6 +209,7 @@ def main():
         "epochs": args.epochs,
         "learning_rate": args.lr,
         "loss_action_weight": args.loss_action_weight,
+        "rest_weight": float(args.rest_weight),
         "test_size": args.test_size,
         "non_rest_only": bool(args.non_rest_only),
         "npz_path": str(args.npz),

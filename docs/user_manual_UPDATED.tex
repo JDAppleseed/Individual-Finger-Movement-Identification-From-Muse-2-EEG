@@ -1,0 +1,657 @@
+
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{amsmath, amssymb}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{fancyhdr}
+\usepackage{enumitem}
+\usepackage{caption}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+  citecolor=blue
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{EEG-BCI Finger/Action Pipeline Manual}
+\rhead{User Manual}
+\cfoot{\thepage}
+
+\definecolor{codebg}{RGB}{248,248,248}
+\definecolor{codeframe}{RGB}{220,220,220}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{codeframe},
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false
+}
+
+\title{\textbf{EEG-BCI Finger/Action Project}\\User Manual (End-to-End)}
+\author{Prepared for onboarding new researchers}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Scope and goals}
+This manual explains the complete end-to-end workflow implemented in the EEG-BCI repository:
+\begin{itemize}[leftmargin=*]
+\item recording or importing EEG sessions,
+\item validating event labels,
+\item extracting fixed-length windows for machine learning,
+\item training a compact multi-head deep model (action head + finger head),
+\item evaluating accuracy and calibration,
+\item generating reports (including Deepchecks outputs),
+\item running a live demo UI + backend using LSL streams,
+\item improving live stability via postprocessing (smoothing, hysteresis, threshold gating, adjacency assist),
+\item troubleshooting the most common runtime issues on macOS (OpenMP duplicate runtime).
+\end{itemize}
+
+\textbf{Important:} This manual is written to match the repo structure and scripts as used in your terminal logs:
+\begin{lstlisting}
+1b_extract_windows.py
+2_train_model.py
+3_evaluate_model.py
+4_generate_reports.py
+demo_backend/
+demo_app/
+\end{lstlisting}
+
+\section{System overview}
+\subsection{High-level dataflow}
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Raw EEG + event logs} are recorded per session (subject id, experiment hash, timestamps).
+\item \textbf{Processed features} are computed and aligned with events.
+\item \textbf{Event validation} checks schema integrity and distribution sanity.
+\item \textbf{Window extraction} generates:
+  \begin{itemize}
+  \item \texttt{eeg\_windows.csv} (tabular window metadata/labels),
+  \item \texttt{eeg\_windows.npz} (model-ready tensors and metadata).
+  \end{itemize}
+\item \textbf{Training (Step 2)} fits a CNN+LSTM multi-head model and saves:
+  \begin{itemize}
+  \item \texttt{finger\_action\_model.pt} (PyTorch weights),
+  \item \texttt{scaler.save} (channel normalizer),
+  \item \texttt{test\_predictions.npz} (probabilities + labels for reproducible evaluation).
+  \end{itemize}
+\item \textbf{Evaluation (Step 3)} loads the model, normalizer, and either recomputes predictions or reuses \texttt{test\_predictions.npz} to compute:
+  \begin{itemize}
+  \item action accuracy,
+  \item finger accuracy on non-REST samples,
+  \item calibration metrics (ECE),
+  \item plots and confusion matrices.
+  \end{itemize}
+\item \textbf{Reports (Step 4)} build subject and cross-subject summaries.
+\item \textbf{Live demo} streams LSL EEG into the backend, runs inference, applies postprocessing, and visualizes decisions in a Vite/React UI.
+\end{enumerate}
+
+\subsection{Labeling problem: two heads}
+The model predicts two related targets per window:
+\begin{itemize}[leftmargin=*]
+\item \textbf{Action head:} \texttt{action\_id} includes REST and non-REST actions (e.g., open vs close).
+\item \textbf{Finger head:} \texttt{finger\_id} includes NONE (0) plus specific fingers. In evaluation, finger accuracy is typically reported \textbf{only for non-REST action windows}.
+\end{itemize}
+
+\section{Repository layout (what to read first)}
+Recommended onboarding reading order:
+\begin{enumerate}[leftmargin=*]
+\item \textbf{\texttt{docs/}} (any design notes, data schema notes).
+\item \textbf{\texttt{utils/label\_schema.py}}: canonical IDs and display names for actions and fingers.
+\item \textbf{\texttt{utils/sequence\_data.py}}: how \texttt{eeg\_windows.npz} is created, loaded, normalized, and split.
+\item \textbf{\texttt{models/cnn\_lstm\_finger\_action\_net.py}}: network architecture and tensor shapes.
+\item \textbf{\texttt{2\_train\_model.py}}: training loop, loss definitions, and saved artifacts.
+\item \textbf{\texttt{3\_evaluate\_model.py}}: evaluation metrics, calibration, confusion matrices, plots.
+\item \textbf{\texttt{demo\_backend/}}: inference engine, live LSL source, replay source, and WebSocket tick schema.
+\item \textbf{\texttt{demo\_app/}}: UI controls, connection logic, and diagnostics display.
+\end{enumerate}
+
+\section{Quickstart for new researchers}
+This is the shortest path to reproducing a complete run on an existing dataset.
+
+\subsection{Environment}
+Activate the conda environment you already use:
+\begin{lstlisting}
+conda activate base
+\end{lstlisting}
+
+On macOS, evaluation may crash due to duplicate OpenMP runtime loading (common when mixing PyTorch/NumPy/Scipy MKL/OpenMP builds). Use the known workaround:
+\begin{lstlisting}
+export KMP_DUPLICATE_LIB_OK=TRUE
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+\end{lstlisting}
+
+\subsection{Validate events}
+\begin{lstlisting}
+python 5_validate_events.py
+\end{lstlisting}
+Typical output includes counts by action and finger, plus a PASS/WARN decision.
+
+\subsection{Extract windows}
+\begin{lstlisting}
+python 1b_extract_windows.py
+\end{lstlisting}
+Expected artifacts:
+\begin{lstlisting}
+eeg_windows.csv
+eeg_windows.npz
+\end{lstlisting}
+
+\subsection{Train baseline model}
+Example ``strong'' run that produced improved metrics in your logs:
+\begin{lstlisting}
+python 2_train_model.py --epochs 60 --batch-size 32 --rest-weight 0.2
+\end{lstlisting}
+
+\subsection{Evaluate}
+\begin{lstlisting}
+export KMP_DUPLICATE_LIB_OK=TRUE
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+python 3_evaluate_model.py
+\end{lstlisting}
+
+\subsection{Generate reports}
+\begin{lstlisting}
+python 4_generate_reports.py
+\end{lstlisting}
+
+\section{Step 1: Data and events}
+\subsection{Session metadata}
+Sessions commonly write a JSON metadata file (e.g., \texttt{session\_meta.json}) to preserve:
+\begin{itemize}[leftmargin=*]
+\item \texttt{subject\_id}
+\item \texttt{experiment\_hash}
+\item recording time
+\item mode flags (if used)
+\end{itemize}
+This metadata is used by downstream scripts to name outputs and log experiments.
+
+\subsection{Events file}
+During \textbf{STEP 1} recording, the script \texttt{1\_stream\_and\_record.py} writes two key ``per session'' CSV artifacts into \texttt{data/processed/}:
+
+\begin{lstlisting}
+data/processed/<subject>_<timestamp>_events.csv
+data/processed/<subject>_<timestamp>_eeg_features.csv
+\end{lstlisting}
+
+\paragraph{What \texttt{*\_events.csv} contains.}
+This is the time-aligned event log used to label the EEG. Each row corresponds to a discrete user action (e.g., a keypress or GUI event) with at least a timestamp and the categorical labels needed to train:
+\texttt{action\_id} (REST/OPEN/CLOSE) and \texttt{finger\_id} (NONE/THUMB/INDEX/MIDDLE/RING/PINKY). The exact column set is enforced by the validator (see below).
+
+\paragraph{What \texttt{*\_eeg\_features.csv} contains.}
+Despite the name ``features'', this file is the cleaned \emph{per-sample} EEG time series written after ICA-based artifact attenuation (see header comments in \texttt{1\_stream\_and\_record.py}). The four numeric columns are:
+
+\begin{itemize}
+  \item \texttt{ch1} = TP9
+  \item \texttt{ch2} = AF7
+  \item \texttt{ch3} = AF8
+  \item \texttt{ch4} = TP10
+\end{itemize}
+
+Each row is one timestamped sample; downstream preprocessing groups these samples into 64-sample windows to form the model input tensor described in Section ``What is a window?''.
+
+\subsection{Event validation (5\_validate\_events.py)}
+Validation checks usually include:
+\begin{itemize}[leftmargin=*]
+\item required columns present,
+\item optional columns (e.g. \texttt{session\_mode}) may be missing and produce warnings,
+\item event counts and class distributions are sensible,
+\item the REST class exists but is not dominating the dataset,
+\item action and finger IDs are within the label schema.
+\end{itemize}
+
+Why validation matters:
+\begin{itemize}[leftmargin=*]
+\item Window extraction uses event spans to label windows. Broken timestamps create mislabeled windows.
+\item Class imbalance (too many REST or too few per finger) can inflate accuracy or collapse learning.
+\end{itemize}
+
+\section{Step 1b: Window extraction (1b\_extract\_windows.py)}
+\subsection{What is a window?}
+A \emph{window} is the atomic input unit for the neural model and for live inference. In this repo it is defined exactly as:
+
+\[
+X \in \mathbb{R}^{(N,\,64,\,4)}
+\]
+
+where:
+
+\begin{itemize}
+  \item $N$ = number of windows (samples) in the dataset or batch.
+  \item $64$ = timesteps per window. At 256\,Hz sampling, this is $64/256 = 0.25$\,s of EEG.
+  \item $4$ = EEG channels, ordered as: \texttt{TP9}, \texttt{AF7}, \texttt{AF8}, \texttt{TP10}.
+\end{itemize}
+
+\paragraph{Why this matters.}
+This ordering must remain consistent from (1) streaming/recording, to (2) feature extraction/windowing, to (3) training and evaluation, and finally to (4) live LSL inference. If you permute channels at any stage, the model will see the wrong spatial patterns and performance will collapse.
+
+\paragraph{How windows are created.}
+A continuous time series is segmented into overlapping or non-overlapping chunks of exactly 64 samples per channel (implementation lives in the data preprocessing utilities). Each window is paired with:
+\begin{itemize}
+  \item an \textbf{action label} $y_\text{action}$ in \{REST, OPEN, CLOSE\}, and
+  \item a \textbf{finger label} $y_\text{finger}$ in \{NONE, THUMB, INDEX, MIDDLE, RING, PINKY\}.
+\end{itemize}
+
+\paragraph{Sanity check.} When debugging, print one window and verify:
+\begin{itemize}
+  \item \texttt{window.shape == (64,4)}
+  \item channel 0 corresponds to TP9, channel 1 to AF7, channel 2 to AF8, channel 3 to TP10.
+\end{itemize}
+
+\subsection{Window selection rules}
+Your extraction summary shows windows are kept/dropped based on:
+\begin{itemize}[leftmargin=*]
+\item \textbf{no-overlap:} windows that do not overlap any labeled event span,
+\item \textbf{artifact-overlap:} (0 in your run) windows overlapping artifact segments,
+\item \textbf{guard-band:} windows too close to boundaries (helps prevent leakage around transitions),
+\item \textbf{invalid label / short segment:} sanity constraints.
+\end{itemize}
+
+\subsection{Outputs}
+\texttt{eeg\_windows.csv} is used for quick inspection and debugging distributions.
+\texttt{eeg\_windows.npz} is the authoritative tensor input to training and evaluation.
+
+\section{Step 2: Training (2\_train\_model.py)}
+\subsection{Model architecture: CNN + LSTM multi-head}
+A typical CNN+LSTM design for EEG windows is:
+\begin{itemize}[leftmargin=*]
+\item \textbf{CNN frontend:} learns local temporal filters and channel mixing.
+\item \textbf{LSTM backend:} integrates across the window to capture dynamics.
+\item \textbf{Two heads:}
+  \begin{itemize}
+  \item action head outputs logits over actions,
+  \item finger head outputs logits over fingers.
+  \end{itemize}
+\end{itemize}
+
+\subsection{Normalization}
+Training fits a \emph{channel normalizer} on training data only and applies it to train/test:
+\begin{lstlisting}
+scaler.save
+\end{lstlisting}
+This prevents data leakage and ensures stable feature scaling.
+
+\subsection{Losses and masking}
+Two cross-entropy losses are used:
+\[
+\mathcal{L} = \mathcal{L}_{action} + \lambda \mathcal{L}_{finger}
+\]
+Finger loss is masked to non-REST examples:
+\[
+\mathcal{L}_{finger} = \mathrm{CE}(f(x), y_{finger}) \;\;\text{only where}\;\; y_{action} \neq \texttt{ACTION\_REST}.
+\]
+This matches the semantic meaning: when the action is REST, finger identity is not meaningful.
+
+\subsection{REST reweighting}
+Your best run used:
+\begin{lstlisting}
+--rest-weight 0.2
+\end{lstlisting}
+This typically means REST examples contribute less to the action loss. Why it helps:
+\begin{itemize}[leftmargin=*]
+\item REST can be ``easy'' and abundant. The model may over-optimize REST confidence and underfit non-REST discrimination.
+\item Lowering REST weight forces the model to allocate capacity to non-REST decisions, often improving finger accuracy and non-REST action accuracy.
+\end{itemize}
+
+\subsection{Saved artifacts}
+After training completes:
+\begin{itemize}[leftmargin=*]
+\item \texttt{finger\_action\_model.pt}: model weights
+\item \texttt{scaler.save}: fitted normalizer
+\item \texttt{test\_predictions.npz}: cached test probabilities and labels (if produced by your training script)
+\item \texttt{logs/experiments/<hash>\_train\_config.json}: hyperparameters and input shape
+\end{itemize}
+
+\section{Step 3: Evaluation and calibration (3\_evaluate\_model.py)}
+\subsection{Accuracy metrics}
+Action accuracy:
+\[
+\mathrm{Acc}_{action} = \frac{1}{N}\sum_{i=1}^N \mathbb{1}[\hat{y}^{(i)}_{action} = y^{(i)}_{action}]
+\]
+Finger accuracy is computed only on non-REST subset:
+\[
+\mathrm{Acc}_{finger} = \frac{1}{N'}\sum_{i: y^{(i)}_{action}\neq REST} \mathbb{1}[\hat{y}^{(i)}_{finger} = y^{(i)}_{finger}]
+\]
+
+\subsection{Confidence and softmax}
+Logits $z$ are converted to probabilities by softmax:
+\[
+p_k = \frac{e^{z_k}}{\sum_j e^{z_j}}
+\]
+Confidence is the maximum probability:
+\[
+c = \max_k p_k
+\]
+
+\subsection{Expected calibration error (ECE)}
+ECE measures the gap between confidence and accuracy binned by confidence. For bins $B_m$:
+\[
+\mathrm{ECE} = \sum_{m=1}^M \frac{|B_m|}{N}\left|\mathrm{acc}(B_m) - \mathrm{conf}(B_m)\right|.
+\]
+Lower is better. Your improved run achieved (example):
+\begin{itemize}[leftmargin=*]
+\item Action ECE $\approx 0.0346$
+\item Finger ECE (non-REST) $\approx 0.0456$
+\end{itemize}
+
+\subsection{Using test\_predictions.npz for reproducibility}
+If \texttt{test\_predictions.npz} exists, evaluation can skip model inference and reuse saved:
+\begin{itemize}[leftmargin=*]
+\item \texttt{action\_probs}, \texttt{finger\_probs}
+\item \texttt{y\_action}, \texttt{y\_finger}
+\item \texttt{test\_indices} (for traceability back to the full dataset order)
+\end{itemize}
+This guarantees that metrics match prior runs even if code changes, as long as label schema is unchanged.
+
+\subsection{Optional postprocessed metrics}
+The repo includes a stateful postprocessor for live stability. Offline evaluation can optionally apply it sequentially (ordered by time) to compute ``smoothed'' accuracies. This is useful because the postprocessor is causal and depends on previous frames.
+
+\section{Step 4: Report generation (4\_generate\_reports.py)}
+Report generation typically:
+\begin{itemize}[leftmargin=*]
+\item collects metrics and plots per subject,
+\item writes subject-specific folders under \texttt{reports/subjects/<subject\_id>/},
+\item optionally generates cross-subject comparisons,
+\item detects calibration files and warns if none are present (as in your log).
+\end{itemize}
+
+\section{Deepchecks report (offline data quality)}
+You provided and zipped:
+\begin{lstlisting}
+reports/deepchecks/deepchecks_eeg_report.html
+\end{lstlisting}
+Deepchecks-style reports usually surface:
+\begin{itemize}[leftmargin=*]
+\item label leakage risk,
+\item train/test distribution shift,
+\item class imbalance,
+\item feature drift or outliers,
+\item correlation and redundancy among channels/features,
+\item segments with unusually high variance (artifacts),
+\item confusion ``hot spots'' indicating systematic confusions between specific fingers.
+\end{itemize}
+When interpreting the report, prioritize findings that directly match observed confusions in your finger confusion matrix.
+
+\section{Live demo system}
+\subsection{Components}
+\begin{itemize}[leftmargin=*]
+\item \textbf{demo\_backend}: Python server that handles model loading, LSL acquisition, replay, inference, and WebSocket streaming to the UI.
+\item \textbf{demo\_app}: Vite/React frontend that connects to the backend, displays predictions, and exposes controls.
+\item \textbf{LSL (Lab Streaming Layer)}: network discovery and streaming of EEG samples (e.g., \texttt{PetalStream\_eeg}).
+\end{itemize}
+
+\subsection{Starting the backend}
+From repo root:
+\begin{lstlisting}
+conda activate base
+python -m demo_backend.server
+\end{lstlisting}
+
+\subsection{Starting the UI}
+From \texttt{demo\_app}:
+\begin{lstlisting}
+cd demo_app
+npm run dev
+\end{lstlisting}
+If port 5173 is taken, Vite will automatically choose another (e.g., 5174):
+\begin{lstlisting}
+Local: http://localhost:5174/
+\end{lstlisting}
+
+\subsection{LSL stream selection}
+To list available streams:
+\begin{lstlisting}
+python - <<'PY'
+from pylsl import resolve_streams
+streams = resolve_streams()
+print("Found", len(streams), "streams\n")
+for i,s in enumerate(streams):
+    print(f"[{i}] name={s.name()} type={s.type()} "
+          f"source_id={s.source_id()} uid={s.uid()} "
+          f"ch={s.channel_count()} srate={s.nominal_srate()}")
+PY
+\end{lstlisting}
+
+Your example showed:
+\begin{lstlisting}
+name=PetalStream_eeg type=EEG ch=5 srate=256.0
+\end{lstlisting}
+
+A robust selection rule is to pick the first stream whose name contains \texttt{"eeg"} (case-insensitive). If none is found, the backend should emit:
+\begin{lstlisting}
+no eeg stream found
+\end{lstlisting}
+and keep live mode idle so the UI disconnects gracefully.
+
+\section{Live postprocessing (stability features)}
+In live use, raw model predictions can jitter due to noise, boundary transitions, or low confidence. The repo adds a \textbf{stateful postprocessor} that runs after the model and before actuation/UI display.
+
+\subsection{Features}
+\begin{longtable}{p{0.22\linewidth} p{0.74\linewidth}}
+\toprule
+Feature & What it does \\
+\midrule
+Smoothing (vote) & Maintains a sliding window of recent class IDs and outputs the majority class. Also averages probabilities in that window for confidence reporting.\\
+Smoothing (EMA) & Exponentially averages probabilities. With window size $N$, the alpha used is:
+$\alpha = \frac{2}{N+1}$.\\
+Threshold gating & If action confidence $< T_{action}$, force REST (no actuation). If finger confidence $< T_{finger}$, force finger NONE (0).\\
+Hysteresis & Prevents rapid flips between action states (e.g., open/close). Requires a new action to persist for $K$ frames before committing. Also supports a margin above threshold to switch faster.\\
+Adjacency assist & If the top two finger probabilities are close (gap below $\Delta$) and the second choice is adjacent to the last finger in the anatomical chain, prefer the adjacent finger to reduce flicker.\\
+Diagnostics & Exposes \texttt{decision\_reason}, raw and smoothed IDs, committed IDs, and \texttt{frames\_in\_state} to the UI for debugging.\\
+\bottomrule
+\end{longtable}
+
+\subsection{How to tune postprocessing in practice}
+Start with conservative defaults:
+\begin{itemize}[leftmargin=*]
+\item smoothing: enabled, vote, window 5
+\item action threshold: 0.75
+\item finger threshold: 0.75
+\item hysteresis: enabled in live mode, frames 3
+\item adjacency assist: enabled
+\end{itemize}
+Then tune in this order:
+\begin{enumerate}[leftmargin=*]
+\item Increase thresholds if you see many false positives (random non-REST detections at rest).
+\item Increase smoothing window if predictions are noisy, but note this adds latency.
+\item Increase hysteresis frames if action toggles rapidly.
+\item Disable adjacency assist if it causes systematic bias toward a neighbor finger.
+\end{enumerate}
+
+\section{UI controls: what to click (operator checklist)}
+This section describes the UI workflow for running tests and checks. Labels may vary slightly, but the control intent is stable.
+
+\subsection{Open the UI}
+\begin{enumerate}[leftmargin=*]
+\item Start backend: \texttt{python -m demo\_backend.server}
+\item Start UI: \texttt{cd demo\_app \;\; \&\& \;\; npm run dev}
+\item In the terminal, read the printed URL (e.g., \url{http://localhost:5174/}) and open it in your browser.
+\end{enumerate}
+
+\subsection{Connection and mode selection}
+In the UI:
+\begin{enumerate}[leftmargin=*]
+\item Locate the \textbf{Mode} selector. Choose:
+  \begin{itemize}
+  \item \textbf{Replay} to test on a saved dataset (\texttt{eeg\_windows.npz}).
+  \item \textbf{Live} to connect to LSL and run real-time inference.
+  \item \textbf{Idle} to stop streaming.
+  \end{itemize}
+\item If in \textbf{Replay} mode, set the \textbf{Replay path} to \texttt{eeg\_windows.npz} unless testing another file.
+\item Click \textbf{Start} (or equivalent). Confirm status shows ``Connected'' and ticks begin updating.
+\item For \textbf{Live} mode, confirm an EEG LSL stream exists. If not, the UI should show a status warning such as ``no eeg stream found'' and disconnect.
+\end{enumerate}
+
+\subsection{Model stability controls}
+Still in the UI, in the control panel:
+\begin{enumerate}[leftmargin=*]
+\item Enable \textbf{Smoothing}.
+\item Choose \textbf{Method: Vote} initially.
+\item Set \textbf{Window N} to 5 (increase if too jittery).
+\item Enable \textbf{Hysteresis} in live mode; in replay mode it may be off by default (unless the user explicitly enabled it).
+\item Set \textbf{Hysteresis frames} to 3.
+\item Set \textbf{Action threshold} to 75\%.
+\item Set \textbf{Finger threshold} to 75\%.
+\item Enable \textbf{Adjacency assist}.
+\end{enumerate}
+
+\subsection{Decision diagnostics}
+Use the \textbf{Decision} panel:
+\begin{itemize}[leftmargin=*]
+\item Confirm \texttt{decision\_reason} is usually \texttt{vote\_commit} or \texttt{ema\_commit}.
+\item If you see \texttt{below\_threshold} frequently during intended movement, thresholds are too high \emph{or} the model is underconfident.
+\item If you see \texttt{hysteresis\_hold} frequently during intentional transitions, reduce hysteresis frames or margin.
+\end{itemize}
+
+\section{Troubleshooting}
+\subsection{OpenMP duplicate runtime crash on macOS}
+Symptom:
+\begin{lstlisting}
+OMP: Error #15: Initializing libomp.dylib, but found libomp.dylib already initialized.
+zsh: abort  python 3_evaluate_model.py
+\end{lstlisting}
+Workaround (known, but ``unsafe'' per OpenMP message):
+\begin{lstlisting}
+export KMP_DUPLICATE_LIB_OK=TRUE
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+python 3_evaluate_model.py
+\end{lstlisting}
+
+Longer-term fix options for maintainers:
+\begin{itemize}[leftmargin=*]
+\item Ensure a single OpenMP runtime is used (avoid linking two copies via Conda + Homebrew).
+\item Prefer consistent builds of numpy/scipy/pytorch (all conda-forge or all defaults) to reduce runtime duplication.
+\end{itemize}
+
+\subsection{Vite port already in use}
+If you see:
+\begin{lstlisting}
+Port 5173 is in use, trying another one...
+Local: http://localhost:5174/
+\end{lstlisting}
+Just open the shown URL.
+
+\subsection{LSL connects to wrong stream}
+If LSL attaches to gyro/ppg/etc. instead of EEG:
+\begin{itemize}[leftmargin=*]
+\item Print resolved streams (script shown earlier).
+\item Ensure backend stream selection filters by name containing ``eeg''.
+\item If multiple EEG streams exist, extend selection to prefer \texttt{type=EEG} and/or channel count.
+\end{itemize}
+
+\section{Improving accuracy: practical playbook}
+Your improved run achieved:
+\begin{itemize}[leftmargin=*]
+\item Action accuracy: 67.52\%
+\item Finger accuracy (non-REST): 62.16\%
+\end{itemize}
+
+To push further, prefer changes in this order (highest ROI first):
+\subsection{Data improvements}
+\begin{itemize}[leftmargin=*]
+\item \textbf{Increase samples per finger and per action}, especially for weaker fingers (often ring/pinky).
+\item \textbf{Balance the class distribution}: keep non-REST examples comparable across fingers.
+\item \textbf{Reduce label noise}: enforce consistent event timing and guard-bands.
+\item \textbf{Artifact handling}: mark and exclude high-motion/no-contact segments.
+\end{itemize}
+
+\subsection{Training improvements}
+\begin{itemize}[leftmargin=*]
+\item \textbf{REST weighting}: continue tuning \texttt{--rest-weight}. Too low can increase false positives at rest.
+\item \textbf{Learning rate schedule}: consider step decay or cosine annealing to improve final convergence.
+\item \textbf{Regularization}: mild dropout or weight decay can reduce overconfidence and improve generalization.
+\item \textbf{Early stopping}: stop when validation metrics plateau (prevents overfitting).
+\end{itemize}
+
+\subsection{Evaluation improvements}
+\begin{itemize}[leftmargin=*]
+\item Always report both \textbf{raw} and \textbf{postprocessed} metrics for live readiness.
+\item Use \texttt{test\_predictions.npz} to ensure reproducibility when comparing model changes.
+\end{itemize}
+
+\subsection{Postprocessing improvements}
+\begin{itemize}[leftmargin=*]
+\item If accuracy is fine but live feels unstable, tune thresholds and hysteresis before retraining.
+\item If the model is underconfident, consider temperature scaling as a calibration step.
+\end{itemize}
+
+\section{Appendix A: Common terminal recipes}
+\subsection{End-to-end run}
+\begin{lstlisting}
+conda activate base
+python 5_validate_events.py
+python 1b_extract_windows.py
+python 2_train_model.py --epochs 60 --batch-size 32 --rest-weight 0.2
+
+export KMP_DUPLICATE_LIB_OK=TRUE
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+python 3_evaluate_model.py
+
+python 4_generate_reports.py
+\end{lstlisting}
+
+\subsection{Zip reports for sharing}
+\begin{lstlisting}
+zip -r deepchecks_report.zip reports/deepchecks
+\end{lstlisting}
+
+\subsection{Run the demo}
+\begin{lstlisting}
+# Terminal 1: backend
+conda activate base
+python -m demo_backend.server
+
+# Terminal 2: UI
+cd demo_app
+npm run dev
+\end{lstlisting}
+
+\section{Appendix B: Glossary}
+\begin{longtable}{p{0.22\linewidth} p{0.74\linewidth}}
+\toprule
+Term & Meaning \\
+\midrule
+REST & No intended movement; used as a background class.\\
+Window & Fixed-length EEG segment used as one training example.\\
+Head & Output branch of a neural network for a specific target (action vs finger).\\
+ECE & Expected calibration error, measures confidence vs accuracy mismatch.\\
+LSL & Lab Streaming Layer, a protocol for streaming biosignals.\\
+Hysteresis & A stability mechanism requiring persistence before switching state.\\
+EMA & Exponential moving average of probabilities for smoothing.\\
+\bottomrule
+\end{longtable}
+
+\section{Clarifying questions (to improve this manual)}
+If you answer these, I can update the manual to be perfectly aligned with your repo:
+\begin{enumerate}[leftmargin=*]
+\item What are the exact action IDs and finger IDs (and names) in \texttt{utils/label\_schema.py} for this project version?
+\item What exact preprocessing creates \texttt{data/processed/*\_eeg\_features.csv} (script name and feature definitions)?
+\item What are the precise EEG channels/features in the model input (the ``4'' in shape (N, 64, 4))?
+\item Should the manual include electrode placement, sensor setup, and experimental protocol (timing cues, rest periods)?
+\item Do you want a dedicated section on how to add a new subject/session and how experiment hashes are generated?
+\end{enumerate}
+
+\end{document}

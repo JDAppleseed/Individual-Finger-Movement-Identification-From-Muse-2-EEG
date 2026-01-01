@@ -36,7 +36,23 @@ export const InferenceTickSchema = z.object({
     health_score: z.number(),
     lsl_connected: z.boolean(),
     artifact_suppression: z.boolean().nullable(),
-    notes: z.string()
+    notes: z.string(),
+    smoothing_enabled: z.boolean().optional(),
+    smoothing_method: z.string().optional(),
+    smoothing_window: z.number().optional(),
+    hysteresis_enabled: z.boolean().optional(),
+    hysteresis_frames: z.number().optional(),
+    threshold_action: z.number().optional(),
+    threshold_finger: z.number().optional(),
+    adjacency_enabled: z.boolean().optional(),
+    decision_reason: z.string().optional(),
+    raw_top_action_id: z.number().int().optional(),
+    raw_top_finger_id: z.number().int().optional(),
+    committed_action_id: z.number().int().optional(),
+    committed_finger_id: z.number().int().optional(),
+    smoothed_action_id: z.number().int().optional(),
+    smoothed_finger_id: z.number().int().optional(),
+    frames_in_state: z.number().int().optional()
   })
 });
 

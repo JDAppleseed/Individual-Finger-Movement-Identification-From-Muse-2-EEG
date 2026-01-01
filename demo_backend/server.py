@@ -15,6 +15,7 @@ from demo_backend.inference import InferenceConfig, InferenceEngine
 from demo_backend.live_lsl import LiveLSLSource
 from demo_backend.replay import ReplaySource
 from demo_backend.schemas import schema_bundle
+from demo_backend.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
 from demo_backend.utils_demo import (
     ensure_repo_on_path,
     load_calibration_state,
@@ -46,6 +47,15 @@ class RuntimeState:
     fps: float = 20.0
     device: str = "cpu"
     mc_passes: int = 10
+    smoothing_enabled: bool = True
+    smoothing_method: str = "vote"
+    smoothing_window: int = 5
+    hysteresis_enabled: bool = True
+    hysteresis_frames: int = 3
+    threshold_action: float = 0.75
+    threshold_finger: float = 0.75
+    adjacency_enabled: bool = True
+    user_set_hysteresis: bool = False
 
 
 class ControlPayload(BaseModel):
@@ -54,6 +64,14 @@ class ControlPayload(BaseModel):
     fps: Optional[float] = None
     device: Optional[str] = None
     mc_passes: Optional[int] = None
+    smoothing_enabled: Optional[bool] = None
+    smoothing_method: Optional[str] = None
+    smoothing_window: Optional[int] = None
+    hysteresis_enabled: Optional[bool] = None
+    hysteresis_frames: Optional[int] = None
+    threshold_action: Optional[float] = None
+    threshold_finger: Optional[float] = None
+    adjacency_enabled: Optional[bool] = None
 
 
 class BackendState:
@@ -66,7 +84,9 @@ class BackendState:
         self.replay: Optional[ReplaySource] = None
         self.live = LiveLSLSource()
         self.lsl_connected = False
+        self.live_status_sent = False
         self.last_status_sent = 0.0
+        self.postprocess = PostprocessState()
         self.lock = asyncio.Lock()
 
     def load_assets(self) -> None:
@@ -150,9 +170,18 @@ async def schema():
 @app.post("/control")
 async def control(payload: ControlPayload):
     async with state.lock:
+        previous_mode = state.runtime.mode
         state.runtime.mode = payload.mode
+        if payload.mode != previous_mode:
+            state.postprocess.reset()
+            if not state.runtime.user_set_hysteresis:
+                state.runtime.hysteresis_enabled = payload.mode == "live"
+        if payload.mode != "live":
+            state.live_status_sent = False
         if payload.replay_path:
             state.runtime.replay_path = Path(payload.replay_path)
+            if state.replay and state.replay.path != state.runtime.replay_path:
+                state.postprocess.reset()
         if payload.fps:
             state.runtime.fps = float(payload.fps)
         if payload.device:
@@ -161,9 +190,39 @@ async def control(payload: ControlPayload):
             state.runtime.mc_passes = int(payload.mc_passes)
             if state.engine:
                 state.engine.config.mc_passes = state.runtime.mc_passes
+        if payload.smoothing_enabled is not None:
+            state.runtime.smoothing_enabled = bool(payload.smoothing_enabled)
+        if payload.smoothing_method:
+            state.runtime.smoothing_method = payload.smoothing_method
+        if payload.smoothing_window:
+            state.runtime.smoothing_window = int(payload.smoothing_window)
+        if payload.hysteresis_enabled is not None:
+            state.runtime.hysteresis_enabled = bool(payload.hysteresis_enabled)
+            state.runtime.user_set_hysteresis = True
+        if payload.hysteresis_frames:
+            state.runtime.hysteresis_frames = int(payload.hysteresis_frames)
+        if payload.threshold_action is not None:
+            state.runtime.threshold_action = float(payload.threshold_action)
+        if payload.threshold_finger is not None:
+            state.runtime.threshold_finger = float(payload.threshold_finger)
+        if payload.adjacency_enabled is not None:
+            state.runtime.adjacency_enabled = bool(payload.adjacency_enabled)
         if state.engine:
             state.engine.set_device(resolve_device(state.runtime.device))
     return {"status": "ok", "mode": state.runtime.mode}
+
+
+def _build_postprocess_settings():
+    return PostprocessSettings(
+        smoothing_enabled=state.runtime.smoothing_enabled,
+        smoothing_method=state.runtime.smoothing_method,
+        smoothing_window=state.runtime.smoothing_window,
+        hysteresis_enabled=state.runtime.hysteresis_enabled,
+        hysteresis_frames=state.runtime.hysteresis_frames,
+        threshold_action=state.runtime.threshold_action,
+        threshold_finger=state.runtime.threshold_finger,
+        adjacency_enabled=state.runtime.adjacency_enabled,
+    )
 
 
 async def _send_status(ws: WebSocket, level: str, message: str, details: Optional[dict] = None):
@@ -189,9 +248,42 @@ async def _stream_replay(ws: WebSocket):
     for window, meta in state.replay.iter_windows():
         if state.runtime.mode != "replay":
             break
+        post = None
         t0 = time.perf_counter()
-        prediction, safety, diag = state.engine.predict(window)
-        latency_ms = (time.perf_counter() - t0) * 1000.0
+        action_probs, finger_probs, action_unc, finger_unc, diag = state.engine.predict_proba(window)
+        if action_probs is None or finger_probs is None:
+            prediction, safety, diag2 = state.engine.predict(window)
+            diag.update(diag2)
+            latency_ms = (time.perf_counter() - t0) * 1000.0
+        else:
+            settings = _build_postprocess_settings()
+            post = postprocess_predictions(action_probs, finger_probs, settings, state.postprocess)
+            committed_action = int(post["committed_action_id"])
+            committed_finger = int(post["committed_finger_id"])
+            action_conf = float(post["action_conf"])
+            finger_conf = float(post["finger_conf"])
+
+            prediction = {
+                "action_id": committed_action,
+                "action_name": ACTION_NAMES.get(committed_action, "UNKNOWN"),
+                "finger_id": committed_finger,
+                "finger_name": FINGER_NAMES.get(committed_finger, "UNKNOWN"),
+                "action_confidence": action_conf,
+                "action_uncertainty": float(action_unc),
+                "finger_confidence": finger_conf,
+                "finger_uncertainty": float(finger_unc),
+            }
+
+            allow_actuation = committed_action != 0 and action_conf >= settings.threshold_action
+            safety = {
+                "base_threshold": settings.threshold_action,
+                "adaptive_threshold": settings.threshold_action,
+                "allow_actuation": allow_actuation,
+                "stability_frames": settings.hysteresis_frames,
+                "stability_ok": post["decision_reason"] not in {"hysteresis_hold", "below_threshold"},
+                "velocity": action_conf * (1.0 - float(action_unc)) if committed_action != 0 else 0.0,
+            }
+            latency_ms = (time.perf_counter() - t0) * 1000.0
         tick_count += 1
         elapsed = time.perf_counter() - start_time
         fps_actual = tick_count / elapsed if elapsed > 0 else state.runtime.fps
@@ -217,6 +309,22 @@ async def _stream_replay(ws: WebSocket):
                 "lsl_connected": False,
                 "artifact_suppression": None,
                 "notes": "calibration_loaded=true" if state.calibration_loaded else "",
+                "smoothing_enabled": state.runtime.smoothing_enabled,
+                "smoothing_method": state.runtime.smoothing_method,
+                "smoothing_window": state.runtime.smoothing_window,
+                "hysteresis_enabled": state.runtime.hysteresis_enabled if state.runtime.mode == "live" else False,
+                "hysteresis_frames": state.runtime.hysteresis_frames,
+                "threshold_action": state.runtime.threshold_action,
+                "threshold_finger": state.runtime.threshold_finger,
+                "adjacency_enabled": state.runtime.adjacency_enabled,
+                "decision_reason": post["decision_reason"] if post else "",
+                "raw_top_action_id": post["raw_top_action_id"] if post else -1,
+                "raw_top_finger_id": post["raw_top_finger_id"] if post else -1,
+                "committed_action_id": post["committed_action_id"] if post else prediction.get("action_id", -1),
+                "committed_finger_id": post["committed_finger_id"] if post else prediction.get("finger_id", -1),
+                "smoothed_action_id": post["smoothed_action_id"] if post else prediction.get("action_id", -1),
+                "smoothed_finger_id": post["smoothed_finger_id"] if post else prediction.get("finger_id", -1),
+                "frames_in_state": post["frames_in_state"] if post else 0,
             },
         }
 
@@ -234,8 +342,12 @@ async def _stream_live(ws: WebSocket):
         state.lsl_connected = ok
         level = "info" if ok else "warning"
         await _send_status(ws, level, msg, {})
+        state.live_status_sent = ok
         if not ok:
             return
+    elif not state.live_status_sent and state.live.status_message:
+        await _send_status(ws, "info", state.live.status_message, {})
+        state.live_status_sent = True
 
     start_time = time.perf_counter()
     tick_count = 0
@@ -246,8 +358,41 @@ async def _stream_live(ws: WebSocket):
             continue
 
         t0 = time.perf_counter()
-        prediction, safety, diag = state.engine.predict(window_data.window)
-        latency_ms = (time.perf_counter() - t0) * 1000.0
+        post = None
+        action_probs, finger_probs, action_unc, finger_unc, diag = state.engine.predict_proba(window_data.window)
+        if action_probs is None or finger_probs is None:
+            prediction, safety, diag2 = state.engine.predict(window_data.window)
+            diag.update(diag2)
+            latency_ms = (time.perf_counter() - t0) * 1000.0
+        else:
+            settings = _build_postprocess_settings()
+            post = postprocess_predictions(action_probs, finger_probs, settings, state.postprocess)
+            committed_action = int(post["committed_action_id"])
+            committed_finger = int(post["committed_finger_id"])
+            action_conf = float(post["action_conf"])
+            finger_conf = float(post["finger_conf"])
+
+            prediction = {
+                "action_id": committed_action,
+                "action_name": ACTION_NAMES.get(committed_action, "UNKNOWN"),
+                "finger_id": committed_finger,
+                "finger_name": FINGER_NAMES.get(committed_finger, "UNKNOWN"),
+                "action_confidence": action_conf,
+                "action_uncertainty": float(action_unc),
+                "finger_confidence": finger_conf,
+                "finger_uncertainty": float(finger_unc),
+            }
+
+            allow_actuation = committed_action != 0 and action_conf >= settings.threshold_action
+            safety = {
+                "base_threshold": settings.threshold_action,
+                "adaptive_threshold": settings.threshold_action,
+                "allow_actuation": allow_actuation,
+                "stability_frames": settings.hysteresis_frames,
+                "stability_ok": post["decision_reason"] not in {"hysteresis_hold", "below_threshold"},
+                "velocity": action_conf * (1.0 - float(action_unc)) if committed_action != 0 else 0.0,
+            }
+            latency_ms = (time.perf_counter() - t0) * 1000.0
         tick_count += 1
         elapsed = time.perf_counter() - start_time
         fps_actual = tick_count / elapsed if elapsed > 0 else state.runtime.fps
@@ -273,6 +418,22 @@ async def _stream_live(ws: WebSocket):
                 "lsl_connected": True,
                 "artifact_suppression": False,
                 "notes": "calibration_loaded=true" if state.calibration_loaded else "",
+                "smoothing_enabled": state.runtime.smoothing_enabled,
+                "smoothing_method": state.runtime.smoothing_method,
+                "smoothing_window": state.runtime.smoothing_window,
+                "hysteresis_enabled": state.runtime.hysteresis_enabled if state.runtime.mode == "live" else False,
+                "hysteresis_frames": state.runtime.hysteresis_frames,
+                "threshold_action": state.runtime.threshold_action,
+                "threshold_finger": state.runtime.threshold_finger,
+                "adjacency_enabled": state.runtime.adjacency_enabled,
+                "decision_reason": post["decision_reason"] if post else "",
+                "raw_top_action_id": post["raw_top_action_id"] if post else -1,
+                "raw_top_finger_id": post["raw_top_finger_id"] if post else -1,
+                "committed_action_id": post["committed_action_id"] if post else prediction.get("action_id", -1),
+                "committed_finger_id": post["committed_finger_id"] if post else prediction.get("finger_id", -1),
+                "smoothed_action_id": post["smoothed_action_id"] if post else prediction.get("action_id", -1),
+                "smoothed_finger_id": post["smoothed_finger_id"] if post else prediction.get("finger_id", -1),
+                "frames_in_state": post["frames_in_state"] if post else 0,
             },
         }
 
@@ -283,6 +444,7 @@ async def _stream_live(ws: WebSocket):
 @app.websocket("/stream")
 async def stream(ws: WebSocket):
     await ws.accept()
+    state.postprocess.reset()
     await _send_status(ws, "info", "Connected", {"mode": state.runtime.mode})
 
     while True:

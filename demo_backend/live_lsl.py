@@ -31,9 +31,12 @@ class LiveLSLSource:
         self.window_samples = int(fs * window_sec)
         self.step_samples = max(1, int(fs * step_sec))
         self.inlet = None
+        self.channel_indices = None
+        self.status_message = ""
         self.buffer = deque(maxlen=self.window_samples)
         self.sample_times = deque(maxlen=self.window_samples)
         self._last_emit_idx = 0
+        self._sample_count = 0
         self._stream_start = None
 
     def connect(self) -> Tuple[bool, str]:
@@ -42,8 +45,49 @@ class LiveLSLSource:
         streams = resolve_streams()
         if not streams:
             return False, "No LSL streams found"
-        self.inlet = StreamInlet(streams[0])
-        return True, f"Connected to LSL stream: {streams[0].name()}"
+        eeg_stream = None
+        for stream in streams:
+            name = stream.name().lower()
+            if "eeg" in name:
+                eeg_stream = stream
+                break
+
+        if eeg_stream is None:
+            return False, "no eeg stream found"
+
+        stream = eeg_stream
+        if stream.channel_count() < 4:
+            return False, f"EEG stream has {stream.channel_count()} channels; expected at least 4"
+
+        self.inlet = StreamInlet(stream)
+        self.channel_indices = None
+
+        channel_note = "channels=first4"
+        try:
+            info = stream.info()
+            desc = info.desc()
+            ch = desc.child("channels").child("channel")
+            labels = []
+            while ch and ch.name():
+                label = ch.child_value("label")
+                if label:
+                    labels.append(label.strip())
+                ch = ch.next_sibling()
+            if labels:
+                labels_lower = [l.lower() for l in labels]
+                wanted = ["tp9", "af7", "af8", "tp10"]
+                indices = []
+                for name in wanted:
+                    if name in labels_lower:
+                        indices.append(labels_lower.index(name))
+                if len(indices) == 4:
+                    self.channel_indices = indices
+                    channel_note = "channels=TP9,AF7,AF8,TP10"
+        except Exception:
+            self.channel_indices = None
+
+        self.status_message = f"Connected to LSL stream: {stream.name()} ({channel_note})"
+        return True, self.status_message
 
     def pull_window(self) -> Optional[LiveWindow]:
         if self.inlet is None:
@@ -56,16 +100,24 @@ class LiveLSLSource:
         if self._stream_start is None:
             self._stream_start = ts
 
-        self.buffer.append(sample[:4])
+        if len(sample) < 4:
+            return None
+        if self.channel_indices is not None:
+            sample = [sample[i] for i in self.channel_indices]
+        else:
+            sample = sample[:4]
+        self.buffer.append(sample)
         self.sample_times.append(ts)
 
         if len(self.buffer) < self.window_samples:
             return None
 
+        self._sample_count += 1
+
         # Emit every step samples
-        if (self._last_emit_idx + self.step_samples) > len(self.sample_times):
+        if (self._sample_count - self._last_emit_idx) < self.step_samples:
             return None
-        self._last_emit_idx = len(self.sample_times)
+        self._last_emit_idx = self._sample_count
 
         window = np.array(self.buffer, dtype=np.float32)
         start_s = float(self.sample_times[0] - self._stream_start)

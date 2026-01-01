@@ -77,26 +77,41 @@ class InferenceEngine:
         if self.model is not None:
             self.model.to(self.device)
 
-    def predict(self, window_TxC: np.ndarray) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
+
+    def predict_proba(self, window_TxC: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], float, float, Dict[str, Any]]:
         if self.model is None:
-            return self._empty_prediction(window_TxC)
+            return None, None, 1.0, 1.0, {"health_score": compute_health_score(window_TxC)}
 
         window_TxC = apply_channel_normalizer(window_TxC, self.normalizer)
         x = torch.tensor(window_TxC, dtype=torch.float32, device=self.device).unsqueeze(0)
 
         mc = _mc_predict(self.model, x, passes=self.config.mc_passes)
         action_mean = mc["action_mean"].squeeze(0).detach().cpu().numpy()
-        action_std = mc["action_std"].squeeze(0).detach().cpu().numpy()
         finger_mean = mc["finger_mean"].squeeze(0).detach().cpu().numpy()
+        action_std = mc["action_std"].squeeze(0).detach().cpu().numpy()
         finger_std = mc["finger_std"].squeeze(0).detach().cpu().numpy()
+
+        action_uncertainty = float(np.mean(action_std))
+        finger_uncertainty = float(np.mean(finger_std))
+
+        diagnostics = {
+            "health_score": compute_health_score(window_TxC),
+        }
+        return action_mean, finger_mean, action_uncertainty, finger_uncertainty, diagnostics
+
+    def predict(self, window_TxC: np.ndarray) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
+        if self.model is None:
+            return self._empty_prediction(window_TxC)
+
+        action_mean, finger_mean, action_uncertainty, finger_uncertainty, diagnostics = self.predict_proba(window_TxC)
+        if action_mean is None or finger_mean is None:
+            return self._empty_prediction(window_TxC)
 
         action_id = int(np.argmax(action_mean))
         finger_id = int(np.argmax(finger_mean))
 
         action_confidence = float(action_mean[action_id])
-        action_uncertainty = float(np.mean(action_std))
         finger_confidence = float(finger_mean[finger_id])
-        finger_uncertainty = float(np.mean(finger_std))
 
         adaptive = min(
             0.99,
@@ -128,10 +143,6 @@ class InferenceEngine:
             "stability_frames": self.config.stability_frames,
             "stability_ok": stability_ok,
             "velocity": velocity,
-        }
-
-        diagnostics = {
-            "health_score": compute_health_score(window_TxC),
         }
 
         return prediction, safety, diagnostics

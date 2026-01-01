@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import joblib
+import json
 
 from deepchecks.tabular import Dataset
 from deepchecks.tabular.suites import data_integrity, train_test_validation, model_evaluation
@@ -134,7 +135,18 @@ suite = data_integrity().add(train_test_validation()).add(model_evaluation())
 
 result = suite.run(train_ds, test_ds, model=TorchModelWrapper())
 
-out_dir = Path("reports/deepchecks")
+session_meta_path = Path("session_meta.json")
+subject_id = "UNKNOWN"
+exp_hash = "UNKNOWN"
+if session_meta_path.exists():
+    try:
+        meta = json.loads(session_meta_path.read_text())
+        subject_id = meta.get("subject_id", subject_id)
+        exp_hash = meta.get("experiment_hash", exp_hash)
+    except Exception:
+        pass
+
+out_dir = Path("reports") / "subjects" / str(subject_id) / str(exp_hash)
 out_dir.mkdir(parents=True, exist_ok=True)
 out_path = out_dir / "deepchecks_eeg_report.html"
 result.save_as_html(out_path.as_posix(), as_widget=False)
