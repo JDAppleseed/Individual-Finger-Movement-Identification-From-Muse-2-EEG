@@ -6,13 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import torch
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from demo_backend.inference import InferenceConfig, InferenceEngine
 from demo_backend.live_lsl import LiveLSLSource
+from demo_backend.nn_vis.extract import extract_activations, pack_tensor
+from demo_backend.nn_vis.routes import router as nnvis_router
 from demo_backend.replay import ReplaySource
 from demo_backend.schemas import schema_bundle
 from demo_backend.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
@@ -72,6 +75,13 @@ class ControlPayload(BaseModel):
     threshold_action: Optional[float] = None
     threshold_finger: Optional[float] = None
     adjacency_enabled: Optional[bool] = None
+
+
+@dataclass
+class NnvisSubscription:
+    enabled: bool = False
+    rate_hz: float = 5.0
+    last_sent: float = 0.0
 
 
 class BackendState:
@@ -150,6 +160,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(nnvis_router)
 
 
 @app.get("/health")
@@ -235,7 +246,47 @@ async def _send_status(ws: WebSocket, level: str, message: str, details: Optiona
     })
 
 
-async def _stream_replay(ws: WebSocket):
+def _build_nnvis_payload(window: np.ndarray, source: str, index: Optional[int], time_s: Optional[float], passes: int) -> Optional[dict]:
+    if state.engine is None or state.engine.model is None:
+        return None
+    activations, uncertainty = extract_activations(
+        state.engine.model,
+        window,
+        deterministic=True,
+        normalizer=state.engine.normalizer,
+        mc_passes=passes if passes > 0 else None,
+    )
+
+    finger_probs = activations["finger_probs"]
+    action_probs = activations["action_probs"]
+    finger_pred = int(np.argmax(finger_probs))
+    action_pred = int(np.argmax(action_probs))
+
+    # Pack activations for websocket efficiency; keep probabilities as lists.
+    return {
+        "sample": {"source": source, "index": index, "time_s": time_s},
+        "input": {"shape": [64, 4], "values": pack_tensor(activations["input"])},
+        "conv1": {"shape": [16, 64], "values": pack_tensor(activations["conv1"])},
+        "conv2": {"shape": [32, 64], "values": pack_tensor(activations["conv2"])},
+        "lstm_out": {"shape": [64, 64], "values": pack_tensor(activations["lstm_out"])},
+        "last_features": {"shape": [64], "values": pack_tensor(activations["last_features"])},
+        "probs": {
+            "finger": {
+                "values": finger_probs.tolist(),
+                "pred_id": finger_pred,
+                "pred_name": FINGER_NAMES.get(finger_pred, "UNKNOWN"),
+            },
+            "action": {
+                "values": action_probs.tolist(),
+                "pred_id": action_pred,
+                "pred_name": ACTION_NAMES.get(action_pred, "UNKNOWN"),
+            },
+        },
+        "uncertainty": uncertainty,
+    }
+
+
+async def _stream_replay(ws: WebSocket, nnvis: NnvisSubscription):
     if state.replay is None or state.replay.path != state.runtime.replay_path:
         if not state.runtime.replay_path.exists():
             await _send_status(ws, "error", f"Replay file not found: {state.runtime.replay_path}")
@@ -328,6 +379,23 @@ async def _stream_replay(ws: WebSocket):
             },
         }
 
+        if nnvis.enabled:
+            now = time.perf_counter()
+            interval = 1.0 / max(nnvis.rate_hz, 0.1)
+            if now - nnvis.last_sent >= interval:
+                nnvis_passes = state.runtime.mc_passes
+                if nnvis.rate_hz > 2.0 and nnvis_passes > 3:
+                    # Clamp MC passes to keep high-rate nnvis updates responsive.
+                    nnvis_passes = 3
+                tick["nnvis"] = _build_nnvis_payload(
+                    window,
+                    source="replay",
+                    index=meta.index,
+                    time_s=meta.window_end_s,
+                    passes=nnvis_passes,
+                )
+                nnvis.last_sent = now
+
         await ws.send_json(tick)
         await asyncio.sleep(max(0.0, (1.0 / state.runtime.fps)))
 
@@ -336,7 +404,7 @@ async def _stream_replay(ws: WebSocket):
         await _send_status(ws, "info", "Replay complete", {})
 
 
-async def _stream_live(ws: WebSocket):
+async def _stream_live(ws: WebSocket, nnvis: NnvisSubscription):
     if not state.lsl_connected:
         ok, msg = state.live.connect()
         state.lsl_connected = ok
@@ -437,8 +505,50 @@ async def _stream_live(ws: WebSocket):
             },
         }
 
+        if nnvis.enabled:
+            now = time.perf_counter()
+            interval = 1.0 / max(nnvis.rate_hz, 0.1)
+            if now - nnvis.last_sent >= interval:
+                nnvis_passes = state.runtime.mc_passes
+                if nnvis.rate_hz > 2.0 and nnvis_passes > 3:
+                    # Clamp MC passes to keep high-rate nnvis updates responsive.
+                    nnvis_passes = 3
+                tick["nnvis"] = _build_nnvis_payload(
+                    window_data.window,
+                    source="live",
+                    index=tick_count,
+                    time_s=window_data.window_end_s,
+                    passes=nnvis_passes,
+                )
+                nnvis.last_sent = now
+
         await ws.send_json(tick)
         await asyncio.sleep(max(0.0, (1.0 / state.runtime.fps)))
+
+
+async def _listen_ws(ws: WebSocket, nnvis: NnvisSubscription):
+    while True:
+        try:
+            message = await ws.receive_json()
+        except WebSocketDisconnect:
+            return
+        if not isinstance(message, dict):
+            continue
+        if message.get("type") == "nnvis_subscribe":
+            # Guard parsing to keep websocket resilient to malformed inputs.
+            enabled = message.get("enabled", nnvis.enabled)
+            if isinstance(enabled, bool):
+                nnvis.enabled = enabled
+            elif isinstance(enabled, (int, float, str)):
+                nnvis.enabled = str(enabled).lower() not in {"0", "false", "none", ""}
+
+            rate_hz = message.get("rate_hz", nnvis.rate_hz)
+            try:
+                rate_value = float(rate_hz)
+            except (TypeError, ValueError):
+                rate_value = None
+            if rate_value is not None:
+                nnvis.rate_hz = max(0.5, min(rate_value, 30.0))
 
 
 @app.websocket("/stream")
@@ -446,6 +556,8 @@ async def stream(ws: WebSocket):
     await ws.accept()
     state.postprocess.reset()
     await _send_status(ws, "info", "Connected", {"mode": state.runtime.mode})
+    nnvis = NnvisSubscription()
+    listener = asyncio.create_task(_listen_ws(ws, nnvis))
 
     while True:
         if state.runtime.mode == "idle":
@@ -456,12 +568,21 @@ async def stream(ws: WebSocket):
             await asyncio.sleep(0.5)
             continue
 
-        if state.runtime.mode == "replay":
-            await _stream_replay(ws)
-        elif state.runtime.mode == "live":
-            await _stream_live(ws)
-        else:
-            await asyncio.sleep(0.5)
+        try:
+            if state.runtime.mode == "replay":
+                await _stream_replay(ws, nnvis)
+            elif state.runtime.mode == "live":
+                await _stream_live(ws, nnvis)
+            else:
+                await asyncio.sleep(0.5)
+        except WebSocketDisconnect:
+            break
+
+    listener.cancel()
+    try:
+        await listener
+    except asyncio.CancelledError:
+        pass
 
 
 if __name__ == "__main__":

@@ -1,0 +1,10 @@
+{
+  "subject_id": "6-M16",
+  "experiment_hash": "cfa79f8d394a",
+  "sampling_rate": 256,
+  "window_sec": 0.25,
+  "channels": 4,
+  "features_path": "eeg_features_repaired.csv",
+  "events_path": "data/processed/6-M16_cfa79f8d394a_events.csv",
+  "raw_path": "data/raw/6-M16_cfa79f8d394a_raw.csv"
+}

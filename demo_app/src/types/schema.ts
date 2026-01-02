@@ -1,5 +1,63 @@
 import { z } from "zod";
 
+const PackedArraySchema = z.union([
+  z.array(z.any()),
+  z.object({
+    encoding: z.literal("f16_base64"),
+    shape: z.array(z.number()),
+    data: z.string()
+  })
+]);
+
+const NnvisActivationSchema = z.object({
+  sample: z.object({
+    source: z.string(),
+    index: z.number().int().nullable(),
+    time_s: z.number().nullable()
+  }),
+  input: z.object({
+    shape: z.array(z.number()),
+    values: PackedArraySchema
+  }),
+  conv1: z.object({
+    shape: z.array(z.number()),
+    values: PackedArraySchema
+  }),
+  conv2: z.object({
+    shape: z.array(z.number()),
+    values: PackedArraySchema
+  }),
+  lstm_out: z.object({
+    shape: z.array(z.number()),
+    values: PackedArraySchema
+  }),
+  last_features: z.object({
+    shape: z.array(z.number()),
+    values: PackedArraySchema
+  }),
+  probs: z.object({
+    finger: z.object({
+      values: z.array(z.number()),
+      pred_id: z.number().int(),
+      pred_name: z.string()
+    }),
+    action: z.object({
+      values: z.array(z.number()),
+      pred_id: z.number().int(),
+      pred_name: z.string()
+    })
+  }),
+  uncertainty: z.object({
+    present: z.boolean(),
+    finger_std_mean: z.number().nullable().optional(),
+    action_std_mean: z.number().nullable().optional(),
+    finger_entropy: z.number().nullable().optional(),
+    action_entropy: z.number().nullable().optional(),
+    finger_mi: z.number().nullable().optional(),
+    action_mi: z.number().nullable().optional()
+  })
+});
+
 export const InferenceTickSchema = z.object({
   type: z.literal("tick"),
   ts_utc: z.string(),
@@ -53,7 +111,8 @@ export const InferenceTickSchema = z.object({
     smoothed_action_id: z.number().int().optional(),
     smoothed_finger_id: z.number().int().optional(),
     frames_in_state: z.number().int().optional()
-  })
+  }),
+  nnvis: NnvisActivationSchema.optional()
 });
 
 export const StatusSchema = z.object({
@@ -66,6 +125,7 @@ export const StatusSchema = z.object({
 
 export type InferenceTick = z.infer<typeof InferenceTickSchema>;
 export type StatusMessage = z.infer<typeof StatusSchema>;
+export type NnvisActivation = z.infer<typeof NnvisActivationSchema>;
 
 export function parseMessage(payload: unknown): InferenceTick | StatusMessage | null {
   const tick = InferenceTickSchema.safeParse(payload);

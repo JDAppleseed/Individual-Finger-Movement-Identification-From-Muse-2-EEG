@@ -1,9 +1,15 @@
+/* styles.css — FULL REPLACEMENT (includes z-layer fixes + NNVis visibility fixes) */
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* =========================================================
+   Global theme (DARK) + Tailwind token alignment
+   ========================================================= */
+
 :root {
-  color-scheme: light;
+  color-scheme: dark;
   font-family: "Avenir Next", "Futura", "Gill Sans", "Trebuchet MS", sans-serif;
   background: #0b0e10;
   color: #e2e8f0;
@@ -18,9 +24,92 @@ body {
   min-height: 100vh;
 }
 
+/* Tailwind base tokens: set to DARK so @apply bg-background text-foreground
+   does not flip your page to white background + dark text. */
+@layer base {
+  :root {
+    --background: 222 84% 4.9%;
+    --foreground: 210 40% 98%;
+
+    --card: 222 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 204 19% 26%;
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 212.7 26.8% 83.9%;
+
+    --chart-1: 220 70% 50%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 340 75% 55%;
+
+    --radius: 0.5rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* =========================================================
+   Z-Layer / Background Waves (fixes overlays)
+   ========================================================= */
+
+.bg-waves {
+  position: fixed;
+  inset: 0;
+  z-index: 0;           /* behind everything */
+  pointer-events: none; /* never intercept clicks */
+  opacity: 1;
+}
+
+.bg-waves-inner {
+  width: 100%;
+  height: 100%;
+}
+
+.waves-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* =========================================================
+   App layout
+   ========================================================= */
+
 .app {
+  position: relative;
+  z-index: 1; /* above bg-waves */
   padding: 32px;
 }
+
+/* =========================================================
+   Header / Hero
+   ========================================================= */
 
 .hero {
   display: flex;
@@ -30,7 +119,6 @@ body {
   gap: 20px;
   position: relative;
   z-index: 3;
-
 }
 
 .hero h1 {
@@ -66,6 +154,34 @@ body {
   text-transform: none;
 }
 
+.status-row .chip {
+  color: #ffffff;
+}
+
+.nav-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.nav-tab {
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: #e2e8f0;
+  padding: 8px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.nav-tab.active {
+  background: rgba(56, 189, 248, 0.2);
+  border-color: rgba(56, 189, 248, 0.7);
+}
+
+/* =========================================================
+   Dashboard grid + panels
+   ========================================================= */
+
 .grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -81,6 +197,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0; /* important for flex/grid children */
 }
 
 .panel.full {
@@ -283,6 +400,228 @@ body {
   font-size: 0.85rem;
 }
 
+/* =========================================================
+   NN Visualizer (critical visibility + layout fixes)
+   ========================================================= */
+
+.nnvis-main {
+  margin-top: 16px;
+  min-height: 70vh;
+  display: block;
+  position: relative;
+  z-index: 2; /* keep above background */
+}
+
+/* Ensure all NNVis text is readable on dark panels */
+.nnvis,
+.nnvis * {
+  color: #e5e7eb;
+}
+
+/* Prevent flex/grid children from collapsing width */
+.nnvis,
+.nnvis-panel,
+.nnvis-architecture,
+.nnvis-graph,
+.nnvis-card,
+.nnvis-inline {
+  min-width: 0;
+}
+
+.nnvis {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: 100%;
+}
+
+.nnvis-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.nnvis-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.nnvis-toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: #e2e8f0;
+  font-size: 0.9rem;
+}
+
+.nnvis-panel {
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 18px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 120px;
+  position: relative;
+  z-index: 2;
+}
+
+.nnvis-panel-title {
+  font-size: 1.2rem;
+  color: #f8fafc;
+}
+
+.nnvis-control-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.nnvis-select select,
+.nnvis-slider input,
+.nnvis-inline select,
+.nnvis-inline input {
+  margin-top: 6px;
+}
+
+.nnvis-slider span {
+  display: inline-block;
+  margin-left: 8px;
+  color: #cbd5f5;
+}
+
+.nnvis-button {
+  background: rgba(56, 189, 248, 0.2);
+  border: 1px solid rgba(56, 189, 248, 0.5);
+  color: #f8fafc;
+  border-radius: 10px;
+  padding: 6px 12px;
+  cursor: pointer;
+  margin-top: 8px;
+}
+
+.nnvis-button:hover {
+  background: rgba(56, 189, 248, 0.35);
+}
+
+.nnvis-playback {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.nnvis-warning {
+  color: #f97316;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.nnvis-diagnostics,
+.nnvis-weights,
+.nnvis-activations {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.nnvis-card {
+  background: rgba(30, 41, 59, 0.85);
+  border-radius: 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.nnvis-card-title {
+  color: #f8fafc;
+  font-size: 1rem;
+}
+
+.nnvis-card-value {
+  color: #e2e8f0;
+}
+
+.nnvis-card-sub {
+  color: #94a3b8;
+  font-size: 0.85rem;
+}
+
+.nnvis-stale {
+  color: #f97316;
+}
+
+.nnvis-architecture {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 16px;
+}
+
+/* Graph container must have width, and canvas must fill it */
+.nnvis-graph {
+  min-height: 320px;
+  width: 100%;
+  display: block;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(15, 23, 42, 0.7);
+  position: relative;
+  z-index: 2;
+}
+
+.nnvis-graph canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+
+  /* Prevent “invisible” WebGL via blending/filters */
+  mix-blend-mode: normal !important;
+  filter: none !important;
+  opacity: 1 !important;
+}
+
+.nnvis-node-details {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.nnvis-inline {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.nnvis-heatmap,
+.nnvis-lineplot,
+.nnvis-barchart,
+.nnvis-topedges {
+  width: 100%;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.7);
+  mix-blend-mode: normal !important;
+  filter: none !important;
+  opacity: 1 !important;
+}
+
+.nnvis-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* =========================================================
+   Responsive
+   ========================================================= */
+
 @media (max-width: 1024px) {
   .grid {
     grid-template-columns: 1fr;
@@ -296,100 +635,8 @@ body {
   }
 }
 
-
-.bg-waves {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  opacity: 1;
-}
-
-.bg-waves-inner {
-  width: 100%;
-  height: 100%;
-}
-
-.waves-canvas {
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-
-.app {
-  position: relative;
-  z-index: 1;
-}
-
-
-
-@layer base {
-  :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 204 19% 26%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
-    --chart-1: 12 76% 61%;
-    --chart-2: 173 58% 39%;
-    --chart-3: 197 37% 24%;
-    --chart-4: 43 74% 66%;
-    --chart-5: 27 87% 67%;
-    --radius: 0.5rem;
+@media (max-width: 900px) {
+  .nnvis-architecture {
+    grid-template-columns: 1fr;
   }
-  .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 204 19% 26%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 212.7 26.8% 83.9%;
-    --chart-1: 220 70% 50%;
-    --chart-2: 160 60% 45%;
-    --chart-3: 30 80% 55%;
-    --chart-4: 280 65% 60%;
-    --chart-5: 340 75% 55%;
-  }
-}
-
-
-
-@layer base {
-  * {
-    @apply border-border;
-  }
-  body {
-    @apply bg-background text-foreground;
-  }
-}
-
-.status-row .chip {
-  color: #ffffff;
 }

@@ -99,6 +99,7 @@ TICK_SCHEMA = {
                 "frames_in_state": {"type": "integer"},
             },
         },
+        "nnvis": {"type": ["object", "null"]},
     },
 }
 
