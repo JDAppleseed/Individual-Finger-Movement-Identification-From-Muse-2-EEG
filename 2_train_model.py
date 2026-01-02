@@ -28,7 +28,7 @@ BATCH_SIZE = 64
 EPOCHS = 60
 LR = 1e-3
 LOSS_ACTION_WEIGHT = 1.0
-REST_WEIGHT = 1.0
+REST_WEIGHT = 0.2
 
 subject_id = "ANON"
 
@@ -72,6 +72,7 @@ def resolve_experiment_hash():
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Train CNN+LSTM EEG multi-head model")
     parser.add_argument("--npz", type=str, default="eeg_windows.npz", help="Path to window dataset")
+    parser.add_argument("--subject-id", type=str, default="5-M16", help="Filter training data to a single subject_id")
     parser.add_argument("--epochs", type=int, default=EPOCHS, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="Training batch size")
     parser.add_argument("--lr", type=float, default=LR, help="Learning rate")
@@ -95,6 +96,24 @@ def main():
     log_experiment(subject, exp_hash, "STEP_2_TRAIN")
 
     X, y_action, y_finger, meta = load_sequence_npz(args.npz)
+    if args.subject_id:
+        if "subject_id" not in meta:
+            print("subject_id not found in dataset metadata; cannot filter.")
+            return 2
+        subject_ids = np.array(meta["subject_id"]).astype(str)
+        mask = subject_ids == args.subject_id
+        kept = int(mask.sum())
+        if kept == 0:
+            print(f"No windows found for subject_id={args.subject_id}")
+            return 2
+        X = X[mask]
+        y_action = y_action[mask]
+        y_finger = y_finger[mask]
+        meta = {
+            key: (np.array(val)[mask] if isinstance(val, np.ndarray) and len(val) == len(mask) else val)
+            for key, val in meta.items()
+        }
+        subject = args.subject_id
 
     train_idx, test_idx = split_indices(
         y_action,

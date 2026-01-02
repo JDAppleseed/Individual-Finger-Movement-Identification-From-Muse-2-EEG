@@ -107,7 +107,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 GENDER = "M"     # M / F / X
 AGE = 16         # integer only
-SUBJECT_ID_OVERRIDE = "3-M16"  # Set to None to use auto-increment registry
+SUBJECT_ID_OVERRIDE = "5-M16"  # Set to None to use auto-increment registry
 
 subject_id = SUBJECT_ID_OVERRIDE or get_subject_id(GENDER, AGE)
 
@@ -562,7 +562,12 @@ def resolve_eeg_channel_indices(info, expected):
 
 print("🔍 Resolving EEG stream...")
 streams = resolve_streams()
-eeg_stream = next(s for s in streams if "EEG" in s.type() or "EEG" in s.name())
+if not streams:
+    raise RuntimeError("No LSL streams found.")
+eeg_streams = [s for s in streams if "eeg" in s.name().lower()]
+if not eeg_streams:
+    raise RuntimeError("No LSL stream with 'eeg' in the name found.")
+eeg_stream = eeg_streams[0]
 inlet = StreamInlet(eeg_stream)
 info = inlet.info()
 expected_labels = ["TP9", "AF7", "AF8", "TP10"]

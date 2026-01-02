@@ -23,6 +23,13 @@ DEFAULT_FS = 256
 OVERLAP_EPS = 0.02
 
 
+def latest_subject_file(subject_id, suffix, base_dir):
+    base = Path(base_dir)
+    pattern = f"{subject_id}_*_{suffix}"
+    candidates = sorted(base.glob(pattern), key=lambda p: p.name)
+    return candidates[-1] if candidates else None
+
+
 def load_session_meta():
     meta_path = Path("session_meta.json")
     if not meta_path.exists():
@@ -262,9 +269,24 @@ def main():
     parser.add_argument("--apply", action="store_true", help="Apply fixes in-place")
     parser.add_argument("--events", type=str, default=None, help="Override events path")
     parser.add_argument("--features", type=str, default=None, help="Override features path")
+    parser.add_argument("--subject-id", type=str, default="5-M16", help="Subject ID to select latest session files")
     parser.add_argument("--strict", action="store_true", help="Exit with code 1 on warnings")
     parser.add_argument("--json-report", type=str, default=None, help="Write JSON report to path")
     args = parser.parse_args()
+
+    if args.subject_id:
+        if args.events is None:
+            events_path = latest_subject_file(args.subject_id, "events.csv", "data/processed")
+            if events_path is None:
+                print(f"No events file found for subject_id={args.subject_id} in data/processed.")
+                raise SystemExit(2)
+            args.events = str(events_path)
+        if args.features is None:
+            features_path = latest_subject_file(args.subject_id, "eeg_features.csv", "data/processed")
+            if features_path is None:
+                print(f"No features file found for subject_id={args.subject_id} in data/processed.")
+                raise SystemExit(2)
+            args.features = str(features_path)
 
     session_used, events_path, features_path = resolve_paths(args.events, args.features)
 

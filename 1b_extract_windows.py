@@ -40,10 +40,18 @@ MIN_OVERLAP_SEC = MIN_OVERLAP_RATIO * WINDOW_SEC
 WINDOW_SAMPLES = int(FS * WINDOW_SEC)
 STEP_SAMPLES = max(1, int(FS * STEP_SEC))
 
+
+def latest_subject_file(subject_id, suffix, base_dir):
+    base = Path(base_dir)
+    pattern = f"{subject_id}_*_{suffix}"
+    candidates = sorted(base.glob(pattern), key=lambda p: p.name)
+    return candidates[-1] if candidates else None
+
 RAW_FILE = "eeg_features.csv"
 EVENT_FILE = "events.csv"
 OUT_FILE = "eeg_windows.csv"
 OUT_NPZ = "eeg_windows.npz"
+DEFAULT_SUBJECT_ID = "5-M16"
 
 # =========================
 # ===== SESSION META ======
@@ -51,6 +59,7 @@ OUT_NPZ = "eeg_windows.npz"
 parser = argparse.ArgumentParser()
 parser.add_argument("--features", type=str, default=None, help="Override features path")
 parser.add_argument("--events", type=str, default=None, help="Override events path")
+parser.add_argument("--subject-id", type=str, default=DEFAULT_SUBJECT_ID, help="Subject ID to select latest session files")
 args = parser.parse_args()
 
 session_meta = {}
@@ -67,10 +76,21 @@ WINDOW_SAMPLES = int(FS * WINDOW_SEC)
 MIN_OVERLAP_SEC = MIN_OVERLAP_RATIO * WINDOW_SEC
 STEP_SAMPLES = max(1, int(FS * STEP_SEC))
 
-raw_candidate = Path(args.features) if args.features else None
-if raw_candidate is None and session_meta:
+raw_candidate = None
+events_candidate = None
+
+if args.subject_id:
+    raw_candidate = latest_subject_file(args.subject_id, "eeg_features.csv", "data/processed")
+    events_candidate = latest_subject_file(args.subject_id, "events.csv", "data/processed")
+    if raw_candidate is None or events_candidate is None:
+        print(f"No session files found for subject_id={args.subject_id} in data/processed.")
+        raise SystemExit(2)
+
+if args.features:
+    raw_candidate = Path(args.features)
+elif raw_candidate is None and session_meta:
     raw_candidate = Path(session_meta.get("features_path", RAW_FILE))
-if raw_candidate is None:
+elif raw_candidate is None:
     raw_candidate = Path(RAW_FILE)
 
 if not raw_candidate.exists():
@@ -81,7 +101,7 @@ RAW_FILE = str(raw_candidate)
 
 if args.events:
     events_candidate = Path(args.events)
-else:
+elif events_candidate is None:
     events_candidate = Path(session_meta.get("events_path", EVENT_FILE)) if session_meta else Path(EVENT_FILE)
 
 if LABEL_GATED and (events_candidate is None or not events_candidate.exists()):

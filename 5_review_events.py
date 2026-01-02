@@ -11,6 +11,7 @@ Keyboard controls:
   q: quit
 """
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -30,15 +31,52 @@ EVENTS_PATH = Path("events.csv")
 FEATURES_PATH = Path("eeg_features.csv")
 DEFAULT_FS = 256.0
 
+
+def latest_subject_file(subject_id, suffix, base_dir):
+    base = Path(base_dir)
+    pattern = f"{subject_id}_*_{suffix}"
+    candidates = sorted(base.glob(pattern), key=lambda p: p.name)
+    return candidates[-1] if candidates else None
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--subject-id", type=str, default="5-M16", help="Subject ID to select latest session files")
+parser.add_argument("--events", type=str, default=None, help="Override events path")
+parser.add_argument("--features", type=str, default=None, help="Override features path")
+args = parser.parse_args()
+
 meta_path = Path("session_meta.json")
-if meta_path.exists():
-    meta = json.loads(meta_path.read_text())
-    events_candidate = Path(meta.get("events_path", str(EVENTS_PATH)))
-    features_candidate = Path(meta.get("features_path", str(FEATURES_PATH)))
-    if events_candidate.exists():
-        EVENTS_PATH = events_candidate
-    if features_candidate.exists():
-        FEATURES_PATH = features_candidate
+events_candidate = None
+features_candidate = None
+
+if args.subject_id:
+    events_candidate = latest_subject_file(args.subject_id, "events.csv", "data/processed")
+    features_candidate = latest_subject_file(args.subject_id, "eeg_features.csv", "data/processed")
+    if events_candidate is None or features_candidate is None:
+        print(f"No session files found for subject_id={args.subject_id} in data/processed.")
+        raise SystemExit(2)
+
+if args.events:
+    events_candidate = Path(args.events)
+if args.features:
+    features_candidate = Path(args.features)
+
+if events_candidate is None or features_candidate is None:
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text())
+        if events_candidate is None:
+            candidate = Path(meta.get("events_path", str(EVENTS_PATH)))
+            if candidate.exists():
+                events_candidate = candidate
+        if features_candidate is None:
+            candidate = Path(meta.get("features_path", str(FEATURES_PATH)))
+            if candidate.exists():
+                features_candidate = candidate
+
+if events_candidate is not None:
+    EVENTS_PATH = events_candidate
+if features_candidate is not None:
+    FEATURES_PATH = features_candidate
 
 if not EVENTS_PATH.exists():
     raise FileNotFoundError(f"events.csv not found: {EVENTS_PATH}")

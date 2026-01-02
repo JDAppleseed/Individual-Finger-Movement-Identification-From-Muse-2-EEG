@@ -126,6 +126,7 @@ def main():
     parser.add_argument("--pred-npz", type=str, default="test_predictions.npz", help="Optional cached test predictions")
     parser.add_argument("--model", type=str, default="finger_action_model.pt", help="Model weights path")
     parser.add_argument("--scaler", type=str, default="scaler.save", help="Normalizer/scaler path")
+    parser.add_argument("--subject-id", type=str, default="5-M16", help="Filter evaluation to a single subject_id")
 
     parser.add_argument("--smooth", action="store_true", help="Enable postprocess smoothing")
     parser.add_argument("--smooth-method", type=str, default="vote", choices=["vote", "ema"])
@@ -146,6 +147,25 @@ def main():
     # ===== LOAD DATA =========
     # =========================
     X, y_action, y_finger, meta = load_sequence_npz(str(npz_path))
+    subject_filtered = False
+    if args.subject_id:
+        if "subject_id" not in meta:
+            print("subject_id not found in dataset metadata; cannot filter.")
+            return 2
+        subject_ids_all = np.asarray(meta["subject_id"]).astype(str)
+        mask = subject_ids_all == args.subject_id
+        kept = int(mask.sum())
+        if kept == 0:
+            print(f"No windows found for subject_id={args.subject_id}")
+            return 2
+        X = X[mask]
+        y_action = y_action[mask]
+        y_finger = y_finger[mask]
+        meta = {
+            key: (np.array(val)[mask] if isinstance(val, np.ndarray) and len(val) == len(mask) else val)
+            for key, val in meta.items()
+        }
+        subject_filtered = True
 
     subject_ids = meta.get("subject_id", None)
     experiment_hashes = meta.get("experiment_hash", None)
@@ -160,6 +180,9 @@ def main():
     # =========================
     # Priority 1: If cached predictions exist, trust their test_indices + labels for reproducibility.
     cached = _load_predictions_if_present(pred_npz_path)
+    if subject_filtered and cached is not None:
+        print("ℹ️ Ignoring cached predictions because --subject-id filtering is enabled.")
+        cached = None
 
     if cached is not None:
         action_probs = np.asarray(cached["action_probs"])
