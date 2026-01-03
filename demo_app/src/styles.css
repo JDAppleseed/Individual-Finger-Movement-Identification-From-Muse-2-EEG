@@ -67,10 +67,14 @@ textarea {
    App Shell
    ========================================================= */
 
+/* Let the grid fill available height so stage scroll aligns with inspector. */
 .app-shell {
   position: relative;
   z-index: 1;
   padding: 28px 32px 44px;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
 }
 
 .dashboard-grid {
@@ -79,6 +83,7 @@ textarea {
   gap: 20px;
   align-items: stretch;
   min-height: 0;
+  flex: 1;
 }
 
 /* =========================================================
@@ -247,12 +252,15 @@ select {
    Left / Right Rails
    ========================================================= */
 
+/* Ensure side rails stretch so column bottoms align. */
 .rail,
 .inspector {
   display: flex;
   flex-direction: column;
   gap: 16px;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
 }
 
 .rail-panel {
@@ -396,11 +404,16 @@ select {
   height: 100%;
   overflow: auto;
   padding: 12px;
+  min-height: 0;
+  flex: 1;
 }
 
 .nn-stage {
   height: 100%;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 /* =========================================================
