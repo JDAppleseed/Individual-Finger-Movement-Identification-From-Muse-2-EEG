@@ -8,12 +8,14 @@ import ConvKernelGrid from "../components/nnvis/ConvKernelGrid";
 import { decodePacked } from "../components/nnvis/utils";
 import type { InferenceTick, NnvisActivation } from "../types/schema";
 import type { NnvisManifest, NnvisWeights, NnvisTimelineManifest, OfflineSource } from "../types/nnvis";
-
-const API_BASE = "http://127.0.0.1:8008";
+import { fetchJson, getBackendBase } from "../api/client";
 
 type Props = {
   ws: WebSocket | null;
   tick: InferenceTick | null;
+  selectedNodeId?: string | null;
+  onSelectNode?: (id: string | null, meta?: NnvisManifest["nodes"][number] | null) => void;
+  onHoverNode?: (id: string | null, meta?: NnvisManifest["nodes"][number] | null) => void;
 };
 
 function useLocalStorageState<T>(key: string, initial: T): [T, (next: T) => void] {
@@ -45,31 +47,8 @@ function exportCanvasPNG(canvas: HTMLCanvasElement | null, filename: string) {
   link.click();
 }
 
-async function fetchJson(url: string): Promise<any> {
-  let res: Response;
-  try {
-    res = await fetch(url);
-  } catch (err) {
-    const message = `fetchJson ${url} status 0: ${String(err)}`;
-    console.error(message);
-    throw new Error(message);
-  }
-  const text = await res.text();
-  if (!res.ok) {
-    const message = `fetchJson ${url} status ${res.status}: ${text}`;
-    console.error(message);
-    throw new Error(message);
-  }
-  try {
-    return JSON.parse(text);
-  } catch (err) {
-    const message = `fetchJson ${url} status ${res.status}: ${text}`;
-    console.error(message);
-    throw new Error(message);
-  }
-}
-
-export default function NnVisualizer({ ws, tick }: Props) {
+export default function NnVisualizer({ ws, tick, selectedNodeId, onSelectNode, onHoverNode }: Props) {
+  const apiBase = useMemo(() => getBackendBase(), []);
   const [mode, setMode] = useState<"online" | "offline">("online");
   const [manifest, setManifest] = useState<NnvisManifest | null>(null);
   const [weights, setWeights] = useState<NnvisWeights | null>(null);
@@ -81,7 +60,7 @@ export default function NnVisualizer({ ws, tick }: Props) {
   const [playing, setPlaying] = useState<boolean>(false);
   const [subscribe, setSubscribe] = useState<boolean>(false);
   const [rateHz, setRateHz] = useState<number>(5);
-  const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  const [selectedNode, setSelectedNode] = useState<string | null>(selectedNodeId ?? null);
   const [timeline, setTimeline] = useState<NnvisTimelineManifest | null>(null);
   const [timelineIndex, setTimelineIndex] = useState<number>(0);
   const [now, setNow] = useState<number>(Date.now());
@@ -109,7 +88,7 @@ export default function NnVisualizer({ ws, tick }: Props) {
     setSourcesError(null);
 
     try {
-      await fetchJson(`${API_BASE}/health`);
+      await fetchJson(`${apiBase}/health`);
       setHealthOk(true);
     } catch (err) {
       setHealthOk(false);
@@ -117,7 +96,7 @@ export default function NnVisualizer({ ws, tick }: Props) {
     }
 
     try {
-      const data = await fetchJson(`${API_BASE}/nnvis/manifest`);
+      const data = await fetchJson<NnvisManifest>(`${apiBase}/nnvis/manifest`);
       setManifest(data);
     } catch (err) {
       setManifest(null);
@@ -125,7 +104,7 @@ export default function NnVisualizer({ ws, tick }: Props) {
     }
 
     try {
-      const data = await fetchJson(`${API_BASE}/nnvis/weights?quantize=1&downsample=1&topk=150`);
+      const data = await fetchJson<NnvisWeights>(`${apiBase}/nnvis/weights?quantize=1&downsample=1&topk=150`);
       setWeights(data);
       setBaseWeights(data);
     } catch (err) {
@@ -134,8 +113,8 @@ export default function NnVisualizer({ ws, tick }: Props) {
     }
 
     try {
-      const data = await fetchJson(`${API_BASE}/nnvis/offline/sources`);
-      const list = data.sources as OfflineSource[];
+      const data = await fetchJson<{ sources: OfflineSource[] }>(`${apiBase}/nnvis/offline/sources`);
+      const list = data.sources;
       setSources(list);
       if (list.length > 0) {
         setSourcePath((prev) => prev || list[0].path);
@@ -144,7 +123,7 @@ export default function NnVisualizer({ ws, tick }: Props) {
       setSources([]);
       setSourcesError(err instanceof Error ? err.message : String(err));
     }
-  }, []);
+  }, [apiBase]);
 
   useEffect(() => {
     void loadBootstrap();
@@ -162,7 +141,7 @@ export default function NnVisualizer({ ws, tick }: Props) {
       setTimeline(null);
       return;
     }
-    fetch(`${API_BASE}${manifest.timeline.manifest_url}`)
+    fetch(`${apiBase}${manifest.timeline.manifest_url}`)
       .then((res) => res.json())
       .then((data) => {
         setTimeline(data);
@@ -171,29 +150,29 @@ export default function NnVisualizer({ ws, tick }: Props) {
         }
       })
       .catch(() => setTimeline(null));
-  }, [manifest]);
+  }, [manifest, apiBase]);
 
   useEffect(() => {
     if (!timeline || !timeline.steps.length) return;
     const step = timeline.steps[timelineIndex];
     if (!step) return;
-    fetch(`${API_BASE}/nnvis/timeline/weights?file=${encodeURIComponent(step.file)}`)
+    fetch(`${apiBase}/nnvis/timeline/weights?file=${encodeURIComponent(step.file)}`)
       .then((res) => res.json())
       .then((data) => setWeights(data))
       .catch(() => setWeights(baseWeights));
-  }, [timeline, timelineIndex, baseWeights]);
+  }, [timeline, timelineIndex, baseWeights, apiBase]);
 
   useEffect(() => {
     if (mode !== "offline" || !sourcePath) return;
     const params = new URLSearchParams({ source: sourcePath, index: String(sampleIndex) });
-    fetch(`${API_BASE}/nnvis/offline/sample?${params.toString()}`)
+    fetch(`${apiBase}/nnvis/offline/sample?${params.toString()}`)
       .then((res) => res.json())
       .then((data) => {
         setActivations(data);
         lastUpdateRef.current = Date.now();
       })
       .catch(() => setActivations(null));
-  }, [mode, sourcePath, sampleIndex]);
+  }, [mode, sourcePath, sampleIndex, apiBase]);
 
   useEffect(() => {
     if (mode !== "online") return;
@@ -222,6 +201,11 @@ export default function NnVisualizer({ ws, tick }: Props) {
     }, 300);
     return () => window.clearInterval(timer);
   }, [ws, subscribe, rateHz]);
+
+  useEffect(() => {
+    if (selectedNodeId === undefined) return;
+    setSelectedNode(selectedNodeId);
+  }, [selectedNodeId]);
 
   useEffect(() => {
     if (!playing || mode !== "offline") return;
@@ -298,6 +282,25 @@ export default function NnVisualizer({ ws, tick }: Props) {
   const lastFeat = useMemo(() => activations ? decodePacked(activations.last_features.values) : null, [activations]);
 
   const selectedNodeInfo = useMemo(() => manifest?.nodes.find((n) => n.id === selectedNode), [manifest, selectedNode]);
+
+  const handleSelectNodeClick = useCallback(
+    (id: string | null) => {
+      if (selectedNodeId === undefined) {
+        setSelectedNode(id);
+      }
+      const meta = id ? manifest?.nodes.find((n) => n.id === id) ?? null : null;
+      onSelectNode?.(id, meta);
+    },
+    [manifest, onSelectNode, selectedNodeId]
+  );
+
+  const handleHoverNode = useCallback(
+    (id: string | null) => {
+      const meta = id ? manifest?.nodes.find((n) => n.id === id) ?? null : null;
+      onHoverNode?.(id, meta);
+    },
+    [manifest, onHoverNode]
+  );
 
   const gridRef = useRef<HTMLCanvasElement | null>(null);
   const gridRef2 = useRef<HTMLCanvasElement | null>(null);
@@ -455,7 +458,7 @@ export default function NnVisualizer({ ws, tick }: Props) {
           </div>
         )}
         {mode === "offline" && sources.length === 0 && (
-          <div className="nnvis-warning">No offline npz sources found. Place `test_predictions.npz` or `eeg_windows.npz` in the repo.</div>
+          <div className="nnvis-warning">Offline sources are discovered by the backend. Ensure the backend's offline directory contains `test_predictions.npz` or `eeg_windows.npz` and that `/nnvis/offline/sources` can see them.</div>
         )}
       </section>
 
@@ -492,7 +495,8 @@ export default function NnVisualizer({ ws, tick }: Props) {
               edges={manifest.edges}
               grouping={grouping}
               selectedId={selectedNode}
-              onSelect={setSelectedNode}
+              onSelect={handleSelectNodeClick}
+              onHover={handleHoverNode}
             />
             <div className="nnvis-node-details">
               <div className="nnvis-toggle-row">

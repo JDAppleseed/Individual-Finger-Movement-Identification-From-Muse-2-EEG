@@ -20,6 +20,7 @@ export type Graph3DProps = {
   grouping?: boolean;
   selectedId?: string | null;
   onSelect?: (id: string | null) => void;
+  onHover?: (id: string | null) => void;
 };
 
 const ORDER = [
@@ -70,7 +71,7 @@ function createLabelSprite(text: string): THREE.Sprite {
   return sprite;
 }
 
-export default function Graph3D({ nodes, edges, grouping = true, selectedId, onSelect }: Graph3DProps) {
+export default function Graph3D({ nodes, edges, grouping = true, selectedId, onSelect, onHover }: Graph3DProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -86,6 +87,7 @@ export default function Graph3D({ nodes, edges, grouping = true, selectedId, onS
     camera.position.set(0, 0, 20);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(window.devicePixelRatio ?? 1);
     renderer.setSize(width, height);
     container.innerHTML = "";
     container.appendChild(renderer.domElement);
@@ -134,6 +136,8 @@ export default function Graph3D({ nodes, edges, grouping = true, selectedId, onS
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
 
+    let lastHoverId: string | null = null;
+
     function handlePointer(event: MouseEvent) {
       const rect = renderer.domElement.getBoundingClientRect();
       pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -148,7 +152,31 @@ export default function Graph3D({ nodes, edges, grouping = true, selectedId, onS
       }
     }
 
+    function handlePointerMove(event: MouseEvent) {
+      if (!onHover) return;
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, camera);
+      const hits = raycaster.intersectObjects(nodeMeshes, false);
+      const next = hits.length > 0 ? (hits[0].object.userData.id as string) : null;
+      if (next !== lastHoverId) {
+        lastHoverId = next;
+        onHover(next);
+      }
+    }
+
+    function handlePointerLeave() {
+      if (!onHover) return;
+      if (lastHoverId !== null) {
+        lastHoverId = null;
+        onHover(null);
+      }
+    }
+
     renderer.domElement.addEventListener("click", handlePointer);
+    renderer.domElement.addEventListener("mousemove", handlePointerMove);
+    renderer.domElement.addEventListener("mouseleave", handlePointerLeave);
 
     function render() {
       nodeMeshes.forEach((mesh) => {
@@ -162,11 +190,25 @@ export default function Graph3D({ nodes, edges, grouping = true, selectedId, onS
 
     render();
 
+    const resizeObserver = new ResizeObserver(() => {
+      const nextWidth = container.clientWidth || 600;
+      const nextHeight = container.clientHeight || 320;
+      renderer.setSize(nextWidth, nextHeight);
+      camera.aspect = nextWidth / nextHeight;
+      camera.updateProjectionMatrix();
+      render();
+    });
+
+    resizeObserver.observe(container);
+
     return () => {
       renderer.domElement.removeEventListener("click", handlePointer);
+      renderer.domElement.removeEventListener("mousemove", handlePointerMove);
+      renderer.domElement.removeEventListener("mouseleave", handlePointerLeave);
+      resizeObserver.disconnect();
       renderer.dispose();
     };
-  }, [nodes, edges, grouping, selectedId, onSelect]);
+  }, [nodes, edges, grouping, selectedId, onSelect, onHover]);
 
   return <div className="nnvis-graph" ref={containerRef} />;
 }
