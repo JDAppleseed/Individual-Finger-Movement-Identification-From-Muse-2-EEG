@@ -20,6 +20,31 @@ type Props = {
   confidence: number;
 };
 
+// Keep the stage usable if GLB loading fails at runtime.
+type ErrorBoundaryProps = { fallback: React.ReactNode; children: React.ReactNode; resetKey?: string };
+type ErrorBoundaryState = { hasError: boolean };
+
+class GltfFallbackBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  state: ErrorBoundaryState = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidUpdate(prevProps: ErrorBoundaryProps) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.hasError) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback;
+    }
+    return this.props.children;
+  }
+}
+
 type FingerKey = "THUMB" | "INDEX" | "MIDDLE" | "RING" | "PINKY";
 type FingerName = FingerKey | "NONE";
 
@@ -460,8 +485,9 @@ function GLTFHand({ action, finger, confidence, url }: Props & { url: string }) 
     const center = new Vector3();
     box.getSize(size);
     box.getCenter(center);
-    const height = size.y || 1;
-    const scale = MathUtils.clamp(1.2 / height, 1.0, 1.6);
+    // Shrink the rigged model so it reads smaller in the stage.
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    const scale = MathUtils.clamp(1.2 / maxDim, 0.7, 1.6) * 0.5;
     const offset = new Vector3(-center.x, -box.min.y, -center.z);
     return { scale, offset };
   }, [gltf]);
@@ -571,8 +597,9 @@ function GLTFHand({ action, finger, confidence, url }: Props & { url: string }) 
     }
   });
 
+  // Align model base to the ground plane so it sits on the stage bottom.
   return (
-    <group ref={groupRef} scale={layout.scale} position={[0, -0.55, 0]}>
+    <group ref={groupRef} scale={layout.scale} position={[0, -0.62, 0]}>
       <group position={[layout.offset.x, layout.offset.y, layout.offset.z]}>
         <primitive object={gltf.scene} />
       </group>
@@ -611,5 +638,12 @@ export default function HandModel({ action, finger, confidence }: Props) {
     return <ProceduralHand action={action} finger={finger} confidence={confidence} />;
   }
 
-  return <GLTFHand action={action} finger={finger} confidence={confidence} url={url} />;
+  return (
+    <GltfFallbackBoundary
+      fallback={<ProceduralHand action={action} finger={finger} confidence={confidence} />}
+      resetKey={url}
+    >
+      <GLTFHand action={action} finger={finger} confidence={confidence} url={url} />
+    </GltfFallbackBoundary>
+  );
 }
