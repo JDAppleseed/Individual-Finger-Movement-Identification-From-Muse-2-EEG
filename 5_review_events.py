@@ -40,7 +40,7 @@ def latest_subject_file(subject_id, suffix, base_dir):
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--subject-id", type=str, default="5-M16", help="Subject ID to select latest session files")
+parser.add_argument("--subject-id", type=str, default="1-M17", help="Subject ID to select latest session files")
 parser.add_argument("--events", type=str, default=None, help="Override events path")
 parser.add_argument("--features", type=str, default=None, help="Override features path")
 args = parser.parse_args()

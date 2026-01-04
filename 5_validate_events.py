@@ -269,7 +269,7 @@ def main():
     parser.add_argument("--apply", action="store_true", help="Apply fixes in-place")
     parser.add_argument("--events", type=str, default=None, help="Override events path")
     parser.add_argument("--features", type=str, default=None, help="Override features path")
-    parser.add_argument("--subject-id", type=str, default="5-M16", help="Subject ID to select latest session files")
+    parser.add_argument("--subject-id", type=str, default="1-M17", help="Subject ID to select latest session files")
     parser.add_argument("--strict", action="store_true", help="Exit with code 1 on warnings")
     parser.add_argument("--json-report", type=str, default=None, help="Write JSON report to path")
     args = parser.parse_args()

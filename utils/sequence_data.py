@@ -4,14 +4,16 @@ from pathlib import Path
 from sklearn.model_selection import train_test_split, GroupShuffleSplit
 
 
-def load_sequence_npz(path="eeg_windows.npz"):
+def load_sequence_npz(path="eeg_windows.npz", mmap_mode=None):
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Sequence window file not found: {path}")
-    data = np.load(path, allow_pickle=True)
-    X = data["X"].astype(np.float32)
-    y_action = data["y_action"].astype(np.int64)
-    y_finger = data["y_finger"].astype(np.int64)
+    data = np.load(path, allow_pickle=True, mmap_mode=mmap_mode)
+    X = data["X"]
+    if X.dtype != np.float32 and mmap_mode is None:
+        X = X.astype(np.float32)
+    y_action = np.asarray(data["y_action"], dtype=np.int64)
+    y_finger = np.asarray(data["y_finger"], dtype=np.int64)
     meta = {}
     for key in [
         "subject_id",

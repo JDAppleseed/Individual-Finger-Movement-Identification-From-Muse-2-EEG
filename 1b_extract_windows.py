@@ -51,7 +51,7 @@ RAW_FILE = "eeg_features.csv"
 EVENT_FILE = "events.csv"
 OUT_FILE = "eeg_windows.csv"
 OUT_NPZ = "eeg_windows.npz"
-DEFAULT_SUBJECT_ID = "5-M16"
+DEFAULT_SUBJECT_ID = "1-M17"
 
 # =========================
 # ===== SESSION META ======

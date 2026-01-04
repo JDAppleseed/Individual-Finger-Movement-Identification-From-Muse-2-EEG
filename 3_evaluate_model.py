@@ -9,6 +9,7 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
+from typing import Optional
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,7 @@ import matplotlib.pyplot as plt
 import joblib
 
 from sklearn.metrics import confusion_matrix, accuracy_score
+from sklearn.model_selection import StratifiedShuffleSplit
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from utils.label_schema import ACTION_REST, ACTION_NAMES, FINGER_NAMES
@@ -31,6 +33,9 @@ from demo_backend.postprocess import PostprocessSettings, PostprocessState, post
 N_BINS = 10
 SEED = 42
 SHOW_PLOTS = os.environ.get("SHOW_PLOTS", "0") == "1"
+MIN_TEST_SAMPLES = 30
+MAX_SPLIT_ATTEMPTS = 8
+DEFAULT_BATCH_SIZE = 256
 
 
 def reliability_bins(conf, preds, labels, n_bins=10):
@@ -120,13 +125,103 @@ def _load_predictions_if_present(path: Path):
         return None
 
 
+def _format_label_counts(values: np.ndarray, name_map: Optional[dict] = None):
+    if values.size == 0:
+        return "none"
+    unique, counts = np.unique(values, return_counts=True)
+    parts = []
+    for val, count in zip(unique, counts):
+        label = str(name_map.get(int(val), val)) if name_map else str(val)
+        parts.append(f"{label}({int(val)})={int(count)}")
+    return ", ".join(parts)
+
+
+def _print_label_summary(prefix: str, y_action: np.ndarray, y_finger: np.ndarray):
+    print(f"📊 {prefix} action labels: {_format_label_counts(y_action, ACTION_NAMES)}")
+    print(f"📊 {prefix} finger labels: {_format_label_counts(y_finger, FINGER_NAMES)}")
+    non_rest = y_action != ACTION_REST
+    if np.any(non_rest):
+        print(
+            f"📊 {prefix} finger (non-REST): "
+            f"{_format_label_counts(y_finger[non_rest], FINGER_NAMES)}"
+        )
+    else:
+        print(f"📊 {prefix} finger (non-REST): none")
+
+
+def _unique_non_rest_fingers(y_action: np.ndarray, y_finger: np.ndarray):
+    mask = y_action != ACTION_REST
+    if not np.any(mask):
+        return 0
+    return len(np.unique(y_finger[mask]))
+
+
+def _apply_sample_limit(X, y_action, y_finger, meta, max_samples: Optional[int], seed: int):
+    if not max_samples or len(y_action) <= max_samples:
+        return X, y_action, y_finger, meta
+
+    indices = np.arange(len(y_action))
+    stratify_labels = (y_action.astype(int) * 100) + y_finger.astype(int)
+    try:
+        splitter = StratifiedShuffleSplit(
+            n_splits=1, train_size=max_samples, random_state=seed
+        )
+        keep_idx, _ = next(splitter.split(indices, stratify_labels))
+    except ValueError:
+        rng = np.random.default_rng(seed)
+        keep_idx = rng.choice(indices, size=max_samples, replace=False)
+
+    keep_idx = np.sort(keep_idx)
+    X = X[keep_idx]
+    y_action = y_action[keep_idx]
+    y_finger = y_finger[keep_idx]
+    if meta:
+        meta = {
+            key: (np.asarray(val)[keep_idx] if isinstance(val, np.ndarray) and len(val) == len(indices) else val)
+            for key, val in meta.items()
+        }
+    return X, y_action, y_finger, meta
+
+
+def _split_with_checks(y_action, y_finger, meta, seed: int):
+    overall_action_unique = len(np.unique(y_action))
+    overall_finger_unique = _unique_non_rest_fingers(y_action, y_finger)
+
+    for attempt in range(MAX_SPLIT_ATTEMPTS):
+        train_idx, test_idx = split_indices(
+            y_action,
+            y_finger,
+            meta=meta,
+            test_size=0.2,
+            random_state=seed + attempt * 11,
+        )
+
+        if len(test_idx) < MIN_TEST_SAMPLES:
+            continue
+
+        action_train_unique = len(np.unique(y_action[train_idx]))
+        action_test_unique = len(np.unique(y_action[test_idx]))
+        finger_train_unique = _unique_non_rest_fingers(y_action[train_idx], y_finger[train_idx])
+        finger_test_unique = _unique_non_rest_fingers(y_action[test_idx], y_finger[test_idx])
+
+        action_ok = overall_action_unique < 2 or (action_train_unique >= 2 and action_test_unique >= 2)
+        finger_ok = overall_finger_unique < 2 or (finger_train_unique >= 2 and finger_test_unique >= 2)
+
+        if action_ok and finger_ok:
+            return train_idx, test_idx
+
+    return None, None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--npz", type=str, default="eeg_windows.npz", help="Sequence npz file")
     parser.add_argument("--pred-npz", type=str, default="test_predictions.npz", help="Optional cached test predictions")
     parser.add_argument("--model", type=str, default="finger_action_model.pt", help="Model weights path")
     parser.add_argument("--scaler", type=str, default="scaler.save", help="Normalizer/scaler path")
-    parser.add_argument("--subject-id", type=str, default="5-M16", help="Filter evaluation to a single subject_id")
+    parser.add_argument("--subject-id", type=str, default="1-M17", help="Filter evaluation to a single subject_id")
+    parser.add_argument("--max-samples", type=int, default=None, help="Limit samples for eval (memory guard)")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Inference batch size")
 
     parser.add_argument("--smooth", action="store_true", help="Enable postprocess smoothing")
     parser.add_argument("--smooth-method", type=str, default="vote", choices=["vote", "ema"])
@@ -146,7 +241,7 @@ def main():
     # =========================
     # ===== LOAD DATA =========
     # =========================
-    X, y_action, y_finger, meta = load_sequence_npz(str(npz_path))
+    X, y_action, y_finger, meta = load_sequence_npz(str(npz_path), mmap_mode="r")
     subject_filtered = False
     if args.subject_id:
         if "subject_id" not in meta:
@@ -167,6 +262,15 @@ def main():
         }
         subject_filtered = True
 
+    if isinstance(X, np.memmap) and X.dtype != np.float32:
+        print(f"ℹ️ X dtype is {X.dtype}; casting to float32 per batch.")
+
+    X, y_action, y_finger, meta = _apply_sample_limit(
+        X, y_action, y_finger, meta, args.max_samples, SEED
+    )
+
+    _print_label_summary("Filtered", y_action, y_finger)
+
     subject_ids = meta.get("subject_id", None)
     experiment_hashes = meta.get("experiment_hash", None)
     exp_hash = str(experiment_hashes[0]) if experiment_hashes is not None else "UNKNOWN"
@@ -183,6 +287,9 @@ def main():
     if subject_filtered and cached is not None:
         print("ℹ️ Ignoring cached predictions because --subject-id filtering is enabled.")
         cached = None
+    if args.max_samples and cached is not None:
+        print("ℹ️ Ignoring cached predictions because --max-samples is enabled.")
+        cached = None
 
     if cached is not None:
         action_probs = np.asarray(cached["action_probs"])
@@ -190,6 +297,10 @@ def main():
         y_action_test = np.asarray(cached["y_action"])
         y_finger_test = np.asarray(cached["y_finger"])
         test_idx = np.asarray(cached["test_indices"]).astype(np.int64)
+        all_idx = np.arange(len(y_action), dtype=np.int64)
+        test_mask = np.zeros(len(y_action), dtype=bool)
+        test_mask[test_idx] = True
+        train_idx = all_idx[~test_mask]
 
         # Sanity: ensure probabilities align with label lengths
         if len(action_probs) != len(y_action_test) or len(finger_probs) != len(y_finger_test):
@@ -199,10 +310,11 @@ def main():
         print(f"✅ Using cached predictions: {pred_npz_path}")
     else:
         # Priority 2: reproduce the same split and run deterministic inference.
-        train_idx, test_idx = split_indices(
-            y_action, y_finger, meta=meta, test_size=0.2, random_state=SEED
-        )
-        X_test = X[test_idx]
+        train_idx, test_idx = _split_with_checks(y_action, y_finger, meta=meta, seed=SEED)
+        if train_idx is None or test_idx is None:
+            print("⚠️ Unable to create a split with multiple classes. Aborting evaluation.")
+            return 2
+
         y_action_test = y_action[test_idx]
         y_finger_test = y_finger[test_idx]
 
@@ -231,13 +343,54 @@ def main():
         # =========================
         # ===== INFERENCE =========
         # =========================
+        batch_size = max(1, int(args.batch_size))
+        action_probs = np.zeros((len(test_idx), n_actions), dtype=np.float32)
+        finger_probs = np.zeros((len(test_idx), n_fingers), dtype=np.float32)
+
         with torch.no_grad():
-            X_t = torch.tensor(X_test, dtype=torch.float32)
-            finger_logits, action_logits = model(X_t)
-            action_probs = torch.softmax(action_logits, dim=1).cpu().numpy()
-            finger_probs = torch.softmax(finger_logits, dim=1).cpu().numpy()
+            for start in range(0, len(test_idx), batch_size):
+                end = min(start + batch_size, len(test_idx))
+                batch_idx = test_idx[start:end]
+                X_batch = np.asarray(X[batch_idx], dtype=np.float32)
+                X_batch = apply_channel_normalizer(X_batch, normalizer)
+                X_t = torch.tensor(X_batch, dtype=torch.float32)
+                finger_logits, action_logits = model(X_t)
+                action_probs[start:end] = torch.softmax(action_logits, dim=1).cpu().numpy()
+                finger_probs[start:end] = torch.softmax(finger_logits, dim=1).cpu().numpy()
 
         print("✅ Ran deterministic inference (no cached test_predictions.npz found).")
+
+    if len(test_idx) < MIN_TEST_SAMPLES:
+        print(f"⚠️ Test set too small ({len(test_idx)} samples). Aborting evaluation.")
+        return 2
+
+    _print_label_summary("Train split", y_action[train_idx], y_finger[train_idx])
+    _print_label_summary("Test split", y_action_test, y_finger_test)
+
+    overall_action_unique = len(np.unique(y_action))
+    overall_finger_unique = _unique_non_rest_fingers(y_action, y_finger)
+    action_train_unique = len(np.unique(y_action[train_idx])) if len(train_idx) else 0
+    action_test_unique = len(np.unique(y_action_test)) if len(y_action_test) else 0
+    finger_train_unique = _unique_non_rest_fingers(y_action[train_idx], y_finger[train_idx])
+    finger_test_unique = _unique_non_rest_fingers(y_action_test, y_finger_test)
+
+    if overall_action_unique < 2:
+        print("⚠️ Action labels are single-class overall. Aborting evaluation.")
+        return 2
+    if action_train_unique < 2 or action_test_unique < 2:
+        print("⚠️ Action labels collapsed in train/test split. Aborting evaluation.")
+        return 2
+
+    finger_metrics_ok = True
+    exit_code = 0
+    if overall_finger_unique < 2:
+        print("⚠️ Finger labels are single-class overall; skipping finger metrics.")
+        finger_metrics_ok = False
+        exit_code = 1
+    elif finger_train_unique < 2 or finger_test_unique < 2:
+        print("⚠️ Finger labels collapsed in train/test split; skipping finger metrics.")
+        finger_metrics_ok = False
+        exit_code = 1
 
     # =========================
     # ===== PREDICTIONS =========
@@ -253,10 +406,20 @@ def main():
     # =========================
     action_acc = accuracy_score(y_action_test, action_preds)
     mask = y_action_test != ACTION_REST
-    finger_acc = accuracy_score(y_finger_test[mask], finger_preds[mask]) if mask.any() else 0.0
+    if not mask.any():
+        print("⚠️ No non-REST windows in test set; skipping finger metrics.")
+        finger_metrics_ok = False
+        exit_code = max(exit_code, 1)
+
+    finger_acc = (
+        accuracy_score(y_finger_test[mask], finger_preds[mask]) if (finger_metrics_ok and mask.any()) else None
+    )
 
     print(f"\n🎯 Action Accuracy: {action_acc*100:.2f}%")
-    print(f"🎯 Finger Accuracy (non-REST): {finger_acc*100:.2f}%\n")
+    if finger_acc is not None:
+        print(f"🎯 Finger Accuracy (non-REST): {finger_acc*100:.2f}%\n")
+    else:
+        print("🎯 Finger Accuracy (non-REST): skipped\n")
 
     # =========================
     # ===== OPTIONAL SMOOTHED METRICS (stateful) ==========
@@ -293,12 +456,15 @@ def main():
         mask_s = y_action_test[order] != ACTION_REST
         finger_acc_s = (
             accuracy_score(y_finger_test[order][mask_s], smoothed_finger[mask_s])
-            if mask_s.any()
-            else 0.0
+            if (finger_metrics_ok and mask_s.any())
+            else None
         )
 
         print(f"🎯 Smoothed Action Accuracy: {action_acc_s*100:.2f}%")
-        print(f"🎯 Smoothed Finger Accuracy (non-REST): {finger_acc_s*100:.2f}%\n")
+        if finger_acc_s is not None:
+            print(f"🎯 Smoothed Finger Accuracy (non-REST): {finger_acc_s*100:.2f}%\n")
+        else:
+            print("🎯 Smoothed Finger Accuracy (non-REST): skipped\n")
 
     # =========================
     # ===== ECE COMPUTATION ===
@@ -306,7 +472,7 @@ def main():
     action_ece = expected_calibration_error(action_conf, action_preds, y_action_test, N_BINS)
     print(f"📏 Action ECE: {action_ece:.4f}")
 
-    if mask.any():
+    if finger_metrics_ok and mask.any():
         finger_ece = expected_calibration_error(
             finger_conf[mask], finger_preds[mask], y_finger_test[mask], N_BINS
         )
@@ -328,7 +494,7 @@ def main():
                     )
 
                     subj_finger_mask = subj_mask & (y_action_test != ACTION_REST)
-                    if np.any(subj_finger_mask):
+                    if finger_metrics_ok and np.any(subj_finger_mask):
                         subj_finger_ece = expected_calibration_error(
                             finger_conf[subj_finger_mask],
                             finger_preds[subj_finger_mask],
@@ -365,7 +531,7 @@ def main():
     axs[0, 0].set_ylabel("True")
 
     # --- Finger Confusion Matrix (non-REST) ---
-    if mask.any():
+    if finger_metrics_ok and mask.any():
         # Finger confusion is only meaningful for non-rest windows.
         # We exclude finger_id=0 (NONE/REST) from the label set for clarity.
         finger_label_ids = [i for i in range(n_fingers) if i != 0]
@@ -389,7 +555,8 @@ def main():
         axs[0, 1].set_xlabel("Predicted")
         axs[0, 1].set_ylabel("True")
     else:
-        axs[0, 1].set_axis_off()
+        axs[0, 1].axis("off")
+        axs[0, 1].text(0.5, 0.5, "Finger metrics skipped", ha="center", va="center")
 
     # --- Reliability Diagram (Action) ---
     bin_centers, bin_accs = reliability_bins(action_conf, action_preds, y_action_test, N_BINS)
@@ -400,7 +567,7 @@ def main():
     axs[1, 0].set_ylabel("Accuracy")
 
     # --- Reliability Diagram (Finger, non-REST) ---
-    if mask.any():
+    if finger_metrics_ok and mask.any():
         f_bin_centers, f_bin_accs = reliability_bins(
             finger_conf[mask], finger_preds[mask], y_finger_test[mask], N_BINS
         )
@@ -410,7 +577,8 @@ def main():
         axs[1, 1].set_xlabel("Confidence")
         axs[1, 1].set_ylabel("Accuracy")
     else:
-        axs[1, 1].set_axis_off()
+        axs[1, 1].axis("off")
+        axs[1, 1].text(0.5, 0.5, "Finger metrics skipped", ha="center", va="center")
 
     plt.tight_layout()
 
@@ -426,7 +594,7 @@ def main():
         plt.close()
 
     print(f"\n✅ Saved evaluation plot: {out_path}")
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

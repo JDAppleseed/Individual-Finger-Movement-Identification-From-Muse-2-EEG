@@ -11,6 +11,7 @@ import {
   MeshStandardMaterial,
   Object3D,
   SkinnedMesh,
+  SphereGeometry,
   Vector3
 } from "three";
 
@@ -18,6 +19,10 @@ type Props = {
   action: string;
   finger: string;
   confidence: number;
+  actionConfidence: number;
+  fingerConfidence: number;
+  safeMode?: boolean;
+  lowPerfMode?: boolean;
 };
 
 // Keep the stage usable if GLB loading fails at runtime.
@@ -47,6 +52,9 @@ class GltfFallbackBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
 
 type FingerKey = "THUMB" | "INDEX" | "MIDDLE" | "RING" | "PINKY";
 type FingerName = FingerKey | "NONE";
+type ActionName = "OPEN" | "CLOSE" | "REST";
+
+type CurlAxis = "x" | "y" | "z";
 
 const ACCENT = new Color("#41f2c2");
 const BASE = new Color("#7f94ae");
@@ -62,23 +70,52 @@ const FINGER_TOKENS: Record<FingerKey, string[]> = {
   PINKY: ["pinky", "pinkie"]
 };
 
+const FINGER_BIAS: Record<FingerKey, number> = {
+  THUMB: 0.92,
+  INDEX: 1.0,
+  MIDDLE: 1.02,
+  RING: 0.97,
+  PINKY: 0.9
+};
+
+const ACTION_CONF_THRESHOLD = 0.55;
+const FINGER_CONF_THRESHOLD = 0.6;
+const FINGER_HOLD_SECONDS = 0.18;
+const FINGER_RELEASE_SECONDS = 0.08;
+const IDLE_BREATH_FREQ = 1.4;
+const IDLE_BREATH_AMPLITUDE = 0.025;
+
+const DEFAULT_CURL_AXIS: CurlAxis = "z";
+const FINGER_CURL_AXIS_OVERRIDE: Partial<Record<FingerKey, CurlAxis>> = {};
+
+const DEBUG_HAND = import.meta.env.VITE_HAND_DEBUG === "1";
+const TEST_ANIM = import.meta.env.VITE_HAND_TEST_ANIM === "1";
+
 // You will likely replace these names after you print the bone list.
 // Keeping them here is fine for now.
 const RIG_BONE_CHAINS_BY_NAME: Record<FingerKey, string[]> = {
-  THUMB: ["Bone.001", "Bone.002", "Bone.003", "Bone.004"],
-  INDEX: ["Bone.005", "Bone.006", "Bone.007", "Bone.008"],
-  MIDDLE: ["Bone.009", "Bone.010", "Bone.011", "Bone.012"],
-  RING: ["Bone.013", "Bone.014", "Bone.015", "Bone.016"],
-  PINKY: ["Bone.017", "Bone.018", "Bone.019"]
+  THUMB: ["Bone001", "Bone002", "Bone003", "Bone004"],
+  INDEX: ["Bone005", "Bone006", "Bone007", "Bone008"],
+  MIDDLE: ["Bone009", "Bone010", "Bone011", "Bone012"],
+  RING: ["Bone013", "Bone014", "Bone015", "Bone016"],
+  PINKY: ["Bone017", "Bone018", "Bone019"]
 };
 
+function normalizeAction(value: string): ActionName {
+  const v = (value ?? "").toUpperCase();
+  if (v.includes("OPEN")) return "OPEN";
+  if (v.includes("CLOSE")) return "CLOSE";
+  if (v.includes("REST")) return "REST";
+  return "REST";
+}
+
 function normalizeFinger(value: string): FingerName {
-  const upper = value.toUpperCase();
-  if (upper === "THUMB") return "THUMB";
-  if (upper === "INDEX") return "INDEX";
-  if (upper === "MIDDLE") return "MIDDLE";
-  if (upper === "RING") return "RING";
-  if (upper === "PINKY" || upper === "PINKIE") return "PINKY";
+  const v = (value ?? "").toUpperCase();
+  if (v.includes("THUMB")) return "THUMB";
+  if (v.includes("INDEX")) return "INDEX";
+  if (v.includes("MIDDLE")) return "MIDDLE";
+  if (v.includes("RING")) return "RING";
+  if (v.includes("PINKY") || v.includes("PINKIE")) return "PINKY";
   return "NONE";
 }
 
@@ -92,8 +129,19 @@ function fingerKeyFromName(name: string): FingerKey | null {
   return null;
 }
 
+function normalizeBoneName(name: string) {
+  return name.replace(/\./g, "").toLowerCase();
+}
+
 function findBoneByName(skeletonBones: Bone[], name: string): Bone | null {
-  return skeletonBones.find((bone) => bone.name === name) ?? null;
+  const target = normalizeBoneName(name);
+  return (
+    skeletonBones.find((bone) => normalizeBoneName(bone.name) === target) ?? null
+  );
+}
+
+function getCurlAxis(finger: FingerKey): CurlAxis {
+  return FINGER_CURL_AXIS_OVERRIDE[finger] ?? DEFAULT_CURL_AXIS;
 }
 
 // Favor distal curl over proximal for a more natural flex.
@@ -104,7 +152,7 @@ function segmentWeight(count: number, index: number) {
 }
 
 // Map action -> relaxed/open/closed curl targets.
-function targetFlexFromAction(action: string) {
+function targetFlexFromAction(action: ActionName) {
   if (action === "CLOSE") return 1.0;
   if (action === "OPEN") return 0.05;
   return 0.28; // REST = slightly contracted
@@ -171,16 +219,118 @@ function computeFingerInfluence(mesh: SkinnedMesh, fingerBoneIndices: Record<Fin
   return { fingerWeights, totalWeight };
 }
 
-function ProceduralHand({ action, finger, confidence }: Props) {
-  const flexRef = useRef(0.35);
-  const groupRef = useRef<Group | null>(null);
-  const fingerRefs = useRef<Record<FingerKey, Group | null>>({
-    THUMB: null,
-    INDEX: null,
-    MIDDLE: null,
-    RING: null,
-    PINKY: null
+type MotionState = {
+  baseFlex: number;
+  fingerFlex: Record<FingerKey, number>;
+  stableFinger: FingerName;
+  candidateFinger: FingerName;
+  candidateHold: number;
+  fingerWeight: number;
+  intensity: number;
+};
+
+function initMotionState(): MotionState {
+  return {
+    baseFlex: targetFlexFromAction("REST"),
+    fingerFlex: {
+      THUMB: targetFlexFromAction("REST"),
+      INDEX: targetFlexFromAction("REST"),
+      MIDDLE: targetFlexFromAction("REST"),
+      RING: targetFlexFromAction("REST"),
+      PINKY: targetFlexFromAction("REST")
+    },
+    stableFinger: "NONE",
+    candidateFinger: "NONE",
+    candidateHold: 0,
+    fingerWeight: 0,
+    intensity: 0
+  };
+}
+
+function updateMotionState(
+  state: MotionState,
+  action: string,
+  finger: string,
+  actionConfidence: number,
+  fingerConfidence: number,
+  dt: number,
+  elapsed: number
+): MotionState {
+  let actionName = normalizeAction(action);
+  let actionWeight = MathUtils.clamp(
+    (actionConfidence - ACTION_CONF_THRESHOLD) / (1 - ACTION_CONF_THRESHOLD),
+    0,
+    1
+  );
+  let fingerName = normalizeFinger(finger);
+  let fingerWeightRaw = MathUtils.clamp(
+    (fingerConfidence - FINGER_CONF_THRESHOLD) / (1 - FINGER_CONF_THRESHOLD),
+    0,
+    1
+  );
+
+  if (TEST_ANIM) {
+    actionName = Math.sin(elapsed * 1.2) >= 0 ? "CLOSE" : "OPEN";
+    actionWeight = 1;
+    const fingerIndex = Math.floor(elapsed * 0.6) % FINGER_ORDER.length;
+    fingerName = FINGER_ORDER[fingerIndex];
+    fingerWeightRaw = 1;
+    state.stableFinger = fingerName;
+    state.candidateFinger = fingerName;
+    state.candidateHold = FINGER_HOLD_SECONDS;
+  } else {
+    const candidate = fingerWeightRaw > 0 ? fingerName : "NONE";
+    if (candidate !== state.candidateFinger) {
+      state.candidateFinger = candidate;
+      state.candidateHold = 0;
+    } else {
+      state.candidateHold += dt;
+    }
+
+    const holdTime = candidate === "NONE" ? FINGER_RELEASE_SECONDS : FINGER_HOLD_SECONDS;
+    if (state.candidateHold >= holdTime) {
+      state.stableFinger = candidate;
+    }
+  }
+
+  const actionTarget = MathUtils.lerp(targetFlexFromAction("REST"), targetFlexFromAction(actionName), actionWeight);
+  const idle = IDLE_BREATH_AMPLITUDE * (0.5 + 0.5 * Math.sin(elapsed * IDLE_BREATH_FREQ));
+  state.baseFlex = MathUtils.damp(state.baseFlex, actionTarget + idle, 5.5, dt);
+
+  state.fingerWeight = MathUtils.damp(state.fingerWeight, fingerWeightRaw, 6, dt);
+  const stableFinger = state.stableFinger;
+  const fingerWeight = stableFinger === "NONE" ? 0 : state.fingerWeight;
+
+  const baseFlex = MathUtils.clamp(state.baseFlex, 0.02, 1.35);
+  const sympathetic = baseFlex * (0.04 + 0.08 * actionWeight);
+
+  FINGER_ORDER.forEach((key) => {
+    const bias = FINGER_BIAS[key];
+    let targetFlex = baseFlex * bias;
+
+    if (stableFinger === key) {
+      if (actionName === "OPEN") {
+        targetFlex = baseFlex * (1 - fingerWeight * 0.7);
+      } else if (actionName === "CLOSE") {
+        targetFlex = baseFlex * (1 + fingerWeight * 0.6);
+      } else {
+        targetFlex = baseFlex * (1 + fingerWeight * 0.25);
+      }
+    } else {
+      targetFlex = baseFlex * bias + sympathetic;
+    }
+
+    targetFlex = MathUtils.clamp(targetFlex, 0.02, 1.45);
+    state.fingerFlex[key] = MathUtils.damp(state.fingerFlex[key], targetFlex, 7.5, dt);
   });
+
+  state.intensity = TEST_ANIM ? 1 : MathUtils.clamp(Math.max(actionConfidence, fingerConfidence), 0, 1);
+
+  return state;
+}
+
+function ProceduralHand({ action, finger, actionConfidence, fingerConfidence }: Props) {
+  const motionRef = useRef<MotionState>(initMotionState());
   const segmentRefs = useRef<Record<FingerKey, Mesh[]>>({
     THUMB: [],
     INDEX: [],
@@ -212,23 +362,21 @@ function ProceduralHand({ action, finger, confidence }: Props) {
     []
   );
 
-  useFrame((_, delta) => {
-    // Defensive clamp (avoid giant delta after tab sleeps / hiccups)
+  useFrame((state, delta) => {
     const dt = Math.min(delta, 1 / 20);
+    const motion = updateMotionState(
+      motionRef.current,
+      action,
+      finger,
+      actionConfidence,
+      fingerConfidence,
+      dt,
+      state.clock.elapsedTime
+    );
 
-    const target = targetFlexFromAction(action);
-    flexRef.current = MathUtils.damp(flexRef.current, target, 6, dt);
-
-    const highlighted = normalizeFinger(finger);
-    const intensity = highlighted === "NONE" ? 0 : MathUtils.clamp(confidence, 0, 1);
-    const isOpen = action === "OPEN";
-    const isClose = action === "CLOSE";
-
-    FINGER_ORDER.forEach((name, idx) => {
+    FINGER_ORDER.forEach((name) => {
       const segments = segmentRefs.current[name] ?? [];
-      const isActive = highlighted === name;
-      const actionScale = isActive ? (isOpen ? 0.7 : isClose ? 1.3 : 1.15) : 1.0;
-      const fingerFlex = flexRef.current * actionScale * (0.9 + idx * 0.04);
+      const fingerFlex = motion.fingerFlex[name];
 
       segments.forEach((segment, sIdx) => {
         if (!segment) return;
@@ -237,15 +385,16 @@ function ProceduralHand({ action, finger, confidence }: Props) {
 
       const mat = materials[name];
       if (mat) {
-        const mix = isActive ? 0.4 + intensity * 0.6 : 0.15;
+        const isActive = motion.stableFinger === name;
+        const mix = isActive ? 0.35 + motion.intensity * 0.55 : 0.12;
         mat.color.copy(DIM).lerp(isActive ? ACCENT : BASE, mix);
-        mat.emissive.copy(ACCENT).multiplyScalar(isActive ? 0.35 + intensity * 0.6 : 0.05);
+        mat.emissive.copy(ACCENT).multiplyScalar(isActive ? 0.3 + motion.intensity * 0.6 : 0.05);
       }
     });
   });
 
   return (
-    <group ref={groupRef} position={[0, -0.3, 0]} rotation={[0.05, 0, 0]}>
+    <group position={[0, -0.3, 0]} rotation={[0.05, 0, 0]}>
       <mesh material={materials.palm} position={[0, 0, 0]}>
         <boxGeometry args={[2.0, 0.5, 1.2]} />
       </mesh>
@@ -253,9 +402,6 @@ function ProceduralHand({ action, finger, confidence }: Props) {
       {fingerDefs.map((fingerDef) => (
         <group
           key={fingerDef.name}
-          ref={(node) => {
-            fingerRefs.current[fingerDef.name] = node;
-          }}
           position={fingerDef.position.toArray()}
           rotation={fingerDef.rotation as [number, number, number]}
         >
@@ -278,10 +424,19 @@ function ProceduralHand({ action, finger, confidence }: Props) {
   );
 }
 
-function GLTFHand({ action, finger, confidence, url }: Props & { url: string }) {
+function GLTFHand({
+  action,
+  finger,
+  actionConfidence,
+  fingerConfidence,
+  safeMode,
+  lowPerfMode,
+  url,
+  onRigStatus
+}: Props & { url: string; onRigStatus?: (ok: boolean) => void }) {
   const gltf = useGLTF(url) as any;
 
-  const flexRef = useRef(0.35);
+  const motionRef = useRef<MotionState>(initMotionState());
   const groupRef = useRef<Group | null>(null);
   const tipRefs = useRef<Record<FingerKey, Mesh | null>>({
     THUMB: null,
@@ -291,6 +446,9 @@ function GLTFHand({ action, finger, confidence, url }: Props & { url: string }) 
     PINKY: null
   });
   const scratch = useMemo(() => new Vector3(), []);
+  const bindPoseRef = useRef<WeakMap<Bone, { x: number; y: number; z: number }>>(new WeakMap());
+  const mappingLoggedRef = useRef(false);
+  const missingLoggedRef = useRef(false);
 
   // Track cloned materials so we can dispose on unmount.
   const clonedMaterialsRef = useRef<MeshStandardMaterial[]>([]);
@@ -315,6 +473,7 @@ function GLTFHand({ action, finger, confidence, url }: Props & { url: string }) 
 
     const primarySkeleton = skinnedMeshes.find((mesh) => !!mesh.skeleton)?.skeleton ?? null;
     const skeletonBones = primarySkeleton?.bones ?? [];
+    const skeletonBoneNames = skeletonBones.map((bone) => bone.name);
 
     const boneSet = new Set<Bone>();
     skinnedMeshes.forEach((mesh) => mesh.skeleton?.bones.forEach((bone) => boneSet.add(bone)));
@@ -327,22 +486,39 @@ function GLTFHand({ action, finger, confidence, url }: Props & { url: string }) 
       PINKY: []
     };
 
+    const missingBones: Record<FingerKey, string[]> = {
+      THUMB: [],
+      INDEX: [],
+      MIDDLE: [],
+      RING: [],
+      PINKY: []
+    };
+
     if (skeletonBones.length) {
       FINGER_ORDER.forEach((fingerKey) => {
-        explicitChains[fingerKey] = RIG_BONE_CHAINS_BY_NAME[fingerKey]
-          .map((name) => findBoneByName(skeletonBones, name))
+        const names = RIG_BONE_CHAINS_BY_NAME[fingerKey];
+        explicitChains[fingerKey] = names
+          .map((name) => {
+            const bone = findBoneByName(skeletonBones, name);
+            if (!bone) missingBones[fingerKey].push(name);
+            return bone;
+          })
           .filter((bone): bone is Bone => !!bone);
+      });
+    } else {
+      FINGER_ORDER.forEach((fingerKey) => {
+        missingBones[fingerKey].push(...RIG_BONE_CHAINS_BY_NAME[fingerKey]);
       });
     }
 
     const fingerChains = explicitChains;
 
-    const fingerAxes: Record<FingerKey, "x" | "z"> = {
-      THUMB: "x",
-      INDEX: "x",
-      MIDDLE: "x",
-      RING: "x",
-      PINKY: "x"
+    const fingerAxes: Record<FingerKey, CurlAxis> = {
+      THUMB: getCurlAxis("THUMB"),
+      INDEX: getCurlAxis("INDEX"),
+      MIDDLE: getCurlAxis("MIDDLE"),
+      RING: getCurlAxis("RING"),
+      PINKY: getCurlAxis("PINKY")
     };
 
     const fingerTips: Record<FingerKey, Bone | null> = {
@@ -396,7 +572,10 @@ function GLTFHand({ action, finger, confidence, url }: Props & { url: string }) 
       });
     });
 
-    const hasBoneChains = FINGER_ORDER.every((fingerKey) => fingerChains[fingerKey].length > 0);
+    const hasBoneChains = FINGER_ORDER.every(
+      (fingerKey) => fingerChains[fingerKey].length === RIG_BONE_CHAINS_BY_NAME[fingerKey].length
+    );
+    const hasMissingBones = FINGER_ORDER.some((fingerKey) => missingBones[fingerKey].length > 0);
 
     return {
       allMeshes,
@@ -405,8 +584,11 @@ function GLTFHand({ action, finger, confidence, url }: Props & { url: string }) 
       fingerAxes,
       fingerTips,
       fingerMeshes,
-      hasRig: boneSet.size > 0,
-      hasBoneChains
+      hasRig: skeletonBones.length > 0 && boneSet.size > 0,
+      hasBoneChains,
+      missingBones,
+      skeletonBoneNames,
+      hasMissingBones
     };
   }, [gltf]);
 
@@ -463,69 +645,122 @@ function GLTFHand({ action, finger, confidence, url }: Props & { url: string }) 
     };
   }, [rig.allMeshes]);
 
-  // ====== OPTIONAL: DEV bone dump (SAFE: runs once on load) ======
-  // Uncomment to verify bone names. Remove after you copy the list.
-  /*
   useEffect(() => {
-    const bones: string[] = [];
-    gltf.scene.traverse((o: any) => {
-      if (o?.isBone) bones.push(o.name);
-    });
-    console.log("HAND BONES:", bones);
-  }, [gltf]);
-  */
-
-  // ====== Animation loop (defensive delta clamp; NO root tilt fallbacks) ======
-  useFrame((_, delta) => {
-    const dt = Math.min(delta, 1 / 20); // clamp large delta spikes
-    const target = targetFlexFromAction(action);
-    const intensity = MathUtils.clamp(confidence, 0, 1);
-    const speed = 6 + intensity * 2;
-
-    flexRef.current = MathUtils.damp(flexRef.current, target, speed, dt);
-    const flex = flexRef.current * (1 + intensity * 0.08);
-
-    const highlighted = normalizeFinger(finger);
-
-    if (rig.hasBoneChains) {
-      FINGER_ORDER.forEach((name, idx) => {
-        const chain = rig.fingerChains[name];
-        if (!chain.length) return;
-
-        // Rest: slightly contracted; OPEN: more extension; CLOSE: more curl
-        // Note: if OPEN/CLOSE come from action only (not finger), we still animate all fingers subtly,
-        // but add extra emphasis on highlighted finger.
-        const isActive = highlighted === name;
-        const fingerBias = [0.92, 1.0, 1.02, 0.97, 0.9][idx] ?? 1.0;
-
-        const emphasis = isActive ? (0.12 + 0.28 * intensity) : 0.0;
-        const fingerFlex = flex * fingerBias + emphasis;
-
-        chain.forEach((bone, boneIndex) => {
-          const baseRot = bone.userData.baseRotation as { x: number; y: number; z: number } | undefined;
-          if (!baseRot) bone.userData.baseRotation = { x: bone.rotation.x, y: bone.rotation.y, z: bone.rotation.z };
-          const saved = bone.userData.baseRotation as { x: number; y: number; z: number };
-
-          const amount = fingerFlex * segmentWeight(chain.length, boneIndex);
-
-          // NOTE: Curl axis may not be X for your rig—this is addressed in brainstorm below.
-          bone.rotation.x = saved.x - amount;
-          bone.rotation.y = saved.y;
-          bone.rotation.z = saved.z;
+    if (!rig.hasRig || !rig.hasBoneChains) return;
+    bindPoseRef.current = new WeakMap();
+    FINGER_ORDER.forEach((name) => {
+      rig.fingerChains[name].forEach((bone) => {
+        bindPoseRef.current.set(bone, {
+          x: bone.rotation.x,
+          y: bone.rotation.y,
+          z: bone.rotation.z
         });
       });
-    } else {
-      // DEFENSE: do nothing (do NOT rotate root/palm). Keep bind pose.
+    });
+  }, [rig]);
+
+  useEffect(() => {
+    if (!DEBUG_HAND || mappingLoggedRef.current) return;
+    console.info("[HandRig] bones\n" + rig.skeletonBoneNames.join("\n"));
+    const mapping: Record<FingerKey, string[]> = {
+      THUMB: rig.fingerChains.THUMB.map((bone) => bone.name),
+      INDEX: rig.fingerChains.INDEX.map((bone) => bone.name),
+      MIDDLE: rig.fingerChains.MIDDLE.map((bone) => bone.name),
+      RING: rig.fingerChains.RING.map((bone) => bone.name),
+      PINKY: rig.fingerChains.PINKY.map((bone) => bone.name)
+    };
+    console.info("[HandRig] mapping", { mapping, axes: rig.fingerAxes });
+    mappingLoggedRef.current = true;
+  }, [rig]);
+
+  useEffect(() => {
+    if (rig.hasBoneChains || missingLoggedRef.current) return;
+    const missingSummary = FINGER_ORDER.map((fingerKey) => {
+      const missing = rig.missingBones[fingerKey];
+      if (!missing.length) return null;
+      return `${fingerKey}: ${missing.join(", ")}`;
+    })
+      .filter((entry) => entry)
+      .join(" | ");
+    const details = missingSummary || "missing bone names";
+    console.error(
+      `[HandRig] Missing required bones (${details}). Falling back to ProceduralHand.`
+    );
+    missingLoggedRef.current = true;
+  }, [rig]);
+
+  useEffect(() => {
+    if (!DEBUG_HAND || safeMode || lowPerfMode || !rig.hasRig) return;
+    const geometry = new SphereGeometry(0.012, 10, 10);
+    const material = new MeshStandardMaterial({ color: "#ffb347", emissive: "#ffb347" });
+    const markers: Mesh[] = [];
+
+    FINGER_ORDER.forEach((fingerKey) => {
+      rig.fingerChains[fingerKey].forEach((bone) => {
+        const marker = new Mesh(geometry, material);
+        marker.userData._debugMarker = true;
+        bone.add(marker);
+        markers.push(marker);
+      });
+    });
+
+    return () => {
+      markers.forEach((marker) => {
+        marker.parent?.remove(marker);
+      });
+      geometry.dispose();
+      material.dispose();
+    };
+  }, [rig, safeMode, lowPerfMode]);
+
+  useEffect(() => {
+    if (!onRigStatus) return;
+    onRigStatus(rig.hasRig && rig.hasBoneChains);
+  }, [onRigStatus, rig]);
+
+  // ====== Animation loop (defensive delta clamp; NO root tilt fallbacks) ======
+  useFrame((state, delta) => {
+    const dt = Math.min(delta, 1 / 20);
+    const motion = updateMotionState(
+      motionRef.current,
+      action,
+      finger,
+      actionConfidence,
+      fingerConfidence,
+      dt,
+      state.clock.elapsedTime
+    );
+
+    if (rig.hasBoneChains) {
+      FINGER_ORDER.forEach((name) => {
+        const chain = rig.fingerChains[name];
+        if (!chain.length) return;
+        const axis = rig.fingerAxes[name];
+        const fingerFlex = motion.fingerFlex[name];
+
+        chain.forEach((bone, boneIndex) => {
+          const bind = bindPoseRef.current.get(bone);
+          if (!bind) return;
+
+          const amount = fingerFlex * segmentWeight(chain.length, boneIndex);
+          bone.rotation.x = bind.x;
+          bone.rotation.y = bind.y;
+          bone.rotation.z = bind.z;
+          if (axis === "x") bone.rotation.x = bind.x + amount;
+          if (axis === "y") bone.rotation.y = bind.y + amount;
+          if (axis === "z") bone.rotation.z = bind.z + amount;
+        });
+      });
     }
 
     // Highlighting (emissive only; safe)
-    const highlightMeshes = highlighted === "NONE" ? null : rig.fingerMeshes[highlighted];
+    const highlightMeshes = motion.stableFinger === "NONE" ? null : rig.fingerMeshes[motion.stableFinger];
     const hasMeshHighlight = !!highlightMeshes && highlightMeshes.size > 0;
 
     rig.allMeshes.forEach((mesh) => {
       const isHighlighted = hasMeshHighlight && highlightMeshes?.has(mesh);
       const targetColor = isHighlighted ? ACCENT : NO_EMISSIVE;
-      const targetIntensity = isHighlighted ? 0.3 + intensity * 0.7 : 0;
+      const targetIntensity = isHighlighted ? 0.3 + motion.intensity * 0.7 : 0;
 
       if (Array.isArray(mesh.material)) {
         mesh.material.forEach((mat) => {
@@ -542,12 +777,17 @@ function GLTFHand({ action, finger, confidence, url }: Props & { url: string }) 
 
     // Tip markers
     const group = groupRef.current;
+    const tipsEnabled = !safeMode && !lowPerfMode;
     if (group) {
       FINGER_ORDER.forEach((name) => {
         const marker = tipRefs.current[name];
         if (!marker) return;
+        if (!tipsEnabled) {
+          marker.visible = false;
+          return;
+        }
         const tip = rig.fingerTips[name];
-        if (!tip || highlighted !== name) {
+        if (!tip || motion.stableFinger !== name) {
           marker.visible = false;
           return;
         }
@@ -556,13 +796,18 @@ function GLTFHand({ action, finger, confidence, url }: Props & { url: string }) 
         marker.position.copy(scratch);
         marker.visible = true;
         const material = marker.material as MeshStandardMaterial;
-        material.emissiveIntensity = 0.35 + intensity * 0.75;
+        material.emissiveIntensity = 0.35 + motion.intensity * 0.75;
       });
     }
   });
 
   return (
-    <group ref={groupRef} scale={layout.scale} position={[0, -0.62, 0]}>
+    <group
+      ref={groupRef}
+      scale={layout.scale}
+      position={[0, -0.62, 0]}
+      rotation={[0, Math.PI / 2, 0]}   // ✅ 90° fix (try Y first)
+    >
       <group position={[layout.offset.x, layout.offset.y, layout.offset.z]}>
         <primitive object={gltf.scene} />
       </group>
@@ -590,19 +835,61 @@ function GLTFHand({ action, finger, confidence, url }: Props & { url: string }) 
   );
 }
 
-export default function HandModel({ action, finger, confidence }: Props) {
+export default function HandModel({
+  action,
+  finger,
+  confidence,
+  actionConfidence,
+  fingerConfidence,
+  safeMode,
+  lowPerfMode
+}: Props) {
   const url = "/models/hand.glb";
   const available = useModelAvailable(url);
+  const [rigInvalid, setRigInvalid] = useState(false);
 
-  if (available === false) return <ProceduralHand action={action} finger={finger} confidence={confidence} />;
-  if (available === null) return <ProceduralHand action={action} finger={finger} confidence={confidence} />;
+  useEffect(() => {
+    setRigInvalid(false);
+  }, [url]);
+
+  if (rigInvalid || available === false || available === null) {
+    return (
+      <ProceduralHand
+        action={action}
+        finger={finger}
+        confidence={confidence}
+        actionConfidence={actionConfidence}
+        fingerConfidence={fingerConfidence}
+      />
+    );
+  }
 
   return (
     <GltfFallbackBoundary
-      fallback={<ProceduralHand action={action} finger={finger} confidence={confidence} />}
+      fallback={
+        <ProceduralHand
+          action={action}
+          finger={finger}
+          confidence={confidence}
+          actionConfidence={actionConfidence}
+          fingerConfidence={fingerConfidence}
+        />
+      }
       resetKey={url}
     >
-      <GLTFHand action={action} finger={finger} confidence={confidence} url={url} />
+      <GLTFHand
+        action={action}
+        finger={finger}
+        confidence={confidence}
+        actionConfidence={actionConfidence}
+        fingerConfidence={fingerConfidence}
+        safeMode={safeMode}
+        lowPerfMode={lowPerfMode}
+        url={url}
+        onRigStatus={(ok) => {
+          if (!ok) setRigInvalid(true);
+        }}
+      />
     </GltfFallbackBoundary>
   );
 }

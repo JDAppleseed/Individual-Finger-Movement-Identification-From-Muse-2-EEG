@@ -72,7 +72,7 @@ def resolve_experiment_hash():
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Train CNN+LSTM EEG multi-head model")
     parser.add_argument("--npz", type=str, default="eeg_windows.npz", help="Path to window dataset")
-    parser.add_argument("--subject-id", type=str, default="5-M16", help="Filter training data to a single subject_id")
+    parser.add_argument("--subject-id", type=str, default="1-M17", help="Filter training data to a single subject_id")
     parser.add_argument("--epochs", type=int, default=EPOCHS, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="Training batch size")
     parser.add_argument("--lr", type=float, default=LR, help="Learning rate")

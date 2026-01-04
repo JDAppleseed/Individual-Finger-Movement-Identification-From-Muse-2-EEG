@@ -106,8 +106,8 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # =========================
 
 GENDER = "M"     # M / F / X
-AGE = 16         # integer only
-SUBJECT_ID_OVERRIDE = "5-M16"  # Set to None to use auto-increment registry
+AGE = 17         # integer only
+SUBJECT_ID_OVERRIDE = "1-M17"  # Set to None to use auto-increment registry
 
 subject_id = SUBJECT_ID_OVERRIDE or get_subject_id(GENDER, AGE)
 
