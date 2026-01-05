@@ -4,11 +4,16 @@ Muse 2 EEG → LSL → Compression → ICA → Window Prep (cleaned)
 Optional: CNN/LSTM inference + latency + MC-dropout uncertainty
 Also: keyboard event marking (space=hold event), autosave events
 
-FIXES:
-- Unifies timebase: events.onset_s is now SESSION-ABSOLUTE, aligned with features.time_s
-- Adds onset_rel_s (segment-relative) for debugging, plus end_s/end_rel_s
-- Resume-safe: loads existing events file on startup (prevents overwriting/dropping)
-- Guard: if starting a new features file, do NOT carry over total_elapsed_s
+FIXES (this version):
+- Resume-safe *session-continuous* timebase WITHOUT downtime gaps:
+    time_s = total_elapsed_s + (lsl_ts - run_start_lsl_ts)
+  so pausing/stopping between runs does NOT create a giant jump.
+- Events aligned to the same session timebase:
+    onset_s/end_s computed with total_elapsed_s + (event_lsl - run_start_lsl_ts)
+- Per-run timebase fields persisted:
+    run_start_lsl_ts, run_start_local, clock_offset
+- Resume gating retained; no silent overwrites
+- Session metadata/state sidecars updated to reflect the new canonical timebase
 """
 
 # Work around duplicate libomp on macOS (MKL/torch/scipy); must be set before imports.
@@ -18,8 +23,8 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 # =========================
 # ===== CONFIG FLAGS ======
 # =========================
-TRAINING_MODE = False          # If True, allows optional interactive correctness feedback for calibrator
-DEMO_MODE = False              # If True, loads model and runs inference/uncertainty
+TRAINING_MODE = False
+DEMO_MODE = False
 ENABLE_PLOT = True
 SAVE_TO_DISK = True
 SAVE_RAW = True
@@ -29,9 +34,10 @@ WINDOW_SEC = 0.25
 CHANNELS = 4
 N_FINGERS = 6
 N_ACTIONS = 3
+TIMEBASE_VERSION = "absolute_v1"
 
-MODEL_PATH = "finger_action_model.pt"   # model weights file
-SCALER_PATH = "scaler.save"             # Per-channel normalizer from Step 2 (optional for inference)
+MODEL_PATH = "finger_action_model.pt"
+SCALER_PATH = "scaler.save"
 
 # =========================
 # ===== SAFETY & UNCERTAINTY ======
@@ -53,6 +59,7 @@ EVENTS_CHANNEL = "n/a"
 # =========================
 # ===== IMPORTS ===========
 # =========================
+import argparse
 import threading
 import time
 import csv
@@ -106,6 +113,17 @@ GENDER = "M"
 AGE = 17
 SUBJECT_ID_OVERRIDE = "1-M17"  # Set to None to use auto-increment registry
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--subject-id", type=str, default=None, help="Override subject ID for this run")
+parser.add_argument("--init-only", action="store_true", help="Initialize session and exit before LSL streaming")
+parser.add_argument("--force-new-session", action="store_true", help="Always start a new session (ignore resume state)")
+args, _ = parser.parse_known_args()
+
+if args.subject_id:
+    SUBJECT_ID_OVERRIDE = args.subject_id
+
+INIT_ONLY = bool(args.init_only)
+
 subject_id = SUBJECT_ID_OVERRIDE or get_subject_id(GENDER, AGE)
 
 experiment_config = {
@@ -119,7 +137,6 @@ experiment_config = {
 # ===== SESSION STATE =====
 # =========================
 SESSION_STATE_DIR = Path("logs")
-SESSION_STATE_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_STATE_PATH = SESSION_STATE_DIR / f"session_state_{subject_id}.json"
 
 session_state = {}
@@ -132,27 +149,221 @@ if SESSION_STATE_PATH.exists():
 # Defaults
 session_id = None
 segment_id = 0
-total_elapsed_s = 0.0
-last_time_s = -1.0
+total_elapsed_s = 0.0      # session-continuous elapsed time (excludes downtime)
+last_time_s = -1.0         # last written session-continuous time_s
 BLOCK_ID = 0
 experiment_hash = None
 features_path_state = None
 events_path_state = None
 raw_path_state = None
-created_utc = session_state.get("created_utc")
+created_utc = None
 
-# Tentative resume info
-resume_session = bool(session_state.get("subject_id") == subject_id)
-if resume_session:
-    session_id = session_state.get("session_id")
+# Legacy/diagnostic fields (kept for compatibility)
+stream_start_lsl_ts = None
+local_clock_at_start = None
+
+# Canonical timebase fields (THIS FIX)
+run_start_lsl_ts = None     # first LSL timestamp observed THIS run
+run_start_local = None      # local_clock() at run start
+clock_offset = None         # run_start_lsl_ts - run_start_local
+
+def _coerce_float(value, default=None):
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+def _read_csv_header(path: Path):
+    try:
+        with open(path, "r", newline="") as f:
+            reader = csv.reader(f)
+            return next(reader, [])
+    except Exception:
+        return []
+
+def _csv_has_data_rows(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    try:
+        with open(path, "r", newline="") as f:
+            reader = csv.reader(f)
+            _ = next(reader, None)
+            for row in reader:
+                if any(str(cell).strip() for cell in row):
+                    return True
+    except Exception:
+        return False
+    return False
+
+def _header_has_columns(header, required_cols) -> bool:
+    if not header:
+        return False
+    header_set = {str(h).strip() for h in header}
+    return required_cols.issubset(header_set)
+
+def _infer_session_id_from_path(path: Path, subject: str):
+    if path is None:
+        return None
+    name = Path(path).name
+    prefix = f"{subject}_"
+    if not name.startswith(prefix):
+        return None
+    if name.endswith("_eeg_features.csv"):
+        return name[len(prefix):-len("_eeg_features.csv")]
+    if name.endswith("_events.csv"):
+        return name[len(prefix):-len("_events.csv")]
+    return None
+
+def _resolve_events_path(state_events_path, state_features_path, subject, session):
+    if state_events_path:
+        return Path(state_events_path)
+    if state_features_path and session:
+        return Path(state_features_path).parent / f"{subject}_{session}_events.csv"
+    return None
+
+def _infer_stream_start_lsl_ts(path: Path):
+    # Legacy helper (still used only if you need to backfill diagnostics)
+    if not path or not path.exists():
+        return None
+    try:
+        with open(path, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row and "lsl_timestamp" in row:
+                    return _coerce_float(row.get("lsl_timestamp"))
+                break
+    except Exception:
+        return None
+    return None
+
+def _load_session_meta(path: Path):
+    if not path or not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {}
+
+def _write_json_atomic(path: Path, payload: dict):
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2))
+    tmp.replace(path)
+
+def _maybe_backup_path(path: Path, label: str):
+    if path.exists():
+        backup_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = path.with_name(f"{path.name}.bak_{backup_stamp}")
+        path.rename(backup_path)
+        print(f"⚠️ {label} backed up to {backup_path}")
+        return backup_path
+    return None
+
+def _merge_non_none(existing: dict, updates: dict) -> dict:
+    merged = dict(existing)
+    for key, value in updates.items():
+        if value is not None:
+            merged[key] = value
+    return merged
+
+resume_requested = not bool(args.force_new_session)
+resume_blockers = []
+state_subject_id = session_state.get("subject_id")
+resume_subject_match = bool(state_subject_id == subject_id)
+if not resume_requested:
+    resume_blockers.append("forced_new_session")
+if not resume_subject_match:
+    resume_blockers.append("subject_id_mismatch")
+
+state_features_path = session_state.get("features_path")
+state_events_path = session_state.get("events_path")
+state_raw_path = session_state.get("raw_path")
+state_session_id = session_state.get("session_id")
+state_timebase_version = session_state.get("timebase_version") or session_state.get("timebase")
+
+required_feature_cols = {"lsl_timestamp", "time_s"}
+state_features_ok = False
+state_features_header_ok = False
+state_features = None
+if resume_subject_match and state_features_path:
+    state_features = Path(state_features_path)
+    state_features_ok = _csv_has_data_rows(state_features)
+    if state_features_ok:
+        state_features_header_ok = _header_has_columns(_read_csv_header(state_features), required_feature_cols)
+    if not state_features_ok:
+        resume_blockers.append("features_missing_or_empty")
+    elif not state_features_header_ok:
+        resume_blockers.append("features_missing_required_columns")
+else:
+    if resume_subject_match:
+        resume_blockers.append("features_missing")
+
+resolved_events_path = _resolve_events_path(state_events_path, state_features_path, subject_id, state_session_id)
+events_path_safe = False
+state_events_missing = False
+if resume_subject_match and resolved_events_path:
+    events_parent = resolved_events_path.parent
+    features_parent = Path(state_features_path).parent if state_features_path else None
+    same_dir = (features_parent is None) or (events_parent == features_parent)
+    if same_dir and (resolved_events_path.exists() or events_parent.exists()):
+        events_path_safe = True
+        state_events_missing = not resolved_events_path.exists()
+if not events_path_safe:
+    resume_blockers.append("events_path_not_safe")
+
+state_meta = {}
+if state_session_id:
+    meta_candidate = Path("data/processed") / f"{subject_id}_{state_session_id}_session_meta.json"
+    state_meta = _load_session_meta(meta_candidate)
+    if not state_timebase_version:
+        state_timebase_version = state_meta.get("timebase_version") or state_meta.get("timebase")
+if state_timebase_version and state_timebase_version != TIMEBASE_VERSION:
+    resume_blockers.append(f"timebase_mismatch({state_timebase_version})")
+
+resume_allowed = resume_subject_match and state_features_ok and state_features_header_ok and events_path_safe
+true_resume = resume_requested and resume_allowed and not any(
+    b for b in resume_blockers if b not in {"forced_new_session"}
+)
+
+if true_resume:
+    session_id = state_session_id
+    if not session_id:
+        session_id = _infer_session_id_from_path(state_features, subject_id) or _infer_session_id_from_path(
+            resolved_events_path, subject_id
+        )
     BLOCK_ID = int(session_state.get("block_id", 0))
     segment_id = int(session_state.get("segment_id", -1)) + 1
     total_elapsed_s = float(session_state.get("total_elapsed_s", 0.0))
     last_time_s = float(session_state.get("last_time_s", -1.0))
     experiment_hash = session_state.get("experiment_hash")
-    features_path_state = session_state.get("features_path")
-    events_path_state = session_state.get("events_path")
-    raw_path_state = session_state.get("raw_path")
+    features_path_state = state_features_path
+    events_path_state = str(resolved_events_path) if resolved_events_path else state_events_path
+    raw_path_state = state_raw_path
+    created_utc = session_state.get("created_utc") or state_meta.get("created_utc")
+
+    # Load any legacy timebase fields (diagnostics only)
+    stream_start_lsl_ts = _coerce_float(session_state.get("stream_start_lsl_ts"))
+    local_clock_at_start = _coerce_float(session_state.get("local_clock_at_start"))
+
+    # We intentionally DO NOT reuse old run_start_* across runs.
+    # But we can load last-known clock_offset for "early events before first sample"
+    # (still guarded; we ignore events until first sample anyway).
+    clock_offset = _coerce_float(session_state.get("clock_offset"))
+    if state_meta and clock_offset is None:
+        clock_offset = _coerce_float(state_meta.get("clock_offset"))
+
+else:
+    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_hash = generate_experiment_hash(subject_id, experiment_config)
+    features_path_state = None
+    events_path_state = None
+    raw_path_state = None
+    total_elapsed_s = 0.0
+    last_time_s = -1.0
+    BLOCK_ID = 0
+    segment_id = 0
+    created_utc = None
 
 # If no prior session_id, start fresh
 if not session_id:
@@ -161,7 +372,6 @@ if experiment_hash is None:
     experiment_hash = generate_experiment_hash(subject_id, experiment_config)
 
 FEATURES_ARCHIVE_DIR = Path("data/processed")
-FEATURES_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 
 FEATURES_ARCHIVE_PATH = Path(features_path_state) if features_path_state else FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_eeg_features.csv"
 EVENTS_ARCHIVE_PATH = Path(events_path_state) if events_path_state else FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_events.csv"
@@ -170,37 +380,121 @@ EVENTS_CSV_PATH = str(EVENTS_ARCHIVE_PATH)
 FEATURES_PATH = FEATURES_ARCHIVE_PATH
 
 RAW_ARCHIVE_PATH = Path(raw_path_state) if raw_path_state else Path("data/raw") / f"{subject_id}_{session_id}_raw.csv"
+SESSION_META_PATH = FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_session_meta.json"
+ROOT_SESSION_META_PATH = Path("session_meta.json")
 
-# ---- GUARD: If we are NOT truly resuming the same features file, don't carry total_elapsed_s ----
-# A "true resume" means we have an existing non-empty features file we're appending to.
-true_resume = False
-if resume_session and FEATURES_ARCHIVE_PATH.exists() and FEATURES_ARCHIVE_PATH.stat().st_size > 0:
-    true_resume = True
+def _build_session_meta_payload(complete: bool):
+    return {
+        "subject_id": subject_id,
+        "session_id": session_id,
+        "segment_id": segment_id,
+        "experiment_hash": experiment_hash,
+        "sampling_rate": SAMPLING_RATE,
+        "window_sec": WINDOW_SEC,
+        "channels": CHANNELS,
+        "features_path": str(FEATURES_ARCHIVE_PATH),
+        "events_path": str(EVENTS_ARCHIVE_PATH),
+        "raw_path": str(RAW_ARCHIVE_PATH),
+        "timebase_version": TIMEBASE_VERSION,
+        "timebase": TIMEBASE_VERSION,
 
-if not true_resume:
-    # Starting a new features file => reset timebase carry-over
-    total_elapsed_s = 0.0
-    last_time_s = -1.0
-    # If we aren't resuming the same file, also reset block/segment counters to avoid confusion
-    BLOCK_ID = 0
-    segment_id = 0
+        # Canonical (session-continuous) bookkeeping
+        "total_elapsed_s": float(total_elapsed_s),
+        "last_time_s": float(last_time_s),
 
-session_meta = {
-    "subject_id": subject_id,
-    "session_id": session_id,
-    "segment_id": segment_id,
-    "experiment_hash": experiment_hash,
-    "sampling_rate": SAMPLING_RATE,
-    "window_sec": WINDOW_SEC,
-    "channels": CHANNELS,
-    "features_path": str(FEATURES_ARCHIVE_PATH),
-    "events_path": str(EVENTS_ARCHIVE_PATH),
-    "raw_path": str(RAW_ARCHIVE_PATH),
-    "timebase": "absolute_v1",   # <-- IMPORTANT: indicates onset_s is session-absolute
-}
-Path("session_meta.json").write_text(json.dumps(session_meta, indent=2))
+        # Canonical per-run timebase
+        "run_start_lsl_ts": run_start_lsl_ts,
+        "run_start_local": run_start_local,
+        "clock_offset": clock_offset,
+
+        # Legacy/diagnostic (kept)
+        "stream_start_lsl_ts": stream_start_lsl_ts,
+        "local_clock_at_start": local_clock_at_start,
+
+        "complete": bool(complete),
+        "created_utc": created_utc,
+        "updated_utc": datetime.utcnow().isoformat() + "Z",
+    }
+
+def _update_session_meta(complete: bool, label: str):
+    if INIT_ONLY:
+        return
+    payload = _build_session_meta_payload(complete)
+    existing = _load_session_meta(SESSION_META_PATH)
+    merged = _merge_non_none(existing, payload)
+    msg = "Updating" if SESSION_META_PATH.exists() else "Writing"
+    print(f"ℹ️ {msg} session meta ({label}): {SESSION_META_PATH}")
+    _write_json_atomic(SESSION_META_PATH, merged)
+
+    root_existing = _load_session_meta(ROOT_SESSION_META_PATH)
+    root_merged = _merge_non_none(root_existing, payload)
+    root_msg = "Updating" if ROOT_SESSION_META_PATH.exists() else "Writing"
+    print(f"ℹ️ {root_msg} root session meta ({label}): {ROOT_SESSION_META_PATH}")
+    _write_json_atomic(ROOT_SESSION_META_PATH, root_merged)
+
+def _build_session_state_payload(
+    total_elapsed_override=None,
+    last_time_override=None,
+    block_id_override=None,
+    segment_id_override=None,
+):
+    return {
+        "subject_id": subject_id,
+        "session_id": session_id,
+        "experiment_hash": experiment_hash,
+        "block_id": int(block_id_override if block_id_override is not None else BLOCK_ID),
+        "segment_id": int(segment_id_override if segment_id_override is not None else segment_id),
+
+        # Canonical session-continuous time
+        "total_elapsed_s": float(total_elapsed_override if total_elapsed_override is not None else total_elapsed_s),
+        "last_time_s": float(last_time_override if last_time_override is not None else last_time_s),
+
+        "features_path": str(FEATURES_ARCHIVE_PATH),
+        "events_path": str(EVENTS_ARCHIVE_PATH),
+        "raw_path": str(RAW_ARCHIVE_PATH),
+        "created_utc": created_utc,
+        "updated_utc": datetime.utcnow().isoformat() + "Z",
+        "timebase_version": TIMEBASE_VERSION,
+        "timebase": TIMEBASE_VERSION,
+
+        # Canonical per-run timebase
+        "run_start_lsl_ts": run_start_lsl_ts,
+        "run_start_local": run_start_local,
+        "clock_offset": clock_offset,
+
+        # Legacy/diagnostic
+        "stream_start_lsl_ts": stream_start_lsl_ts,
+        "local_clock_at_start": local_clock_at_start,
+    }
+
+def _write_session_state(
+    label: str,
+    total_elapsed_override=None,
+    last_time_override=None,
+    block_id_override=None,
+    segment_id_override=None,
+):
+    if INIT_ONLY:
+        return
+    payload = _build_session_state_payload(
+        total_elapsed_override=total_elapsed_override,
+        last_time_override=last_time_override,
+        block_id_override=block_id_override,
+        segment_id_override=segment_id_override,
+    )
+    SESSION_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    msg = "Updating" if SESSION_STATE_PATH.exists() else "Writing"
+    print(f"ℹ️ {msg} session state ({label}): {SESSION_STATE_PATH}")
+    _write_json_atomic(SESSION_STATE_PATH, payload)
 
 resume_flag = "YES" if true_resume else "NO"
+resume_request_reason = "forced_new_session" if args.force_new_session else "auto"
+
+def _fmt_time_value(value):
+    if isinstance(value, (int, float)) and np.isfinite(value):
+        return f"{float(value):.6f}"
+    return "pending"
+
 channel_list = "TP9, AF7, AF8, TP10"
 
 print("-" * 50)
@@ -210,13 +504,22 @@ print(f"Subject ID        : {subject_id}")
 print(f"Session ID        : {session_id}")
 print(f"Experiment Hash   : {experiment_hash}")
 print("")
-print(f"Resume Session    : {resume_flag}")
+print(f"Resume Requested  : {'YES' if resume_requested else 'NO'} ({resume_request_reason})")
+print(f"Resume Decision   : {resume_flag}")
+if resume_blockers and not true_resume:
+    print(f"Resume Blockers   : {', '.join(resume_blockers)}")
 print(f"Current Block ID  : {BLOCK_ID}")
-print(f"Total Elapsed Time: {total_elapsed_s:.2f} s")
+print(f"Total Elapsed Time: {total_elapsed_s:.2f} s (session-continuous)")
 print("")
+if true_resume and state_events_missing:
+    print(f"⚠️ Resume note: events file missing at {resolved_events_path}; a new events file will be created.")
 print(f"EEG Channels      : {channel_list} ({CHANNELS})")
 print(f"Sampling Rate     : {SAMPLING_RATE} Hz")
 print(f"Window Length     : {WINDOW_SEC} s")
+print(f"Timebase Version  : {TIMEBASE_VERSION}")
+print(f"Run Start LSL     : {_fmt_time_value(run_start_lsl_ts)}")
+print(f"Run Start Local   : {_fmt_time_value(run_start_local)}")
+print(f"Clock Offset      : {_fmt_time_value(clock_offset)}")
 print("")
 print("Modes:")
 print(f"  Event Marking   : {'ENABLED' if EVENT_MARKING_ENABLED else 'DISABLED'}")
@@ -240,18 +543,41 @@ print("  Q or ESC = end stream safely")
 print("")
 print("Status:")
 print("  ✔ LSL EEG connected")
-print("  ✔ Time base aligned (events use session-absolute time)")
+print(f"  ✔ Time base aligned ({TIMEBASE_VERSION}, session-continuous)")
 print("  ✔ Resume-safe logging enabled")
 print("-" * 50)
 print("▶ Streaming started…")
 print("-" * 50)
 print("Type 'end_stream' into terminal OR press ESC/q to stop safely.")
 
+if INIT_ONLY:
+    print("ℹ️ Init-only mode: exiting before LSL stream.")
+    raise SystemExit(0)
+
+# Prepare output directories and metadata/state files.
+FEATURES_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+SESSION_STATE_DIR.mkdir(parents=True, exist_ok=True)
+if SAVE_RAW:
+    Path("data/raw").mkdir(parents=True, exist_ok=True)
+
+if not true_resume:
+    _maybe_backup_path(FEATURES_ARCHIVE_PATH, "Existing features file")
+    _maybe_backup_path(EVENTS_ARCHIVE_PATH, "Existing events file")
+    _maybe_backup_path(Path(EVENTS_AUTOSAVE_PATH), "Existing autosave events file")
+    _maybe_backup_path(RAW_ARCHIVE_PATH, "Existing raw file")
+    _maybe_backup_path(SESSION_META_PATH, "Existing session meta file")
+
+if not created_utc:
+    created_utc = datetime.utcnow().isoformat() + "Z"
+
+_update_session_meta(complete=False, label="init")
+_write_session_state(label="init")
+
 log_experiment(
     subject_id,
     experiment_hash,
     step="STEP_1_STREAM",
-    notes="EEG collection + ICA + optional inference + event marking (absolute timebase)"
+    notes="EEG collection + ICA + optional inference + event marking (session-continuous timebase)"
 )
 
 # =========================
@@ -292,6 +618,21 @@ def listen_for_exit():
 threading.Thread(target=listen_for_exit, daemon=True).start()
 
 # =========================
+# ===== TIMEBASE HELPERS ===
+# =========================
+def _lsl_now():
+    """LSL-domain timestamp for 'now' using local_clock and current clock_offset."""
+    if clock_offset is None:
+        return None
+    return local_clock() + clock_offset
+
+def _time_s_from_lsl(lsl_ts: float):
+    """Session-continuous time_s from an LSL timestamp."""
+    if run_start_lsl_ts is None:
+        return None
+    return float(total_elapsed_s + (lsl_ts - run_start_lsl_ts))
+
+# =========================
 # ===== EVENT MARKING =====
 # =========================
 events = []
@@ -301,23 +642,12 @@ last_event_index = None
 current_action_id = ACTION_REST
 current_override = None
 
-stream_start_ts = None   # LSL timestamp of first received sample
-clock_offset = None      # stream_start_ts - local_clock()
 trial_id_counter = 0
 TIME_EPS = 1e-4
-last_event_clock_rel_s = 0.0
 last_written_time_s = float(last_time_s)
 time_s_backwards_skips = 0
-
-def _event_time_seconds_rel():
-    """Seconds since LSL stream start (segment-relative)."""
-    if stream_start_ts is None or clock_offset is None:
-        return None
-    return (local_clock() + clock_offset) - stream_start_ts
-
-def _abs_time_from_rel(rel_s: float) -> float:
-    """Convert segment-relative seconds -> session-absolute seconds."""
-    return float(total_elapsed_s + float(rel_s))
+timebase_written = False
+clock_offset_estimated = False
 
 def _load_existing_events(path: Path):
     """Load existing events to support resume without overwriting."""
@@ -330,7 +660,7 @@ def _load_existing_events(path: Path):
             for row in reader:
                 if not row:
                     continue
-                # Keep unknown columns, but normalize known ones
+
                 def _f(key, default=np.nan):
                     v = row.get(key, "")
                     if v is None or v == "":
@@ -350,13 +680,30 @@ def _load_existing_events(path: Path):
                         return default
 
                 e = dict(row)
-                e["onset_s"] = _f("onset_s", 0.0)
-                e["duration_s"] = _f("duration_s", 0.0)
-                # Optional debug columns
+                onset_lsl = _f("onset_lsl", np.nan)
+                onset_s = _f("onset_s", np.nan)
+                duration_s = _f("duration_s", 0.0)
+                end_lsl = _f("end_lsl", np.nan)
+                end_s = _f("end_s", np.nan)
+
+                if duration_s < 0:
+                    duration_s = 0.0
+                if np.isfinite(onset_s) and not np.isfinite(end_s):
+                    end_s = onset_s + duration_s
+                if np.isfinite(onset_lsl) and not np.isfinite(end_lsl):
+                    end_lsl = onset_lsl + duration_s
+
+                # IMPORTANT: In session-continuous mode, we do NOT try to back-compute onset_lsl
+                # from onset_s unless the file already contains onset_lsl. (Because downtime-free
+                # session time can't be inverted without per-run mapping history.)
+                e["onset_lsl"] = onset_lsl
+                e["onset_s"] = onset_s
+                e["duration_s"] = duration_s
+                e["end_lsl"] = end_lsl
+                e["end_s"] = end_s
+
                 if "onset_rel_s" in row:
                     e["onset_rel_s"] = _f("onset_rel_s", np.nan)
-                if "end_s" in row:
-                    e["end_s"] = _f("end_s", np.nan)
                 if "end_rel_s" in row:
                     e["end_rel_s"] = _f("end_rel_s", np.nan)
 
@@ -382,7 +729,6 @@ if true_resume:
         with events_lock:
             events.extend(loaded_events)
             last_event_index = len(events) - 1
-        # Keep trial counter monotonic
         trial_id_counter = max([int(e.get("trial_id", 0) or 0) for e in loaded_events] + [0])
         print(f"🧾 Resumed events: loaded {len(loaded_events)} existing events (trial_id_counter={trial_id_counter}).")
 
@@ -392,8 +738,11 @@ def save_events_csv(path, items):
     Step 1b will ignore extra columns.
     """
     base_header = [
+        "onset_lsl",
         "onset_s",
         "duration_s",
+        "end_lsl",
+        "end_s",
         "type",
         "channel",
         "confidence",
@@ -405,9 +754,8 @@ def save_events_csv(path, items):
         "source",
     ]
 
-    # Add extras if present
     extras = []
-    extra_candidates = ["onset_rel_s", "end_s", "end_rel_s"]
+    extra_candidates = ["onset_rel_s", "end_rel_s"]
     for k in extra_candidates:
         if any((k in it) for it in items):
             extras.append(k)
@@ -418,9 +766,33 @@ def save_events_csv(path, items):
         writer = csv.writer(f)
         writer.writerow(header)
         for item in items:
+            def _f(val, default=np.nan):
+                try:
+                    if val is None or val == "":
+                        return default
+                    return float(val)
+                except Exception:
+                    return default
+
+            onset_lsl = _f(item.get("onset_lsl"), np.nan)
+            onset_s = _f(item.get("onset_s"), np.nan)
+            duration_s = _f(item.get("duration_s"), 0.0)
+            end_lsl = _f(item.get("end_lsl"), np.nan)
+            end_s = _f(item.get("end_s"), np.nan)
+
+            if duration_s < 0:
+                duration_s = 0.0
+            if not np.isfinite(end_lsl) and np.isfinite(onset_lsl):
+                end_lsl = onset_lsl + duration_s
+            if not np.isfinite(end_s) and np.isfinite(onset_s):
+                end_s = onset_s + duration_s
+
             row = [
-                f"{float(item.get('onset_s', 0.0)):.4f}",
-                f"{float(item.get('duration_s', 0.0)):.4f}",
+                f"{float(onset_lsl):.6f}" if np.isfinite(onset_lsl) else "",
+                f"{float(onset_s):.6f}" if np.isfinite(onset_s) else "",
+                f"{float(duration_s):.6f}",
+                f"{float(end_lsl):.6f}" if np.isfinite(end_lsl) else "",
+                f"{float(end_s):.6f}" if np.isfinite(end_s) else "",
                 item.get("type", ""),
                 item.get("channel", "n/a"),
                 item.get("confidence", ""),
@@ -439,27 +811,34 @@ def save_events_csv(path, items):
                     row.append("" if v is None else str(v))
             writer.writerow(row)
 
-    # Mirror autosave into archive path if autosaving
     if EVENTS_ARCHIVE_PATH and str(path) != str(EVENTS_ARCHIVE_PATH):
         FEATURES_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, EVENTS_ARCHIVE_PATH)
 
-def finalize_event(duration_s_rel):
+def finalize_event():
     global current_event, last_event_index, trial_id_counter
     if current_event is None:
         return
 
-    duration_s_rel = max(0.0, float(duration_s_rel))
-    current_event["duration_s"] = duration_s_rel
+    duration_s = float(current_event.get("duration_s", 0.0))
+    if duration_s < 0:
+        duration_s = 0.0
+    current_event["duration_s"] = duration_s
 
-    # Derive types
+    onset_lsl = current_event.get("onset_lsl", np.nan)
+    onset_s = current_event.get("onset_s", np.nan)
+
+    if (current_event.get("end_lsl") is None or not np.isfinite(current_event.get("end_lsl", np.nan))) and np.isfinite(onset_lsl):
+        current_event["end_lsl"] = float(onset_lsl + duration_s)
+    if (current_event.get("end_s") is None or not np.isfinite(current_event.get("end_s", np.nan))) and np.isfinite(onset_s):
+        current_event["end_s"] = float(onset_s + duration_s)
+
     current_event["type"] = event_type_for(
         int(current_event["action_id"]),
         int(current_event["finger_id"]),
         current_event.get("override_type"),
     )
 
-    # trial/block ids
     trial_id_counter += 1
     current_event["trial_id"] = int(trial_id_counter)
     current_event["block_id"] = int(BLOCK_ID)
@@ -495,17 +874,27 @@ def on_key_press(key):
     # Hold SPACE = event active
     if key == keyboard.Key.space:
         if current_event is None:
-            onset_rel = _event_time_seconds_rel()
-            if onset_rel is None:
+            # In this fixed design, we refuse to stamp events until run_start_lsl_ts exists,
+            # because that's the anchor for session-continuous time.
+            if run_start_lsl_ts is None or clock_offset is None:
+                print("⚠️ Event ignored: timebase not initialized yet (waiting for first LSL sample).")
                 return
-            onset_abs = _abs_time_from_rel(onset_rel)
-            current_event = {
-                # IMPORTANT: onset_s is session-absolute
-                "onset_s": float(onset_abs),
-                # Debug: store the segment-relative onset too
-                "onset_rel_s": float(onset_rel),
 
+            event_local = local_clock()
+            onset_lsl = _lsl_now()
+            if onset_lsl is None:
+                return
+
+            onset_s = _time_s_from_lsl(onset_lsl)
+            if onset_s is None:
+                return
+
+            current_event = {
+                "onset_lsl": float(onset_lsl),
+                "onset_s": float(onset_s),
                 "duration_s": 0.0,
+                "end_lsl": np.nan,
+                "end_s": np.nan,
                 "type": "",
                 "channel": EVENTS_CHANNEL,
                 "confidence": "",
@@ -515,6 +904,10 @@ def on_key_press(key):
                 "override_type": current_override,
                 "source": "manual",
             }
+
+            # Debug: local-clock relative to run start (NOT used by Step 1b)
+            if run_start_local is not None:
+                current_event["onset_rel_s"] = float(event_local - run_start_local)
         return
 
     if key_char is None:
@@ -567,22 +960,37 @@ def on_key_press(key):
         print(f"📝 Finger assigned: {FINGER_NAMES.get(finger_id, 'UNKNOWN')}")
 
 def on_key_release(key):
-    global last_event_clock_rel_s
     if not EVENT_MARKING_ENABLED:
         return
     if key == keyboard.Key.space and current_event is not None:
-        end_rel = _event_time_seconds_rel()
-        if end_rel is None:
+        if run_start_lsl_ts is None or clock_offset is None:
             return
-        onset_rel = float(current_event.get("onset_rel_s", np.nan))
-        if not np.isfinite(onset_rel):
+
+        end_local = local_clock()
+        end_lsl = _lsl_now()
+        if end_lsl is None:
             return
-        duration_rel = float(end_rel - onset_rel)
-        # add debug end stamps
-        current_event["end_rel_s"] = float(end_rel)
-        current_event["end_s"] = float(_abs_time_from_rel(end_rel))
-        last_event_clock_rel_s = float(end_rel)
-        finalize_event(duration_rel)
+
+        onset_lsl = current_event.get("onset_lsl", np.nan)
+        if not np.isfinite(onset_lsl):
+            return
+
+        duration_s = float(end_lsl - onset_lsl)
+        if duration_s < 0:
+            duration_s = 0.0
+
+        current_event["duration_s"] = duration_s
+        current_event["end_lsl"] = float(end_lsl)
+
+        end_s = _time_s_from_lsl(end_lsl)
+        if end_s is None:
+            return
+        current_event["end_s"] = float(end_s)
+
+        if run_start_local is not None:
+            current_event["end_rel_s"] = float(end_local - run_start_local)
+
+        finalize_event()
 
 if EVENT_MARKING_ENABLED and keyboard is None:
     print("⚠️ Event marking disabled (pynput not installed).")
@@ -796,10 +1204,38 @@ try:
         if len(sample) != CHANNELS:
             sample = [sample[i] for i in channel_indices]
 
-        # align local clock to stream time for event marking
-        if stream_start_ts is None:
-            stream_start_ts = lsl_ts
-            clock_offset = stream_start_ts - local_clock()
+        # =========================
+        # ===== TIMEBASE INIT ======
+        # =========================
+        # On the FIRST sample of THIS run, anchor run_start_lsl_ts and compute clock_offset.
+        # This makes time_s continuous across resumes without including downtime.
+        if run_start_lsl_ts is None:
+            run_start_lsl_ts = float(lsl_ts)
+            run_start_local = float(local_clock())
+            clock_offset = float(run_start_lsl_ts - run_start_local)
+
+            # Legacy diagnostics: keep stream_start_* set once if absent
+            if stream_start_lsl_ts is None:
+                stream_start_lsl_ts = run_start_lsl_ts
+            if local_clock_at_start is None:
+                local_clock_at_start = run_start_local
+
+            timebase_written = False
+
+        # If clock_offset is missing (shouldn't happen after init), estimate from current sample
+        if clock_offset is None:
+            clock_offset = float(lsl_ts - local_clock())
+            if not clock_offset_estimated:
+                print("⚠️ clock_offset missing; estimating from current sample (resume metadata incomplete).")
+                clock_offset_estimated = True
+            timebase_written = False
+
+        if not timebase_written and run_start_lsl_ts is not None and clock_offset is not None:
+            _update_session_meta(complete=False, label="timebase")
+            _write_session_state(label="timebase")
+            timebase_written = True
+
+        latency_ms = (local_clock() - lsl_ts) * 1000.0
 
         eeg_buffer.append(sample)
 
@@ -836,7 +1272,6 @@ try:
         # ===== DEFAULTS =====
         pred_action = -1
         pred_finger = -1
-        latency_ms = -1.0
         action_confidence = 0.0
         action_uncertainty = 0.0
         finger_confidence = 0.0
@@ -885,7 +1320,6 @@ try:
                 if stable and calibrator.allow_actuation(action_confidence, action_uncertainty) and action_confidence >= adaptive_thresh:
                     pass
 
-            latency_ms = (time.time() - lsl_ts) * 1000.0
             _ = time.perf_counter() - t0
 
         # ===== OPTIONAL ONLINE CALIBRATION FEEDBACK =====
@@ -921,13 +1355,11 @@ try:
 
         # ===== SAVE FEATURES =====
         if SAVE_TO_DISK and csv_writer:
-            rel_s = _event_time_seconds_rel()
-            if rel_s is None:
+            time_s = _time_s_from_lsl(float(lsl_ts))
+            if time_s is None:
                 continue
 
-            last_event_clock_rel_s = float(rel_s)
-            time_s = _abs_time_from_rel(rel_s)
-
+            # Backwards protection (should be rare now)
             if last_written_time_s >= 0 and time_s < (last_written_time_s - TIME_EPS):
                 time_s_backwards_skips += 1
                 if time_s_backwards_skips <= 5:
@@ -950,7 +1382,8 @@ try:
             if len(row) != len(header):
                 raise RuntimeError(f"Feature row length {len(row)} does not match header length {len(header)}")
             csv_writer.writerow(row)
-            last_written_time_s = time_s
+            last_written_time_s = float(time_s)
+            last_time_s = float(last_written_time_s)  # keep session meta/state current
 
         # ===== PLOT =====
         if ENABLE_PLOT:
@@ -993,24 +1426,20 @@ if EVENT_MARKING_ENABLED:
         save_events_csv(EVENTS_CSV_PATH, events)
     print(f"📝 Events saved to {EVENTS_CSV_PATH}")
 
-segment_duration = max(0.0, float(last_event_clock_rel_s))
-last_time_s_updated = last_written_time_s if last_written_time_s >= 0 else last_time_s
-total_elapsed_s_updated = float(total_elapsed_s + segment_duration)
+# Update session-continuous elapsed time at end of run
+last_time_s_updated = float(last_written_time_s if last_written_time_s >= 0 else last_time_s)
+total_elapsed_s_updated = float(last_time_s_updated if last_time_s_updated >= 0 else total_elapsed_s)
 
-SESSION_STATE_PATH.write_text(json.dumps({
-    "subject_id": subject_id,
-    "session_id": session_id,
-    "experiment_hash": experiment_hash,
-    "block_id": int(BLOCK_ID) + 1,
-    "segment_id": int(segment_id),
-    "total_elapsed_s": float(total_elapsed_s_updated),
-    "last_time_s": float(last_time_s_updated),
-    "features_path": str(FEATURES_ARCHIVE_PATH),
-    "events_path": str(EVENTS_ARCHIVE_PATH),
-    "raw_path": str(RAW_ARCHIVE_PATH),
-    "created_utc": created_utc or datetime.utcnow().isoformat() + "Z",
-    "updated_utc": datetime.utcnow().isoformat() + "Z",
-    "timebase": "absolute_v1",
-}, indent=2))
+# Commit updated times so next resume uses the correct anchor
+total_elapsed_s = total_elapsed_s_updated
+last_time_s = last_time_s_updated
+
+_update_session_meta(complete=True, label="final")
+_write_session_state(
+    label="final",
+    total_elapsed_override=total_elapsed_s_updated,
+    last_time_override=last_time_s_updated,
+    block_id_override=int(BLOCK_ID) + 1,
+)
 
 print("✅ Stream terminated cleanly")

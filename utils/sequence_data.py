@@ -22,6 +22,8 @@ def load_sequence_npz(path="eeg_windows.npz", mmap_mode=None):
         "window_end",
         "confidence_hint",
         "artifact_flag",
+        "trial_id",
+        "block_id",
     ]:
         if key in data:
             meta[key] = data[key]

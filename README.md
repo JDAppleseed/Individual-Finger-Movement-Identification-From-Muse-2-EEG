@@ -85,9 +85,45 @@ During training, finger loss is masked when action == REST.
 - `logs/calibration/*` calibration traces
 - `reports/subjects/*` HTML + figures
 
+## absolute_v1 timebase
+
+All sessions use a single LSL-aligned timebase (`absolute_v1`).
+
+Features CSV:
+- `lsl_timestamp`: absolute LSL timestamp for each feature row (seconds, LSL domain)
+- `time_s`: relative seconds since stream start
+- `time_s = lsl_timestamp - stream_start_lsl_ts`
+
+Events CSV:
+- `onset_lsl`, `onset_s`, `duration_s`, `end_lsl`, `end_s`
+- `onset_s = onset_lsl - stream_start_lsl_ts`
+- `end_s = end_lsl - stream_start_lsl_ts`
+
+A per-session metadata JSON is written to `data/processed/*_session_meta.json` with:
+`timebase_version`, `stream_start_lsl_ts`, `local_clock_at_start`, `clock_offset`, and output paths.
+
+Resume gating:
+- Resume is allowed only if the subject matches and the existing features file has data rows.
+- Use `--init-only` to preview the resume decision and resolved paths without writing files.
+- Use `--force-new-session` to always start fresh.
+
+Validate alignment after a run:
+```
+python tools/check_time_alignment.py --features data/processed/<subject>_<session>_eeg_features.csv --events data/processed/<subject>_<session>_events.csv
+```
+
+Legacy data may fail strict alignment checks. For extraction, you can override with:
+```
+python 1b_extract_windows.py --ignore-misalignment
+```
+
+Resampled extraction (fixed shape windows):
+```
+python 1b_extract_windows.py --target-fs 256
+```
+
 ## Notes
 
 - Muse 2 sampling rate defaults to 256 Hz in code.
 - `pynput` is required for live event marking.
 - `5_validate_events.py` enforces validity and can auto-repair with `--apply`.
-
