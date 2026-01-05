@@ -64,16 +64,27 @@ def expected_calibration_error(conf, preds, labels, n_bins=10):
     return ece
 
 
-def apply_postprocess_sequence(action_probs, finger_probs, order, settings):
+def apply_postprocess_sequence(action_probs, finger_probs, order, settings, trial_ids=None):
     """
     Apply stateful postprocess across a sequence order.
+    Reset behavior: if trial_ids provided, RESET PostprocessState when trial_id changes.
     Returns committed_action, committed_finger aligned to `order` output.
     """
     state = PostprocessState()
     committed_action = np.zeros(len(order), dtype=np.int64)
     committed_finger = np.zeros(len(order), dtype=np.int64)
 
+    last_trial = None
+
     for out_idx, sample_idx in enumerate(order):
+        if trial_ids is not None:
+            t = int(trial_ids[sample_idx])
+            if last_trial is None:
+                last_trial = t
+            elif t != last_trial:
+                state.reset()
+                last_trial = t
+
         post = postprocess_predictions(
             action_probs[sample_idx],
             finger_probs[sample_idx],
@@ -87,10 +98,6 @@ def apply_postprocess_sequence(action_probs, finger_probs, order, settings):
 
 
 def _safe_label_list(name_map: dict, n_classes: int):
-    """
-    Build a label list of length n_classes using a mapping like ACTION_NAMES/FINGER_NAMES.
-    If a key is missing, uses f"CLASS_{i}" fallback.
-    """
     labels = []
     for i in range(n_classes):
         if i in name_map:
@@ -101,12 +108,6 @@ def _safe_label_list(name_map: dict, n_classes: int):
 
 
 def _load_predictions_if_present(path: Path):
-    """
-    If test_predictions.npz exists, load it.
-    Expected keys (from Step 2 training script):
-      - action_probs, finger_probs, y_action, y_finger, test_indices
-    Returns dict or None.
-    """
     if not path.exists():
         return None
     try:
@@ -275,14 +276,12 @@ def main():
     experiment_hashes = meta.get("experiment_hash", None)
     exp_hash = str(experiment_hashes[0]) if experiment_hashes is not None else "UNKNOWN"
 
-    # Determine class counts from the full dataset (matches Step 2)
     n_fingers = int(np.max(y_finger)) + 1
     n_actions = int(np.max(y_action)) + 1
 
     # =========================
     # ===== TEST SPLIT =========
     # =========================
-    # Priority 1: If cached predictions exist, trust their test_indices + labels for reproducibility.
     cached = _load_predictions_if_present(pred_npz_path)
     if subject_filtered and cached is not None:
         print("ℹ️ Ignoring cached predictions because --subject-id filtering is enabled.")
@@ -297,19 +296,18 @@ def main():
         y_action_test = np.asarray(cached["y_action"])
         y_finger_test = np.asarray(cached["y_finger"])
         test_idx = np.asarray(cached["test_indices"]).astype(np.int64)
+
         all_idx = np.arange(len(y_action), dtype=np.int64)
         test_mask = np.zeros(len(y_action), dtype=bool)
         test_mask[test_idx] = True
         train_idx = all_idx[~test_mask]
 
-        # Sanity: ensure probabilities align with label lengths
         if len(action_probs) != len(y_action_test) or len(finger_probs) != len(y_finger_test):
             raise RuntimeError("test_predictions.npz shapes do not align (probs vs labels).")
 
-        # We'll use meta for ordering (time) if possible, via test_idx.
         print(f"✅ Using cached predictions: {pred_npz_path}")
+
     else:
-        # Priority 2: reproduce the same split and run deterministic inference.
         train_idx, test_idx = _split_with_checks(y_action, y_finger, meta=meta, seed=SEED)
         if train_idx is None or test_idx is None:
             print("⚠️ Unable to create a split with multiple classes. Aborting evaluation.")
@@ -318,17 +316,10 @@ def main():
         y_action_test = y_action[test_idx]
         y_finger_test = y_finger[test_idx]
 
-        # =========================
-        # ===== SCALE (REUSE) =====
-        # =========================
         if not scaler_path.exists():
             raise FileNotFoundError(f"Missing scaler/normalizer file: {scaler_path}")
         normalizer = joblib.load(str(scaler_path))
-        X_test = apply_channel_normalizer(X_test, normalizer)
 
-        # =========================
-        # ===== MODEL (MATCH STEP 2)
-        # =========================
         if not model_path.exists():
             raise FileNotFoundError(f"Missing model weights: {model_path}")
 
@@ -340,9 +331,6 @@ def main():
         model.load_state_dict(torch.load(str(model_path), map_location="cpu"))
         model.eval()
 
-        # =========================
-        # ===== INFERENCE =========
-        # =========================
         batch_size = max(1, int(args.batch_size))
         action_probs = np.zeros((len(test_idx), n_actions), dtype=np.float32)
         finger_probs = np.zeros((len(test_idx), n_fingers), dtype=np.float32)
@@ -436,20 +424,24 @@ def main():
             adjacency_enabled=bool(args.adjacency),
         )
 
-        # Postprocess is stateful, so order matters.
-        # Best: sort by window_start time if meta has it.
         order = np.arange(len(action_probs), dtype=np.int64)
         if "window_start" in meta:
             try:
-                # meta["window_start"] is for the full dataset; map via test_idx.
                 starts = np.asarray(meta["window_start"])[test_idx]
                 order = np.argsort(starts).astype(np.int64)
             except Exception:
-                # Fall back to the default sequential order
                 order = np.arange(len(action_probs), dtype=np.int64)
 
+        # ===== Reset by trial_id (requested) =====
+        trial_ids_for_probs = None
+        if "trial_id" in meta:
+            try:
+                trial_ids_for_probs = np.asarray(meta["trial_id"])[test_idx].astype(np.int64)
+            except Exception:
+                trial_ids_for_probs = None
+
         smoothed_action, smoothed_finger = apply_postprocess_sequence(
-            action_probs, finger_probs, order, settings
+            action_probs, finger_probs, order, settings, trial_ids=trial_ids_for_probs
         )
 
         action_acc_s = accuracy_score(y_action_test[order], smoothed_action)
@@ -478,7 +470,6 @@ def main():
         )
         print(f"📏 Finger ECE (non-REST): {finger_ece:.4f}")
 
-    # Optional per-subject ECE (on the same test set)
     if subject_ids is not None:
         try:
             subj_test = np.asarray(subject_ids)[test_idx]
@@ -513,7 +504,6 @@ def main():
     # =========================
     fig, axs = plt.subplots(2, 2, figsize=(14, 10))
 
-    # --- Action Confusion Matrix ---
     action_cm = confusion_matrix(y_action_test, action_preds, labels=list(range(n_actions)))
     action_labels = _safe_label_list(ACTION_NAMES, n_actions)
 
@@ -530,10 +520,7 @@ def main():
     axs[0, 0].set_xlabel("Predicted")
     axs[0, 0].set_ylabel("True")
 
-    # --- Finger Confusion Matrix (non-REST) ---
     if finger_metrics_ok and mask.any():
-        # Finger confusion is only meaningful for non-rest windows.
-        # We exclude finger_id=0 (NONE/REST) from the label set for clarity.
         finger_label_ids = [i for i in range(n_fingers) if i != 0]
         finger_cm = confusion_matrix(
             y_finger_test[mask],
@@ -558,7 +545,6 @@ def main():
         axs[0, 1].axis("off")
         axs[0, 1].text(0.5, 0.5, "Finger metrics skipped", ha="center", va="center")
 
-    # --- Reliability Diagram (Action) ---
     bin_centers, bin_accs = reliability_bins(action_conf, action_preds, y_action_test, N_BINS)
     axs[1, 0].plot([0, 1], [0, 1], "--", color="gray", label="Perfect Calibration")
     axs[1, 0].bar(bin_centers, bin_accs, width=0.08, alpha=0.7)
@@ -566,7 +552,6 @@ def main():
     axs[1, 0].set_xlabel("Confidence")
     axs[1, 0].set_ylabel("Accuracy")
 
-    # --- Reliability Diagram (Finger, non-REST) ---
     if finger_metrics_ok and mask.any():
         f_bin_centers, f_bin_accs = reliability_bins(
             finger_conf[mask], finger_preds[mask], y_finger_test[mask], N_BINS
@@ -582,7 +567,6 @@ def main():
 
     plt.tight_layout()
 
-    # Save figure for reports
     report_dir = Path("reports/subjects")
     report_dir.mkdir(parents=True, exist_ok=True)
     out_path = report_dir / f"eval_{exp_hash}.png"

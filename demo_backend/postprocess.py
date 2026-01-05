@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, Optional, Tuple
+from typing import Deque, Dict, Optional
 
 import numpy as np
 
@@ -78,10 +78,17 @@ def postprocess_predictions(
     settings: PostprocessSettings,
     state: PostprocessState,
 ) -> Dict[str, object]:
+    """
+    Key fixes:
+    - In vote mode, DO NOT use max(mean_probs) as "confidence" (it shrinks peaks and trips thresholds).
+      Instead, compute confidence from the CURRENT FRAME prob for the voted class.
+    - In vote mode, do NOT vote finger IDs; smooth finger probabilities and argmax them.
+    """
+
     smoothing_window = max(1, int(settings.smoothing_window))
 
-    raw_action_id = int(np.argmax(action_probs))
-    raw_finger_id = int(np.argmax(finger_probs))
+    raw_action_id = int(np.argmax(action_probs)) if action_probs.size else 0
+    raw_finger_id = int(np.argmax(finger_probs)) if finger_probs.size else 0
 
     smoothed_action_probs = action_probs
     smoothed_finger_probs = finger_probs
@@ -91,41 +98,61 @@ def postprocess_predictions(
     if settings.smoothing_enabled:
         if settings.smoothing_method == "ema":
             alpha = 2.0 / (smoothing_window + 1.0)
+
             if state.ema_action is None:
                 state.ema_action = action_probs.copy()
             else:
                 state.ema_action = alpha * action_probs + (1 - alpha) * state.ema_action
+
             if state.ema_finger is None:
                 state.ema_finger = finger_probs.copy()
             else:
                 state.ema_finger = alpha * finger_probs + (1 - alpha) * state.ema_finger
+
             smoothed_action_probs = state.ema_action
             smoothed_finger_probs = state.ema_finger
-            smoothed_action_id = int(np.argmax(smoothed_action_probs))
-            smoothed_finger_id = int(np.argmax(smoothed_finger_probs))
+            smoothed_action_id = int(np.argmax(smoothed_action_probs)) if smoothed_action_probs.size else 0
+            smoothed_finger_id = int(np.argmax(smoothed_finger_probs)) if smoothed_finger_probs.size else 0
+
         else:
+            # ===== vote mode =====
             state.action_ids.append(raw_action_id)
-            state.finger_ids.append(raw_finger_id)
             state.action_probs.append(action_probs)
-            state.finger_probs.append(finger_probs)
+
+            state.finger_probs.append(finger_probs)  # keep probs for smoothing
+            # (we keep finger_ids for compatibility, but we no longer use majority vote for finger)
+            state.finger_ids.append(raw_finger_id)
+
             while len(state.action_ids) > smoothing_window:
                 state.action_ids.popleft()
-            while len(state.finger_ids) > smoothing_window:
-                state.finger_ids.popleft()
             while len(state.action_probs) > smoothing_window:
                 state.action_probs.popleft()
+
+            while len(state.finger_ids) > smoothing_window:
+                state.finger_ids.popleft()
             while len(state.finger_probs) > smoothing_window:
                 state.finger_probs.popleft()
+
+            # Action: vote IDs (stable), and also compute mean probs for optional logging
             smoothed_action_id = _vote_majority(state.action_ids)
-            smoothed_finger_id = _vote_majority(state.finger_ids)
             smoothed_action_probs = _mean_probs(state.action_probs)
+
+            # Finger: smooth PROBS then argmax (more reliable than voting IDs)
             smoothed_finger_probs = _mean_probs(state.finger_probs)
+            smoothed_finger_id = int(np.argmax(smoothed_finger_probs)) if smoothed_finger_probs.size else raw_finger_id
 
-    action_conf = float(np.max(smoothed_action_probs)) if smoothed_action_probs.size else 0.0
-    finger_conf = float(np.max(smoothed_finger_probs)) if smoothed_finger_probs.size else 0.0
+    # ===== Confidence computation =====
+    # In vote mode, using max(mean_probs) shrinks peaks and causes mass threshold failures.
+    if settings.smoothing_enabled and settings.smoothing_method == "vote":
+        action_conf = float(action_probs[smoothed_action_id]) if action_probs.size else 0.0
+        finger_conf = float(finger_probs[smoothed_finger_id]) if finger_probs.size else 0.0
+        decision_reason = "vote_commit"
+    else:
+        action_conf = float(np.max(smoothed_action_probs)) if smoothed_action_probs.size else 0.0
+        finger_conf = float(np.max(smoothed_finger_probs)) if smoothed_finger_probs.size else 0.0
+        decision_reason = "ema_commit" if settings.smoothing_method == "ema" else "commit"
 
-    decision_reason = "vote_commit" if settings.smoothing_method == "vote" else "ema_commit"
-
+    # ===== Thresholding =====
     if action_conf < float(settings.threshold_action):
         committed_action = 0
         committed_finger = 0
@@ -135,6 +162,8 @@ def postprocess_predictions(
     else:
         candidate_action = int(smoothed_action_id)
         committed_action = candidate_action
+
+        # ===== Hysteresis on action transitions (OPEN/CLOSE) =====
         if settings.hysteresis_enabled and candidate_action in {1, 2} and state.last_action in {1, 2}:
             if candidate_action != state.last_action:
                 if action_conf < float(settings.threshold_action) + float(settings.hysteresis_margin):
@@ -146,6 +175,7 @@ def postprocess_predictions(
                     else:
                         state.pending_action = candidate_action
                         state.pending_count = 1
+
                     if state.pending_count >= int(settings.hysteresis_frames):
                         committed_action = candidate_action
                         state.pending_action = None
@@ -158,24 +188,38 @@ def postprocess_predictions(
                 state.pending_action = None
                 state.pending_count = 0
 
+        # ===== Finger commit =====
         committed_finger = int(smoothed_finger_id)
+
+        # If action is REST, finger must be NONE
         if committed_action == 0:
             committed_finger = 0
         else:
+            # Optional adjacency assist
             if settings.adjacency_enabled and smoothed_finger_probs.size:
-                sorted_idx = np.argsort(smoothed_finger_probs)[::-1]
-                top1, top2 = int(sorted_idx[0]), int(sorted_idx[1]) if len(sorted_idx) > 1 else int(sorted_idx[0])
-                if top1 != top2:
-                    gap = float(smoothed_finger_probs[top1] - smoothed_finger_probs[top2])
-                    if gap < float(settings.finger_delta) and state.last_finger != 0 and _adjacent_to(state.last_finger, top2):
-                        committed_finger = top2
-                        decision_reason = "adjacent_correction"
+                # Only allow adjacency correction if we have at least some stability in current state
+                if state.frames_in_state >= 2:
+                    sorted_idx = np.argsort(smoothed_finger_probs)[::-1]
+                    top1 = int(sorted_idx[0])
+                    top2 = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1
+                    if top1 != top2:
+                        gap = float(smoothed_finger_probs[top1] - smoothed_finger_probs[top2])
+                        if (
+                            gap < float(settings.finger_delta)
+                            and state.last_finger != 0
+                            and _adjacent_to(state.last_finger, top2)
+                        ):
+                            committed_finger = top2
+                            decision_reason = "adjacent_correction"
+
+            # Finger threshold
             if finger_conf < float(settings.threshold_finger):
                 committed_finger = 0
                 if decision_reason not in {"below_threshold", "hysteresis_hold"}:
                     decision_reason = "finger_below_threshold"
 
-    if committed_action == state.last_action:
+    # ===== Update state =====
+    if int(committed_action) == int(state.last_action):
         state.frames_in_state += 1
     else:
         state.frames_in_state = 1
@@ -192,6 +236,6 @@ def postprocess_predictions(
         "finger_conf": float(finger_conf),
         "smoothed_action_id": int(smoothed_action_id),
         "smoothed_finger_id": int(smoothed_finger_id),
-        "decision_reason": decision_reason,
+        "decision_reason": str(decision_reason),
         "frames_in_state": int(state.frames_in_state),
     }

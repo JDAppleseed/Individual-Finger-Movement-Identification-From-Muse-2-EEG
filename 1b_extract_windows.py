@@ -33,7 +33,7 @@ STEP_SEC = 0.05
 LABEL_GATED = True  # If True, drop unlabeled windows instead of REST-by-exclusion
 KEEP_BASELINE_REST_EVENTS = 2  # Keep REST only if overlapping first N rest events
 MIN_OVERLAP_RATIO = 0.20   # fraction of WINDOW_SEC required for non-REST labels
-GUARD_BAND_SEC = 0.15     # skip windows within ± this time of any movement event boundary
+GUARD_BAND_SEC = 0.00     # skip windows within ± this time of any movement event boundary
 ARTIFACT_MIN_OVERLAP_FRAC = 0.20  # if artifact overlaps >=20% of window, drop window
 
 MIN_OVERLAP_SEC = MIN_OVERLAP_RATIO * WINDOW_SEC
@@ -260,6 +260,12 @@ drop_artifact = 0
 drop_guard_band = 0
 drop_invalid_label = 0
 drop_short_segment = 0
+
+drop_guard_band_by_action = {}
+drop_artifact_by_action = {}
+kept_by_action = {}
+drop_no_overlap_by_action = {}
+drop_invalid_by_action = {}
 
 for start_idx in range(0, max_idx + 1, STEP_SAMPLES):
     total_windows += 1
