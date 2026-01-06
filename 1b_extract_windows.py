@@ -1,7 +1,8 @@
+#!/usr/bin/env python3
 """
 STEP 1b — Window Extraction (time-based resampling, audited)
 
-Converts continuous EEG + event markers → windowed dataset (tabular + sequence npz)
+Converts continuous EEG + event markers → windowed dataset (CSV + sequence NPZ).
 
 Key upgrades:
 - Time-based windows using features.time_s (absolute_v1)
@@ -10,14 +11,18 @@ Key upgrades:
 - Deterministic session auto-pick with completed-session preference
 """
 
-import json
+from __future__ import annotations
+
 import argparse
 import csv
+import json
+import re
 import sys
-from typing import Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
 
 from utils.label_schema import (
     ACTION_REST,
@@ -28,11 +33,13 @@ from utils.label_schema import (
 # =========================
 # ===== CONFIG ============
 # =========================
+
 SOURCE_FS_DEFAULT = 256
 TARGET_FS_DEFAULT = 256.0
 WINDOW_SEC_DEFAULT = 0.25
 STEP_SEC = 0.05
 PAD_SEC = 0.05
+
 GAP_THRESHOLD_SEC = 0.10
 DEDUP_POLICY = "keep_last"
 INTERPOLATION_POLICY = "np.interp.linear"
@@ -40,8 +47,8 @@ INTERPOLATION_POLICY = "np.interp.linear"
 # Label assignment robustness
 LABEL_GATED = True  # If True, drop unlabeled windows instead of REST-by-exclusion
 KEEP_BASELINE_REST_EVENTS = 2  # Keep REST only if overlapping first N rest events
-MIN_OVERLAP_RATIO = 0.20   # fraction of WINDOW_SEC required for non-REST labels
-GUARD_BAND_SEC = 0.00     # skip windows within ± this time of any movement event boundary
+MIN_OVERLAP_RATIO = 0.20       # fraction of WINDOW_SEC required for non-REST labels
+GUARD_BAND_SEC = 0.00          # skip windows within ± this time of any movement boundary (midpoint-based)
 ARTIFACT_MIN_OVERLAP_FRAC = 0.20  # if artifact overlaps >=20% of window, drop window
 
 RAW_FILE = "eeg_features.csv"
@@ -49,13 +56,14 @@ EVENT_FILE = "events.csv"
 OUT_FILE = "eeg_windows.csv"
 OUT_NPZ = "eeg_windows.npz"
 DEFAULT_SUBJECT_ID = "1-M17"
+ROOT_DIR = Path(__file__).resolve().parent
 
 
 # =========================
-# ===== HELPERS ===========
+# ===== UTILITIES =========
 # =========================
 
-def _read_json(path: Path):
+def _read_json(path: Path) -> Dict[str, Any]:
     if not path or not path.exists():
         return {}
     try:
@@ -64,13 +72,28 @@ def _read_json(path: Path):
         return {}
 
 
-def _csv_has_data_rows(path: Path) -> bool:
+def load_root_session_meta() -> Dict[str, Any]:
+    return _read_json(ROOT_DIR / "session_meta.json")
+
+
+def _resolve_path(path_str: Optional[str]) -> Optional[Path]:
+    if not path_str:
+        return None
+    p = Path(path_str)
+    if p.is_absolute():
+        return p
+    if p.exists():
+        return p
+    return ROOT_DIR / p
+
+
+def _csv_has_data_rows(path: Optional[Path]) -> bool:
     if not path or not path.exists() or path.stat().st_size == 0:
         return False
     try:
         with open(path, "r", newline="") as f:
             reader = csv.reader(f)
-            _ = next(reader, None)
+            _ = next(reader, None)  # header
             for row in reader:
                 if any(str(cell).strip() for cell in row):
                     return True
@@ -79,15 +102,137 @@ def _csv_has_data_rows(path: Path) -> bool:
     return False
 
 
-def _session_id_from_filename(filename: str, subject_id: str):
+def _session_id_from_filename(filename: str, subject_id: str) -> Optional[str]:
+    """
+    Expected:
+      {subject_id}_{session_id}_eeg_features.csv
+      {subject_id}_{session_id}_events*.csv
+    """
     prefix = f"{subject_id}_"
     if not filename.startswith(prefix):
         return None
     if filename.endswith("_eeg_features.csv"):
         return filename[len(prefix):-len("_eeg_features.csv")]
-    if filename.endswith("_events.csv"):
-        return filename[len(prefix):-len("_events.csv")]
+    events_idx = filename.find("_events")
+    if events_idx != -1:
+        return filename[len(prefix):events_idx]
     return None
+
+
+def _events_prefix_from_features(features_path: Path) -> Optional[str]:
+    if not features_path:
+        return None
+    name = features_path.name
+    suffix = "_eeg_features.csv"
+    if not name.endswith(suffix):
+        return None
+    return name[:-len(suffix)]  # includes "{subject}_{session}"
+
+
+def _features_prefix_from_events(events_path: Path) -> Optional[str]:
+    if not events_path:
+        return None
+    name = events_path.name
+    idx = name.find("_events")
+    if idx < 0:
+        return None
+    return name[:idx]  # includes "{subject}_{session}"
+
+
+def _select_events_for_prefix(prefix: str, base_dir: Path) -> Optional[Path]:
+    """
+    prefix example: "1-M17_20260103_153353"
+    Preference order:
+      1) shifted (highest name sort)
+      2) exact "{prefix}_events.csv"
+      3) latest non-autosave
+      4) latest anything
+    """
+    if not prefix:
+        return None
+
+    candidates = sorted(base_dir.glob(f"{prefix}_events*.csv"), key=lambda p: p.name)
+    if not candidates:
+        return None
+
+    shifted = [p for p in candidates if "_events_shifted_" in p.name]
+    if shifted:
+        return sorted(shifted, key=lambda p: p.name)[-1]
+
+    exact = base_dir / f"{prefix}_events.csv"
+    if exact.exists():
+        return exact
+
+    non_autosave = [p for p in candidates if "_events_autosave" not in p.name]
+    if non_autosave:
+        return sorted(non_autosave, key=lambda p: p.name)[-1]
+
+    return candidates[-1]
+
+
+def infer_subject_session_from_features_path(path: Path):
+    """
+    Expected filename:
+      <subject_id>_<YYYYMMDD>_<HHMMSS>_eeg_features.csv
+
+    Example:
+      1-M17_20260103_153353_eeg_features.csv
+      subject_id = "1-M17"
+      session_id = "20260103_153353"
+    """
+    if not path:
+        return None, None
+
+    name = path.name
+
+    m = re.match(
+        r"^(?P<subject>.+?)_(?P<session>\d{8}_\d{6})_eeg_features\.csv$",
+        name
+    )
+    if m:
+        return m.group("subject"), m.group("session")
+
+    # fallback: if it ends with _eeg_features.csv but doesn't match strict pattern
+    suffix = "_eeg_features.csv"
+    if name.endswith(suffix):
+        prefix = name[:-len(suffix)]
+        # Try split on last 2 underscores to recover session like YYYYMMDD_HHMMSS
+        parts = prefix.split("_")
+        if len(parts) >= 3:
+            session = "_".join(parts[-2:])
+            subject = "_".join(parts[:-2])
+            return subject, session
+        return prefix, None
+
+    return None, None
+
+
+def _infer_events_shift_s(events_path: Optional[Path]) -> float:
+    """
+    Parse ..._events_shifted_49.5s.csv or ..._events_shifted_-2.0s.csv
+    """
+    if not events_path:
+        return 0.0
+    m = re.search(r"_events_shifted_(?P<shift>-?\d+(?:\.\d+)?)s\.csv$", events_path.name)
+    if m:
+        try:
+            return float(m.group("shift"))
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _load_latest_session_meta(base_dir: Path) -> Dict[str, Any]:
+    if not base_dir.exists():
+        return {}
+    candidates = list(base_dir.glob("*_session_meta.json"))
+    if not candidates:
+        return {}
+    try:
+        latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    except Exception:
+        return {}
+    return _read_json(latest)
 
 
 def _session_sort_key(entry: dict):
@@ -98,22 +243,56 @@ def _session_sort_key(entry: dict):
     return (session_id, updated, meta_name)
 
 
+def _infer_events_from_features(features_path: Optional[Path]) -> Optional[Path]:
+    if not features_path:
+        return None
+    prefix = _events_prefix_from_features(features_path)
+    if not prefix:
+        return None
+    exact = features_path.with_name(f"{prefix}_events.csv")
+    if exact.exists():
+        return exact
+    return _select_events_for_prefix(prefix, features_path.parent)
+
+
+def _infer_features_from_events(events_path: Optional[Path]) -> Optional[Path]:
+    if not events_path:
+        return None
+    prefix = _features_prefix_from_events(events_path)
+    if not prefix:
+        return None
+    return events_path.with_name(f"{prefix}_eeg_features.csv")
+
+
 def _collect_session_meta(base_dir: Path, subject_id: Optional[str]):
     candidates = []
     if not base_dir.exists():
         return candidates
+
     for meta_path in sorted(base_dir.glob("*_session_meta.json")):
         meta = _read_json(meta_path)
         if not meta:
             continue
-        if subject_id and meta.get("subject_id") != subject_id:
+        if subject_id and str(meta.get("subject_id", "")) != str(subject_id):
             continue
-        features_path = Path(meta.get("features_path", "")) if meta.get("features_path") else None
-        events_path = Path(meta.get("events_path", "")) if meta.get("events_path") else None
+
+        features_path = _resolve_path(meta.get("features_path", "")) if meta.get("features_path") else None
+        events_path = _resolve_path(meta.get("events_path", "")) if meta.get("events_path") else None
+
+        if features_path and not events_path:
+            inferred = _infer_events_from_features(features_path)
+            if inferred and inferred.exists():
+                events_path = inferred
+        if events_path and not features_path:
+            inferred = _infer_features_from_events(events_path)
+            if inferred and inferred.exists():
+                features_path = inferred
+
         if not features_path or not events_path:
             continue
         if not (_csv_has_data_rows(features_path) and _csv_has_data_rows(events_path)):
             continue
+
         candidates.append({
             "meta": meta,
             "meta_path": meta_path,
@@ -121,6 +300,7 @@ def _collect_session_meta(base_dir: Path, subject_id: Optional[str]):
             "events_path": events_path,
             "complete": bool(meta.get("complete")),
         })
+
     return candidates
 
 
@@ -133,8 +313,9 @@ def _find_latest_pair_by_subject(subject_id: str, base_dir: Path):
         session_id = _session_id_from_filename(feat.name, subject_id)
         if not session_id:
             continue
-        events_path = base_dir / f"{subject_id}_{session_id}_events.csv"
-        if not events_path.exists():
+        prefix = f"{subject_id}_{session_id}"
+        events_path = _select_events_for_prefix(prefix, base_dir)
+        if not events_path:
             continue
         if not (_csv_has_data_rows(feat) and _csv_has_data_rows(events_path)):
             continue
@@ -145,29 +326,19 @@ def _find_latest_pair_by_subject(subject_id: str, base_dir: Path):
     return candidates[-1]
 
 
-def _infer_events_from_features(features_path: Path):
-    if not features_path:
-        return None
-    name = features_path.name
-    if name.endswith("_eeg_features.csv"):
-        return features_path.with_name(name.replace("_eeg_features.csv", "_events.csv"))
-    return None
-
-
-def _infer_features_from_events(events_path: Path):
-    if not events_path:
-        return None
-    name = events_path.name
-    if name.endswith("_events.csv"):
-        return events_path.with_name(name.replace("_events.csv", "_eeg_features.csv"))
-    return None
-
-
 def _select_session_paths(args):
-    session_meta = {}
-    features_path = Path(args.features) if args.features else None
-    events_path = Path(args.events) if args.events else None
+    """
+    Selection order:
+      1) overrides (--features/--events), with inference pairing
+      2) latest completed session_meta in data/processed
+      3) root session_meta.json
+      4) latest subject files in data/processed
+    """
+    session_meta: Dict[str, Any] = {}
+    features_path = _resolve_path(args.features) if args.features else None
+    events_path = _resolve_path(args.events) if args.events else None
 
+    # (1) overrides
     if features_path or events_path:
         if features_path and not events_path:
             inferred = _infer_events_from_features(features_path)
@@ -178,43 +349,43 @@ def _select_session_paths(args):
             if inferred and inferred.exists():
                 features_path = inferred
         if not features_path or not events_path:
-            root_meta = _read_json(Path("session_meta.json"))
+            root_meta = load_root_session_meta()
             if root_meta:
                 session_meta = root_meta
                 if not features_path:
-                    features_path = Path(root_meta.get("features_path", RAW_FILE))
+                    features_path = _resolve_path(root_meta.get("features_path", RAW_FILE))
                 if not events_path:
-                    events_path = Path(root_meta.get("events_path", EVENT_FILE))
+                    events_path = _resolve_path(root_meta.get("events_path", EVENT_FILE))
         return features_path, events_path, session_meta, "overrides"
 
-    base_dir = Path("data/processed")
+    base_dir = ROOT_DIR / "data/processed"
+
+    # (2) session_meta files
     candidates = _collect_session_meta(base_dir, args.subject_id)
-    selected = None
     if candidates:
         complete = [c for c in candidates if c.get("complete")]
         pool = complete if complete else candidates
         pool.sort(key=_session_sort_key)
         selected = pool[-1]
-
-    if selected:
         session_meta = selected.get("meta", {})
         features_path = selected.get("features_path")
         events_path = selected.get("events_path")
-        source = f"session_meta:{selected.get('meta_path').name}"
-        return features_path, events_path, session_meta, source
+        return features_path, events_path, session_meta, f"session_meta:{selected.get('meta_path').name}"
 
-    root_meta = _read_json(Path("session_meta.json"))
+    # (3) root session_meta.json
+    root_meta = load_root_session_meta()
     if root_meta:
-        features_path = Path(root_meta.get("features_path", RAW_FILE))
-        events_path = Path(root_meta.get("events_path", EVENT_FILE))
-        session_meta = root_meta
-        return features_path, events_path, session_meta, "session_meta.json"
+        fp = _resolve_path(root_meta.get("features_path", RAW_FILE))
+        ep = _resolve_path(root_meta.get("events_path", EVENT_FILE))
+        if _csv_has_data_rows(fp) and _csv_has_data_rows(ep):
+            return fp, ep, root_meta, "session_meta.json"
 
+    # (4) latest subject files
     if args.subject_id:
         pair = _find_latest_pair_by_subject(args.subject_id, base_dir)
         if pair:
-            _, features_path, events_path = pair
-            return features_path, events_path, session_meta, "latest_subject_files"
+            _, fp, ep = pair
+            return fp, ep, session_meta, "latest_subject_files"
 
     return None, None, session_meta, "none"
 
@@ -225,6 +396,8 @@ def _dedupe_times_keep_last(times: np.ndarray, signal: np.ndarray):
     signal_sorted = signal[order]
     if times_sorted.size == 0:
         return times_sorted, signal_sorted
+
+    # keep last sample for each duplicated time
     rev_idx = np.unique(times_sorted[::-1], return_index=True)[1]
     keep_idx = times_sorted.size - 1 - rev_idx
     keep_idx.sort()
@@ -235,6 +408,7 @@ def _load_features(path: Path):
     df = pd.read_csv(path)
     if "time_s" not in df.columns:
         raise RuntimeError(f"time_s column missing in features file: {path}")
+
     times = df["time_s"].astype(float).to_numpy()
 
     channel_cols = [c for c in ["ch1", "ch2", "ch3", "ch4"] if c in df.columns]
@@ -259,9 +433,17 @@ def _load_features(path: Path):
     return times, signal, channel_cols
 
 
+def _safe_int(x: Any, default: int = 0) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+
 def _load_events(path: Path):
     events_df = pd.read_csv(path)
-    events = []
+    events: List[Dict[str, Any]] = []
+
     for _, row in events_df.iterrows():
         try:
             onset_s = float(row.get("onset_s", np.nan))
@@ -269,6 +451,7 @@ def _load_events(path: Path):
             onset_s = np.nan
         if not np.isfinite(onset_s):
             continue
+
         try:
             duration_s = float(row.get("duration_s", 0.0))
         except Exception:
@@ -285,58 +468,87 @@ def _load_events(path: Path):
             end_s = onset_s + duration_s
 
         e = {
-            "onset_s": onset_s,
-            "duration_s": duration_s,
-            "end_s": end_s,
+            "onset_s": float(onset_s),
+            "duration_s": float(duration_s),
+            "end_s": float(end_s),
             "type": str(row.get("type", "")).strip(),
-            "finger_id": int(row.get("finger_id", 0)) if "finger_id" in row else 0,
-            "action_id": int(row.get("action_id", 0)) if "action_id" in row else 0,
+            "finger_id": _safe_int(row.get("finger_id", 0), 0),
+            "action_id": _safe_int(row.get("action_id", 0), 0),
             "confidence": row.get("confidence", np.nan),
             "source": str(row.get("source", "")).strip() or "unknown",
             "notes": str(row.get("notes", "")).strip() if "notes" in row else "",
             "session_mode": str(row.get("session_mode", "")).strip() if "session_mode" in row else "",
-            "trial_id": int(row.get("trial_id", 0)) if "trial_id" in row else 0,
-            "block_id": int(row.get("block_id", 0)) if "block_id" in row else 0,
+            "trial_id": _safe_int(row.get("trial_id", 0), 0),
+            "block_id": _safe_int(row.get("block_id", 0), 0),
         }
         events.append(e)
+
     return events
 
 
-def overlap_s(a_start, a_end, b_start, b_end) -> float:
-    """Returns overlap duration in seconds between [a_start,a_end] and [b_start,b_end]."""
+def overlap_s(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
+    """Overlap duration (seconds) between [a_start,a_end] and [b_start,b_end]."""
     return max(0.0, min(a_end, b_end) - max(a_start, b_start))
 
 
-def event_priority(e: dict) -> int:
+def event_priority(e: Dict[str, Any]) -> int:
     """
     Lower number = higher priority when overlap ties.
-    Priority:
       0: artifact
       1: calibration (if present)
       2: movement (action != REST)
       3: rest
-      4: unknown/other
+      4: other
     """
-    if e["type"] == "artifact":
+    if e.get("type") == "artifact":
         return 0
-    if e["type"] == "calibration":
+    if e.get("type") == "calibration":
         return 1
-    if int(e["action_id"]) != int(ACTION_REST):
+    if int(e.get("action_id", ACTION_REST)) != int(ACTION_REST):
         return 2
-    if int(e["action_id"]) == int(ACTION_REST):
+    if int(e.get("action_id", ACTION_REST)) == int(ACTION_REST):
         return 3
     return 4
 
 
-def is_baseline_rest_window(window_start, window_end, baseline_rest_events, min_overlap_sec) -> bool:
+def is_baseline_rest_window(window_start: float, window_end: float,
+                            baseline_rest_events: List[Dict[str, Any]],
+                            min_overlap_sec: float) -> bool:
     if not baseline_rest_events:
         return False
     for e in baseline_rest_events:
-        ov = overlap_s(window_start, window_end, e["onset_s"], e["end_s"])
-        if ov >= min_overlap_sec:
+        if overlap_s(window_start, window_end, e["onset_s"], e["end_s"]) >= min_overlap_sec:
             return True
     return False
 
+
+def _next_available_path(base_path: Path) -> Path:
+    if not base_path.exists():
+        return base_path
+    stem = base_path.stem
+    suffix = base_path.suffix
+    for i in range(2, 1000):
+        candidate = base_path.with_name(f"{stem}_v{i}{suffix}")
+        if not candidate.exists():
+            return candidate
+    return base_path
+
+def _u_dtype_for(s: str, min_len: int = 1) -> np.dtype:
+    """Return a NumPy unicode dtype long enough to hold string s without truncation."""
+    s = "" if s is None else str(s)
+    n = max(min_len, len(s))
+    return np.dtype(f"<U{n}")
+
+def _uarr_fill(n: int, value: str) -> np.ndarray:
+    """np.full that cannot truncate unicode strings."""
+    v = "" if value is None else str(value)
+    return np.full((n,), v, dtype=_u_dtype_for(v))
+
+def _uarr_from_list(values: List[str]) -> np.ndarray:
+    """np.array for unicode lists with max-length dtype (no truncation)."""
+    vals = ["" if v is None else str(v) for v in values]
+    max_len = max([1] + [len(v) for v in vals])
+    return np.array(vals, dtype=np.dtype(f"<U{max_len}"))
 
 # =========================
 # ===== MAIN ==============
@@ -346,16 +558,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--features", type=str, default=None, help="Override features path")
     parser.add_argument("--events", type=str, default=None, help="Override events path")
-    parser.add_argument("--subject-id", type=str, default=DEFAULT_SUBJECT_ID, help="Subject ID to select latest session files")
-    parser.add_argument("--target-fs", type=float, default=None, help="Target sampling rate (Hz) for resampling windows")
-    parser.add_argument("--allow-gaps", action="store_true", help="Keep windows with large gaps and mark them")
-    parser.add_argument("--ignore-misalignment", action="store_true", help="Warn but continue if events are outside feature range")
+    parser.add_argument("--subject-id", type=str, default=DEFAULT_SUBJECT_ID,
+                        help="Subject ID to select latest session files")
+    parser.add_argument("--target-fs", type=float, default=None,
+                        help="Target sampling rate (Hz) for resampling windows")
+    parser.add_argument("--allow-gaps", action="store_true",
+                        help="Keep windows with large gaps and mark them")
+    parser.add_argument("--ignore-misalignment", action="store_true",
+                        help="Warn but continue if events are outside feature range")
     args = parser.parse_args()
 
     features_path, events_path, session_meta, source = _select_session_paths(args)
 
     if not features_path:
-        print("No features file found. Run: python 1_stream_and_record.py to create a new session, then re-run 1b_extract_windows.py.")
+        print("No features file found. Run Step 1 to create a new session, then re-run 1b_extract_windows.py.")
         raise SystemExit(2)
     if not features_path.exists():
         print(f"No features file found at {features_path}")
@@ -365,6 +581,44 @@ def main():
         print("No events file found. Provide --events PATH or run Step 1 to create events before extraction.")
         raise SystemExit(2)
 
+    inferred_subject, inferred_session = infer_subject_session_from_features_path(features_path)
+
+    # Start with filename-derived values (most reliable)
+    subject_id_value = inferred_subject
+    session_id_value = inferred_session
+
+    experiment_hash_value = None
+    if session_meta:
+        experiment_hash_value = session_meta.get("experiment_hash") or experiment_hash_value
+
+    # Root meta is only used if it matches the inferred subject/session
+    root_meta = load_root_session_meta()
+    if root_meta:
+        root_subject = root_meta.get("subject_id")
+        root_session = root_meta.get("session_id")
+        root_exp = root_meta.get("experiment_hash")
+
+        root_matches = True
+        if inferred_subject and root_subject and root_subject != inferred_subject:
+            root_matches = False
+        if inferred_session and root_session and root_session != inferred_session:
+            root_matches = False
+
+        if root_matches:
+            if not experiment_hash_value and root_exp:
+                experiment_hash_value = root_exp
+
+    # If still missing, use session_meta hash (already attempted) or UNKNOWN
+    if not experiment_hash_value:
+        experiment_hash_value = "UNKNOWN"
+
+    if not subject_id_value:
+        subject_id_value = "UNKNOWN"
+    if session_id_value is None:
+        session_id_value = ""
+
+    events_time_shift_s = _infer_events_shift_s(events_path)
+
     target_fs = float(args.target_fs) if args.target_fs is not None else float(session_meta.get("sampling_rate", TARGET_FS_DEFAULT))
     window_sec = float(session_meta.get("window_sec", WINDOW_SEC_DEFAULT)) if session_meta else WINDOW_SEC_DEFAULT
     window_samples = int(round(window_sec * target_fs))
@@ -372,21 +626,22 @@ def main():
         print(f"Invalid window_samples={window_samples}; check window_sec={window_sec} and target_fs={target_fs}.")
         raise SystemExit(2)
 
-    min_overlap_sec = MIN_OVERLAP_RATIO * window_sec
-
+    min_overlap_sec = float(MIN_OVERLAP_RATIO) * float(window_sec)
     timebase_version = session_meta.get("timebase_version") or session_meta.get("timebase") or "unknown"
 
     print(f"Session selection source: {source}")
     print(f"Using features file: {features_path}")
     print(f"Using events file: {events_path}")
+    print(f"Derived subject_id: {subject_id_value}")
+    print(f"Derived experiment_hash: {experiment_hash_value}")
+    print(f"Derived session_id: {session_id_value}")
+    print(f"Events time shift (s): {events_time_shift_s}")
     print(f"Target window rate: {target_fs} Hz ({window_samples} samples/window)")
     print(f"Interpolation policy: {INTERPOLATION_POLICY}, dedupe: {DEDUP_POLICY}")
+    print(f"Timebase version: {timebase_version}")
 
-    # =========================
-    # ===== LOAD DATA =========
-    # =========================
+    # ===== LOAD DATA =====
     times, signal, channel_cols = _load_features(features_path)
-
     events = _load_events(events_path)
 
     # Alignment strictness
@@ -407,61 +662,57 @@ def main():
                 print(f"❌ {msg}")
                 raise SystemExit(2)
 
-    # Precompute boundaries for guard band (movement events only)
-    movement_boundaries = []
+    # Guard band boundaries (movement events only)
+    movement_boundaries: List[float] = []
     for e in events:
-        if e["type"] == "artifact":
+        if e.get("type") == "artifact":
             continue
-        if int(e["action_id"]) != int(ACTION_REST):
+        if int(e.get("action_id", ACTION_REST)) != int(ACTION_REST):
             movement_boundaries.append(float(e["onset_s"]))
             movement_boundaries.append(float(e["end_s"]))
-    movement_boundaries = np.array(sorted(set(movement_boundaries)), dtype=float)
+    movement_boundaries_arr = np.array(sorted(set(movement_boundaries)), dtype=float)
 
-    # Baseline REST allow-list (first N rest events by onset)
-    baseline_rest_events = []
+    def in_guard_band(window_start: float, window_end: float) -> bool:
+        if movement_boundaries_arr.size == 0:
+            return False
+        mid = 0.5 * (window_start + window_end)
+        return bool(np.any(np.abs(movement_boundaries_arr - mid) <= GUARD_BAND_SEC))
+
+    # Baseline REST allow-list (first N rest events)
+    baseline_rest_events: List[Dict[str, Any]] = []
     if KEEP_BASELINE_REST_EVENTS > 0:
         rest_events = [
             e for e in events
-            if int(e["action_id"]) == int(ACTION_REST) and e["type"] == "rest"
+            if int(e.get("action_id", ACTION_REST)) == int(ACTION_REST) and e.get("type") == "rest"
         ]
         rest_events.sort(key=lambda x: float(x["onset_s"]))
-        baseline_rest_events = rest_events[:KEEP_BASELINE_REST_EVENTS]
+        baseline_rest_events = rest_events[: int(KEEP_BASELINE_REST_EVENTS)]
 
-    def in_guard_band(window_start, window_end) -> bool:
-        if movement_boundaries.size == 0:
-            return False
-        mid = 0.5 * (window_start + window_end)
-        return np.any(np.abs(movement_boundaries - mid) <= GUARD_BAND_SEC)
+    # ===== WINDOW LOOP =====
+    windows: List[Dict[str, Any]] = []
+    sequence_windows: List[np.ndarray] = []
+    action_labels: List[int] = []
+    finger_labels: List[int] = []
+    window_starts: List[float] = []
+    window_ends: List[float] = []
+    confidence_hints: List[float] = []
+    artifact_flags: List[int] = []
+    gap_flags: List[int] = []
 
-    # =========================
-    # ===== WINDOW LOOP =======
-    # =========================
-    windows = []
-    sequence_windows = []
-    action_labels = []
-    finger_labels = []
-    subject_ids = []
-    experiment_hashes = []
-    window_starts = []
-    window_ends = []
-    confidence_hints = []
-    artifact_flags = []
-    gap_flags = []
-
-    # New metadata arrays for QA
-    assigned_event_types = []
-    overlap_seconds = []
-    overlap_fracs = []
-    event_onsets = []
-    event_durations = []
-    event_sources = []
-    session_modes = []
-    trial_ids = []
-    block_ids = []
+    # QA/meta arrays
+    assigned_event_types: List[str] = []
+    overlap_seconds: List[float] = []
+    overlap_fracs: List[float] = []
+    event_onsets_out: List[float] = []
+    event_durations_out: List[float] = []
+    event_sources: List[str] = []
+    session_modes: List[str] = []
+    trial_ids: List[int] = []
+    block_ids: List[int] = []
 
     start_time = float(times[0])
     end_time = float(times[-1])
-    last_start = end_time - window_sec
+    last_start = end_time - float(window_sec)
     if last_start < start_time:
         raise RuntimeError(
             f"Not enough time coverage in {features_path}: "
@@ -485,7 +736,7 @@ def main():
 
     for window_start in window_starts_grid:
         total_windows += 1
-        window_end = float(window_start + window_sec)
+        window_end = float(window_start + float(window_sec))
 
         if GUARD_BAND_SEC > 0 and in_guard_band(window_start, window_end):
             drop_guard_band += 1
@@ -498,29 +749,30 @@ def main():
 
         times_pad = times[mask_pad]
         signal_pad = signal[mask_pad]
-        core_count = np.sum((times_pad >= window_start) & (times_pad < window_end))
+
+        core_count = int(np.sum((times_pad >= window_start) & (times_pad < window_end)))
         if core_count < 2 or times_pad.size < 2:
             drop_short_segment += 1
             continue
 
-        max_dt = float(np.max(np.diff(times_pad))) if times_pad.size >= 2 else np.inf
+        max_dt = float(np.max(np.diff(times_pad))) if times_pad.size >= 2 else float("inf")
         gap_flag = int(max_dt > GAP_THRESHOLD_SEC)
         if gap_flag and not args.allow_gaps:
             drop_gap += 1
             continue
 
-        # Compute overlaps with events
+        # Overlaps with events
         overlapping = []
         any_artifact_flag = 0
 
         for e in events:
-            ov = overlap_s(window_start, window_end, e["onset_s"], e["end_s"])
+            ov = overlap_s(window_start, window_end, float(e["onset_s"]), float(e["end_s"]))
             if ov <= 0:
                 continue
 
-            ov_frac = ov / window_sec
+            ov_frac = ov / float(window_sec)
 
-            if e["type"] == "artifact" and ov_frac >= ARTIFACT_MIN_OVERLAP_FRAC:
+            if e.get("type") == "artifact" and ov_frac >= ARTIFACT_MIN_OVERLAP_FRAC:
                 any_artifact_flag = 1
                 break
 
@@ -530,7 +782,7 @@ def main():
             drop_artifact += 1
             continue
 
-        # Default label if no overlap: REST/NONE
+        # Default labels
         artifact_flag = 0
         action_id = int(ACTION_REST)
         finger_id = int(FINGER_NONE)
@@ -556,29 +808,29 @@ def main():
         if overlapping:
             overlapping.sort(
                 key=lambda x: (
-                    -x[0],
-                    event_priority(x[2]),
+                    -x[0],                 # max overlap seconds
+                    event_priority(x[2]),  # priority ties
                     -float(x[2]["onset_s"]),
                     -float(x[2]["duration_s"]),
                 )
             )
             best_ov, best_ov_frac, best = overlapping[0]
 
-            if best["type"] == "artifact":
+            if best.get("type") == "artifact":
                 artifact_flag = 1
             else:
                 if best_ov >= min_overlap_sec:
-                    action_id = int(best["action_id"])
-                    finger_id = int(best["finger_id"])
+                    action_id = int(best.get("action_id", ACTION_REST))
+                    finger_id = int(best.get("finger_id", FINGER_NONE))
                     confidence_hint = best.get("confidence", np.nan)
                     assigned_type = best.get("type", "") or "event"
-                    best_onset = float(best["onset_s"])
-                    best_dur = float(best["duration_s"])
+                    best_onset = float(best.get("onset_s", np.nan))
+                    best_dur = float(best.get("duration_s", np.nan))
                     best_source = str(best.get("source", ""))
                     best_session_mode = str(best.get("session_mode", ""))
                     best_trial_id = int(best.get("trial_id", 0))
                     best_block_id = int(best.get("block_id", 0))
-                elif int(best["action_id"]) == int(ACTION_REST):
+                elif int(best.get("action_id", ACTION_REST)) == int(ACTION_REST):
                     if LABEL_GATED:
                         if is_baseline_rest_window(window_start, window_end, baseline_rest_events, min_overlap_sec):
                             action_id = int(ACTION_REST)
@@ -616,6 +868,7 @@ def main():
             drop_invalid_label += 1
             continue
 
+        # Resample to fixed window_samples
         grid = np.linspace(window_start, window_end, window_samples, endpoint=False)
         segment = np.empty((window_samples, signal.shape[1]), dtype=float)
         for ch_idx in range(signal.shape[1]):
@@ -623,15 +876,13 @@ def main():
 
         features = segment.mean(axis=0)
 
+        # collect
         sequence_windows.append(segment.astype(np.float32))
         action_labels.append(int(action_id))
         finger_labels.append(int(finger_id))
 
-        subject_ids.append(session_meta.get("subject_id", "UNKNOWN"))
-        experiment_hashes.append(session_meta.get("experiment_hash", "UNKNOWN"))
-
-        window_starts.append(window_start)
-        window_ends.append(window_end)
+        window_starts.append(float(window_start))
+        window_ends.append(float(window_end))
         confidence_hints.append(float(confidence_hint) if pd.notna(confidence_hint) else np.nan)
         artifact_flags.append(int(artifact_flag))
         gap_flags.append(int(gap_flag))
@@ -639,8 +890,8 @@ def main():
         assigned_event_types.append(str(assigned_type))
         overlap_seconds.append(float(best_ov))
         overlap_fracs.append(float(best_ov_frac))
-        event_onsets.append(float(best_onset) if np.isfinite(best_onset) else np.nan)
-        event_durations.append(float(best_dur) if np.isfinite(best_dur) else np.nan)
+        event_onsets_out.append(float(best_onset) if np.isfinite(best_onset) else np.nan)
+        event_durations_out.append(float(best_dur) if np.isfinite(best_dur) else np.nan)
         event_sources.append(str(best_source) if best_source is not None else "")
         session_modes.append(str(best_session_mode) if best_session_mode is not None else "")
         trial_ids.append(int(best_trial_id))
@@ -653,14 +904,14 @@ def main():
             "ch4": float(features[3]) if signal.shape[1] > 3 else 0.0,
             "action_id": int(action_id),
             "finger_id": int(finger_id),
-            "subject_id": session_meta.get("subject_id", "UNKNOWN"),
-            "experiment_hash": session_meta.get("experiment_hash", "UNKNOWN"),
+            "subject_id": str(subject_id_value),
+            "experiment_hash": str(experiment_hash_value),
+            "session_id": str(session_id_value),
             "window_start": float(window_start),
             "window_end": float(window_end),
             "confidence_hint": float(confidence_hint) if pd.notna(confidence_hint) else np.nan,
             "artifact_flag": int(artifact_flag),
             "gap_flag": int(gap_flag),
-
             "assigned_event_type": str(assigned_type),
             "overlap_s": float(best_ov),
             "overlap_frac": float(best_ov_frac),
@@ -673,9 +924,7 @@ def main():
         })
         kept_windows += 1
 
-    # =========================
-    # ===== SAVE CSV ==========
-    # =========================
+    # ===== SAVE CSV =====
     pd.DataFrame(windows).to_csv(OUT_FILE, index=False)
     print(f"✅ Saved {len(windows)} windows → {OUT_FILE}")
 
@@ -694,70 +943,109 @@ def main():
     if KEEP_BASELINE_REST_EVENTS == 0:
         print("Sanity: KEEP_BASELINE_REST_EVENTS=0 → no REST windows are kept.")
 
-    # =========================
-    # ===== SAVE NPZ ==========
-    # =========================
-    if sequence_windows:
-        X = np.stack(sequence_windows).astype(np.float32)
-        gap_policy = "allow_gaps" if args.allow_gaps else "strict_drop"
-        np.savez_compressed(
-            OUT_NPZ,
-            X=X,
-            y_action=np.array(action_labels, dtype=np.int64),
-            y_finger=np.array(finger_labels, dtype=np.int64),
-
-            subject_id=np.array(subject_ids, dtype="U"),
-            experiment_hash=np.array(experiment_hashes, dtype="U"),
-            window_start=np.array(window_starts, dtype=np.float32),
-            window_end=np.array(window_ends, dtype=np.float32),
-
-            confidence_hint=np.array(confidence_hints, dtype=np.float32),
-            artifact_flag=np.array(artifact_flags, dtype=np.int64),
-            gap_flag=np.array(gap_flags, dtype=np.int64),
-
-            assigned_event_type=np.array(assigned_event_types, dtype="U"),
-            overlap_s=np.array(overlap_seconds, dtype=np.float32),
-            overlap_frac=np.array(overlap_fracs, dtype=np.float32),
-            event_onset_s=np.array(event_onsets, dtype=np.float32),
-            event_duration_s=np.array(event_durations, dtype=np.float32),
-            event_source=np.array(event_sources, dtype="U"),
-            session_mode=np.array(session_modes, dtype="U"),
-            trial_id=np.array(trial_ids, dtype=np.int64),
-            block_id=np.array(block_ids, dtype=np.int64),
-
-            fs=np.array(int(round(target_fs)), dtype=np.int64),
-            target_fs=np.array(target_fs, dtype=np.float32),
-            window_sec=np.array(window_sec, dtype=np.float32),
-            step_sec=np.array(STEP_SEC, dtype=np.float32),
-            channel_names=np.array(channel_cols, dtype="U"),
-            timebase_version=np.array(str(timebase_version), dtype="U"),
-            interpolation_policy=np.array(INTERPOLATION_POLICY, dtype="U"),
-            gap_policy=np.array(gap_policy, dtype="U"),
-            features_path=np.array(str(features_path), dtype="U"),
-            events_path=np.array(str(events_path), dtype="U"),
-            config=np.array([json.dumps({
-                "min_overlap_ratio": MIN_OVERLAP_RATIO,
-                "guard_band_sec": GUARD_BAND_SEC,
-                "artifact_min_overlap_frac": ARTIFACT_MIN_OVERLAP_FRAC,
-                "window_sec": window_sec,
-                "step_sec": STEP_SEC,
-                "fs": float(target_fs),
-                "source_fs": SOURCE_FS_DEFAULT,
-                "target_fs": float(target_fs),
-                "pad_sec": PAD_SEC,
-                "gap_threshold_sec": GAP_THRESHOLD_SEC,
-                "gap_policy": gap_policy,
-                "interpolation_policy": INTERPOLATION_POLICY,
-                "dedupe_policy": DEDUP_POLICY,
-            })], dtype="U"),
-        )
-        print(f"✅ Saved sequence windows → {OUT_NPZ} with shape {X.shape}")
-    else:
+   # ===== SAVE NPZ =====
+    if not sequence_windows:
         print("⚠ No sequence windows produced; check features/events alignment.")
+        return 0
+
+    X = np.stack(sequence_windows).astype(np.float32)
+    n_kept = X.shape[0]
+    gap_policy = "allow_gaps" if args.allow_gaps else "strict_drop"
+
+    # Contract-critical arrays for Step 2 filtering (NO TRUNCATION)
+    print(f"[SANITY] subject_id_value used for NPZ: {subject_id_value!r}")
+
+    subject_id_arr = _uarr_fill(n_kept, str(subject_id_value))
+    experiment_hash_arr = _uarr_fill(n_kept, str(experiment_hash_value))
+    session_id_arr = _uarr_fill(n_kept, str(session_id_value or ""))
+    source_features_path_arr = _uarr_fill(n_kept, str(features_path))
+    source_events_path_arr = _uarr_fill(n_kept, str(events_path))
+
+    # Non-fixed-length strings (safe max-length dtype)
+    channel_names_arr = _uarr_from_list([str(c) for c in channel_cols])
+
+    # config JSON can be long → do NOT store as dtype="U" without sizing
+    config_json = json.dumps({
+        "min_overlap_ratio": float(MIN_OVERLAP_RATIO),
+        "guard_band_sec": float(GUARD_BAND_SEC),
+        "artifact_min_overlap_frac": float(ARTIFACT_MIN_OVERLAP_FRAC),
+        "window_sec": float(window_sec),
+        "step_sec": float(STEP_SEC),
+        "fs": float(target_fs),
+        "source_fs": int(SOURCE_FS_DEFAULT),
+        "target_fs": float(target_fs),
+        "pad_sec": float(PAD_SEC),
+        "gap_threshold_sec": float(GAP_THRESHOLD_SEC),
+        "gap_policy": str(gap_policy),
+        "interpolation_policy": str(INTERPOLATION_POLICY),
+        "dedupe_policy": str(DEDUP_POLICY),
+    })
+    config_arr = np.array([config_json], dtype=_u_dtype_for(config_json))
+
+    npz_payload = dict(
+        X=X,
+        y_action=np.array(action_labels, dtype=np.int64),
+        y_finger=np.array(finger_labels, dtype=np.int64),
+
+        subject_id=subject_id_arr,
+        experiment_hash=experiment_hash_arr,
+        session_id=session_id_arr,
+        window_start=np.array(window_starts, dtype=np.float32),
+        window_end=np.array(window_ends, dtype=np.float32),
+        trial_id=np.array(trial_ids, dtype=np.int64),
+        block_id=np.array(block_ids, dtype=np.int64),
+        source_features_path=source_features_path_arr,
+        source_events_path=source_events_path_arr,
+        events_time_shift_s=np.array([events_time_shift_s], dtype=np.float32),
+
+        confidence_hint=np.array(confidence_hints, dtype=np.float32),
+        artifact_flag=np.array(artifact_flags, dtype=np.int64),
+        gap_flag=np.array(gap_flags, dtype=np.int64),
+
+        assigned_event_type=_uarr_from_list(assigned_event_types),
+        overlap_s=np.array(overlap_seconds, dtype=np.float32),
+        overlap_frac=np.array(overlap_fracs, dtype=np.float32),
+        event_onset_s=np.array(event_onsets_out, dtype=np.float32),
+        event_duration_s=np.array(event_durations_out, dtype=np.float32),
+        event_source=_uarr_from_list(event_sources),
+        session_mode=_uarr_from_list(session_modes),
+
+        fs=np.array(int(round(target_fs)), dtype=np.int64),
+        target_fs=np.array(float(target_fs), dtype=np.float32),
+        window_sec=np.array(float(window_sec), dtype=np.float32),
+        step_sec=np.array(float(STEP_SEC), dtype=np.float32),
+
+        channel_names=channel_names_arr,
+        timebase_version=np.array(str(timebase_version), dtype=_u_dtype_for(str(timebase_version))),
+        interpolation_policy=np.array(INTERPOLATION_POLICY, dtype=_u_dtype_for(INTERPOLATION_POLICY)),
+        gap_policy=np.array(gap_policy, dtype=_u_dtype_for(gap_policy)),
+        features_path=np.array(str(features_path), dtype=_u_dtype_for(str(features_path))),
+        events_path=np.array(str(events_path), dtype=_u_dtype_for(str(events_path))),
+
+        config=config_arr,
+    )
+
+    np.savez_compressed(OUT_NPZ, **npz_payload)
+    print(f"✅ Saved sequence windows → {OUT_NPZ} with shape {X.shape}")
+
+    u = np.unique(subject_id_arr.astype("U"))
+    print(f"[SANITY] unique subject_id saved in NPZ: {u.tolist()}")
+    print(f"N windows saved: {n_kept}")
+
+        # Also save per-session NPZ in data/processed
+    if subject_id_value and subject_id_value != "UNKNOWN" and session_id_value:
+        session_dir = ROOT_DIR / "data/processed"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        session_name = f"{subject_id_value}_{session_id_value}_eeg_windows.npz"
+        session_path = _next_available_path(session_dir / session_name)
+        np.savez_compressed(session_path, **npz_payload)
+        print(f"✅ Saved session windows → {session_path}")
+
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        main()
+        raise SystemExit(main())
     except KeyboardInterrupt:
-        sys.exit(1)
+        raise SystemExit(1)

@@ -1,79 +1,286 @@
+"""
+utils/sequence_data.py
+
+Robust NPZ loader + split utilities for EEG window datasets produced by Step 1b.
+
+Key goals:
+- Preserve *all* useful metadata from Step 1b NPZ (not just a short whitelist).
+- Keep y_action/y_finger strict (1D int64) and validate lengths.
+- Support memmap loading (don't cast X if mmap_mode is set).
+- Prefer leakage-resistant splits (trial_id groups first, then subject_id groups).
+- Stratify when possible, but gracefully fall back if stratification fails due to rare classes.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Dict, Any, Optional, Tuple
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
 from sklearn.model_selection import train_test_split, GroupShuffleSplit
 
 
-def load_sequence_npz(path="eeg_windows.npz", mmap_mode=None):
+# -------------------------
+# Helpers
+# -------------------------
+
+_REQUIRED_KEYS = ("X", "y_action", "y_finger")
+
+
+_STRING_META_KEYS = {
+    "subject_id",
+    "experiment_hash",
+    "session_id",
+    "channel_names",
+    "assigned_event_type",
+    "event_source",
+    "session_mode",
+    "features_path",
+    "events_path",
+    "source_features_path",
+    "source_events_path",
+    "timebase_version",
+    "interpolation_policy",
+    "gap_policy",
+}
+
+# Many Step-1b keys are numeric; we keep dtype as-is unless we normalize a known string key.
+# We also keep JSON config blobs as-is (often dtype "U" with one entry).
+_JSONISH_KEYS = {"config", "dataset_info"}
+
+
+def _as_1d_int64(x, name: str) -> np.ndarray:
+    arr = np.asarray(x, dtype=np.int64).reshape(-1)
+    if arr.ndim != 1:
+        raise ValueError(f"{name} must be 1D after reshape; got shape {arr.shape}")
+    return arr
+
+
+def _normalize_string_array(arr: np.ndarray) -> np.ndarray:
+    # Normalize to unicode array. Handles object arrays of strings too.
+    try:
+        return np.asarray(arr).astype("U")
+    except Exception:
+        # Best-effort fallback: stringify elementwise
+        return np.array([str(v) for v in np.asarray(arr).reshape(-1)], dtype="U")
+
+
+def _maybe_scalar(arr: np.ndarray):
+    # Some NPZ scalars are stored as 0-d arrays.
+    if isinstance(arr, np.ndarray) and arr.ndim == 0:
+        try:
+            return arr.item()
+        except Exception:
+            return arr
+    return arr
+
+
+def _unique_nonempty(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values).astype("U")
+    # Filter empty / UNKNOWN
+    keep = (values != "") & (values != "UNKNOWN")
+    if keep.any():
+        return np.unique(values[keep])
+    return np.unique(values)
+
+
+# -------------------------
+# Public API
+# -------------------------
+
+def load_sequence_npz(path: str | Path = "eeg_windows.npz", mmap_mode: Optional[str] = None):
+    """
+    Load an EEG window dataset from .npz.
+
+    Returns:
+        X: (N,T,C) or (N,C,T) float32 (cast only if mmap_mode is None)
+        y_action: (N,) int64
+        y_finger: (N,) int64
+        meta: dict of all other NPZ keys (arrays preserved)
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Sequence window file not found: {path}")
+
     data = np.load(path, allow_pickle=True, mmap_mode=mmap_mode)
+    keys = set(data.files)
+
+    missing = [k for k in _REQUIRED_KEYS if k not in keys]
+    if missing:
+        raise KeyError(
+            f"Missing required keys in NPZ {path}: {missing}. Available keys: {sorted(keys)}"
+        )
+
     X = data["X"]
-    if X.dtype != np.float32 and mmap_mode is None:
-        X = X.astype(np.float32)
-    y_action = np.asarray(data["y_action"], dtype=np.int64)
-    y_finger = np.asarray(data["y_finger"], dtype=np.int64)
-    meta = {}
-    for key in [
-        "subject_id",
-        "experiment_hash",
-        "window_start",
-        "window_end",
-        "confidence_hint",
-        "artifact_flag",
-        "trial_id",
-        "block_id",
-    ]:
-        if key in data:
-            meta[key] = data[key]
+    if mmap_mode is None:
+        # When not memmapping, force float32 for torch friendliness.
+        if not isinstance(X, np.ndarray):
+            X = np.asarray(X)
+        if X.dtype != np.float32:
+            X = X.astype(np.float32)
+
+    # Labels: strict 1D int64
+    y_action = _as_1d_int64(data["y_action"], "y_action")
+    y_finger = _as_1d_int64(data["y_finger"], "y_finger")
+
+    # Validate X shape (don’t transpose here; Step 2 has ensure_X_shape)
+    X_arr = X if isinstance(X, np.ndarray) else np.asarray(X)
+    if X_arr.ndim != 3:
+        raise ValueError(
+            f"Expected X to be 3D (N,T,C) or (N,C,T) in {path}, got shape {X_arr.shape}"
+        )
+
+    n = int(X_arr.shape[0])
+    if len(y_action) != n or len(y_finger) != n:
+        raise ValueError(
+            f"Dataset length mismatch in {path}: X has N={n}, "
+            f"y_action={len(y_action)}, y_finger={len(y_finger)}"
+        )
+
+    # Meta: keep everything except X/y arrays
+    meta: Dict[str, Any] = {}
+    for k in data.files:
+        if k in _REQUIRED_KEYS:
+            continue
+        v = data[k]
+
+        # Normalize known string-ish arrays
+        if k in _STRING_META_KEYS:
+            v = _normalize_string_array(v)
+        else:
+            # Preserve scalars as python types when convenient
+            v = _maybe_scalar(v)
+
+        meta[k] = v
+
+    # If some expected keys are missing, that's okay; Step 2 handles optional meta.
+    # But ensure subject_id/expt/session are in a predictable dtype if present.
+    for k in ("subject_id", "experiment_hash", "session_id"):
+        if k in meta and isinstance(meta[k], np.ndarray):
+            meta[k] = meta[k].astype("U")
+
     return X, y_action, y_finger, meta
 
 
-def split_indices(y_action, y_finger, meta=None, test_size=0.2, random_state=42):
+def split_indices(
+    y_action: np.ndarray,
+    y_finger: np.ndarray,
+    meta: Optional[Dict[str, Any]] = None,
+    test_size: float = 0.2,
+    random_state: int = 42,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Return (train_idx, test_idx) as int64 arrays.
+
+    Preference order:
+      1) GroupShuffleSplit by trial_id if present and meaningful (reduces leakage).
+      2) GroupShuffleSplit by subject_id if multiple subjects exist.
+      3) Stratified train_test_split on combined label; fallback to non-stratified if it fails.
+    """
+    y_action = _as_1d_int64(y_action, "y_action")
+    y_finger = _as_1d_int64(y_finger, "y_finger")
     n = len(y_action)
-    indices = np.arange(n)
-    groups = None
+    indices = np.arange(n, dtype=np.int64)
+
+    # ---- 1) Group by trial_id if available and usable ----
+    if meta and "trial_id" in meta:
+        try:
+            trial = np.asarray(meta["trial_id"]).reshape(-1)
+            if len(trial) == n:
+                # Only use if there are at least 2 groups
+                u = np.unique(trial)
+                if len(u) >= 2:
+                    splitter = GroupShuffleSplit(
+                        n_splits=1, test_size=test_size, random_state=random_state
+                    )
+                    train_idx, test_idx = next(splitter.split(indices, y_action, groups=trial))
+                    return np.asarray(train_idx, dtype=np.int64), np.asarray(test_idx, dtype=np.int64)
+        except Exception:
+            pass
+
+    # ---- 2) Group by subject_id if multiple subjects exist ----
     if meta and "subject_id" in meta:
-        subject_ids = np.array(meta["subject_id"])
-        unique_subjects = np.unique(subject_ids)
-        if len(unique_subjects) > 1 and not (len(unique_subjects) == 1 and unique_subjects[0] == "UNKNOWN"):
-            groups = subject_ids
+        try:
+            subject_ids = np.asarray(meta["subject_id"])
+            if subject_ids.ndim != 0 and len(subject_ids) == n:
+                subject_ids = subject_ids.astype("U")
+                unique_subjects = _unique_nonempty(subject_ids)
+                # Only group if we truly have multiple subjects (excluding UNKNOWN-only)
+                if len(unique_subjects) > 1:
+                    splitter = GroupShuffleSplit(
+                        n_splits=1, test_size=test_size, random_state=random_state
+                    )
+                    train_idx, test_idx = next(
+                        splitter.split(indices, y_action, groups=subject_ids)
+                    )
+                    return np.asarray(train_idx, dtype=np.int64), np.asarray(test_idx, dtype=np.int64)
+        except Exception:
+            pass
 
-    if groups is not None:
-        splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
-        train_idx, test_idx = next(splitter.split(indices, y_action, groups=groups))
-        return train_idx, test_idx
+    # ---- 3) Stratify on combined action/finger label; fallback if too sparse ----
+    # Safer multiplier than 100: derive from max finger class count
+    max_finger = int(np.max(y_finger)) if n > 0 else 0
+    stratify_labels = (y_action * (max_finger + 1)) + y_finger
 
-    stratify_labels = (y_action.astype(int) * 100) + y_finger.astype(int)
-    train_idx, test_idx = train_test_split(
-        indices,
-        test_size=test_size,
-        stratify=stratify_labels,
-        random_state=random_state,
-    )
-    return train_idx, test_idx
+    try:
+        train_idx, test_idx = train_test_split(
+            indices,
+            test_size=test_size,
+            stratify=stratify_labels,
+            random_state=random_state,
+        )
+    except ValueError:
+        # Typically: "The least populated class in y has only 1 member"
+        train_idx, test_idx = train_test_split(
+            indices,
+            test_size=test_size,
+            random_state=random_state,
+            stratify=None,
+        )
+
+    return np.asarray(train_idx, dtype=np.int64), np.asarray(test_idx, dtype=np.int64)
 
 
-def fit_channel_normalizer(X_train):
-    mean = X_train.mean(axis=(0, 1))
-    std = X_train.std(axis=(0, 1))
-    std = np.where(std < 1e-6, 1.0, std)
+def fit_channel_normalizer(X_train: np.ndarray) -> Dict[str, Any]:
+    """
+    Per-channel z-score stats over (N,T, C). Works with memmaps.
+    """
+    X_train = np.asarray(X_train)
+    if X_train.ndim != 3:
+        raise ValueError(f"X_train must be 3D (N,T,C), got shape {X_train.shape}")
+
+    mean = X_train.mean(axis=(0, 1)).astype(np.float32)
+    std = X_train.std(axis=(0, 1)).astype(np.float32)
+    std = np.where(std < 1e-6, 1.0, std).astype(np.float32)
+
     return {
         "type": "per_channel",
-        "mean": mean.astype(np.float32),
-        "std": std.astype(np.float32),
-        "channels": X_train.shape[-1],
+        "mean": mean,
+        "std": std,
+        "channels": int(X_train.shape[-1]),
     }
 
 
-def apply_channel_normalizer(X, normalizer):
-    mean = normalizer["mean"]
-    std = normalizer["std"]
-    return (X - mean) / std
+def apply_channel_normalizer(X: np.ndarray, normalizer: Dict[str, Any]) -> np.ndarray:
+    """
+    Apply per-channel normalization. Returns float32.
+    """
+    X = np.asarray(X, dtype=np.float32)
+    mean = np.asarray(normalizer["mean"], dtype=np.float32)
+    std = np.asarray(normalizer["std"], dtype=np.float32)
+    return ((X - mean) / std).astype(np.float32)
 
 
-def summarize_windows(X):
+def summarize_windows(X: np.ndarray) -> pd.DataFrame:
+    """
+    Convert (N,T,C) windows into simple per-channel summary features.
+    """
+    X = np.asarray(X)
+    if X.ndim != 3:
+        raise ValueError(f"X must be 3D (N,T,C), got shape {X.shape}")
+
     means = X.mean(axis=1)
     stds = X.std(axis=1)
     rms = np.sqrt(np.mean(np.square(X), axis=1))
@@ -81,7 +288,8 @@ def summarize_windows(X):
 
     feats = []
     names = []
-    for idx in range(X.shape[2]):
+    C = int(X.shape[2])
+    for idx in range(C):
         feats.append(means[:, idx])
         names.append(f"ch{idx+1}_mean")
         feats.append(stds[:, idx])

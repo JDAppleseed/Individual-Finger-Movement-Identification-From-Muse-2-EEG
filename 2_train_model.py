@@ -9,6 +9,7 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 import argparse
 import json
 import random
+import re
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -35,6 +36,14 @@ LR = 1e-3
 LOSS_ACTION_WEIGHT = 1.0
 REST_WEIGHT = 0.2
 
+DEFAULT_NPZ = "eeg_windows.npz"
+DEFAULT_MODEL = "finger_action_model.pt"
+DEFAULT_SCALER = "scaler.save"
+DEFAULT_PREDS = "test_predictions.npz"
+MAX_SEARCH_DEPTH = 4
+
+ROOT_DIR = Path(__file__).resolve().parent
+
 subject_id = "ANON"
 
 
@@ -60,23 +69,52 @@ class EEGWindowDataset(Dataset):
         return self.X[idx], self.y_finger[idx], self.y_action[idx]
 
 
-def resolve_experiment_hash():
-    exp_hash = "UNKNOWN"
-    subject = subject_id
+def _first_nonempty_meta_value(meta: Dict[str, Any], keys, n_expected: int) -> Optional[str]:
+    if not meta:
+        return None
+    for key in keys:
+        if key not in meta:
+            continue
+        try:
+            arr = np.asarray(meta[key])
+        except Exception:
+            continue
+        if arr.ndim == 0:
+            val = str(arr)
+            if val and val != "UNKNOWN":
+                return val
+            continue
+        if len(arr) != n_expected:
+            continue
+        arr_u = np.asarray(arr).astype("U")
+        unique = [v for v in np.unique(arr_u) if v and v != "UNKNOWN"]
+        if unique:
+            return unique[0]
+    return None
+
+
+def resolve_experiment_hash(meta: Dict[str, Any], n_expected: int) -> str:
+    exp_hash = _first_nonempty_meta_value(meta, ["experiment_hash", "exp_hash"], n_expected)
+    if exp_hash:
+        return exp_hash
+    meta_path = ROOT_DIR / "session_meta.json"
+    if meta_path.exists():
+        try:
+            root_meta = json.loads(meta_path.read_text())
+            root_hash = root_meta.get("experiment_hash")
+            if root_hash:
+                return str(root_hash)
+        except Exception:
+            pass
     try:
-        exp_hash = get_latest_experiment_hash()
+        return get_latest_experiment_hash()
     except Exception:
-        meta_path = Path("session_meta.json")
-        if meta_path.exists():
-            meta = json.loads(meta_path.read_text())
-            subject = meta.get("subject_id", subject)
-            exp_hash = meta.get("experiment_hash", exp_hash)
-    return subject, exp_hash
+        return "UNKNOWN"
 
 
 def build_arg_parser():
     p = argparse.ArgumentParser(description="Train CNN+LSTM EEG multi-head model")
-    p.add_argument("--npz", type=str, default="eeg_windows.npz", help="Path to window dataset")
+    p.add_argument("--npz", type=str, default=DEFAULT_NPZ, help="Path to window dataset")
     p.add_argument("--subject-id", type=str, default="1-M17", help="Filter training data to a single subject_id")
     p.add_argument("--epochs", type=int, default=EPOCHS, help="Number of training epochs")
     p.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="Training batch size")
@@ -86,35 +124,264 @@ def build_arg_parser():
     p.add_argument("--rest-weight", type=float, default=REST_WEIGHT, help="Class weight for REST action (0=ignore)")
     p.add_argument("--test-size", type=float, default=0.2, help="Test split fraction")
     p.add_argument("--non-rest-only", action="store_true", help="Train only on non-REST windows")
-    p.add_argument("--save-model", type=str, default="finger_action_model.pt", help="Model output path")
-    p.add_argument("--save-scaler", type=str, default="scaler.save", help="Scaler output path")
-    p.add_argument("--save-preds", type=str, default="test_predictions.npz", help="Predictions output path")
+    p.add_argument("--save-model", type=str, default=DEFAULT_MODEL, help="Model output path")
+    p.add_argument("--save-scaler", type=str, default=DEFAULT_SCALER, help="Scaler output path")
+    p.add_argument("--save-preds", type=str, default=DEFAULT_PREDS, help="Predictions output path")
     return p
 
 
-def _safe_meta_take(meta: Dict[str, Any], idx: np.ndarray, key: str, dtype: Optional[Any] = None):
-    if not meta or key not in meta:
+def _latest_by_mtime(paths):
+    paths = [p for p in paths if p.exists()]
+    if not paths:
         return None
-    arr = np.asarray(meta[key])
-    if len(arr) != len(idx) and len(arr) != len(meta.get("subject_id", arr)):
-        # best effort: only take if it matches dataset length
-        if len(arr) != len(meta.get("subject_id", arr)):
-            return None
-    out = arr[idx]
-    if dtype is not None:
-        out = out.astype(dtype)
-    return out
+    return max(paths, key=lambda p: p.stat().st_mtime)
+
+
+def _search_eeg_windows(root: Path, max_depth: int):
+    matches = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel = Path(dirpath).relative_to(root)
+        depth = len(rel.parts)
+        if depth >= max_depth:
+            dirnames[:] = []
+        for name in filenames:
+            if name.endswith(".npz") and "eeg_windows" in name:
+                matches.append(Path(dirpath) / name)
+    return matches
+
+
+def resolve_npz_path(path_str: str) -> Path:
+    candidate = Path(path_str)
+    if candidate.exists():
+        return candidate
+    if not candidate.is_absolute():
+        root_candidate = ROOT_DIR / candidate
+        if root_candidate.exists():
+            return root_candidate
+    if path_str not in (DEFAULT_NPZ, f"./{DEFAULT_NPZ}"):
+        raise FileNotFoundError(f"NPZ file not found: {path_str}")
+
+    processed_dir = ROOT_DIR / "data/processed"
+    if processed_dir.exists():
+        latest = _latest_by_mtime(list(processed_dir.glob("*_eeg_windows.npz")))
+        if latest:
+            return latest
+        direct = processed_dir / DEFAULT_NPZ
+        if direct.exists():
+            return direct
+
+    windows_dir = ROOT_DIR / "data/windows"
+    if windows_dir.exists():
+        latest = _latest_by_mtime(list(windows_dir.glob("*_eeg_windows.npz")))
+        if latest:
+            return latest
+
+    deep_matches = _search_eeg_windows(ROOT_DIR, MAX_SEARCH_DEPTH)
+    latest = _latest_by_mtime(deep_matches)
+    if latest:
+        return latest
+
+    raise FileNotFoundError(
+        f"NPZ file not found: {path_str}. Searched default locations under {ROOT_DIR}."
+    )
+
+
+def infer_subject_id_from_npz(npz_path: Path) -> Optional[str]:
+    stem = npz_path.stem
+    if "_eeg_windows" in stem:
+        prefix = stem.split("_eeg_windows")[0]
+    else:
+        prefix = stem
+    if prefix in ("eeg_windows", ""):
+        return None
+    match = re.match(r"^(?P<subject>.+)_\d{8}_\d{6}$", prefix)
+    if match:
+        return match.group("subject")
+    if "_" in prefix:
+        return prefix.split("_")[0]
+    return prefix
+
+
+def _subject_ids_from_meta(meta: Dict[str, Any], n_before: int) -> Optional[np.ndarray]:
+    if not meta or "subject_id" not in meta:
+        return None
+    try:
+        arr = np.asarray(meta["subject_id"])
+    except Exception:
+        return None
+    if arr.ndim == 0 or len(arr) != n_before:
+        return None
+    return arr.astype("U")
+
+
+def infer_subject_id_from_meta(meta: Dict[str, Any], n_before: int) -> Optional[str]:
+    subject_ids = _subject_ids_from_meta(meta, n_before)
+    if subject_ids is None:
+        return None
+    unique = np.unique(subject_ids.astype(str))
+    if len(unique) == 1:
+        return unique[0]
+    return None
+
+
+def mask_meta(meta: Dict[str, Any], mask: np.ndarray, n_before: int):
+    if not meta:
+        return {}, []
+    mask = np.asarray(mask)
+    out = {}
+    masked_keys = []
+    for key, val in meta.items():
+        if isinstance(val, dict):
+            out[key] = val
+            continue
+        if isinstance(val, (str, bytes)):
+            out[key] = val
+            continue
+        try:
+            arr = np.asarray(val)
+        except Exception:
+            out[key] = val
+            continue
+        if arr.ndim == 0:
+            out[key] = val
+            continue
+        try:
+            length = len(arr)
+        except Exception:
+            out[key] = val
+            continue
+        if length == n_before:
+            out[key] = arr[mask]
+            masked_keys.append(key)
+        else:
+            out[key] = val
+    return out, masked_keys
+
+
+def take_meta(meta: Dict[str, Any], keys, idx: np.ndarray, n_expected: int, dtype: Optional[Any] = None):
+    if not meta:
+        return None
+    idx = np.asarray(idx)
+    if idx.size == 0:
+        return None
+    for key in keys:
+        if key not in meta:
+            continue
+        try:
+            arr = np.asarray(meta[key])
+            if arr.ndim == 0:
+                continue
+            if len(arr) != n_expected:
+                continue
+            out = arr[idx]
+            if dtype is not None:
+                out = out.astype(dtype)
+            return out
+        except Exception:
+            continue
+    return None
+
+
+def ensure_X_shape(X, meta: Dict[str, Any]):
+    X = np.asarray(X, dtype=np.float32)
+    if X.ndim != 3:
+        raise ValueError(f"Expected X to be 3D (N,T,C), got shape {X.shape}")
+
+    channel_count = None
+    if meta and "channel_names" in meta:
+        try:
+            channel_count = int(len(np.asarray(meta["channel_names"])))
+        except Exception:
+            channel_count = None
+
+    # If we know the channel count, enforce that channels dimension equals it.
+    if channel_count is not None and channel_count > 0:
+        if X.shape[2] == channel_count:
+            return X  # already (N,T,C)
+        if X.shape[1] == channel_count and X.shape[2] != channel_count:
+            return np.transpose(X, (0, 2, 1))  # (N,C,T) -> (N,T,C)
+        raise ValueError(
+            f"Cannot infer X layout: expected channels in dim=2 or dim=1 to equal {channel_count}, got {X.shape}"
+        )
+
+    # Fallback: assume (N,T,C) is correct; only transpose if it screams (N,C,T)
+    if X.shape[1] <= 16 and X.shape[2] > 16:
+        return np.transpose(X, (0, 2, 1))
+    return X
+
+
+def _subject_from_root_meta() -> Optional[str]:
+    meta_path = ROOT_DIR / "session_meta.json"
+    if not meta_path.exists():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text())
+    except Exception:
+        return None
+    subject = meta.get("subject_id")
+    return str(subject) if subject else None
+
+
+def resolve_output_paths(args, subject: str, exp_hash: str):
+    subject_safe = subject or "UNKNOWN"
+    run_dir = ROOT_DIR / "data/models" / subject_safe / exp_hash
+
+    def _resolve(path_str: str, default_name: str) -> Path:
+        if path_str == default_name:
+            return run_dir / default_name
+        return Path(path_str)
+
+    model_path = _resolve(args.save_model, DEFAULT_MODEL)
+    scaler_path = _resolve(args.save_scaler, DEFAULT_SCALER)
+    preds_path = _resolve(args.save_preds, DEFAULT_PREDS)
+    return run_dir, model_path, scaler_path, preds_path
+
+
+def _validate_indices(idx: np.ndarray, n_samples: int, name: str):
+    if idx.size == 0:
+        return
+    if idx.min() < 0 or idx.max() >= n_samples:
+        raise ValueError(
+            f"{name} indices out of bounds: min={idx.min()} max={idx.max()} n_samples={n_samples}"
+        )
 
 
 def main():
     args = build_arg_parser().parse_args()
     set_seed(args.seed)
 
-    subject, exp_hash = resolve_experiment_hash()
-    log_experiment(subject, exp_hash, "STEP_2_TRAIN")
+    try:
+        npz_path = resolve_npz_path(args.npz)
+    except FileNotFoundError as exc:
+        print(str(exc))
+        return 2
+    args.npz = str(npz_path)
+    print(f"Using NPZ: {npz_path}")
 
     # ===== LOAD FULL DATA =====
-    X_full, y_action_full, y_finger_full, meta_full = load_sequence_npz(args.npz)
+    X_full, y_action_full, y_finger_full, meta_full = load_sequence_npz(str(npz_path))
+    meta = meta_full if isinstance(meta_full, dict) else {}
+    try:
+        X_full = ensure_X_shape(X_full, meta)
+    except ValueError as exc:
+        print(str(exc))
+        return 2
+
+    y_action_full = np.asarray(y_action_full, dtype=np.int64).reshape(-1)
+    y_finger_full = np.asarray(y_finger_full, dtype=np.int64).reshape(-1)
+
+    if len(X_full) != len(y_action_full) or len(X_full) != len(y_finger_full):
+        print(
+            f"Dataset length mismatch: X={len(X_full)} y_action={len(y_action_full)} "
+            f"y_finger={len(y_finger_full)}"
+        )
+        return 2
+
+    meta_keys = sorted(meta.keys()) if meta else []
+    print(
+        f"Loaded NPZ: X={X_full.shape} y_action={y_action_full.shape} "
+        f"y_finger={y_finger_full.shape} meta_keys={meta_keys}"
+    )
 
     # Global index mapping (original dataset positions)
     global_indices = np.arange(len(y_action_full), dtype=np.int64)
@@ -123,39 +390,104 @@ def main():
     X = X_full
     y_action = y_action_full
     y_finger = y_finger_full
-    meta = meta_full
+    n_full = len(y_action_full)
+    subject = None
 
     if args.subject_id:
         if "subject_id" not in meta:
             print("subject_id not found in dataset metadata; cannot filter.")
+            print(f"NPZ path: {npz_path}")
+            print(f"Available meta keys: {sorted(meta.keys())}")
             return 2
-        subject_ids = np.asarray(meta["subject_id"]).astype(str)
+        try:
+            subject_ids = np.asarray(meta["subject_id"])
+            subject_ids_dtype = subject_ids.dtype
+        except Exception:
+            print("subject_id metadata could not be read; cannot filter.")
+            print(f"NPZ path: {npz_path}")
+            return 2
+        if subject_ids.ndim == 0 or len(subject_ids) != n_full:
+            print("subject_id metadata length mismatch; cannot filter.")
+            print(f"NPZ path: {npz_path}")
+            print(f"subject_id length: {len(subject_ids) if subject_ids.ndim != 0 else 0}, N={n_full}")
+            return 2
+        subject_ids = subject_ids.astype("U")
         mask = subject_ids == args.subject_id
         kept = int(mask.sum())
+        print(f"Subject filter: requested={args.subject_id} kept {kept}/{len(mask)}")
         if kept == 0:
+            unique, counts = np.unique(subject_ids, return_counts=True)
+            pairs = list(zip(unique.tolist(), counts.tolist()))[:20]
             print(f"No windows found for subject_id={args.subject_id}")
+            print(f"NPZ path: {npz_path}")
+            print(f"Unique subject_ids (up to 20): {pairs}")
+            print(f"meta['subject_id'] dtype: {subject_ids_dtype}")
+            print(f"Total N: {len(subject_ids)}")
+            print(f"Requested subject_id: {args.subject_id}")
             return 2
 
         X = X[mask]
         y_action = y_action[mask]
         y_finger = y_finger[mask]
-        global_indices = global_indices[mask]  # ✅ critical mapping
-
-        # Filter meta arrays that match dataset length
-        meta = {
-            key: (np.asarray(val)[mask] if isinstance(val, np.ndarray) and len(val) == len(mask) else val)
-            for key, val in meta.items()
-        }
+        global_indices = global_indices[mask]  # critical mapping
+        meta, masked_keys = mask_meta(meta, mask, n_full)
+        kept = len(y_action)
+        for key in masked_keys:
+            try:
+                val = meta.get(key)
+                if isinstance(val, np.ndarray) and val.ndim == 1 and len(val) != kept:
+                    raise AssertionError(f"Meta length mismatch for {key}: {len(val)} != {kept}")
+                if not isinstance(val, np.ndarray) and hasattr(val, "__len__") and len(val) != kept:
+                    raise AssertionError(f"Meta length mismatch for {key}: {len(val)} != {kept}")
+            except Exception as exc:
+                print(str(exc))
+                return 2
         subject = args.subject_id
+    else:
+        inferred_subject = _subject_from_root_meta()
+        if not inferred_subject:
+            inferred_subject = infer_subject_id_from_meta(meta, n_full)
+        if not inferred_subject:
+            inferred_subject = infer_subject_id_from_npz(npz_path)
+        subject = inferred_subject or subject_id
+        print(f"Subject filter: not applied; using subject_id={subject}")
+
+    if len(y_action) == 0 or len(y_finger) == 0:
+        print("No windows available after subject filtering.")
+        return 2
+
+    def class_counts(y):
+        u, c = np.unique(y, return_counts=True)
+        return dict(zip(u.tolist(), c.tolist()))
+    print(f"Action class counts: {class_counts(y_action)}")
+    print(f"Finger class counts: {class_counts(y_finger)}")
+
+    exp_hash = resolve_experiment_hash(meta, len(y_action))
+    log_experiment(subject, exp_hash, "STEP_2_TRAIN")
+
+    run_dir, save_model_path, save_scaler_path, save_preds_path = resolve_output_paths(
+        args, subject, exp_hash
+    )
+    for path in [save_model_path, save_scaler_path, save_preds_path]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    print(
+        f"Output paths: model={save_model_path}, scaler={save_scaler_path}, preds={save_preds_path}"
+    )
 
     # ===== SPLIT =====
     train_idx, test_idx = split_indices(
         y_action,
         y_finger,
-        meta=meta,
+        meta=meta if meta else None,
         test_size=args.test_size,
         random_state=args.seed,
     )
+
+    train_idx = np.asarray(train_idx, dtype=np.int64)
+    test_idx = np.asarray(test_idx, dtype=np.int64)
+    n_samples = len(y_action)
+    _validate_indices(train_idx, n_samples, "train")
+    _validate_indices(test_idx, n_samples, "test")
 
     if args.non_rest_only:
         keep_mask = y_action[train_idx] != ACTION_REST
@@ -172,11 +504,14 @@ def main():
     y_action_train, y_action_test = y_action[train_idx], y_action[test_idx]
     y_finger_train, y_finger_test = y_finger[train_idx], y_finger[test_idx]
 
+    n_fingers = int(np.max(y_finger)) + 1
+    n_actions = int(np.max(y_action)) + 1
+
     # ===== NORMALIZE =====
     normalizer = fit_channel_normalizer(X_train)
     X_train = apply_channel_normalizer(X_train, normalizer)
     X_test = apply_channel_normalizer(X_test, normalizer)
-    joblib.dump(normalizer, args.save_scaler)
+    joblib.dump(normalizer, str(save_scaler_path))
 
     # ===== DATALOADERS =====
     train_loader = DataLoader(
@@ -191,9 +526,6 @@ def main():
         shuffle=False,
         drop_last=False,
     )
-
-    n_fingers = int(np.max(y_finger)) + 1
-    n_actions = int(np.max(y_action)) + 1
 
     # ===== MODEL =====
     model = CNNLSTMFingerActionNet(n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions)
@@ -262,7 +594,7 @@ def main():
 
     # ===== SAVE MODEL =====
     model.eval()
-    torch.save(model.state_dict(), args.save_model)
+    torch.save(model.state_dict(), str(save_model_path))
 
     train_config = {
         "seed": args.seed,
@@ -273,7 +605,7 @@ def main():
         "rest_weight": float(args.rest_weight),
         "test_size": args.test_size,
         "non_rest_only": bool(args.non_rest_only),
-        "npz_path": str(args.npz),
+        "npz_path": str(npz_path),
         "n_fingers": n_fingers,
         "n_actions": n_actions,
         "input_shape": list(X.shape[1:]),
@@ -281,10 +613,16 @@ def main():
         "device": str(device),
         "model": "CNNLSTMFingerActionNet",
         "subject_id_filter": args.subject_id or "",
+        "save_model_path": str(save_model_path),
+        "save_scaler_path": str(save_scaler_path),
+        "save_preds_path": str(save_preds_path),
     }
-    config_path = Path("logs") / "experiments" / f"{exp_hash}_train_config.json"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(train_config, indent=2))
+    train_config_path = save_model_path.parent / "train_config.json"
+    train_config_path.write_text(json.dumps(train_config, indent=2))
+
+    log_config_path = Path("logs") / "experiments" / f"{exp_hash}_train_config.json"
+    log_config_path.parent.mkdir(parents=True, exist_ok=True)
+    log_config_path.write_text(json.dumps(train_config, indent=2))
 
     # ===== INFERENCE ON TEST SET =====
     all_action_probs = []
@@ -301,37 +639,19 @@ def main():
 
     # ===== SAVE PREDICTIONS WITH ROBUST INDEXING + META =====
     test_indices_local = test_idx.astype(np.int64)
-    test_indices_global = global_indices[test_idx].astype(np.int64)  # ✅ maps back to original NPZ index
+    test_indices_global = global_indices[test_idx].astype(np.int64)  # maps back to original NPZ index
 
     # Save *test-set* meta (aligned to prediction rows)
-    # These arrays are crucial for smoothing eval with resets.
-    test_window_start = None
-    test_window_end = None
-    test_trial_id = None
-    test_block_id = None
-    test_subject_id = None
-    test_experiment_hash = None
-
-    if meta:
-        try:
-            if "window_start" in meta:
-                test_window_start = np.asarray(meta["window_start"])[test_idx].astype(np.float32)
-            if "window_end" in meta:
-                test_window_end = np.asarray(meta["window_end"])[test_idx].astype(np.float32)
-            if "trial_id" in meta:
-                test_trial_id = np.asarray(meta["trial_id"])[test_idx].astype(np.int64)
-            if "block_id" in meta:
-                test_block_id = np.asarray(meta["block_id"])[test_idx].astype(np.int64)
-            if "subject_id" in meta:
-                test_subject_id = np.asarray(meta["subject_id"])[test_idx].astype("U")
-            if "experiment_hash" in meta:
-                test_experiment_hash = np.asarray(meta["experiment_hash"])[test_idx].astype("U")
-        except Exception:
-            # best-effort only
-            pass
+    n_expected = len(y_action)
+    test_window_start = take_meta(meta, ["window_start", "start_s", "onset_s"], test_idx, n_expected, np.float32)
+    test_window_end = take_meta(meta, ["window_end", "end_s", "offset_s"], test_idx, n_expected, np.float32)
+    test_trial_id = take_meta(meta, ["trial_id", "trial", "event_trial_id"], test_idx, n_expected, np.int64)
+    test_block_id = take_meta(meta, ["block_id", "block", "event_block_id"], test_idx, n_expected, np.int64)
+    test_subject_id = take_meta(meta, ["subject_id"], test_idx, n_expected, "U")
+    test_experiment_hash = take_meta(meta, ["experiment_hash", "exp_hash"], test_idx, n_expected, "U")
 
     dataset_info = {
-        "npz_path": str(args.npz),
+        "npz_path": str(npz_path),
         "subject_id_filter": args.subject_id or "",
         "exp_hash": str(exp_hash),
         "n_samples_used": int(len(y_action)),
@@ -351,20 +671,25 @@ def main():
         dataset_info=np.array([json.dumps(dataset_info)], dtype="U"),
     )
 
-    # Add optional meta if present
-    if test_window_start is not None: save_dict["window_start"] = test_window_start
-    if test_window_end is not None: save_dict["window_end"] = test_window_end
-    if test_trial_id is not None: save_dict["trial_id"] = test_trial_id
-    if test_block_id is not None: save_dict["block_id"] = test_block_id
-    if test_subject_id is not None: save_dict["subject_id"] = test_subject_id
-    if test_experiment_hash is not None: save_dict["experiment_hash"] = test_experiment_hash
+    if test_window_start is not None:
+        save_dict["window_start"] = test_window_start
+    if test_window_end is not None:
+        save_dict["window_end"] = test_window_end
+    if test_trial_id is not None:
+        save_dict["trial_id"] = test_trial_id
+    if test_block_id is not None:
+        save_dict["block_id"] = test_block_id
+    if test_subject_id is not None:
+        save_dict["subject_id"] = test_subject_id
+    if test_experiment_hash is not None:
+        save_dict["experiment_hash"] = test_experiment_hash
 
-    np.savez_compressed(args.save_preds, **save_dict)
+    np.savez_compressed(str(save_preds_path), **save_dict)
 
     log_experiment(subject, exp_hash, "STEP_2_COMPLETE", f"loss={avg_loss:.4f}")
     print("✅ Training complete")
     print(f"DECISION: TRAINED (epochs={args.epochs})")
-    print(f"✅ Saved: {args.save_model}, {args.save_scaler}, {args.save_preds}")
+    print(f"✅ Saved: {save_model_path}, {save_scaler_path}, {save_preds_path}")
     return 0
 
 

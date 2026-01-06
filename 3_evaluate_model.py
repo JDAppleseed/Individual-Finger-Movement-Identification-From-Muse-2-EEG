@@ -37,6 +37,96 @@ MIN_TEST_SAMPLES = 30
 MAX_SPLIT_ATTEMPTS = 8
 DEFAULT_BATCH_SIZE = 256
 
+def _has_len(x) -> bool:
+    try:
+        _ = len(x)
+        return True
+    except Exception:
+        return False
+
+
+def _is_maskable_array(val, n: int) -> bool:
+    try:
+        arr = np.asarray(val)
+    except Exception:
+        return False
+    if arr.ndim == 0:
+        return False
+    try:
+        return len(arr) == n
+    except Exception:
+        return False
+
+
+def mask_meta(meta: dict, mask: np.ndarray) -> dict:
+    """
+    Mask only 1D arrays of length N. Leave scalars/0D arrays/strings/dicts untouched.
+    Prevents: TypeError: len() of unsized object
+    """
+    if not isinstance(meta, dict):
+        return meta
+    mask = np.asarray(mask, dtype=bool)
+    n = int(mask.size)
+    out = {}
+    for k, v in meta.items():
+        if isinstance(v, dict) or isinstance(v, (str, bytes)):
+            out[k] = v
+            continue
+        if _is_maskable_array(v, n):
+            out[k] = np.asarray(v)[mask]
+        else:
+            out[k] = v
+    return out
+
+
+def take_meta(meta: dict, keys, idx: np.ndarray, n_expected: int, dtype=None):
+    """
+    Safely take meta arrays aligned to dataset length.
+    """
+    if not isinstance(meta, dict):
+        return None
+    idx = np.asarray(idx)
+    for key in keys:
+        if key not in meta:
+            continue
+        try:
+            arr = np.asarray(meta[key])
+        except Exception:
+            continue
+        if arr.ndim == 0:
+            continue
+        if len(arr) != n_expected:
+            continue
+        out = arr[idx]
+        if dtype is not None:
+            out = out.astype(dtype)
+        return out
+    return None
+
+
+def _first_meta_scalar(meta: dict, keys, default="UNKNOWN") -> str:
+    """
+    Returns a reasonable scalar string for keys that might be scalar or length-N arrays.
+    """
+    if not isinstance(meta, dict):
+        return str(default)
+    for k in keys:
+        if k not in meta:
+            continue
+        try:
+            arr = np.asarray(meta[k])
+        except Exception:
+            continue
+        if arr.ndim == 0:
+            s = str(arr)
+            if s and s != "UNKNOWN":
+                return s
+        else:
+            if len(arr) > 0:
+                s = str(arr.flat[0])
+                if s and s != "UNKNOWN":
+                    return s
+    return str(default)
 
 def reliability_bins(conf, preds, labels, n_bins=10):
     bins = np.linspace(0, 1, n_bins + 1)
@@ -112,16 +202,34 @@ def _load_predictions_if_present(path: Path):
         return None
     try:
         d = np.load(path, allow_pickle=True)
-        required = {"action_probs", "finger_probs", "y_action", "y_finger", "test_indices"}
+
+        # Step 2 writes these keys
+        required = {"action_probs", "finger_probs", "y_action", "y_finger"}
         if not required.issubset(set(d.files)):
             return None
-        return {
+
+        # Accept either legacy 'test_indices' OR step2's 'test_indices_local'
+        if "test_indices" in d.files:
+            test_idx = d["test_indices"]
+        elif "test_indices_local" in d.files:
+            test_idx = d["test_indices_local"]
+        else:
+            return None
+
+        out = {
             "action_probs": d["action_probs"],
             "finger_probs": d["finger_probs"],
             "y_action": d["y_action"],
             "y_finger": d["y_finger"],
-            "test_indices": d["test_indices"],
+            "test_indices": test_idx,
         }
+
+        # Optional metadata aligned to rows of probs/labels
+        for k in ["window_start", "window_end", "trial_id", "block_id", "subject_id", "experiment_hash"]:
+            if k in d.files:
+                out[k] = d[k]
+
+        return out
     except Exception:
         return None
 
@@ -177,10 +285,28 @@ def _apply_sample_limit(X, y_action, y_finger, meta, max_samples: Optional[int],
     y_action = y_action[keep_idx]
     y_finger = y_finger[keep_idx]
     if meta:
-        meta = {
-            key: (np.asarray(val)[keep_idx] if isinstance(val, np.ndarray) and len(val) == len(indices) else val)
-            for key, val in meta.items()
-        }
+        n_before = int(len(indices))
+        out = {}
+        for key, val in meta.items():
+            if isinstance(val, dict) or isinstance(val, (str, bytes)):
+                out[key] = val
+                continue
+            try:
+                arr = np.asarray(val)
+            except Exception:
+                out[key] = val
+                continue
+            if arr.ndim == 0:
+                out[key] = val
+                continue
+            try:
+                if len(arr) == n_before:
+                    out[key] = arr[keep_idx]
+                else:
+                    out[key] = val
+            except Exception:
+                out[key] = val
+        meta = out
     return X, y_action, y_finger, meta
 
 
@@ -223,6 +349,8 @@ def main():
     parser.add_argument("--subject-id", type=str, default="1-M17", help="Filter evaluation to a single subject_id")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit samples for eval (memory guard)")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Inference batch size")
+    parser.add_argument("--smooth-action-only", action="store_true",
+                    help="Smooth action only; finger stays raw (except forced NONE during REST)")
 
     parser.add_argument("--smooth", action="store_true", help="Enable postprocess smoothing")
     parser.add_argument("--smooth-method", type=str, default="vote", choices=["vote", "ema"])
@@ -233,7 +361,8 @@ def main():
     parser.add_argument("--threshold-finger", type=float, default=0.75)
     parser.add_argument("--adjacency", action="store_true", help="Enable adjacency assist (finger correction)")
     args = parser.parse_args()
-
+    if args.smooth_action_only and not args.smooth:
+        args.smooth = True
     npz_path = Path(args.npz)
     pred_npz_path = Path(args.pred_npz)
     model_path = Path(args.model)
@@ -257,10 +386,7 @@ def main():
         X = X[mask]
         y_action = y_action[mask]
         y_finger = y_finger[mask]
-        meta = {
-            key: (np.array(val)[mask] if isinstance(val, np.ndarray) and len(val) == len(mask) else val)
-            for key, val in meta.items()
-        }
+        meta = mask_meta(meta, mask)
         subject_filtered = True
 
     if isinstance(X, np.memmap) and X.dtype != np.float32:
@@ -273,8 +399,7 @@ def main():
     _print_label_summary("Filtered", y_action, y_finger)
 
     subject_ids = meta.get("subject_id", None)
-    experiment_hashes = meta.get("experiment_hash", None)
-    exp_hash = str(experiment_hashes[0]) if experiment_hashes is not None else "UNKNOWN"
+    exp_hash = _first_meta_scalar(meta, ["experiment_hash", "exp_hash"], default="UNKNOWN")
 
     n_fingers = int(np.max(y_finger)) + 1
     n_actions = int(np.max(y_action)) + 1
@@ -422,6 +547,7 @@ def main():
             threshold_action=float(args.threshold_action),
             threshold_finger=float(args.threshold_finger),
             adjacency_enabled=bool(args.adjacency),
+            finger_mode="raw" if args.smooth_action_only else "smooth",
         )
 
         order = np.arange(len(action_probs), dtype=np.int64)
@@ -443,6 +569,11 @@ def main():
         smoothed_action, smoothed_finger = apply_postprocess_sequence(
             action_probs, finger_probs, order, settings, trial_ids=trial_ids_for_probs
         )
+
+        # If you want "smooth action only", override finger smoothing here
+        if args.smooth_action_only:
+            smoothed_finger = finger_preds[order].copy()
+            smoothed_finger[smoothed_action == ACTION_REST] = 0  # NONE=0
 
         action_acc_s = accuracy_score(y_action_test[order], smoothed_action)
         mask_s = y_action_test[order] != ACTION_REST
