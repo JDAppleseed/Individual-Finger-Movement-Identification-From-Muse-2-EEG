@@ -9,7 +9,8 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
-from typing import Optional
+import json
+from typing import Optional, Dict, Any
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +37,22 @@ SHOW_PLOTS = os.environ.get("SHOW_PLOTS", "0") == "1"
 MIN_TEST_SAMPLES = 30
 MAX_SPLIT_ATTEMPTS = 8
 DEFAULT_BATCH_SIZE = 256
+
+
+def _load_config(path: Optional[str]) -> Dict[str, Any]:
+    if not path:
+        return {}
+    try:
+        payload = json.loads(Path(path).read_text())
+    except Exception:
+        return {}
+    return payload.get("settings", payload)
+
+
+def _apply_config_to_args(args_obj, settings: Dict[str, Any], defaults: Dict[str, Any]):
+    for key, default in defaults.items():
+        if key in settings and getattr(args_obj, key) == default:
+            setattr(args_obj, key, settings[key])
 
 def _has_len(x) -> bool:
     try:
@@ -342,6 +359,7 @@ def _split_with_checks(y_action, y_finger, meta, seed: int):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
     parser.add_argument("--npz", type=str, default="eeg_windows.npz", help="Sequence npz file")
     parser.add_argument("--pred-npz", type=str, default="test_predictions.npz", help="Optional cached test predictions")
     parser.add_argument("--model", type=str, default="finger_action_model.pt", help="Model weights path")
@@ -361,6 +379,9 @@ def main():
     parser.add_argument("--threshold-finger", type=float, default=0.75)
     parser.add_argument("--adjacency", action="store_true", help="Enable adjacency assist (finger correction)")
     args = parser.parse_args()
+    defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
+    settings = _load_config(args.config)
+    _apply_config_to_args(args, settings, defaults)
     if args.smooth_action_only and not args.smooth:
         args.smooth = True
     npz_path = Path(args.npz)

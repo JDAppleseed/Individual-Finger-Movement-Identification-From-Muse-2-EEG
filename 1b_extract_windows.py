@@ -37,6 +37,7 @@ from utils.label_schema import (
 SOURCE_FS_DEFAULT = 256
 TARGET_FS_DEFAULT = 256.0
 WINDOW_SEC_DEFAULT = 0.25
+WINDOW_SEC = WINDOW_SEC_DEFAULT
 STEP_SEC = 0.05
 PAD_SEC = 0.05
 
@@ -62,6 +63,25 @@ ROOT_DIR = Path(__file__).resolve().parent
 # =========================
 # ===== UTILITIES =========
 # =========================
+
+def _load_config(path: Optional[str]) -> Dict[str, Any]:
+    if not path:
+        return {}
+    try:
+        payload = json.loads(Path(path).read_text())
+    except Exception:
+        return {}
+    return payload.get("settings", payload)
+
+def _apply_config(settings: Dict[str, Any]):
+    for key, val in settings.items():
+        if key in globals():
+            globals()[key] = val
+
+def _apply_config_to_args(args_obj, settings: Dict[str, Any], defaults: Dict[str, Any]):
+    for key, default in defaults.items():
+        if key in settings and getattr(args_obj, key) == default:
+            setattr(args_obj, key, settings[key])
 
 def _read_json(path: Path) -> Dict[str, Any]:
     if not path or not path.exists():
@@ -556,6 +576,7 @@ def _uarr_from_list(values: List[str]) -> np.ndarray:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
     parser.add_argument("--features", type=str, default=None, help="Override features path")
     parser.add_argument("--events", type=str, default=None, help="Override events path")
     parser.add_argument("--subject-id", type=str, default=DEFAULT_SUBJECT_ID,
@@ -567,6 +588,10 @@ def main():
     parser.add_argument("--ignore-misalignment", action="store_true",
                         help="Warn but continue if events are outside feature range")
     args = parser.parse_args()
+    defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
+    settings = _load_config(args.config)
+    _apply_config(settings)
+    _apply_config_to_args(args, settings, defaults)
 
     features_path, events_path, session_meta, source = _select_session_paths(args)
 
@@ -620,7 +645,7 @@ def main():
     events_time_shift_s = _infer_events_shift_s(events_path)
 
     target_fs = float(args.target_fs) if args.target_fs is not None else float(session_meta.get("sampling_rate", TARGET_FS_DEFAULT))
-    window_sec = float(session_meta.get("window_sec", WINDOW_SEC_DEFAULT)) if session_meta else WINDOW_SEC_DEFAULT
+    window_sec = float(session_meta.get("window_sec", WINDOW_SEC)) if session_meta else WINDOW_SEC
     window_samples = int(round(window_sec * target_fs))
     if window_samples <= 0:
         print(f"Invalid window_samples={window_samples}; check window_sec={window_sec} and target_fs={target_fs}.")

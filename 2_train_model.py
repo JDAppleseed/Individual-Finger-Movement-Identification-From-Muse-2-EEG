@@ -47,6 +47,22 @@ ROOT_DIR = Path(__file__).resolve().parent
 subject_id = "ANON"
 
 
+def _load_config(path: Optional[str]) -> Dict[str, Any]:
+    if not path:
+        return {}
+    try:
+        payload = json.loads(Path(path).read_text())
+    except Exception:
+        return {}
+    return payload.get("settings", payload)
+
+
+def _apply_config_to_args(args_obj, settings: Dict[str, Any], defaults: Dict[str, Any]):
+    for key, default in defaults.items():
+        if key in settings and getattr(args_obj, key) == default:
+            setattr(args_obj, key, settings[key])
+
+
 def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
@@ -114,6 +130,7 @@ def resolve_experiment_hash(meta: Dict[str, Any], n_expected: int) -> str:
 
 def build_arg_parser():
     p = argparse.ArgumentParser(description="Train CNN+LSTM EEG multi-head model")
+    p.add_argument("--config", type=str, default=None, help="Path to JSON config")
     p.add_argument("--npz", type=str, default=DEFAULT_NPZ, help="Path to window dataset")
     p.add_argument("--subject-id", type=str, default="1-M17", help="Filter training data to a single subject_id")
     p.add_argument("--epochs", type=int, default=EPOCHS, help="Number of training epochs")
@@ -347,7 +364,11 @@ def _validate_indices(idx: np.ndarray, n_samples: int, name: str):
 
 
 def main():
-    args = build_arg_parser().parse_args()
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
+    settings = _load_config(args.config)
+    _apply_config_to_args(args, settings, defaults)
     set_seed(args.seed)
 
     try:

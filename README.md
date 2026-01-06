@@ -127,3 +127,26 @@ python 1b_extract_windows.py --target-fs 256
 - Muse 2 sampling rate defaults to 256 Hz in code.
 - `pynput` is required for live event marking.
 - `5_validate_events.py` enforces validity and can auto-repair with `--apply`.
+
+## EEGLAB-Style GUI Wrapper
+
+Launch the operator-friendly GUI:
+```
+python eeglab_wrapper_ui.py
+```
+
+The GUI creates projects under `Projects/<ProjectName>/subjects/<subject_id>/` and writes per-step configs
+to `config/` plus a session snapshot in `sessions/<session_id>/session_config.json`.
+
+Packaging hint (PyInstaller):
+```
+pyinstaller --noconfirm --onefile --windowed eeglab_wrapper_ui.py
+```
+
+### Smoke Test Checklist
+- create project + subject
+- detect LSL / offline CSV
+- run step1 dry run
+- launch event marker
+- confirm config JSON written
+- confirm session folder created

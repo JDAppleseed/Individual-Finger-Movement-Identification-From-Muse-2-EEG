@@ -1,0 +1,26 @@
+{
+  "TIMEBASE_VERSION": "absolute_v1",
+  "created_at": "2026-01-06T08:12:24+00:00",
+  "project_name": "Test1",
+  "schema_version": "1.0",
+  "session_id": "PENDING",
+  "settings": {
+    "N_ACTIONS": 3,
+    "N_FINGERS": 6,
+    "batch_size": 64,
+    "epochs": 60,
+    "loss_action_weight": 1.0,
+    "lr": 0.001,
+    "non_rest_only": false,
+    "npz": "eeg_windows.npz",
+    "rest_weight": 0.2,
+    "save_model": "finger_action_model.pt",
+    "save_preds": "test_predictions.npz",
+    "save_scaler": "scaler.save",
+    "seed": 42,
+    "subject_id": "1-M17",
+    "test_size": 0.2
+  },
+  "subject_id": "1-M17",
+  "timebase_version": "absolute_v1"
+}

@@ -57,6 +57,14 @@ EVENTS_AUTOSAVE_PATH = None
 EVENTS_CHANNEL = "n/a"
 
 # =========================
+# ===== STREAM SOURCE =====
+# =========================
+LSL_STREAM_NAME = None
+LSL_STREAM_TYPE = None
+CSV_OFFLINE_PATH = None
+SESSION_ID_OVERRIDE = None
+
+# =========================
 # ===== IMPORTS ===========
 # =========================
 import argparse
@@ -114,10 +122,35 @@ AGE = 17
 SUBJECT_ID_OVERRIDE = "1-M17"  # Set to None to use auto-increment registry
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
 parser.add_argument("--subject-id", type=str, default=None, help="Override subject ID for this run")
 parser.add_argument("--init-only", action="store_true", help="Initialize session and exit before LSL streaming")
 parser.add_argument("--force-new-session", action="store_true", help="Always start a new session (ignore resume state)")
+
+def _load_config(path: str):
+    if not path:
+        return {}
+    try:
+        payload = json.loads(Path(path).read_text())
+    except Exception:
+        return {}
+    return payload.get("settings", payload)
+
+def _apply_config(settings: dict):
+    for key, val in settings.items():
+        if key in globals():
+            globals()[key] = val
+
+def _apply_config_to_args(args_obj, settings: dict, defaults: dict):
+    for key, default in defaults.items():
+        if key in settings and getattr(args_obj, key) == default:
+            setattr(args_obj, key, settings[key])
+
 args, _ = parser.parse_known_args()
+defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
+config_settings = _load_config(args.config) if args.config else {}
+_apply_config(config_settings)
+_apply_config_to_args(args, config_settings, defaults)
 
 if args.subject_id:
     SUBJECT_ID_OVERRIDE = args.subject_id
@@ -368,6 +401,8 @@ else:
 # If no prior session_id, start fresh
 if not session_id:
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+if not true_resume and SESSION_ID_OVERRIDE:
+    session_id = str(SESSION_ID_OVERRIDE)
 if experiment_hash is None:
     experiment_hash = generate_experiment_hash(subject_id, experiment_config)
 
@@ -375,8 +410,10 @@ FEATURES_ARCHIVE_DIR = Path("data/processed")
 
 FEATURES_ARCHIVE_PATH = Path(features_path_state) if features_path_state else FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_eeg_features.csv"
 EVENTS_ARCHIVE_PATH = Path(events_path_state) if events_path_state else FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_events.csv"
-EVENTS_AUTOSAVE_PATH = str(FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_events_autosave.csv")
-EVENTS_CSV_PATH = str(EVENTS_ARCHIVE_PATH)
+if EVENTS_AUTOSAVE_PATH is None:
+    EVENTS_AUTOSAVE_PATH = str(FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_events_autosave.csv")
+if EVENTS_CSV_PATH is None:
+    EVENTS_CSV_PATH = str(EVENTS_ARCHIVE_PATH)
 FEATURES_PATH = FEATURES_ARCHIVE_PATH
 
 RAW_ARCHIVE_PATH = Path(raw_path_state) if raw_path_state else Path("data/raw") / f"{subject_id}_{session_id}_raw.csv"
@@ -1088,12 +1125,21 @@ def resolve_eeg_channel_indices(info, expected):
     return None
 
 print("🔍 Resolving EEG stream...")
+if CSV_OFFLINE_PATH:
+    raise RuntimeError("CSV offline mode is not supported in 1_stream_and_record.py.")
 streams = resolve_streams()
 if not streams:
     raise RuntimeError("No LSL streams found.")
-eeg_streams = [s for s in streams if "eeg" in s.name().lower()]
+if LSL_STREAM_NAME:
+    target = str(LSL_STREAM_NAME).lower()
+    eeg_streams = [s for s in streams if target in s.name().lower()]
+elif LSL_STREAM_TYPE:
+    target = str(LSL_STREAM_TYPE).lower()
+    eeg_streams = [s for s in streams if s.type().lower() == target]
+else:
+    eeg_streams = [s for s in streams if "eeg" in s.name().lower()]
 if not eeg_streams:
-    raise RuntimeError("No LSL stream with 'eeg' in the name found.")
+    raise RuntimeError("No matching LSL EEG stream found.")
 eeg_stream = eeg_streams[0]
 inlet = StreamInlet(eeg_stream)
 info = inlet.info()
