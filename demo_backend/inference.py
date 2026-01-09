@@ -20,13 +20,14 @@ class InferenceConfig:
 
 def _mc_predict(model, x_BTC: torch.Tensor, passes: int) -> Dict[str, torch.Tensor]:
     if hasattr(model, "mc_forward"):
-        return model.mc_forward(x_BTC, passes=passes)
+        with torch.inference_mode():
+            return model.mc_forward(x_BTC, passes=passes)
 
     was_training = model.training
     model.train()
     finger_probs = []
     action_probs = []
-    with torch.no_grad():
+    with torch.inference_mode():
         for _ in range(passes):
             finger_logits, action_logits = model(x_BTC)
             finger_probs.append(torch.softmax(finger_logits, dim=1))
@@ -67,6 +68,9 @@ class InferenceEngine:
         self.finger_names = finger_names
         self.config = config or InferenceConfig()
         self._stability = deque(maxlen=self.config.stability_frames)
+        self._input_np: Optional[np.ndarray] = None
+        self._input_tensor: Optional[torch.Tensor] = None
+        self._compiled = False
 
         if self.model is not None:
             self.model.to(self.device)
@@ -76,20 +80,85 @@ class InferenceEngine:
         self.device = device
         if self.model is not None:
             self.model.to(self.device)
+        self._input_tensor = None
 
+    def compile_model(self) -> bool:
+        if self.model is None or self._compiled:
+            return False
+        if not hasattr(torch, "compile"):
+            return False
+        try:
+            self.model = torch.compile(self.model)  # type: ignore[attr-defined]
+            self._compiled = True
+            return True
+        except Exception:
+            return False
+
+    def _ensure_buffers(self, shape: Tuple[int, int]) -> None:
+        if self._input_np is None or self._input_np.shape != shape:
+            self._input_np = np.empty(shape, dtype=np.float32)
+        expected = (1,) + shape
+        if self._input_tensor is None or tuple(self._input_tensor.shape) != expected or self._input_tensor.device != self.device:
+            self._input_tensor = torch.empty(expected, dtype=torch.float32, device=self.device)
+
+    def _normalize_window(self, window_TxC: np.ndarray) -> np.ndarray:
+        window = np.asarray(window_TxC, dtype=np.float32)
+        self._ensure_buffers(window.shape)
+        if self._input_np is None:
+            return window
+        np.copyto(self._input_np, window)
+        if self.normalizer is None:
+            return self._input_np
+        if isinstance(self.normalizer, dict) and "mean" in self.normalizer and "std" in self.normalizer:
+            mean = np.asarray(self.normalizer["mean"], dtype=np.float32)
+            std = np.asarray(self.normalizer["std"], dtype=np.float32)
+            std = np.where(std == 0, 1.0, std)
+            self._input_np -= mean
+            self._input_np /= std
+            return self._input_np
+        if hasattr(self.normalizer, "mean_") and hasattr(self.normalizer, "scale_"):
+            mean = np.asarray(self.normalizer.mean_, dtype=np.float32)
+            scale = np.asarray(self.normalizer.scale_, dtype=np.float32)
+            scale = np.where(scale == 0, 1.0, scale)
+            self._input_np -= mean
+            self._input_np /= scale
+            return self._input_np
+        return apply_channel_normalizer(window, self.normalizer)
+
+    def _to_tensor(self, window_TxC: np.ndarray) -> torch.Tensor:
+        if self._input_np is not None and window_TxC is self._input_np:
+            assert self._input_tensor is not None
+            self._input_tensor[0].copy_(torch.from_numpy(window_TxC))
+            return self._input_tensor
+        return torch.tensor(window_TxC, dtype=torch.float32, device=self.device).unsqueeze(0)
 
     def predict_proba(self, window_TxC: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], float, float, Dict[str, Any]]:
         if self.model is None:
             return None, None, 1.0, 1.0, {"health_score": compute_health_score(window_TxC)}
 
-        window_TxC = apply_channel_normalizer(window_TxC, self.normalizer)
-        x = torch.tensor(window_TxC, dtype=torch.float32, device=self.device).unsqueeze(0)
+        normalized = self._normalize_window(window_TxC)
+        x = self._to_tensor(normalized)
 
-        mc = _mc_predict(self.model, x, passes=self.config.mc_passes)
-        action_mean = mc["action_mean"].squeeze(0).detach().cpu().numpy()
-        finger_mean = mc["finger_mean"].squeeze(0).detach().cpu().numpy()
-        action_std = mc["action_std"].squeeze(0).detach().cpu().numpy()
-        finger_std = mc["finger_std"].squeeze(0).detach().cpu().numpy()
+        passes = int(self.config.mc_passes)
+        if passes <= 1:
+            was_training = self.model.training
+            self.model.eval()
+            with torch.inference_mode():
+                finger_logits, action_logits = self.model(x)
+                finger_probs = torch.softmax(finger_logits, dim=1)
+                action_probs = torch.softmax(action_logits, dim=1)
+            if was_training:
+                self.model.train()
+            action_mean = action_probs.squeeze(0).detach().cpu().numpy()
+            finger_mean = finger_probs.squeeze(0).detach().cpu().numpy()
+            action_std = np.zeros_like(action_mean)
+            finger_std = np.zeros_like(finger_mean)
+        else:
+            mc = _mc_predict(self.model, x, passes=passes)
+            action_mean = mc["action_mean"].squeeze(0).detach().cpu().numpy()
+            finger_mean = mc["finger_mean"].squeeze(0).detach().cpu().numpy()
+            action_std = mc["action_std"].squeeze(0).detach().cpu().numpy()
+            finger_std = mc["finger_std"].squeeze(0).detach().cpu().numpy()
 
         action_uncertainty = float(np.mean(action_std))
         finger_uncertainty = float(np.mean(finger_std))

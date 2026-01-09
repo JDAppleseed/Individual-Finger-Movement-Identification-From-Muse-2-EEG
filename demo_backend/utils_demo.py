@@ -40,7 +40,8 @@ def setup_logger(name: str, log_dir: Path) -> logging.Logger:
 
 
 def resolve_device(requested: str) -> torch.device:
-    if requested == "cuda" and torch.cuda.is_available():
+    requested = str(requested).lower()
+    if requested in {"cuda", "auto"} and torch.cuda.is_available():
         return torch.device("cuda")
     return torch.device("cpu")
 

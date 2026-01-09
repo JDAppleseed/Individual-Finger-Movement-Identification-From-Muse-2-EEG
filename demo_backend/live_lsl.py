@@ -92,35 +92,40 @@ class LiveLSLSource:
     def pull_window(self) -> Optional[LiveWindow]:
         if self.inlet is None:
             return None
+        last_window = None
+        while True:
+            sample, ts = self.inlet.pull_sample(timeout=0.0)
+            if sample is None:
+                break
+            if self._stream_start is None:
+                self._stream_start = ts
 
-        sample, ts = self.inlet.pull_sample(timeout=0.0)
-        if sample is None:
-            return None
+            if len(sample) < 4:
+                continue
+            if self.channel_indices is not None:
+                sample = [sample[i] for i in self.channel_indices]
+            else:
+                sample = sample[:4]
+            self.buffer.append(sample)
+            self.sample_times.append(ts)
 
-        if self._stream_start is None:
-            self._stream_start = ts
+            if len(self.buffer) < self.window_samples:
+                continue
 
-        if len(sample) < 4:
-            return None
-        if self.channel_indices is not None:
-            sample = [sample[i] for i in self.channel_indices]
-        else:
-            sample = sample[:4]
-        self.buffer.append(sample)
-        self.sample_times.append(ts)
+            self._sample_count += 1
 
-        if len(self.buffer) < self.window_samples:
-            return None
+            # Emit every step samples
+            if (self._sample_count - self._last_emit_idx) < self.step_samples:
+                continue
+            self._last_emit_idx = self._sample_count
 
-        self._sample_count += 1
+            window = np.array(self.buffer, dtype=np.float32)
+            start_s = float(self.sample_times[0] - self._stream_start)
+            end_s = float(self.sample_times[-1] - self._stream_start)
 
-        # Emit every step samples
-        if (self._sample_count - self._last_emit_idx) < self.step_samples:
-            return None
-        self._last_emit_idx = self._sample_count
-
-        window = np.array(self.buffer, dtype=np.float32)
-        start_s = float(self.sample_times[0] - self._stream_start)
-        end_s = float(self.sample_times[-1] - self._stream_start)
-
-        return LiveWindow(window=window, window_start_s=start_s, window_end_s=end_s)
+            last_window = LiveWindow(
+                window=window,
+                window_start_s=start_s,
+                window_end_s=end_s,
+            )
+        return last_window

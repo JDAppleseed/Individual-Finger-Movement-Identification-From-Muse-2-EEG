@@ -122,6 +122,51 @@ Resampled extraction (fixed shape windows):
 python 1b_extract_windows.py --target-fs 256
 ```
 
+## Live Sliding-Window Inference (demo_backend)
+
+The demo backend consumes LSL samples into fixed windows (default `window_sec=0.25`) and advances
+by hop (`step_sec`, default `0.05`). Inference runs on every hop as soon as samples arrive.
+
+Publishing and actuation are decoupled:
+- `publish_hz` throttles websocket tick updates.
+- `actuation_hz` throttles palm-controller packets.
+
+Timebases:
+- Stream timebase (`absolute_v1`) comes from LSL timestamps and is used for `window_start_s`, `window_end_s`, and actuation packet timestamps.
+- Perf time (`time.perf_counter`) is used only for pacing/profiling and never for dataset time or actuation timing.
+
+Backlog handling:
+- `backlog_strategy="all"` processes every window in order.
+- `backlog_strategy="latest"` drops intermediate windows to reduce latency.
+
+Example control payload (partial):
+```json
+{
+  "mode": "live",
+  "publish_hz": 20,
+  "actuation_hz": 20,
+  "backlog_strategy": "latest",
+  "fast_mode": false,
+  "enable_actuation": true,
+  "link_type": "udp",
+  "udp_host": "127.0.0.1",
+  "udp_port": 9010,
+  "speed_gamma": 1.0,
+  "hold_ms": 150,
+  "watchdog_ms": 500
+}
+```
+
+Actuation links:
+- `link_type="null"` (default): no-op
+- `link_type="udp"`: UDP sim link (2.4GHz radio stand-in)
+- `link_type="serial"`: UART link (`serial_port`, `serial_baud`)
+
+Find the best available evaluation run:
+```
+python tools/find_best_eval_run.py
+```
+
 ## Notes
 
 - Muse 2 sampling rate defaults to 256 Hz in code.

@@ -23,6 +23,7 @@ class ReplayMeta:
     window_start_s: float
     window_end_s: float
     index: int
+    timebase_version: str
 
 
 class ReplaySource:
@@ -49,6 +50,7 @@ class ReplaySource:
         self.experiment_hashes = meta.get("experiment_hash")
         self.window_start = meta.get("window_start")
         self.window_end = meta.get("window_end")
+        self.timebase_version = meta.get("timebase_version")
 
     def __len__(self) -> int:
         return int(self.X.shape[0])
@@ -65,6 +67,12 @@ class ReplaySource:
 
             window_start = float(self.window_start[idx]) if self.window_start is not None else float(idx)
             window_end = float(self.window_end[idx]) if self.window_end is not None else float(idx)
+            timebase_version = "absolute_v1"
+            if self.timebase_version is not None:
+                try:
+                    timebase_version = str(self.timebase_version[idx])
+                except Exception:
+                    timebase_version = str(self.timebase_version)
 
             yield self.X[idx], ReplayMeta(
                 subject_id=subject_id,
@@ -72,4 +80,5 @@ class ReplaySource:
                 window_start_s=window_start,
                 window_end_s=window_end,
                 index=idx,
+                timebase_version=timebase_version,
             )

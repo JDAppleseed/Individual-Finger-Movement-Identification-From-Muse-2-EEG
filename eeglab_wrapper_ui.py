@@ -428,9 +428,12 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
 
-        info = QLabel("Launch event review/edit tools for the current session.")
+        info = QLabel("Post-hoc event review/edit tools for the current session.")
         layout.addWidget(info)
-        note = QLabel("PyQtGraph event marker not found in repo; using 5_review_events.py.")
+        note = QLabel(
+            "Live graph + event labeling run inside Step 1 (1_stream_and_record.py). "
+            "This page is for review/repair after capture."
+        )
         note.setWordWrap(True)
         layout.addWidget(note)
 
@@ -599,6 +602,17 @@ class MainWindow(QMainWindow):
             resume_row.addWidget(self.resume_checkbox)
             resume_row.addStretch(1)
             layout.addLayout(resume_row)
+            live_box = QGroupBox("Live Graph + Event Labeling")
+            live_layout = QVBoxLayout(live_box)
+            live_note = QLabel(
+                "The live plot and keyboard event labeling run inside Step 1 "
+                "(1_stream_and_record.py). Keep 'Enable plot' and 'Event marking' checked "
+                "for live capture. Controls: Space=hold event, o/c/r=mode, a/k/n=override, "
+                "1-5=assign finger, q or ESC=stop."
+            )
+            live_note.setWordWrap(True)
+            live_layout.addWidget(live_note)
+            layout.addWidget(live_box)
 
         self.fields[step_id] = {}
         self.defaults[step_id] = defaults
@@ -1268,6 +1282,11 @@ class MainWindow(QMainWindow):
         settings["TIMEBASE_VERSION"] = TIMEBASE_VERSION
         if step_id in {"step1", "infer"} and self.input_source.currentText() == "CSV Offline":
             self._append_log("CSV Offline selected; backend does not support offline replay in Step 1.")
+        if step_id == "step1":
+            if not settings.get("ENABLE_PLOT", True):
+                self._append_log("Note: ENABLE_PLOT is disabled; no live graph will appear.")
+            if not settings.get("EVENT_MARKING_ENABLED", True):
+                self._append_log("Note: EVENT_MARKING_ENABLED is disabled; live labeling is off.")
 
         backend_session = self.current_session_backend
         if step_id == "step1":

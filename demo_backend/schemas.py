@@ -11,13 +11,14 @@ TICK_SCHEMA = {
         "mode": {"type": "string", "enum": ["replay", "live", "idle"]},
         "session": {
             "type": "object",
-            "required": ["subject_id", "experiment_hash", "window_index", "window_start_s", "window_end_s"],
+            "required": ["subject_id", "experiment_hash", "window_index", "window_start_s", "window_end_s", "timebase_version"],
             "properties": {
                 "subject_id": {"type": "string"},
                 "experiment_hash": {"type": "string"},
                 "window_index": {"type": "integer"},
                 "window_start_s": {"type": "number"},
                 "window_end_s": {"type": "number"},
+                "timebase_version": {"type": "string"},
             },
         },
         "prediction": {
@@ -99,6 +100,15 @@ TICK_SCHEMA = {
                 "frames_in_state": {"type": "integer"},
             },
         },
+        "telemetry": {
+            "type": ["object", "null"],
+            "properties": {
+                "servo_rail_v": {"type": ["number", "null"]},
+                "rail_current_a": {"type": ["number", "null"]},
+                "thermal_c": {"type": ["number", "null"]},
+                "fingertip_contact": {"type": ["boolean", "null"]},
+            },
+        },
         "nnvis": {"type": ["object", "null"]},
     },
 }
@@ -131,6 +141,7 @@ def sample_tick():
             "window_index": 1234,
             "window_start_s": 12.3,
             "window_end_s": 12.55,
+            "timebase_version": "absolute_v1",
         },
         "prediction": {
             "action_id": 1,
@@ -174,6 +185,12 @@ def sample_tick():
             "smoothed_action_id": 1,
             "smoothed_finger_id": 2,
             "frames_in_state": 3,
+        },
+        "telemetry": {
+            "servo_rail_v": None,
+            "rail_current_a": None,
+            "thermal_c": None,
+            "fingertip_contact": None,
         },
     }
 

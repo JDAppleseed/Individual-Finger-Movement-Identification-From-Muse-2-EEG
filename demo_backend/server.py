@@ -42,7 +42,6 @@ RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
 logger = setup_logger("demo_backend", LOG_DIR)
 
-
 @dataclass
 class RuntimeState:
     mode: str = "idle"
@@ -148,9 +147,14 @@ class BackendState:
             config=config,
         )
 
+state: Optional[BackendState] = None
 
-state = BackendState()
-state.load_assets()
+
+def get_state() -> BackendState:
+    global state
+    if state is None:
+        state = BackendState()
+    return state
 
 app = FastAPI()
 app.add_middleware(
@@ -163,8 +167,15 @@ app.add_middleware(
 app.include_router(nnvis_router)
 
 
+@app.on_event("startup")
+async def _startup() -> None:
+    s = get_state()
+    s.load_assets()
+
+
 @app.get("/health")
 async def health():
+    state = get_state()
     return {
         "status": "ok",
         "model_loaded": state.model_loaded,
@@ -180,6 +191,7 @@ async def schema():
 
 @app.post("/control")
 async def control(payload: ControlPayload):
+    state = get_state()
     async with state.lock:
         previous_mode = state.runtime.mode
         state.runtime.mode = payload.mode
@@ -224,6 +236,7 @@ async def control(payload: ControlPayload):
 
 
 def _build_postprocess_settings():
+    state = get_state()
     return PostprocessSettings(
         smoothing_enabled=state.runtime.smoothing_enabled,
         smoothing_method=state.runtime.smoothing_method,
@@ -247,6 +260,7 @@ async def _send_status(ws: WebSocket, level: str, message: str, details: Optiona
 
 
 def _build_nnvis_payload(window: np.ndarray, source: str, index: Optional[int], time_s: Optional[float], passes: int) -> Optional[dict]:
+    state = get_state()
     if state.engine is None or state.engine.model is None:
         return None
     activations, uncertainty = extract_activations(
@@ -287,6 +301,7 @@ def _build_nnvis_payload(window: np.ndarray, source: str, index: Optional[int], 
 
 
 async def _stream_replay(ws: WebSocket, nnvis: NnvisSubscription):
+    state = get_state()
     if state.replay is None or state.replay.path != state.runtime.replay_path:
         if not state.runtime.replay_path.exists():
             await _send_status(ws, "error", f"Replay file not found: {state.runtime.replay_path}")
@@ -405,6 +420,7 @@ async def _stream_replay(ws: WebSocket, nnvis: NnvisSubscription):
 
 
 async def _stream_live(ws: WebSocket, nnvis: NnvisSubscription):
+    state = get_state()
     if not state.lsl_connected:
         ok, msg = state.live.connect()
         state.lsl_connected = ok
@@ -553,6 +569,7 @@ async def _listen_ws(ws: WebSocket, nnvis: NnvisSubscription):
 
 @app.websocket("/stream")
 async def stream(ws: WebSocket):
+    state = get_state()
     await ws.accept()
     state.postprocess.reset()
     await _send_status(ws, "info", "Connected", {"mode": state.runtime.mode})
