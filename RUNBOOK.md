@@ -1,0 +1,26 @@
+# RUNBOOK
+
+## Timebase report
+
+Each Step 1 session writes a timebase report to:
+
+- `data/processed/<subject>_<session>_timebase_report.json`
+- `reports/last_timebase_report.json` (latest pointer)
+
+Key values to eyeball:
+
+- `time_s_clamped_count` should be `0` (non-zero means LSL time moved backward and was clamped).
+- `event_clamped_count` should be `0` (non-zero means event timestamps fell behind stream samples).
+- `nearest_sample_delta_s_abs_max` ideally stays below ~0.05–0.10s for tight alignment.
+- `dt_median_ms`/`dt_p95_ms` should roughly match the sample period (for 256 Hz, ~3.9 ms).
+
+## AFTER CHANGES — RUN FULL CHECKS
+
+```
+python -m compileall .
+pytest -q
+python 3_evaluate_model.py --npz eeg_windows.npz --model finger_action_model.pt --scaler scaler.save --subject-id "" --deterministic --split-seed 42 --no-manifest
+python 1b_extract_windows.py --help
+python -c "import json; from pathlib import Path; print('ok')"
+python -c "from utils.timebase import clamp_monotonic_time; print('ok')"
+```
