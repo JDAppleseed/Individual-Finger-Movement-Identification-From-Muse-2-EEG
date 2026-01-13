@@ -10,6 +10,8 @@ import argparse
 import json
 import random
 import re
+import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -61,6 +63,28 @@ def _apply_config_to_args(args_obj, settings: Dict[str, Any], defaults: Dict[str
     for key, default in defaults.items():
         if key in settings and getattr(args_obj, key) == default:
             setattr(args_obj, key, settings[key])
+
+
+def sha256_file(path: Path) -> Optional[str]:
+    try:
+        hasher = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except Exception:
+        return None
+
+
+def safe_resolve(path: Path) -> str:
+    try:
+        return str(path.expanduser().resolve())
+    except Exception:
+        return str(path)
+
+
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def set_seed(seed: int):
@@ -672,14 +696,16 @@ def main():
     test_experiment_hash = take_meta(meta, ["experiment_hash", "exp_hash"], test_idx, n_expected, "U")
 
     dataset_info = {
-        "npz_path": str(npz_path),
-        "subject_id_filter": args.subject_id or "",
-        "exp_hash": str(exp_hash),
-        "n_samples_used": int(len(y_action)),
-        "n_samples_full": int(len(y_action_full)),
-        "n_test": int(len(test_idx)),
-        "n_actions": int(n_actions),
-        "n_fingers": int(n_fingers),
+        "npz_path": safe_resolve(npz_path),
+        "npz_sha256": sha256_file(npz_path) if npz_path.exists() else None,
+        "npz_size_bytes": npz_path.stat().st_size if npz_path.exists() else None,
+        "experiment_hash": str(exp_hash),
+        "n_samples": int(len(y_action)),
+        "filters": {
+            "subject_id": args.subject_id or "",
+            "max_samples": None,
+        },
+        "created_utc": now_utc_iso(),
     }
 
     save_dict = dict(

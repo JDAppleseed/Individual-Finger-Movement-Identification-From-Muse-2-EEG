@@ -30,6 +30,10 @@ from sklearn.model_selection import StratifiedShuffleSplit
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from utils.label_schema import ACTION_REST, ACTION_NAMES, FINGER_NAMES
+from utils.eval_utils import (
+    resolve_cached_test_indices,
+    validate_cached_predictions_with_dataset_info,
+)
 from utils.sequence_data import load_sequence_npz, split_indices, apply_channel_normalizer
 from demo_backend.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
 
@@ -73,6 +77,62 @@ def numpy_sha256(arr: np.ndarray) -> Optional[str]:
 
 def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _build_dataset_info(
+    *,
+    npz_path: Path,
+    experiment_hash: str,
+    n_samples: int,
+    subject_id: str,
+    max_samples: Optional[int],
+) -> Dict[str, Any]:
+    npz_sha = sha256_file(npz_path) if npz_path.exists() else None
+    npz_size = npz_path.stat().st_size if npz_path.exists() else None
+    return {
+        "npz_path": safe_resolve(npz_path),
+        "npz_sha256": npz_sha,
+        "npz_size_bytes": npz_size,
+        "experiment_hash": experiment_hash,
+        "n_samples": int(n_samples),
+        "filters": {
+            "subject_id": subject_id,
+            "max_samples": int(max_samples) if max_samples is not None else None,
+        },
+        "created_utc": now_utc_iso(),
+    }
+
+
+def _parse_dataset_info(payload: dict) -> Optional[Dict[str, Any]]:
+    if "dataset_info" not in payload:
+        return None
+    info = payload.get("dataset_info")
+    if info is None:
+        return None
+    if isinstance(info, dict):
+        return info
+    if isinstance(info, np.ndarray):
+        if info.size == 0:
+            return None
+        value = info.flat[0]
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="ignore")
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except Exception:
+                return None
+    if isinstance(info, bytes):
+        try:
+            return json.loads(info.decode("utf-8", errors="ignore"))
+        except Exception:
+            return None
+    if isinstance(info, str):
+        try:
+            return json.loads(info)
+        except Exception:
+            return None
+    return None
 
 
 def _load_config(path: Optional[str]) -> Dict[str, Any]:
@@ -276,6 +336,9 @@ def _load_predictions_if_present(path: Path):
             "y_finger": d["y_finger"],
             "test_indices": test_idx,
         }
+
+        if "dataset_info" in d.files:
+            out["dataset_info"] = d["dataset_info"]
 
         # Optional metadata aligned to rows of probs/labels
         for k in ["window_start", "window_end", "trial_id", "block_id", "subject_id", "experiment_hash"]:
@@ -588,6 +651,14 @@ def main():
 
     subject_ids = meta.get("subject_id", None)
     exp_hash = _first_meta_scalar(meta, ["experiment_hash", "exp_hash"], default="UNKNOWN")
+    subject_id_filter = args.subject_id.strip() if args.subject_id else ""
+    dataset_info_current = _build_dataset_info(
+        npz_path=npz_path,
+        experiment_hash=str(exp_hash),
+        n_samples=len(y_action),
+        subject_id=subject_id_filter,
+        max_samples=args.max_samples,
+    )
 
     n_fingers = int(np.max(y_finger)) + 1
     n_actions = int(np.max(y_action)) + 1
@@ -605,12 +676,7 @@ def main():
     # ===== TEST SPLIT =========
     # =========================
     cached = _load_predictions_if_present(pred_npz_path)
-    if subject_filtered and cached is not None:
-        print("ℹ️ Ignoring cached predictions because --subject-id filtering is enabled.")
-        cached = None
-    if args.max_samples and cached is not None:
-        print("ℹ️ Ignoring cached predictions because --max-samples is enabled.")
-        cached = None
+    cache_rejected_reasons: Optional[List[str]] = None
 
     cached_used = False
     split_attempts = 0
@@ -619,41 +685,47 @@ def main():
         finger_probs = np.asarray(cached["finger_probs"])
         y_action_test = np.asarray(cached["y_action"])
         y_finger_test = np.asarray(cached["y_finger"])
-        test_idx = np.asarray(cached["test_indices"]).astype(np.int64)
-
-        all_idx = np.arange(len(y_action), dtype=np.int64)
-        test_mask = np.zeros(len(y_action), dtype=bool)
-        test_mask[test_idx] = True
-        train_idx = all_idx[~test_mask]
-
-        cache_ok = True
-        if action_probs.shape != (len(test_idx), n_actions):
-            cache_ok = False
-        if finger_probs.shape != (len(test_idx), n_fingers):
-            cache_ok = False
-        if y_action_test.shape != (len(test_idx),):
-            cache_ok = False
-        if y_finger_test.shape != (len(test_idx),):
-            cache_ok = False
-        if len(y_action_test) > 0:
-            try:
-                if y_action_test.min() < 0 or y_action_test.max() >= n_actions:
-                    cache_ok = False
-            except Exception:
-                cache_ok = False
-        if len(y_finger_test) > 0:
-            try:
-                if y_finger_test.min() < 0 or y_finger_test.max() >= n_fingers:
-                    cache_ok = False
-            except Exception:
-                cache_ok = False
-
-        if not cache_ok:
-            print("⚠️ Cached predictions mismatch; ignoring cached predictions.")
+        test_idx = resolve_cached_test_indices(cached)
+        if test_idx is None:
+            cache_rejected_reasons = ["missing_test_indices"]
             cached = None
         else:
-            cached_used = True
-            print(f"✅ Using cached predictions: {pred_npz_path}")
+            test_idx = np.asarray(test_idx).astype(np.int64)
+
+        if cached is not None:
+            all_idx = np.arange(len(y_action), dtype=np.int64)
+            test_mask = np.zeros(len(y_action), dtype=bool)
+            test_mask[test_idx] = True
+            train_idx = all_idx[~test_mask]
+
+            dataset_info_cache = _parse_dataset_info(cached)
+            cache_ok, reject_reasons = validate_cached_predictions_with_dataset_info(
+                action_probs=action_probs,
+                finger_probs=finger_probs,
+                y_action_test=y_action_test,
+                y_finger_test=y_finger_test,
+                test_idx=test_idx,
+                n_actions=n_actions,
+                n_fingers=n_fingers,
+                n_samples_current=len(y_action),
+                dataset_info_cache=dataset_info_cache,
+                dataset_info_current=dataset_info_current,
+                y_action_current=y_action,
+                y_finger_current=y_finger,
+                spotcheck_k=10,
+                rng_seed=0,
+            )
+
+            if not cache_ok:
+                print(
+                    "⚠️ Cached predictions rejected; recomputing. "
+                    f"Reasons: {reject_reasons}"
+                )
+                cache_rejected_reasons = reject_reasons
+                cached = None
+            else:
+                cached_used = True
+                print(f"✅ Using cached predictions: {pred_npz_path}")
 
     if cached is None:
         train_idx, test_idx, split_attempts = _split_with_checks(
@@ -709,6 +781,8 @@ def main():
     manifest["split"]["test_n"] = int(len(test_idx))
     manifest["split"]["train_idx_sha256"] = numpy_sha256(np.asarray(train_idx, dtype=np.int64))
     manifest["split"]["test_idx_sha256"] = numpy_sha256(np.asarray(test_idx, dtype=np.int64))
+    if cache_rejected_reasons is not None:
+        manifest["split"]["cache_rejected_reasons"] = cache_rejected_reasons
 
     if len(test_idx) < MIN_TEST_SAMPLES:
         print(f"⚠️ Test set too small ({len(test_idx)} samples). Aborting evaluation.")
@@ -722,7 +796,9 @@ def main():
             "finger_probs": finger_probs,
             "y_action": y_action_test,
             "y_finger": y_finger_test,
+            "test_indices": np.asarray(test_idx, dtype=np.int64),
             "test_indices_local": np.asarray(test_idx, dtype=np.int64),
+            "dataset_info": np.array([json.dumps(dataset_info_current)], dtype="U"),
         }
         optional_keys = ["window_start", "window_end", "trial_id", "block_id", "subject_id", "experiment_hash"]
         n_expected = int(len(y_action))

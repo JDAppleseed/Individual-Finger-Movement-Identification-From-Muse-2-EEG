@@ -1,4 +1,6 @@
-import jsonschema
+import pytest
+
+jsonschema = pytest.importorskip("jsonschema")
 
 from demo_backend import schemas
 

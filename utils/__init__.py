@@ -8,14 +8,7 @@ Importing submodules directly (for example `from utils.per_subject_calibration i
 now works as usual.
 """
 
-from . import (
-    experiment_logger,
-    mc_dropout,
-    online_calibration,
-    per_subject_calibration,
-    report_generator,
-    sequence_data,
-)
+import importlib
 
 __all__ = [
     "experiment_logger",
@@ -24,4 +17,13 @@ __all__ = [
     "per_subject_calibration",
     "report_generator",
     "sequence_data",
+    "timebase",
+    "eval_utils",
+    "session_timebase",
 ]
+
+
+def __getattr__(name: str):
+    if name in __all__:
+        return importlib.import_module(f"{__name__}.{name}")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
