@@ -51,6 +51,10 @@ KEEP_BASELINE_REST_EVENTS = 2  # Keep REST only if overlapping first N rest even
 MIN_OVERLAP_RATIO = 0.20       # fraction of WINDOW_SEC required for non-REST labels
 GUARD_BAND_SEC = 0.00          # skip windows within ± this time of any movement boundary (midpoint-based)
 ARTIFACT_MIN_OVERLAP_FRAC = 0.20  # if artifact overlaps >=20% of window, drop window
+SEED = 42
+REST_SUBSAMPLE_PROB = 1.0
+REST_SUBSAMPLE_SEED = 1337
+REST_MAX_WINDOWS: Optional[int] = None
 
 RAW_FILE = "eeg_features.csv"
 EVENT_FILE = "events.csv"
@@ -460,30 +464,117 @@ def _safe_int(x: Any, default: int = 0) -> int:
         return default
 
 
-def _load_events(path: Path):
+def _safe_float(x: Any, default: float = np.nan) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+
+def _event_id_from_row(row: pd.Series, fallback_id: int) -> Optional[int]:
+    raw_id = row.get("event_id", row.get("id", fallback_id))
+    try:
+        if pd.isna(raw_id):
+            return fallback_id
+    except Exception:
+        pass
+    return _safe_int(raw_id, fallback_id)
+
+
+def _event_key_from_fields(
+    onset_s: float,
+    duration_s: float,
+    action_id: int,
+    finger_id: int,
+    event_type: str,
+    precision: int = 6,
+) -> Tuple[Any, ...]:
+    return (
+        round(float(onset_s), precision),
+        round(float(duration_s), precision),
+        int(action_id),
+        int(finger_id),
+        str(event_type),
+    )
+
+
+def _event_key(event: Dict[str, Any]) -> Any:
+    if event.get("event_id") is not None:
+        return ("event_id", int(event["event_id"]))
+    return ("fields",) + _event_key_from_fields(
+        event.get("onset_s", np.nan),
+        event.get("duration_s", np.nan),
+        event.get("action_id", ACTION_REST),
+        event.get("finger_id", FINGER_NONE),
+        event.get("type", ""),
+    )
+
+
+def _event_id_sort_key(event: Dict[str, Any]) -> Any:
+    event_index = event.get("event_index")
+    if event_index is not None:
+        return int(event_index)
+    event_id = event.get("event_id")
+    if event_id is None:
+        return str(_event_key(event))
+    return int(event_id)
+
+
+def _overlap_sort_key(overlap: float, event: Dict[str, Any]) -> Tuple[Any, ...]:
+    return (
+        -float(overlap),
+        event_priority(event),
+        -float(event.get("duration_s", 0.0)),
+        float(event.get("onset_s", 0.0)),
+        _event_id_sort_key(event),
+    )
+
+
+def _overlap_tie_key(overlap: float, event: Dict[str, Any]) -> Tuple[Any, ...]:
+    return (
+        float(overlap),
+        event_priority(event),
+        float(event.get("duration_s", 0.0)),
+        float(event.get("onset_s", 0.0)),
+    )
+
+
+def _select_best_overlap(
+    overlaps: List[Tuple[float, float, Dict[str, Any]]],
+) -> Tuple[Optional[Tuple[float, float, Dict[str, Any]]], bool]:
+    if not overlaps:
+        return None, False
+    overlaps.sort(key=lambda item: _overlap_sort_key(item[0], item[2]))
+    best = overlaps[0]
+    best_key = _overlap_tie_key(best[0], best[2])
+    ambiguous = any(_overlap_tie_key(ov, ev) == best_key for ov, _, ev in overlaps[1:])
+    return best, ambiguous
+
+
+def _load_events(path: Path, session_meta: Optional[Dict[str, Any]] = None):
     events_df = pd.read_csv(path)
     events: List[Dict[str, Any]] = []
+    stream_start_lsl = None
+    if session_meta:
+        stream_start_lsl = session_meta.get("stream_start_lsl_ts")
+        stream_start_lsl = _safe_float(stream_start_lsl, default=np.nan)
 
-    for _, row in events_df.iterrows():
-        try:
-            onset_s = float(row.get("onset_s", np.nan))
-        except Exception:
-            onset_s = np.nan
+    for row_idx, row in events_df.iterrows():
+        onset_s = _safe_float(row.get("event_time_s", np.nan))
+        if not np.isfinite(onset_s):
+            onset_s = _safe_float(row.get("onset_s", np.nan))
+        if not np.isfinite(onset_s):
+            onset_lsl = _safe_float(row.get("onset_lsl", np.nan))
+            if np.isfinite(onset_lsl) and np.isfinite(stream_start_lsl):
+                onset_s = float(onset_lsl - stream_start_lsl)
         if not np.isfinite(onset_s):
             continue
 
-        try:
-            duration_s = float(row.get("duration_s", 0.0))
-        except Exception:
-            duration_s = 0.0
+        duration_s = _safe_float(row.get("duration_s", 0.0))
         if duration_s < 0:
             duration_s = 0.0
 
-        end_s = row.get("end_s", np.nan)
-        try:
-            end_s = float(end_s)
-        except Exception:
-            end_s = np.nan
+        end_s = _safe_float(row.get("end_s", np.nan))
         if not np.isfinite(end_s):
             end_s = onset_s + duration_s
 
@@ -501,6 +592,8 @@ def _load_events(path: Path):
             "trial_id": _safe_int(row.get("trial_id", 0), 0),
             "block_id": _safe_int(row.get("block_id", 0), 0),
         }
+        e["event_id"] = _event_id_from_row(row, int(row_idx))
+        e["event_index"] = int(row_idx)
         events.append(e)
 
     return events
@@ -540,6 +633,39 @@ def is_baseline_rest_window(window_start: float, window_end: float,
         if overlap_s(window_start, window_end, e["onset_s"], e["end_s"]) >= min_overlap_sec:
             return True
     return False
+
+
+def _select_rest_keep_indices(
+    rest_indices: List[int],
+    non_rest_count: int,
+    subsample_prob: float,
+    seed: int,
+    rest_cap: Optional[int],
+) -> Tuple[List[int], int, int]:
+    if not rest_indices:
+        return [], 0, 0
+    if non_rest_count == 0:
+        return list(rest_indices), 0, 0
+    rng = np.random.default_rng(int(seed))
+    shuffled = rng.permutation(np.array(rest_indices, dtype=int))
+
+    target = int(len(shuffled))
+    if subsample_prob < 1.0:
+        target = int(np.floor(subsample_prob * len(shuffled)))
+    target = max(0, min(len(shuffled), target))
+    subsample_dropped = len(shuffled) - target
+
+    cap_dropped = 0
+    if rest_cap is not None and rest_cap > 0 and target > rest_cap:
+        cap_dropped = target - int(rest_cap)
+        target = int(rest_cap)
+
+    keep = shuffled[:target].tolist()
+    return keep, subsample_dropped, cap_dropped
+
+
+def _filter_by_mask(values: List[Any], keep_mask: np.ndarray) -> List[Any]:
+    return [val for val, keep in zip(values, keep_mask) if keep]
 
 
 def _next_available_path(base_path: Path) -> Path:
@@ -587,11 +713,23 @@ def main():
                         help="Keep windows with large gaps and mark them")
     parser.add_argument("--ignore-misalignment", action="store_true",
                         help="Warn but continue if events are outside feature range")
+    parser.add_argument("--seed", type=int, default=None, help="Seed for deterministic REST subsampling")
     args = parser.parse_args()
     defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
     settings = _load_config(args.config)
     _apply_config(settings)
     _apply_config_to_args(args, settings, defaults)
+
+    if isinstance(settings, dict):
+        config_seed = settings.get("seed", settings.get("SEED", settings.get("REST_SUBSAMPLE_SEED")))
+    else:
+        config_seed = None
+    if config_seed is not None:
+        seed_value = int(config_seed)
+    elif args.seed is not None:
+        seed_value = int(args.seed)
+    else:
+        seed_value = int(SEED)
 
     features_path, events_path, session_meta, source = _select_session_paths(args)
 
@@ -667,7 +805,7 @@ def main():
 
     # ===== LOAD DATA =====
     times, signal, channel_cols = _load_features(features_path)
-    events = _load_events(events_path)
+    events = _load_events(events_path, session_meta=session_meta)
 
     # Alignment strictness
     if events:
@@ -705,6 +843,7 @@ def main():
 
     # Baseline REST allow-list (first N rest events)
     baseline_rest_events: List[Dict[str, Any]] = []
+    baseline_rest_event_indices: set = set()
     if KEEP_BASELINE_REST_EVENTS > 0:
         rest_events = [
             e for e in events
@@ -712,6 +851,7 @@ def main():
         ]
         rest_events.sort(key=lambda x: float(x["onset_s"]))
         baseline_rest_events = rest_events[: int(KEEP_BASELINE_REST_EVENTS)]
+        baseline_rest_event_indices = {e.get("event_index") for e in baseline_rest_events}
 
     # ===== WINDOW LOOP =====
     windows: List[Dict[str, Any]] = []
@@ -758,6 +898,9 @@ def main():
     drop_invalid_label = 0
     drop_short_segment = 0
     drop_gap = 0
+    drop_ambiguous = 0
+    drop_rest_subsample = 0
+    drop_rest_cap = 0
 
     for window_start in window_starts_grid:
         total_windows += 1
@@ -831,24 +974,31 @@ def main():
                 continue
 
         if overlapping:
-            overlapping.sort(
-                key=lambda x: (
-                    -x[0],                 # max overlap seconds
-                    event_priority(x[2]),  # priority ties
-                    -float(x[2]["onset_s"]),
-                    -float(x[2]["duration_s"]),
-                )
-            )
-            best_ov, best_ov_frac, best = overlapping[0]
+            best_selection, ambiguous = _select_best_overlap(overlapping)
+            if ambiguous:
+                drop_ambiguous += 1
+                continue
+            if best_selection is None:
+                drop_no_overlap += 1
+                continue
+            best_ov, best_ov_frac, best = best_selection
+            best_event_index = best.get("event_index")
 
             if best.get("type") == "artifact":
                 artifact_flag = 1
             else:
                 if best_ov >= min_overlap_sec:
+                    is_rest = int(best.get("action_id", ACTION_REST)) == int(ACTION_REST)
+                    if is_rest and best_event_index not in baseline_rest_event_indices:
+                        drop_no_overlap += 1
+                        continue
                     action_id = int(best.get("action_id", ACTION_REST))
                     finger_id = int(best.get("finger_id", FINGER_NONE))
                     confidence_hint = best.get("confidence", np.nan)
-                    assigned_type = best.get("type", "") or "event"
+                    if is_rest and best_event_index in baseline_rest_event_indices:
+                        assigned_type = "baseline_rest"
+                    else:
+                        assigned_type = best.get("type", "") or "event"
                     best_onset = float(best.get("onset_s", np.nan))
                     best_dur = float(best.get("duration_s", np.nan))
                     best_source = str(best.get("source", ""))
@@ -857,7 +1007,9 @@ def main():
                     best_block_id = int(best.get("block_id", 0))
                 elif int(best.get("action_id", ACTION_REST)) == int(ACTION_REST):
                     if LABEL_GATED:
-                        if is_baseline_rest_window(window_start, window_end, baseline_rest_events, min_overlap_sec):
+                        if best_event_index in baseline_rest_event_indices and is_baseline_rest_window(
+                            window_start, window_end, baseline_rest_events, min_overlap_sec
+                        ):
                             action_id = int(ACTION_REST)
                             finger_id = int(FINGER_NONE)
                             assigned_type = "baseline_rest"
@@ -949,6 +1101,49 @@ def main():
         })
         kept_windows += 1
 
+    # ===== REST SUBSAMPLE/CAP =====
+    rest_indices = [i for i, a in enumerate(action_labels) if int(a) == int(ACTION_REST)]
+    non_rest_count = int(len(action_labels) - len(rest_indices))
+    rest_keep, drop_rest_subsample, drop_rest_cap = _select_rest_keep_indices(
+        rest_indices,
+        non_rest_count,
+        float(REST_SUBSAMPLE_PROB),
+        int(seed_value),
+        REST_MAX_WINDOWS,
+    )
+    rest_kept = len(rest_indices)
+    rest_dropped = 0
+
+    if rest_indices and (len(rest_keep) != len(rest_indices)):
+        rest_kept = len(rest_keep)
+        rest_dropped = len(rest_indices) - rest_kept
+        keep_mask = np.ones(len(action_labels), dtype=bool)
+        keep_mask[rest_indices] = False
+        if rest_keep:
+            keep_mask[np.array(rest_keep, dtype=int)] = True
+
+        sequence_windows = _filter_by_mask(sequence_windows, keep_mask)
+        action_labels = _filter_by_mask(action_labels, keep_mask)
+        finger_labels = _filter_by_mask(finger_labels, keep_mask)
+        window_starts = _filter_by_mask(window_starts, keep_mask)
+        window_ends = _filter_by_mask(window_ends, keep_mask)
+        confidence_hints = _filter_by_mask(confidence_hints, keep_mask)
+        artifact_flags = _filter_by_mask(artifact_flags, keep_mask)
+        gap_flags = _filter_by_mask(gap_flags, keep_mask)
+
+        assigned_event_types = _filter_by_mask(assigned_event_types, keep_mask)
+        overlap_seconds = _filter_by_mask(overlap_seconds, keep_mask)
+        overlap_fracs = _filter_by_mask(overlap_fracs, keep_mask)
+        event_onsets_out = _filter_by_mask(event_onsets_out, keep_mask)
+        event_durations_out = _filter_by_mask(event_durations_out, keep_mask)
+        event_sources = _filter_by_mask(event_sources, keep_mask)
+        session_modes = _filter_by_mask(session_modes, keep_mask)
+        trial_ids = _filter_by_mask(trial_ids, keep_mask)
+        block_ids = _filter_by_mask(block_ids, keep_mask)
+
+        windows = _filter_by_mask(windows, keep_mask)
+        kept_windows = len(action_labels)
+
     # ===== SAVE CSV =====
     pd.DataFrame(windows).to_csv(OUT_FILE, index=False)
     print(f"✅ Saved {len(windows)} windows → {OUT_FILE}")
@@ -961,14 +1156,48 @@ def main():
     print(
         "Dropped windows (no-overlap): "
         f"{drop_no_overlap}, artifact-overlap: {drop_artifact}, guard-band: {drop_guard_band}, "
-        f"invalid label: {drop_invalid_label}, short segment: {drop_short_segment}, gap: {drop_gap}"
+        f"invalid label: {drop_invalid_label}, short segment: {drop_short_segment}, gap: {drop_gap}, "
+        f"ambiguous: {drop_ambiguous}, rest-subsample: {drop_rest_subsample}, rest-cap: {drop_rest_cap}"
     )
     print(f"Kept class distribution (action_id): {action_dist}")
     print(f"Kept class distribution (finger_id): {finger_dist}")
     if KEEP_BASELINE_REST_EVENTS == 0:
         print("Sanity: KEEP_BASELINE_REST_EVENTS=0 → no REST windows are kept.")
 
-   # ===== SAVE NPZ =====
+    report_payload = {
+        "total_windows": int(total_windows),
+        "kept_windows": int(kept_windows),
+        "drop_counts": {
+            "no_overlap": int(drop_no_overlap),
+            "artifact": int(drop_artifact),
+            "guard_band": int(drop_guard_band),
+            "invalid_label": int(drop_invalid_label),
+            "short_segment": int(drop_short_segment),
+            "gap": int(drop_gap),
+            "ambiguous": int(drop_ambiguous),
+            "rest_subsample": int(drop_rest_subsample),
+            "rest_cap": int(drop_rest_cap),
+        },
+        "rest_policy": {
+            "keep_baseline_events": int(KEEP_BASELINE_REST_EVENTS),
+            "subsample_prob": float(REST_SUBSAMPLE_PROB),
+            "seed": int(seed_value),
+            "rest_max_windows": int(REST_MAX_WINDOWS) if REST_MAX_WINDOWS else None,
+            "baseline_rest_event_indices_count": int(len(baseline_rest_event_indices)),
+            "rest_kept": int(rest_kept),
+            "rest_dropped": int(rest_dropped),
+        },
+        "timebase_version": str(timebase_version),
+        "subject_id": str(subject_id_value),
+        "session_id": str(session_id_value),
+        "events_path": str(events_path),
+        "features_path": str(features_path),
+    }
+    report_path = Path("extraction_report.json")
+    report_path.write_text(json.dumps(report_payload, indent=2))
+    print(f"✅ Saved extraction report → {report_path}")
+
+    # ===== SAVE NPZ =====
     if not sequence_windows:
         print("⚠ No sequence windows produced; check features/events alignment.")
         return 0
@@ -1004,6 +1233,9 @@ def main():
         "gap_policy": str(gap_policy),
         "interpolation_policy": str(INTERPOLATION_POLICY),
         "dedupe_policy": str(DEDUP_POLICY),
+        "rest_subsample_prob": float(REST_SUBSAMPLE_PROB),
+        "rest_subsample_seed": int(seed_value),
+        "rest_max_windows": int(REST_MAX_WINDOWS) if REST_MAX_WINDOWS else None,
     })
     config_arr = np.array([config_json], dtype=_u_dtype_for(config_json))
 

@@ -5,15 +5,13 @@ Optional: CNN/LSTM inference + latency + MC-dropout uncertainty
 Also: keyboard event marking (space=hold event), autosave events
 
 FIXES (this version):
-- Resume-safe *session-continuous* timebase WITHOUT downtime gaps:
-    time_s = total_elapsed_s + (lsl_ts - run_start_lsl_ts)
-  so pausing/stopping between runs does NOT create a giant jump.
-- Events aligned to the same session timebase:
-    onset_s/end_s computed with total_elapsed_s + (event_lsl - run_start_lsl_ts)
-- Per-run timebase fields persisted:
-    run_start_lsl_ts, run_start_local, clock_offset
-- Resume gating retained; no silent overwrites
-- Session metadata/state sidecars updated to reflect the new canonical timebase
+- Stream-relative absolute_v1 timebase with monotonic clamp:
+    time_s = lsl_ts - stream_start_lsl_ts (clamped on backward jumps)
+- Events aligned to the same stream timebase with clamp protection.
+- Per-run timebase fields anchored per run:
+    run_start_lsl_ts, run_start_local, clock_offset (in-memory only)
+- Resume gating retained; no silent overwrites.
+- Session metadata/state sidecars updated to reflect timebase health counters.
 """
 
 # Work around duplicate libomp on macOS (MKL/torch/scipy); must be set before imports.
@@ -104,6 +102,8 @@ from utils.label_schema import (
     FINGER_NAMES,
     event_type_for,
 )
+from utils.session_timebase import compute_event_lsl_ts
+from utils.timebase import clamp_monotonic_time
 
 try:
     from pynput import keyboard
@@ -190,6 +190,8 @@ features_path_state = None
 events_path_state = None
 raw_path_state = None
 created_utc = None
+time_s_clamped_count = 0
+event_clamped_count = 0
 
 # Legacy/diagnostic fields (kept for compatibility)
 stream_start_lsl_ts = None
@@ -379,12 +381,8 @@ if true_resume:
     stream_start_lsl_ts = _coerce_float(session_state.get("stream_start_lsl_ts"))
     local_clock_at_start = _coerce_float(session_state.get("local_clock_at_start"))
 
-    # We intentionally DO NOT reuse old run_start_* across runs.
-    # But we can load last-known clock_offset for "early events before first sample"
-    # (still guarded; we ignore events until first sample anyway).
-    clock_offset = _coerce_float(session_state.get("clock_offset"))
-    if state_meta and clock_offset is None:
-        clock_offset = _coerce_float(state_meta.get("clock_offset"))
+    # We intentionally DO NOT reuse old per-run alignment across runs.
+    clock_offset = None
 
 else:
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -439,11 +437,6 @@ def _build_session_meta_payload(complete: bool):
         "total_elapsed_s": float(total_elapsed_s),
         "last_time_s": float(last_time_s),
 
-        # Canonical per-run timebase
-        "run_start_lsl_ts": run_start_lsl_ts,
-        "run_start_local": run_start_local,
-        "clock_offset": clock_offset,
-
         # Legacy/diagnostic (kept)
         "stream_start_lsl_ts": stream_start_lsl_ts,
         "local_clock_at_start": local_clock_at_start,
@@ -493,11 +486,8 @@ def _build_session_state_payload(
         "updated_utc": datetime.utcnow().isoformat() + "Z",
         "timebase_version": TIMEBASE_VERSION,
         "timebase": TIMEBASE_VERSION,
-
-        # Canonical per-run timebase
-        "run_start_lsl_ts": run_start_lsl_ts,
-        "run_start_local": run_start_local,
-        "clock_offset": clock_offset,
+        "time_s_clamped_count": int(time_s_clamped_count),
+        "event_clamped_count": int(event_clamped_count),
 
         # Legacy/diagnostic
         "stream_start_lsl_ts": stream_start_lsl_ts,
@@ -546,7 +536,7 @@ print(f"Resume Decision   : {resume_flag}")
 if resume_blockers and not true_resume:
     print(f"Resume Blockers   : {', '.join(resume_blockers)}")
 print(f"Current Block ID  : {BLOCK_ID}")
-print(f"Total Elapsed Time: {total_elapsed_s:.2f} s (session-continuous)")
+print(f"Total Elapsed Time: {total_elapsed_s:.2f} s (stream-relative, monotonic-clamped)")
 print("")
 if true_resume and state_events_missing:
     print(f"⚠️ Resume note: events file missing at {resolved_events_path}; a new events file will be created.")
@@ -661,13 +651,106 @@ def _lsl_now():
     """LSL-domain timestamp for 'now' using local_clock and current clock_offset."""
     if clock_offset is None:
         return None
-    return local_clock() + clock_offset
+    return compute_event_lsl_ts(local_clock(), clock_offset)
 
 def _time_s_from_lsl(lsl_ts: float):
-    """Session-continuous time_s from an LSL timestamp."""
-    if run_start_lsl_ts is None:
+    """Stream-relative time_s from an LSL timestamp."""
+    if stream_start_lsl_ts is None:
         return None
-    return float(total_elapsed_s + (lsl_ts - run_start_lsl_ts))
+    return float(lsl_ts - stream_start_lsl_ts)
+
+def _clamp_event_time(event_time_s: float):
+    if event_time_s is None:
+        return None, None, False
+    if last_sample_time_s is None or stream_start_lsl_ts is None:
+        return event_time_s, None, False
+    if event_time_s < (last_sample_time_s - 2.0):
+        clamped_time_s = float(last_sample_time_s)
+        clamped_lsl = float(stream_start_lsl_ts + clamped_time_s)
+        return clamped_time_s, clamped_lsl, True
+    return event_time_s, None, False
+
+def _record_nearest_sample_delta(event_time_s: float, label: str):
+    if event_time_s is None or len(nearest_sample_delta_samples) >= NEAREST_SAMPLE_MAX:
+        return
+    if not recent_sample_times:
+        return
+    recent = list(recent_sample_times)
+    nearest = min(recent, key=lambda t: abs(t - event_time_s))
+    delta = float(event_time_s - nearest)
+    nearest_sample_delta_samples.append({
+        "label": label,
+        "event_time_s": float(event_time_s),
+        "nearest_sample_s": float(nearest),
+        "delta_s": float(delta),
+    })
+
+def _timebase_report_payload():
+    dt_median_ms = None
+    dt_p95_ms = None
+    if len(recent_sample_times) >= 2:
+        diffs = np.diff(np.array(recent_sample_times, dtype=float))
+        if diffs.size:
+            dt_median_ms = float(np.median(diffs) * 1000.0)
+            dt_p95_ms = float(np.percentile(diffs, 95) * 1000.0)
+
+    delta_abs = [abs(s["delta_s"]) for s in nearest_sample_delta_samples]
+    delta_abs_max = float(max(delta_abs)) if delta_abs else None
+    delta_abs_mean = float(np.mean(delta_abs)) if delta_abs else None
+
+    return {
+        "ts_utc": datetime.utcnow().isoformat() + "Z",
+        "subject_id": subject_id,
+        "session_id": session_id,
+        "segment_id": segment_id,
+        "timebase_version": TIMEBASE_VERSION,
+        "stream_start_lsl_ts": stream_start_lsl_ts,
+        "stream_start_local": local_clock_at_start,
+        "clock_offset": clock_offset,
+        "samples_seen": int(samples_seen),
+        "samples_written": int(samples_written),
+        "time_s_clamped_count": int(time_s_clamped_count),
+        "max_backwards_jump_s": float(max_backwards_jump_s),
+        "event_stamps_count": int(event_stamps_count),
+        "event_clamped_count": int(event_clamped_count),
+        "nearest_sample_delta_s_abs_max": delta_abs_max,
+        "nearest_sample_delta_s_abs_mean": delta_abs_mean,
+        "nearest_sample_delta_s_samples": list(nearest_sample_delta_samples),
+        "dt_median_ms": dt_median_ms,
+        "dt_p95_ms": dt_p95_ms,
+        "first_time_s": first_time_s,
+        "last_time_s": last_time_s_seen,
+        "first_lsl_ts": first_lsl_ts,
+        "last_lsl_ts": last_lsl_ts,
+    }
+
+def _write_timebase_report(label: str):
+    report_path = FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_timebase_report.json"
+    pointer_path = Path("reports") / "last_timebase_report.json"
+    try:
+        payload = _timebase_report_payload()
+        payload["label"] = label
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json_atomic(report_path, payload)
+        pointer_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json_atomic(pointer_path, payload)
+    except Exception as exc:
+        print(f"⚠️ Failed to write timebase report: {exc}")
+
+def _maybe_write_timebase_report(force: bool = False, label: str = "periodic"):
+    global last_report_time, last_report_samples_written
+    now = time.time()
+    if force or last_report_time is None:
+        _write_timebase_report(label)
+        _write_session_state(label=f"timebase_report:{label}")
+        last_report_time = now
+        last_report_samples_written = samples_written
+        return
+    if (now - last_report_time) >= 10.0 or (samples_written - last_report_samples_written) >= 2500:
+        _write_timebase_report(label)
+        _write_session_state(label=f"timebase_report:{label}")
+        last_report_time = now
+        last_report_samples_written = samples_written
 
 # =========================
 # ===== EVENT MARKING =====
@@ -680,11 +763,29 @@ current_action_id = ACTION_REST
 current_override = None
 
 trial_id_counter = 0
-TIME_EPS = 1e-4
 last_written_time_s = float(last_time_s)
-time_s_backwards_skips = 0
 timebase_written = False
 clock_offset_estimated = False
+time_s_clamped_count = int(time_s_clamped_count)
+event_clamped_count = int(event_clamped_count)
+event_stamps_count = 0
+samples_seen = 0
+samples_written = 0
+last_sample_time_s = None
+last_sample_lsl_ts = None
+first_time_s = None
+last_time_s_seen = None
+first_lsl_ts = None
+last_lsl_ts = None
+max_backwards_jump_s = 0.0
+time_s_clamp_warned = False
+event_clamp_warned = False
+nearest_sample_delta_samples = []
+NEAREST_SAMPLE_MAX = 10
+recent_sample_times = deque(maxlen=512)
+last_report_time = None
+last_report_samples_written = 0
+timebase_report_initialized = False
 
 def _load_existing_events(path: Path):
     """Load existing events to support resume without overwriting."""
@@ -722,6 +823,8 @@ def _load_existing_events(path: Path):
                 duration_s = _f("duration_s", 0.0)
                 end_lsl = _f("end_lsl", np.nan)
                 end_s = _f("end_s", np.nan)
+                event_lsl_ts = _f("event_lsl_ts", np.nan)
+                event_time_s = _f("event_time_s", np.nan)
 
                 if duration_s < 0:
                     duration_s = 0.0
@@ -738,6 +841,8 @@ def _load_existing_events(path: Path):
                 e["duration_s"] = duration_s
                 e["end_lsl"] = end_lsl
                 e["end_s"] = end_s
+                e["event_lsl_ts"] = event_lsl_ts
+                e["event_time_s"] = event_time_s
 
                 if "onset_rel_s" in row:
                     e["onset_rel_s"] = _f("onset_rel_s", np.nan)
@@ -780,6 +885,8 @@ def save_events_csv(path, items):
         "duration_s",
         "end_lsl",
         "end_s",
+        "event_lsl_ts",
+        "event_time_s",
         "type",
         "channel",
         "confidence",
@@ -830,6 +937,8 @@ def save_events_csv(path, items):
                 f"{float(duration_s):.6f}",
                 f"{float(end_lsl):.6f}" if np.isfinite(end_lsl) else "",
                 f"{float(end_s):.6f}" if np.isfinite(end_s) else "",
+                f"{float(_f(item.get('event_lsl_ts'), np.nan)):.6f}" if np.isfinite(_f(item.get("event_lsl_ts"), np.nan)) else "",
+                f"{float(_f(item.get('event_time_s'), np.nan)):.6f}" if np.isfinite(_f(item.get("event_time_s"), np.nan)) else "",
                 item.get("type", ""),
                 item.get("channel", "n/a"),
                 item.get("confidence", ""),
@@ -853,7 +962,7 @@ def save_events_csv(path, items):
         shutil.copyfile(path, EVENTS_ARCHIVE_PATH)
 
 def finalize_event():
-    global current_event, last_event_index, trial_id_counter
+    global current_event, last_event_index, trial_id_counter, event_stamps_count
     if current_event is None:
         return
 
@@ -885,6 +994,9 @@ def finalize_event():
         last_event_index = len(events) - 1
         save_events_csv(EVENTS_AUTOSAVE_PATH, events)
 
+    event_stamps_count += 1
+    _record_nearest_sample_delta(current_event.get("onset_s"), label="onset")
+
     current_event = None
 
 def update_last_event_finger(finger_id):
@@ -899,7 +1011,7 @@ def update_last_event_finger(finger_id):
         save_events_csv(EVENTS_AUTOSAVE_PATH, events)
 
 def on_key_press(key):
-    global current_event, current_action_id, current_override
+    global current_event, current_action_id, current_override, event_clamped_count, event_clamp_warned
     if not EVENT_MARKING_ENABLED:
         return
 
@@ -922,9 +1034,19 @@ def on_key_press(key):
             if onset_lsl is None:
                 return
 
-            onset_s = _time_s_from_lsl(onset_lsl)
+            if stream_start_lsl_ts is None:
+                return
+            onset_s = float(onset_lsl - stream_start_lsl_ts)
             if onset_s is None:
                 return
+            clamped_onset_s, clamped_onset_lsl, clamped = _clamp_event_time(onset_s)
+            if clamped:
+                onset_s = clamped_onset_s
+                onset_lsl = clamped_onset_lsl if clamped_onset_lsl is not None else onset_lsl
+                event_clamped_count += 1
+                if not event_clamp_warned:
+                    print("⚠️ Event time behind stream; clamped.")
+                    event_clamp_warned = True
 
             current_event = {
                 "onset_lsl": float(onset_lsl),
@@ -932,6 +1054,8 @@ def on_key_press(key):
                 "duration_s": 0.0,
                 "end_lsl": np.nan,
                 "end_s": np.nan,
+                "event_lsl_ts": float(onset_lsl),
+                "event_time_s": float(onset_s),
                 "type": "",
                 "channel": EVENTS_CHANNEL,
                 "confidence": "",
@@ -997,6 +1121,7 @@ def on_key_press(key):
         print(f"📝 Finger assigned: {FINGER_NAMES.get(finger_id, 'UNKNOWN')}")
 
 def on_key_release(key):
+    global event_clamped_count, event_clamp_warned
     if not EVENT_MARKING_ENABLED:
         return
     if key == keyboard.Key.space and current_event is not None:
@@ -1012,16 +1137,26 @@ def on_key_release(key):
         if not np.isfinite(onset_lsl):
             return
 
-        duration_s = float(end_lsl - onset_lsl)
+        if stream_start_lsl_ts is None:
+            return
+        end_s = float(end_lsl - stream_start_lsl_ts)
+        if end_s is None:
+            return
+        clamped_end_s, clamped_end_lsl, clamped = _clamp_event_time(end_s)
+        if clamped:
+            end_s = clamped_end_s
+            end_lsl = clamped_end_lsl if clamped_end_lsl is not None else end_lsl
+            event_clamped_count += 1
+            if not event_clamp_warned:
+                print("⚠️ Event time behind stream; clamped.")
+                event_clamp_warned = True
+
+        duration_s = float(end_s - current_event.get("onset_s", end_s))
         if duration_s < 0:
             duration_s = 0.0
 
         current_event["duration_s"] = duration_s
         current_event["end_lsl"] = float(end_lsl)
-
-        end_s = _time_s_from_lsl(end_lsl)
-        if end_s is None:
-            return
         current_event["end_s"] = float(end_s)
 
         if run_start_local is not None:
@@ -1267,12 +1402,13 @@ try:
                 local_clock_at_start = run_start_local
 
             timebase_written = False
+            timebase_report_initialized = False
 
         # If clock_offset is missing (shouldn't happen after init), estimate from current sample
         if clock_offset is None:
             clock_offset = float(lsl_ts - local_clock())
             if not clock_offset_estimated:
-                print("⚠️ clock_offset missing; estimating from current sample (resume metadata incomplete).")
+                print("⚠️ clock_offset missing; estimating from current sample.")
                 clock_offset_estimated = True
             timebase_written = False
 
@@ -1280,6 +1416,31 @@ try:
             _update_session_meta(complete=False, label="timebase")
             _write_session_state(label="timebase")
             timebase_written = True
+        if run_start_lsl_ts is not None and not timebase_report_initialized:
+            _write_timebase_report("init")
+            timebase_report_initialized = True
+
+        samples_seen += 1
+        raw_time_s = None
+        if stream_start_lsl_ts is not None:
+            raw_time_s = float(lsl_ts - stream_start_lsl_ts)
+        clamped_time_s, clamped = clamp_monotonic_time(last_sample_time_s, raw_time_s)
+        if clamped and raw_time_s is not None and last_sample_time_s is not None:
+            time_s_clamped_count += 1
+            max_backwards_jump_s = max(max_backwards_jump_s, float(last_sample_time_s - raw_time_s))
+            if not time_s_clamp_warned:
+                print("⚠️ LSL time went backwards; time_s was clamped.")
+                time_s_clamp_warned = True
+        if clamped_time_s is not None and stream_start_lsl_ts is not None:
+            last_sample_time_s = float(clamped_time_s)
+            last_sample_lsl_ts = float(stream_start_lsl_ts + clamped_time_s)
+            recent_sample_times.append(last_sample_time_s)
+            if first_time_s is None:
+                first_time_s = last_sample_time_s
+            last_time_s_seen = last_sample_time_s
+            if first_lsl_ts is None:
+                first_lsl_ts = last_sample_lsl_ts
+            last_lsl_ts = last_sample_lsl_ts
 
         latency_ms = (local_clock() - lsl_ts) * 1000.0
 
@@ -1401,16 +1562,9 @@ try:
 
         # ===== SAVE FEATURES =====
         if SAVE_TO_DISK and csv_writer:
-            time_s = _time_s_from_lsl(float(lsl_ts))
+            time_s = clamped_time_s
             if time_s is None:
                 continue
-
-            # Backwards protection (should be rare now)
-            if last_written_time_s >= 0 and time_s < (last_written_time_s - TIME_EPS):
-                time_s_backwards_skips += 1
-                if time_s_backwards_skips <= 5:
-                    print(f"⚠️ time_s went backwards ({time_s:.6f} < {last_written_time_s:.6f}); clamping.")
-                time_s = last_written_time_s + TIME_EPS
 
             row = [
                 lsl_ts,
@@ -1430,6 +1584,8 @@ try:
             csv_writer.writerow(row)
             last_written_time_s = float(time_s)
             last_time_s = float(last_written_time_s)  # keep session meta/state current
+            samples_written += 1
+            _maybe_write_timebase_report()
 
         # ===== PLOT =====
         if ENABLE_PLOT:
@@ -1471,6 +1627,9 @@ if EVENT_MARKING_ENABLED:
     with events_lock:
         save_events_csv(EVENTS_CSV_PATH, events)
     print(f"📝 Events saved to {EVENTS_CSV_PATH}")
+
+# Write final timebase report
+_maybe_write_timebase_report(force=True, label="final")
 
 # Update session-continuous elapsed time at end of run
 last_time_s_updated = float(last_written_time_s if last_written_time_s >= 0 else last_time_s)

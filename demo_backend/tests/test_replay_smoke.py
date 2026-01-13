@@ -1,7 +1,8 @@
 from pathlib import Path
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 
 from demo_backend.inference import InferenceConfig, InferenceEngine
 from demo_backend.replay import ReplaySource

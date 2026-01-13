@@ -30,6 +30,7 @@ from sklearn.model_selection import StratifiedShuffleSplit
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from utils.label_schema import ACTION_REST, ACTION_NAMES, FINGER_NAMES
+from utils.eval_utils import resolve_cached_test_indices, validate_cached_predictions
 from utils.sequence_data import load_sequence_npz, split_indices, apply_channel_normalizer
 from demo_backend.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
 
@@ -605,12 +606,17 @@ def main():
     # ===== TEST SPLIT =========
     # =========================
     cached = _load_predictions_if_present(pred_npz_path)
-    if subject_filtered and cached is not None:
-        print("ℹ️ Ignoring cached predictions because --subject-id filtering is enabled.")
-        cached = None
-    if args.max_samples and cached is not None:
-        print("ℹ️ Ignoring cached predictions because --max-samples is enabled.")
-        cached = None
+    cache_ignored_reason = None
+    if cached is not None:
+        ignored_reasons = []
+        if args.subject_id is not None and str(args.subject_id).strip() != "":
+            ignored_reasons.append("subject_id_filter")
+        if args.max_samples is not None:
+            ignored_reasons.append("max_samples")
+        if ignored_reasons:
+            cache_ignored_reason = ",".join(ignored_reasons)
+            print("ℹ️ Ignoring cached predictions due to filters.")
+            cached = None
 
     cached_used = False
     split_attempts = 0
@@ -619,41 +625,37 @@ def main():
         finger_probs = np.asarray(cached["finger_probs"])
         y_action_test = np.asarray(cached["y_action"])
         y_finger_test = np.asarray(cached["y_finger"])
-        test_idx = np.asarray(cached["test_indices"]).astype(np.int64)
-
-        all_idx = np.arange(len(y_action), dtype=np.int64)
-        test_mask = np.zeros(len(y_action), dtype=bool)
-        test_mask[test_idx] = True
-        train_idx = all_idx[~test_mask]
-
-        cache_ok = True
-        if action_probs.shape != (len(test_idx), n_actions):
-            cache_ok = False
-        if finger_probs.shape != (len(test_idx), n_fingers):
-            cache_ok = False
-        if y_action_test.shape != (len(test_idx),):
-            cache_ok = False
-        if y_finger_test.shape != (len(test_idx),):
-            cache_ok = False
-        if len(y_action_test) > 0:
-            try:
-                if y_action_test.min() < 0 or y_action_test.max() >= n_actions:
-                    cache_ok = False
-            except Exception:
-                cache_ok = False
-        if len(y_finger_test) > 0:
-            try:
-                if y_finger_test.min() < 0 or y_finger_test.max() >= n_fingers:
-                    cache_ok = False
-            except Exception:
-                cache_ok = False
-
-        if not cache_ok:
-            print("⚠️ Cached predictions mismatch; ignoring cached predictions.")
+        test_idx = resolve_cached_test_indices(cached)
+        if test_idx is None:
+            cache_ignored_reason = "missing_test_indices"
             cached = None
         else:
-            cached_used = True
-            print(f"✅ Using cached predictions: {pred_npz_path}")
+            test_idx = np.asarray(test_idx).astype(np.int64)
+
+        if cached is not None:
+            all_idx = np.arange(len(y_action), dtype=np.int64)
+            test_mask = np.zeros(len(y_action), dtype=bool)
+            test_mask[test_idx] = True
+            train_idx = all_idx[~test_mask]
+
+            cache_ok = validate_cached_predictions(
+                action_probs=action_probs,
+                finger_probs=finger_probs,
+                y_action_test=y_action_test,
+                y_finger_test=y_finger_test,
+                test_idx=test_idx,
+                n_actions=n_actions,
+                n_fingers=n_fingers,
+                n_samples=len(y_action),
+            )
+
+            if not cache_ok:
+                print("⚠️ Cached predictions mismatch; ignoring cached predictions.")
+                cache_ignored_reason = "cache_invalid"
+                cached = None
+            else:
+                cached_used = True
+                print(f"✅ Using cached predictions: {pred_npz_path}")
 
     if cached is None:
         train_idx, test_idx, split_attempts = _split_with_checks(
@@ -709,6 +711,8 @@ def main():
     manifest["split"]["test_n"] = int(len(test_idx))
     manifest["split"]["train_idx_sha256"] = numpy_sha256(np.asarray(train_idx, dtype=np.int64))
     manifest["split"]["test_idx_sha256"] = numpy_sha256(np.asarray(test_idx, dtype=np.int64))
+    if cache_ignored_reason is not None:
+        manifest["split"]["cache_ignored_reason"] = cache_ignored_reason
 
     if len(test_idx) < MIN_TEST_SAMPLES:
         print(f"⚠️ Test set too small ({len(test_idx)} samples). Aborting evaluation.")
