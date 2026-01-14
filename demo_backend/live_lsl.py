@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Deque, Optional, Sequence, Tuple, List
 
 import numpy as np
 
@@ -33,14 +33,14 @@ class LiveLSLSource:
         self.step_sec = step_sec
         self.window_samples = int(fs * window_sec)
         self.step_samples = max(1, int(fs * step_sec))
-        self.inlet = None
-        self.channel_indices = None
+        self.inlet: Optional[StreamInlet] = None
+        self.channel_indices: Optional[List[int]] = None
         self.status_message = ""
-        self.buffer = deque(maxlen=self.window_samples)
-        self.sample_times = deque(maxlen=self.window_samples)
+        self.buffer: Deque[Sequence[float]] = deque(maxlen=self.window_samples)
+        self.sample_times: Deque[float] = deque(maxlen=self.window_samples)
         self._last_emit_idx = 0
         self._sample_count = 0
-        self._stream_start = None
+        self._stream_start: Optional[float] = None
 
     def connect(self) -> Tuple[bool, str]:
         if not LSL_AVAILABLE:

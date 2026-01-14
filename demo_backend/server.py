@@ -290,8 +290,8 @@ def _build_nnvis_payload(
         mc_passes=passes if passes > 0 else None,
     )
 
-    finger_probs = activations["finger_probs"]
-    action_probs = activations["action_probs"]
+    finger_probs = np.asarray(activations["finger_probs"])
+    action_probs = np.asarray(activations["action_probs"])
     finger_pred = int(np.argmax(finger_probs))
     action_pred = int(np.argmax(action_probs))
 
@@ -324,6 +324,7 @@ def _build_nnvis_payload(
 
 async def _stream_replay(ws: WebSocket, nnvis: NnvisSubscription):
     state = get_state()
+    assert state.engine is not None
     if state.replay is None or state.replay.path != state.runtime.replay_path:
         if not state.runtime.replay_path.exists():
             await _send_status(
@@ -348,6 +349,10 @@ async def _stream_replay(ws: WebSocket, nnvis: NnvisSubscription):
             diag.update(diag2)
             latency_ms = (time.perf_counter() - t0) * 1000.0
         else:
+            assert action_probs is not None
+            assert finger_probs is not None
+            action_probs = np.asarray(action_probs)
+            finger_probs = np.asarray(finger_probs)
             settings = _build_postprocess_settings()
             post = postprocess_predictions(
                 action_probs, finger_probs, settings, state.postprocess
@@ -464,6 +469,7 @@ async def _stream_replay(ws: WebSocket, nnvis: NnvisSubscription):
 
 async def _stream_live(ws: WebSocket, nnvis: NnvisSubscription):
     state = get_state()
+    assert state.engine is not None
     if not state.lsl_connected:
         ok, msg = state.live.connect()
         state.lsl_connected = ok
@@ -494,6 +500,10 @@ async def _stream_live(ws: WebSocket, nnvis: NnvisSubscription):
             diag.update(diag2)
             latency_ms = (time.perf_counter() - t0) * 1000.0
         else:
+            assert action_probs is not None
+            assert finger_probs is not None
+            action_probs = np.asarray(action_probs)
+            finger_probs = np.asarray(finger_probs)
             settings = _build_postprocess_settings()
             post = postprocess_predictions(
                 action_probs, finger_probs, settings, state.postprocess

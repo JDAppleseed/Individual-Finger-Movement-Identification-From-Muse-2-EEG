@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Tuple
+from typing import Callable, Iterator, Optional, Tuple
 
 import numpy as np
 
@@ -14,6 +14,8 @@ try:
     from utils.sequence_data import load_sequence_npz
 except Exception:  # fallback
     load_sequence_npz = None
+
+load_sequence_npz: Optional[Callable[[str | Path, str | None], object]]
 
 
 @dataclass

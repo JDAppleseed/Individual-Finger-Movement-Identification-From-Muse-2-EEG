@@ -267,7 +267,8 @@ def _session_sort_key(entry: dict):
     meta = entry.get("meta", {})
     session_id = str(meta.get("session_id") or "")
     updated = str(meta.get("updated_utc") or "")
-    meta_name = entry.get("meta_path").name if entry.get("meta_path") else ""
+    meta_path = entry.get("meta_path")
+    meta_name = meta_path.name if meta_path else ""
     return (session_id, updated, meta_name)
 
 
@@ -293,7 +294,7 @@ def _infer_features_from_events(events_path: Optional[Path]) -> Optional[Path]:
 
 
 def _collect_session_meta(base_dir: Path, subject_id: Optional[str]):
-    candidates = []
+    candidates: List[Dict[str, Any]] = []
     if not base_dir.exists():
         return candidates
 
@@ -583,10 +584,11 @@ def _select_best_overlap(
 def _load_events(path: Path, session_meta: Optional[Dict[str, Any]] = None):
     events_df = pd.read_csv(path)
     events: List[Dict[str, Any]] = []
-    stream_start_lsl = None
+    stream_start_lsl = np.nan
     if session_meta:
-        stream_start_lsl = session_meta.get("stream_start_lsl_ts")
-        stream_start_lsl = _safe_float(stream_start_lsl, default=np.nan)
+        stream_start_lsl = _safe_float(
+            session_meta.get("stream_start_lsl_ts"), default=np.nan
+        )
 
     for row_idx, row in events_df.iterrows():
         onset_s = _safe_float(row.get("event_time_s", np.nan))

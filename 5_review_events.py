@@ -14,6 +14,7 @@ Keyboard controls:
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -164,7 +165,7 @@ if events:
 fig, ax = plt.subplots(figsize=(12, 4))
 ax.plot(times, signal_mean, linewidth=0.5, color="black")
 cursor_line = ax.axvline(cursor_t, color="red", linestyle="--")
-span_patches = []
+span_patches: list[Any] = []
 
 
 def redraw_spans():

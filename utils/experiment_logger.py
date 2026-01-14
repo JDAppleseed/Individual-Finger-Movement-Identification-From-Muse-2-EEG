@@ -10,11 +10,15 @@ import json
 import hashlib
 from pathlib import Path
 from datetime import datetime
+from types import ModuleType
+from typing import Optional
 
 try:
     import fcntl  # Unix/macOS
 except ImportError:
     fcntl = None
+
+fcntl: Optional[ModuleType]
 
 
 ROOT = Path(__file__).resolve().parent.parent

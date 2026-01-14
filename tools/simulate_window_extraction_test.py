@@ -14,9 +14,10 @@ import pytest
 
 np = pytest.importorskip("numpy")
 pd = pytest.importorskip("pandas")
+from numpy.typing import NDArray
 
 
-def _write_features(path: Path, times: np.ndarray, lsl_start: float):
+def _write_features(path: Path, times: NDArray[np.floating], lsl_start: float):
     lsl_ts = lsl_start + times
     ch1 = np.sin(2 * np.pi * 8.0 * times)
     ch2 = np.cos(2 * np.pi * 6.0 * times)
@@ -61,14 +62,16 @@ def _write_events(path: Path, lsl_start: float):
 
     rows = []
     for e in events:
-        onset_lsl = lsl_start + e["onset_s"]
-        end_s = e["onset_s"] + e["duration_s"]
+        onset_s = float(e["onset_s"])
+        duration_s = float(e["duration_s"])
+        onset_lsl = lsl_start + onset_s
+        end_s = onset_s + duration_s
         end_lsl = lsl_start + end_s
         rows.append(
             [
                 onset_lsl,
-                e["onset_s"],
-                e["duration_s"],
+                onset_s,
+                duration_s,
                 end_lsl,
                 end_s,
                 e["type"],

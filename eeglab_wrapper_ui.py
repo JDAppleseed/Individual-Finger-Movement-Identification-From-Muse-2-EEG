@@ -68,7 +68,7 @@ from app.process_runner import ProcessRunner
 from app.repo_probe import discover_scripts
 
 try:
-    import pylsl  # type: ignore
+    import pylsl
 
     LSL_AVAILABLE = True
 except Exception:
@@ -2129,7 +2129,7 @@ class MainWindow(QMainWindow):
             checklist.addItem(item)
 
     def _expected_step1_outputs(self) -> list[tuple[str, str]]:
-        outputs = []
+        outputs: list[tuple[str, str]] = []
         if not self.current_subject or not self.current_session_backend:
             return outputs
         subject = self.current_subject
@@ -2226,7 +2226,7 @@ class MainWindow(QMainWindow):
         return outputs
 
     def _expected_step1b_outputs(self) -> list[tuple[str, str]]:
-        outputs = []
+        outputs: list[tuple[str, str]] = []
         if (
             not self.current_project
             or not self.current_subject
@@ -2261,7 +2261,7 @@ class MainWindow(QMainWindow):
         return outputs
 
     def _expected_train_outputs(self) -> list[tuple[str, str]]:
-        outputs = []
+        outputs: list[tuple[str, str]] = []
         if not self.current_project or not self.current_subject:
             return outputs
         subject_dir = subject_root(self.current_project, self.current_subject)
@@ -2269,7 +2269,7 @@ class MainWindow(QMainWindow):
         return outputs
 
     def _expected_event_outputs(self) -> list[tuple[str, str]]:
-        outputs = []
+        outputs: list[tuple[str, str]] = []
         if not self.current_project or not self.current_subject:
             return outputs
         subject_dir = subject_root(self.current_project, self.current_subject)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Deque, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -67,7 +67,7 @@ class InferenceEngine:
         self.action_names = action_names
         self.finger_names = finger_names
         self.config = config or InferenceConfig()
-        self._stability = deque(maxlen=self.config.stability_frames)
+        self._stability: Deque[int] = deque(maxlen=self.config.stability_frames)
         self._input_np: Optional[np.ndarray] = None
         self._input_tensor: Optional[torch.Tensor] = None
         self._compiled = False
@@ -88,7 +88,7 @@ class InferenceEngine:
         if not hasattr(torch, "compile"):
             return False
         try:
-            self.model = torch.compile(self.model)  # type: ignore[attr-defined]
+            self.model = torch.compile(self.model)
             self._compiled = True
             return True
         except Exception:
@@ -198,7 +198,7 @@ class InferenceEngine:
 
     def predict(
         self, window_TxC: np.ndarray
-    ) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         if self.model is None:
             return self._empty_prediction(window_TxC)
 
@@ -259,7 +259,9 @@ class InferenceEngine:
 
         return prediction, safety, diagnostics
 
-    def _empty_prediction(self, window_TxC: np.ndarray):
+    def _empty_prediction(
+        self, window_TxC: np.ndarray
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         prediction = {
             "action_id": -1,
             "action_name": "UNAVAILABLE",

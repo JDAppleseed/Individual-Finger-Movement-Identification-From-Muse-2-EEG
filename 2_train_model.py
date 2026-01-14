@@ -14,7 +14,7 @@ import re
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 
 import numpy as np
 import torch
@@ -299,12 +299,14 @@ def infer_subject_id_from_meta(meta: Dict[str, Any], n_before: int) -> Optional[
     return None
 
 
-def mask_meta(meta: Dict[str, Any], mask: np.ndarray, n_before: int):
+def mask_meta(
+    meta: Dict[str, Any], mask: np.ndarray, n_before: int
+) -> Tuple[Dict[str, Any], List[str]]:
     if not meta:
         return {}, []
     mask = np.asarray(mask)
-    out = {}
-    masked_keys = []
+    out: Dict[str, Any] = {}
+    masked_keys: List[str] = []
     for key, val in meta.items():
         if isinstance(val, dict):
             out[key] = val

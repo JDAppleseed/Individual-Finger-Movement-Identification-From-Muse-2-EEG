@@ -71,7 +71,7 @@ def _find_models(root: Path) -> List[Path]:
 
 
 def _find_scalers(root: Path) -> List[Path]:
-    candidates = []
+    candidates: List[Path] = []
     for pattern in (
         "scaler.save",
         "*normalizer*.save",

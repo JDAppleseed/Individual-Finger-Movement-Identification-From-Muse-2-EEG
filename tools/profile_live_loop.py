@@ -5,7 +5,7 @@ import argparse
 import time
 from collections import deque
 from statistics import mean
-from typing import List, Optional, Tuple
+from typing import Deque, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -25,12 +25,12 @@ class SlidingBuffer:
         self.step_sec = step_sec
         self.window_samples = int(fs * window_sec)
         self.step_samples = max(1, int(fs * step_sec))
-        self.buffer = deque(maxlen=self.window_samples)
-        self.sample_times = deque(maxlen=self.window_samples)
-        self.stream_start = None
+        self.buffer: Deque[np.ndarray] = deque(maxlen=self.window_samples)
+        self.sample_times: Deque[float] = deque(maxlen=self.window_samples)
+        self.stream_start: Optional[float] = None
         self.sample_count = 0
         self.last_emit = 0
-        self.last_window_end_s = None
+        self.last_window_end_s: Optional[float] = None
 
     def push(
         self, sample: np.ndarray, lsl_ts: float
@@ -60,7 +60,7 @@ def _load_engine(device: str, mc_passes: int) -> InferenceEngine:
     root = repo_root()
     model_path = root / "finger_action_model.pt"
     normalizer = load_normalizer(root / "scaler.save")
-    model = None
+    model: Optional[CNNLSTMFingerActionNet] = None
     if model_path.exists():
         state = torch.load(model_path, map_location="cpu")
         n_fingers = int(state["finger_head.weight"].shape[0])
@@ -96,7 +96,7 @@ def main() -> int:
     hop_ms: List[float] = []
     infer_ms: List[float] = []
     publish_age_ms: List[float] = []
-    last_emit_perf = None
+    last_emit_perf: Optional[float] = None
 
     start = time.perf_counter()
     samples = int(args.duration_sec * args.fs)

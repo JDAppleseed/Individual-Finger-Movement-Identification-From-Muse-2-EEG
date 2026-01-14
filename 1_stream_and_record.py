@@ -28,6 +28,7 @@ import shutil
 from datetime import datetime
 from collections import deque
 from pathlib import Path
+from typing import Any, Deque, Dict, List, Optional
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -409,9 +410,12 @@ true_resume = (
 if true_resume:
     session_id = state_session_id
     if not session_id:
-        session_id = _infer_session_id_from_path(
-            state_features, subject_id
-        ) or _infer_session_id_from_path(resolved_events_path, subject_id)
+        if state_features is not None:
+            session_id = _infer_session_id_from_path(state_features, subject_id)
+        if not session_id and resolved_events_path is not None:
+            session_id = _infer_session_id_from_path(
+                resolved_events_path, subject_id
+            )
     BLOCK_ID = int(session_state.get("block_id", 0))
     segment_id = int(session_state.get("segment_id", -1)) + 1
     total_elapsed_s = float(session_state.get("total_elapsed_s", 0.0))
@@ -877,10 +881,10 @@ def _maybe_write_timebase_report(force: bool = False, label: str = "periodic"):
 # =========================
 # ===== EVENT MARKING =====
 # =========================
-events = []
+events: List[Dict[str, Any]] = []
 events_lock = threading.Lock()
-current_event = None
-last_event_index = None
+current_event: Optional[Dict[str, Any]] = None
+last_event_index: Optional[int] = None
 current_action_id = ACTION_REST
 current_override = None
 
@@ -893,26 +897,26 @@ event_clamped_count = int(event_clamped_count)
 event_stamps_count = 0
 samples_seen = 0
 samples_written = 0
-last_sample_time_s = None
-last_sample_lsl_ts = None
-first_time_s = None
-last_time_s_seen = None
-first_lsl_ts = None
-last_lsl_ts = None
+last_sample_time_s: Optional[float] = None
+last_sample_lsl_ts: Optional[float] = None
+first_time_s: Optional[float] = None
+last_time_s_seen: Optional[float] = None
+first_lsl_ts: Optional[float] = None
+last_lsl_ts: Optional[float] = None
 max_backwards_jump_s = 0.0
 time_s_clamp_warned = False
 event_clamp_warned = False
-nearest_sample_delta_samples = []
+nearest_sample_delta_samples: List[Dict[str, Any]] = []
 NEAREST_SAMPLE_MAX = 10
-recent_sample_times = deque(maxlen=512)
-last_report_time = None
+recent_sample_times: Deque[float] = deque(maxlen=512)
+last_report_time: Optional[float] = None
 last_report_samples_written = 0
 timebase_report_initialized = False
 
 
 def _load_existing_events(path: Path):
     """Load existing events to support resume without overwriting."""
-    loaded = []
+    loaded: List[Dict[str, Any]] = []
     if not path.exists() or path.stat().st_size == 0:
         return loaded
     try:
@@ -1453,8 +1457,8 @@ print(
 # ===== BUFFERS ===========
 # =========================
 buffer_len = int(WINDOW_SEC * SAMPLING_RATE)
-eeg_buffer = deque(maxlen=buffer_len)
-action_pred_buffer = deque(maxlen=STABILITY_FRAMES)
+eeg_buffer: Deque[List[float]] = deque(maxlen=buffer_len)
+action_pred_buffer: Deque[int] = deque(maxlen=STABILITY_FRAMES)
 
 # =========================
 # ===== CSV OUTPUT ========
@@ -1711,7 +1715,7 @@ try:
                 ):
                     pass
 
-            _ = time.perf_counter() - t0
+            latency_dummy = time.perf_counter() - t0
 
         # ===== OPTIONAL ONLINE CALIBRATION FEEDBACK =====
         if DEMO_MODE and TRAINING_MODE:

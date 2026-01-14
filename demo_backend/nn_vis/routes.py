@@ -200,8 +200,8 @@ async def nnvis_offline_sample(source: str, index: int = Query(0, ge=0)):
         normalizer=cache.normalizer,
         mc_passes=None,
     )
-    finger_probs = activations["finger_probs"]
-    action_probs = activations["action_probs"]
+    finger_probs = np.asarray(activations["finger_probs"])
+    action_probs = np.asarray(activations["action_probs"])
     finger_pred = int(np.argmax(finger_probs))
     action_pred = int(np.argmax(action_probs))
 
