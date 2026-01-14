@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Optional, Tuple
+from typing import Any, Callable, Iterator, Optional, Tuple, cast
 
 import numpy as np
 
@@ -10,12 +10,18 @@ from demo_backend.utils_demo import ensure_repo_on_path
 
 ensure_repo_on_path()
 
-try:
-    from utils.sequence_data import load_sequence_npz
-except Exception:  # fallback
-    load_sequence_npz = None
+LoadSequenceFn = Callable[
+    [str | Path, Optional[str]],
+    Tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]],
+]
 
-load_sequence_npz: Optional[Callable[[str | Path, str | None], object]]
+_load_sequence_npz: Optional[LoadSequenceFn]
+try:
+    from utils.sequence_data import load_sequence_npz as _load_sequence_npz
+except Exception:  # fallback
+    _load_sequence_npz = None
+
+load_sequence_npz: Optional[LoadSequenceFn] = _load_sequence_npz
 
 
 @dataclass
@@ -35,7 +41,7 @@ class ReplaySource:
 
     def _load(self) -> None:
         if load_sequence_npz is not None:
-            X, y_action, y_finger, meta = load_sequence_npz(self.path)
+            X, y_action, y_finger, meta = load_sequence_npz(self.path, None)
         else:
             data = np.load(self.path, allow_pickle=True)
             X = data["X"].astype(np.float32)
@@ -48,13 +54,17 @@ class ReplaySource:
         self.X = X
         self.y_action = y_action
         self.y_finger = y_finger
-        self.meta = meta
+        self.meta = cast(dict[str, Any], meta)
 
-        self.subject_ids = meta.get("subject_id")
-        self.experiment_hashes = meta.get("experiment_hash")
-        self.window_start = meta.get("window_start")
-        self.window_end = meta.get("window_end")
-        self.timebase_version = meta.get("timebase_version")
+        self.subject_ids = cast(Optional[np.ndarray], self.meta.get("subject_id"))
+        self.experiment_hashes = cast(
+            Optional[np.ndarray], self.meta.get("experiment_hash")
+        )
+        self.window_start = cast(Optional[np.ndarray], self.meta.get("window_start"))
+        self.window_end = cast(Optional[np.ndarray], self.meta.get("window_end"))
+        self.timebase_version = cast(
+            Optional[np.ndarray], self.meta.get("timebase_version")
+        )
 
     def __len__(self) -> int:
         return int(self.X.shape[0])

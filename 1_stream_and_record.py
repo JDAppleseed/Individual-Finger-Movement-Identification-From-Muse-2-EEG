@@ -413,9 +413,7 @@ if true_resume:
         if state_features is not None:
             session_id = _infer_session_id_from_path(state_features, subject_id)
         if not session_id and resolved_events_path is not None:
-            session_id = _infer_session_id_from_path(
-                resolved_events_path, subject_id
-            )
+            session_id = _infer_session_id_from_path(resolved_events_path, subject_id)
     BLOCK_ID = int(session_state.get("block_id", 0))
     segment_id = int(session_state.get("segment_id", -1)) + 1
     total_elapsed_s = float(session_state.get("total_elapsed_s", 0.0))

@@ -17,6 +17,7 @@ from demo_backend.nn_vis.extract import (
     pack_tensor,
 )
 from demo_backend.utils_demo import load_normalizer, repo_root
+from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from utils.label_schema import ACTION_NAMES, FINGER_NAMES
 
 
@@ -31,7 +32,7 @@ logger.setLevel(logging.INFO)
 @dataclass
 class ModelCache:
     model_path: Optional[Path] = None
-    model: Optional[object] = None
+    model: Optional[CNNLSTMFingerActionNet] = None
     normalizer: Optional[object] = None
 
 
@@ -39,7 +40,7 @@ cache = ModelCache()
 router = APIRouter()
 
 
-def _get_model() -> object:
+def _get_model() -> CNNLSTMFingerActionNet:
     if not MODEL_PATH.exists():
         raise HTTPException(
             status_code=404, detail=f"Model weights not found at {MODEL_PATH}"

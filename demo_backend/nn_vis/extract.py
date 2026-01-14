@@ -303,7 +303,7 @@ def extract_architecture_manifest(
         {"from": "head_dropout", "to": "action_head"},
     ]
 
-    timeline = {"available": timeline_available}
+    timeline: Dict[str, object] = {"available": timeline_available}
     if timeline_available:
         timeline["manifest_url"] = "/nnvis/timeline/manifest"
 
@@ -446,7 +446,7 @@ def extract_activations(
     deterministic: bool = True,
     normalizer: Optional[object] = None,
     mc_passes: Optional[int] = None,
-) -> Tuple[Dict[str, object], Dict[str, Optional[float]]]:
+) -> Tuple[Dict[str, object], Dict[str, float | bool | None]]:
     device = _device_of(model)
     window_TxC = window_TxC.astype(np.float32)
     window_TxC = apply_channel_normalizer(window_TxC, normalizer)
@@ -491,7 +491,7 @@ def extract_activations(
         "action_probs": action_probs.squeeze(0).detach().cpu().numpy(),
     }
 
-    uncertainty = {
+    uncertainty: Dict[str, float | bool | None] = {
         "present": False,
         "finger_std_mean": None,
         "action_std_mean": None,

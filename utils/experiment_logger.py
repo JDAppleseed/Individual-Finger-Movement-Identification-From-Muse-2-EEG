@@ -13,12 +13,13 @@ from datetime import datetime
 from types import ModuleType
 from typing import Optional
 
+_fcntl: Optional[ModuleType]
 try:
-    import fcntl  # Unix/macOS
+    import fcntl as _fcntl  # Unix/macOS
 except ImportError:
-    fcntl = None
+    _fcntl = None
 
-fcntl: Optional[ModuleType]
+fcntl: Optional[ModuleType] = _fcntl
 
 
 ROOT = Path(__file__).resolve().parent.parent

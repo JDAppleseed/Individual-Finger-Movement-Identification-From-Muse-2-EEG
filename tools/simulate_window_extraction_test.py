@@ -3,6 +3,8 @@
 Deterministic simulation for time-based window extraction.
 """
 
+from __future__ import annotations
+
 import json
 import subprocess
 import sys
@@ -10,14 +12,20 @@ import tempfile
 import time
 from pathlib import Path
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 np = pytest.importorskip("numpy")
 pd = pytest.importorskip("pandas")
-from numpy.typing import NDArray
 
 
-def _write_features(path: Path, times: NDArray[np.floating], lsl_start: float):
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+    from numpy import floating as NpFloating
+
+
+def _write_features(path: Path, times: "NDArray[NpFloating]", lsl_start: float):
     lsl_ts = lsl_start + times
     ch1 = np.sin(2 * np.pi * 8.0 * times)
     ch2 = np.cos(2 * np.pi * 6.0 * times)
@@ -39,7 +47,7 @@ def _write_features(path: Path, times: NDArray[np.floating], lsl_start: float):
 
 
 def _write_events(path: Path, lsl_start: float):
-    events = [
+    events: list[dict[str, float | int | str]] = [
         {
             "onset_s": 1.0,
             "duration_s": 0.4,

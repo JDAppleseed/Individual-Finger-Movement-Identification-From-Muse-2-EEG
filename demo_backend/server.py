@@ -4,7 +4,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional, cast
 
 import numpy as np
 import torch
@@ -354,8 +354,11 @@ async def _stream_replay(ws: WebSocket, nnvis: NnvisSubscription):
             action_probs = np.asarray(action_probs)
             finger_probs = np.asarray(finger_probs)
             settings = _build_postprocess_settings()
-            post = postprocess_predictions(
-                action_probs, finger_probs, settings, state.postprocess
+            post = cast(
+                Dict[str, Any],
+                postprocess_predictions(
+                    action_probs, finger_probs, settings, state.postprocess
+                ),
             )
             committed_action = int(post["committed_action_id"])
             committed_finger = int(post["committed_finger_id"])
@@ -392,7 +395,7 @@ async def _stream_replay(ws: WebSocket, nnvis: NnvisSubscription):
         elapsed = time.perf_counter() - start_time
         fps_actual = tick_count / elapsed if elapsed > 0 else state.runtime.fps
 
-        tick = {
+        tick: Dict[str, object] = {
             "type": "tick",
             "ts_utc": now_utc_iso(),
             "mode": "replay",
@@ -505,8 +508,11 @@ async def _stream_live(ws: WebSocket, nnvis: NnvisSubscription):
             action_probs = np.asarray(action_probs)
             finger_probs = np.asarray(finger_probs)
             settings = _build_postprocess_settings()
-            post = postprocess_predictions(
-                action_probs, finger_probs, settings, state.postprocess
+            post = cast(
+                Dict[str, Any],
+                postprocess_predictions(
+                    action_probs, finger_probs, settings, state.postprocess
+                ),
             )
             committed_action = int(post["committed_action_id"])
             committed_finger = int(post["committed_finger_id"])
@@ -543,7 +549,7 @@ async def _stream_live(ws: WebSocket, nnvis: NnvisSubscription):
         elapsed = time.perf_counter() - start_time
         fps_actual = tick_count / elapsed if elapsed > 0 else state.runtime.fps
 
-        tick = {
+        tick: Dict[str, object] = {
             "type": "tick",
             "ts_utc": now_utc_iso(),
             "mode": "live",
