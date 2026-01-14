@@ -29,6 +29,7 @@ EXP_LOG_DIR = Path("logs/experiments")
 # ===== UTILITIES =========
 # =========================
 
+
 def load_calibration_files():
     return list(CALIB_DIR.glob("*.json"))
 
@@ -61,6 +62,7 @@ def _safe_pct(value):
 # =========================
 # ===== SUBJECT REPORT ====
 # =========================
+
 
 def generate_subject_report(subject_id, experiment_hash):
     calib_path = CALIB_DIR / f"{subject_id}_{experiment_hash}.json"
@@ -105,7 +107,7 @@ def generate_subject_report(subject_id, experiment_hash):
 
         subj_mask = np.ones_like(test_idx, dtype=bool)
         if subj_ids is not None:
-            subj_mask = (subj_ids[test_idx] == subject_id)
+            subj_mask = subj_ids[test_idx] == subject_id
         if exp_hashes is not None:
             subj_mask = subj_mask & (exp_hashes[test_idx] == experiment_hash)
 
@@ -120,8 +122,12 @@ def generate_subject_report(subject_id, experiment_hash):
 
             mask = y_action_subj != 0
             if mask.any():
-                finger_acc = accuracy_score(y_finger_subj[mask], finger_preds_subj[mask])
-                finger_cm = confusion_matrix(y_finger_subj[mask], finger_preds_subj[mask])
+                finger_acc = accuracy_score(
+                    y_finger_subj[mask], finger_preds_subj[mask]
+                )
+                finger_cm = confusion_matrix(
+                    y_finger_subj[mask], finger_preds_subj[mask]
+                )
 
     # ===== Plots =====
     fig, axs = plt.subplots(2, 2, figsize=(12, 10))
@@ -137,7 +143,9 @@ def generate_subject_report(subject_id, experiment_hash):
         axs[0, 0].plot([0, 1], [0, 1], "--", color="gray")
         axs[0, 0].bar(bin_centers, bin_acc, width=0.08)
         axs[0, 0].set_title(
-            f"Reliability Diagram (ECE={ece:.3f})" if ece is not None else "Reliability Diagram"
+            f"Reliability Diagram (ECE={ece:.3f})"
+            if ece is not None
+            else "Reliability Diagram"
         )
 
         axs[0, 1].hist(conf, bins=20)
@@ -172,7 +180,7 @@ def generate_subject_report(subject_id, experiment_hash):
         plt.tight_layout()
         plt.savefig(cm_path)
         plt.close()
-        confusion_html += f"<img src=\"{cm_path.name}\" width=\"400\"/>"
+        confusion_html += f'<img src="{cm_path.name}" width="400"/>'
 
     if finger_cm is not None:
         cm_path = subject_report_dir / "finger_confusion.png"
@@ -185,7 +193,7 @@ def generate_subject_report(subject_id, experiment_hash):
         plt.tight_layout()
         plt.savefig(cm_path)
         plt.close()
-        confusion_html += f"<img src=\"{cm_path.name}\" width=\"400\"/>"
+        confusion_html += f'<img src="{cm_path.name}" width="400"/>'
 
     ece_str = f"{ece:.4f}" if ece is not None else "N/A"
 
@@ -235,6 +243,7 @@ def generate_subject_report(subject_id, experiment_hash):
 # =========================
 # ===== CROSS-SUBJECT =====
 # =========================
+
 
 def generate_cross_subject_summary():
     files = load_calibration_files()

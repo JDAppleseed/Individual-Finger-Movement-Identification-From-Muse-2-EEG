@@ -1,7 +1,6 @@
 # utils/mc_dropout.py
 
 import torch
-import numpy as np
 
 
 def mc_dropout_predict(model, x, mc_samples=30):

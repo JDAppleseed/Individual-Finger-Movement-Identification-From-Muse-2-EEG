@@ -4,14 +4,29 @@ from datetime import datetime, timezone
 
 TICK_SCHEMA = {
     "type": "object",
-    "required": ["type", "ts_utc", "mode", "session", "prediction", "safety", "diagnostics"],
+    "required": [
+        "type",
+        "ts_utc",
+        "mode",
+        "session",
+        "prediction",
+        "safety",
+        "diagnostics",
+    ],
     "properties": {
         "type": {"const": "tick"},
         "ts_utc": {"type": "string"},
         "mode": {"type": "string", "enum": ["replay", "live", "idle"]},
         "session": {
             "type": "object",
-            "required": ["subject_id", "experiment_hash", "window_index", "window_start_s", "window_end_s", "timebase_version"],
+            "required": [
+                "subject_id",
+                "experiment_hash",
+                "window_index",
+                "window_start_s",
+                "window_end_s",
+                "timebase_version",
+            ],
             "properties": {
                 "subject_id": {"type": "string"},
                 "experiment_hash": {"type": "string"},

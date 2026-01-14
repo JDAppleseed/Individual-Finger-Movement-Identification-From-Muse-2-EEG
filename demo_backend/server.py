@@ -4,7 +4,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional, cast
 
 import numpy as np
 import torch
@@ -18,7 +18,11 @@ from demo_backend.nn_vis.extract import extract_activations, pack_tensor
 from demo_backend.nn_vis.routes import router as nnvis_router
 from demo_backend.replay import ReplaySource
 from demo_backend.schemas import schema_bundle
-from demo_backend.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
+from demo_backend.postprocess import (
+    PostprocessSettings,
+    PostprocessState,
+    postprocess_predictions,
+)
 from demo_backend.utils_demo import (
     ensure_repo_on_path,
     load_calibration_state,
@@ -41,6 +45,7 @@ RECORDINGS_DIR = ROOT / "demo_backend" / "recordings"
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
 logger = setup_logger("demo_backend", LOG_DIR)
+
 
 @dataclass
 class RuntimeState:
@@ -130,7 +135,9 @@ class BackendState:
         # Infer head sizes from checkpoint to avoid mismatch with label schema
         n_fingers = int(state["finger_head.weight"].shape[0])
         n_actions = int(state["action_head.weight"].shape[0])
-        model = CNNLSTMFingerActionNet(n_channels=4, n_fingers=n_fingers, n_actions=n_actions)
+        model = CNNLSTMFingerActionNet(
+            n_channels=4, n_fingers=n_fingers, n_actions=n_actions
+        )
         model.load_state_dict(state)
         self.model_loaded = True
         base_threshold = calibration_state.threshold if calibration_state else 0.75
@@ -147,6 +154,7 @@ class BackendState:
             config=config,
         )
 
+
 state: Optional[BackendState] = None
 
 
@@ -155,6 +163,7 @@ def get_state() -> BackendState:
     if state is None:
         state = BackendState()
     return state
+
 
 app = FastAPI()
 app.add_middleware(
@@ -249,17 +258,27 @@ def _build_postprocess_settings():
     )
 
 
-async def _send_status(ws: WebSocket, level: str, message: str, details: Optional[dict] = None):
-    await ws.send_json({
-        "type": "status",
-        "ts_utc": now_utc_iso(),
-        "level": level,
-        "message": message,
-        "details": details or {},
-    })
+async def _send_status(
+    ws: WebSocket, level: str, message: str, details: Optional[dict] = None
+):
+    await ws.send_json(
+        {
+            "type": "status",
+            "ts_utc": now_utc_iso(),
+            "level": level,
+            "message": message,
+            "details": details or {},
+        }
+    )
 
 
-def _build_nnvis_payload(window: np.ndarray, source: str, index: Optional[int], time_s: Optional[float], passes: int) -> Optional[dict]:
+def _build_nnvis_payload(
+    window: np.ndarray,
+    source: str,
+    index: Optional[int],
+    time_s: Optional[float],
+    passes: int,
+) -> Optional[dict]:
     state = get_state()
     if state.engine is None or state.engine.model is None:
         return None
@@ -271,8 +290,8 @@ def _build_nnvis_payload(window: np.ndarray, source: str, index: Optional[int], 
         mc_passes=passes if passes > 0 else None,
     )
 
-    finger_probs = activations["finger_probs"]
-    action_probs = activations["action_probs"]
+    finger_probs = np.asarray(activations["finger_probs"])
+    action_probs = np.asarray(activations["action_probs"])
     finger_pred = int(np.argmax(finger_probs))
     action_pred = int(np.argmax(action_probs))
 
@@ -283,7 +302,10 @@ def _build_nnvis_payload(window: np.ndarray, source: str, index: Optional[int], 
         "conv1": {"shape": [16, 64], "values": pack_tensor(activations["conv1"])},
         "conv2": {"shape": [32, 64], "values": pack_tensor(activations["conv2"])},
         "lstm_out": {"shape": [64, 64], "values": pack_tensor(activations["lstm_out"])},
-        "last_features": {"shape": [64], "values": pack_tensor(activations["last_features"])},
+        "last_features": {
+            "shape": [64],
+            "values": pack_tensor(activations["last_features"]),
+        },
         "probs": {
             "finger": {
                 "values": finger_probs.tolist(),
@@ -302,9 +324,12 @@ def _build_nnvis_payload(window: np.ndarray, source: str, index: Optional[int], 
 
 async def _stream_replay(ws: WebSocket, nnvis: NnvisSubscription):
     state = get_state()
+    assert state.engine is not None
     if state.replay is None or state.replay.path != state.runtime.replay_path:
         if not state.runtime.replay_path.exists():
-            await _send_status(ws, "error", f"Replay file not found: {state.runtime.replay_path}")
+            await _send_status(
+                ws, "error", f"Replay file not found: {state.runtime.replay_path}"
+            )
             state.runtime.mode = "idle"
             return
         state.replay = ReplaySource(state.runtime.replay_path)
@@ -316,14 +341,25 @@ async def _stream_replay(ws: WebSocket, nnvis: NnvisSubscription):
             break
         post = None
         t0 = time.perf_counter()
-        action_probs, finger_probs, action_unc, finger_unc, diag = state.engine.predict_proba(window)
+        action_probs, finger_probs, action_unc, finger_unc, diag = (
+            state.engine.predict_proba(window)
+        )
         if action_probs is None or finger_probs is None:
             prediction, safety, diag2 = state.engine.predict(window)
             diag.update(diag2)
             latency_ms = (time.perf_counter() - t0) * 1000.0
         else:
+            assert action_probs is not None
+            assert finger_probs is not None
+            action_probs = np.asarray(action_probs)
+            finger_probs = np.asarray(finger_probs)
             settings = _build_postprocess_settings()
-            post = postprocess_predictions(action_probs, finger_probs, settings, state.postprocess)
+            post = cast(
+                Dict[str, Any],
+                postprocess_predictions(
+                    action_probs, finger_probs, settings, state.postprocess
+                ),
+            )
             committed_action = int(post["committed_action_id"])
             committed_finger = int(post["committed_finger_id"])
             action_conf = float(post["action_conf"])
@@ -340,21 +376,26 @@ async def _stream_replay(ws: WebSocket, nnvis: NnvisSubscription):
                 "finger_uncertainty": float(finger_unc),
             }
 
-            allow_actuation = committed_action != 0 and action_conf >= settings.threshold_action
+            allow_actuation = (
+                committed_action != 0 and action_conf >= settings.threshold_action
+            )
             safety = {
                 "base_threshold": settings.threshold_action,
                 "adaptive_threshold": settings.threshold_action,
                 "allow_actuation": allow_actuation,
                 "stability_frames": settings.hysteresis_frames,
-                "stability_ok": post["decision_reason"] not in {"hysteresis_hold", "below_threshold"},
-                "velocity": action_conf * (1.0 - float(action_unc)) if committed_action != 0 else 0.0,
+                "stability_ok": post["decision_reason"]
+                not in {"hysteresis_hold", "below_threshold"},
+                "velocity": action_conf * (1.0 - float(action_unc))
+                if committed_action != 0
+                else 0.0,
             }
             latency_ms = (time.perf_counter() - t0) * 1000.0
         tick_count += 1
         elapsed = time.perf_counter() - start_time
         fps_actual = tick_count / elapsed if elapsed > 0 else state.runtime.fps
 
-        tick = {
+        tick: Dict[str, object] = {
             "type": "tick",
             "ts_utc": now_utc_iso(),
             "mode": "replay",
@@ -378,7 +419,9 @@ async def _stream_replay(ws: WebSocket, nnvis: NnvisSubscription):
                 "smoothing_enabled": state.runtime.smoothing_enabled,
                 "smoothing_method": state.runtime.smoothing_method,
                 "smoothing_window": state.runtime.smoothing_window,
-                "hysteresis_enabled": state.runtime.hysteresis_enabled if state.runtime.mode == "live" else False,
+                "hysteresis_enabled": state.runtime.hysteresis_enabled
+                if state.runtime.mode == "live"
+                else False,
                 "hysteresis_frames": state.runtime.hysteresis_frames,
                 "threshold_action": state.runtime.threshold_action,
                 "threshold_finger": state.runtime.threshold_finger,
@@ -386,10 +429,18 @@ async def _stream_replay(ws: WebSocket, nnvis: NnvisSubscription):
                 "decision_reason": post["decision_reason"] if post else "",
                 "raw_top_action_id": post["raw_top_action_id"] if post else -1,
                 "raw_top_finger_id": post["raw_top_finger_id"] if post else -1,
-                "committed_action_id": post["committed_action_id"] if post else prediction.get("action_id", -1),
-                "committed_finger_id": post["committed_finger_id"] if post else prediction.get("finger_id", -1),
-                "smoothed_action_id": post["smoothed_action_id"] if post else prediction.get("action_id", -1),
-                "smoothed_finger_id": post["smoothed_finger_id"] if post else prediction.get("finger_id", -1),
+                "committed_action_id": post["committed_action_id"]
+                if post
+                else prediction.get("action_id", -1),
+                "committed_finger_id": post["committed_finger_id"]
+                if post
+                else prediction.get("finger_id", -1),
+                "smoothed_action_id": post["smoothed_action_id"]
+                if post
+                else prediction.get("action_id", -1),
+                "smoothed_finger_id": post["smoothed_finger_id"]
+                if post
+                else prediction.get("finger_id", -1),
                 "frames_in_state": post["frames_in_state"] if post else 0,
             },
         }
@@ -421,6 +472,7 @@ async def _stream_replay(ws: WebSocket, nnvis: NnvisSubscription):
 
 async def _stream_live(ws: WebSocket, nnvis: NnvisSubscription):
     state = get_state()
+    assert state.engine is not None
     if not state.lsl_connected:
         ok, msg = state.live.connect()
         state.lsl_connected = ok
@@ -443,14 +495,25 @@ async def _stream_live(ws: WebSocket, nnvis: NnvisSubscription):
 
         t0 = time.perf_counter()
         post = None
-        action_probs, finger_probs, action_unc, finger_unc, diag = state.engine.predict_proba(window_data.window)
+        action_probs, finger_probs, action_unc, finger_unc, diag = (
+            state.engine.predict_proba(window_data.window)
+        )
         if action_probs is None or finger_probs is None:
             prediction, safety, diag2 = state.engine.predict(window_data.window)
             diag.update(diag2)
             latency_ms = (time.perf_counter() - t0) * 1000.0
         else:
+            assert action_probs is not None
+            assert finger_probs is not None
+            action_probs = np.asarray(action_probs)
+            finger_probs = np.asarray(finger_probs)
             settings = _build_postprocess_settings()
-            post = postprocess_predictions(action_probs, finger_probs, settings, state.postprocess)
+            post = cast(
+                Dict[str, Any],
+                postprocess_predictions(
+                    action_probs, finger_probs, settings, state.postprocess
+                ),
+            )
             committed_action = int(post["committed_action_id"])
             committed_finger = int(post["committed_finger_id"])
             action_conf = float(post["action_conf"])
@@ -467,21 +530,26 @@ async def _stream_live(ws: WebSocket, nnvis: NnvisSubscription):
                 "finger_uncertainty": float(finger_unc),
             }
 
-            allow_actuation = committed_action != 0 and action_conf >= settings.threshold_action
+            allow_actuation = (
+                committed_action != 0 and action_conf >= settings.threshold_action
+            )
             safety = {
                 "base_threshold": settings.threshold_action,
                 "adaptive_threshold": settings.threshold_action,
                 "allow_actuation": allow_actuation,
                 "stability_frames": settings.hysteresis_frames,
-                "stability_ok": post["decision_reason"] not in {"hysteresis_hold", "below_threshold"},
-                "velocity": action_conf * (1.0 - float(action_unc)) if committed_action != 0 else 0.0,
+                "stability_ok": post["decision_reason"]
+                not in {"hysteresis_hold", "below_threshold"},
+                "velocity": action_conf * (1.0 - float(action_unc))
+                if committed_action != 0
+                else 0.0,
             }
             latency_ms = (time.perf_counter() - t0) * 1000.0
         tick_count += 1
         elapsed = time.perf_counter() - start_time
         fps_actual = tick_count / elapsed if elapsed > 0 else state.runtime.fps
 
-        tick = {
+        tick: Dict[str, object] = {
             "type": "tick",
             "ts_utc": now_utc_iso(),
             "mode": "live",
@@ -505,7 +573,9 @@ async def _stream_live(ws: WebSocket, nnvis: NnvisSubscription):
                 "smoothing_enabled": state.runtime.smoothing_enabled,
                 "smoothing_method": state.runtime.smoothing_method,
                 "smoothing_window": state.runtime.smoothing_window,
-                "hysteresis_enabled": state.runtime.hysteresis_enabled if state.runtime.mode == "live" else False,
+                "hysteresis_enabled": state.runtime.hysteresis_enabled
+                if state.runtime.mode == "live"
+                else False,
                 "hysteresis_frames": state.runtime.hysteresis_frames,
                 "threshold_action": state.runtime.threshold_action,
                 "threshold_finger": state.runtime.threshold_finger,
@@ -513,10 +583,18 @@ async def _stream_live(ws: WebSocket, nnvis: NnvisSubscription):
                 "decision_reason": post["decision_reason"] if post else "",
                 "raw_top_action_id": post["raw_top_action_id"] if post else -1,
                 "raw_top_finger_id": post["raw_top_finger_id"] if post else -1,
-                "committed_action_id": post["committed_action_id"] if post else prediction.get("action_id", -1),
-                "committed_finger_id": post["committed_finger_id"] if post else prediction.get("finger_id", -1),
-                "smoothed_action_id": post["smoothed_action_id"] if post else prediction.get("action_id", -1),
-                "smoothed_finger_id": post["smoothed_finger_id"] if post else prediction.get("finger_id", -1),
+                "committed_action_id": post["committed_action_id"]
+                if post
+                else prediction.get("action_id", -1),
+                "committed_finger_id": post["committed_finger_id"]
+                if post
+                else prediction.get("finger_id", -1),
+                "smoothed_action_id": post["smoothed_action_id"]
+                if post
+                else prediction.get("action_id", -1),
+                "smoothed_finger_id": post["smoothed_finger_id"]
+                if post
+                else prediction.get("finger_id", -1),
                 "frames_in_state": post["frames_in_state"] if post else 0,
             },
         }

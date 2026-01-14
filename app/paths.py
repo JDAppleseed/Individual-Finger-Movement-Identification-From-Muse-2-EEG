@@ -82,7 +82,16 @@ def safe_child(parent: Path, name: str) -> Path:
 
 def ensure_session_dirs(session_dir: Path) -> None:
     session_dir.mkdir(parents=True, exist_ok=True)
-    for name in ["events", "windows", "logs", "exports", "config", "features", "raw", "models"]:
+    for name in [
+        "events",
+        "windows",
+        "logs",
+        "exports",
+        "config",
+        "features",
+        "raw",
+        "models",
+    ]:
         (session_dir / name).mkdir(parents=True, exist_ok=True)
 
 

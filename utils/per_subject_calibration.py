@@ -19,13 +19,14 @@ CALIB_DIR.mkdir(parents=True, exist_ok=True)
 # ===== STORAGE ===========
 # =========================
 
+
 def record_prediction(
     subject_id: str,
     experiment_hash: str,
     confidence: float,
     uncertainty: float,
     correct: bool,
-    threshold: float
+    threshold: float,
 ):
     path = CALIB_DIR / f"{subject_id}_{experiment_hash}.json"
 
@@ -33,7 +34,7 @@ def record_prediction(
         "confidence": float(confidence),
         "uncertainty": float(uncertainty),
         "correct": bool(correct),
-        "threshold": float(threshold)
+        "threshold": float(threshold),
     }
 
     if path.exists():
@@ -48,6 +49,7 @@ def record_prediction(
 # =========================
 # ===== METRICS ===========
 # =========================
+
 
 def expected_calibration_error(conf, correct, n_bins=10):
     bins = np.linspace(0, 1, n_bins + 1)
@@ -68,6 +70,7 @@ def expected_calibration_error(conf, correct, n_bins=10):
 # =========================
 # ===== PLOTTING =========
 # =========================
+
 
 def plot_subject_calibration(subject_id: str, experiment_hash: str):
     path = CALIB_DIR / f"{subject_id}_{experiment_hash}.json"

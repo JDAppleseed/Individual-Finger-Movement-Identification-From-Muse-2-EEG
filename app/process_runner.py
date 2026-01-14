@@ -84,4 +84,3 @@ class ProcessRunner(QObject):
             self.line_ready.emit("[stderr] " + self._stderr_buffer.rstrip("\r\n"))
             self._stderr_buffer = ""
         self.finished.emit(exit_code, exit_status)
-

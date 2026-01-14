@@ -8,7 +8,16 @@ from pathlib import Path
 import pandas as pd
 
 REQUIRED_EVENT_COLS = {"onset_s", "duration_s", "action_id", "finger_id"}
-OPTIONAL_EVENT_COLS = {"type", "channel", "confidence", "notes", "source", "session_mode", "trial_id", "block_id"}
+OPTIONAL_EVENT_COLS = {
+    "type",
+    "channel",
+    "confidence",
+    "notes",
+    "source",
+    "session_mode",
+    "trial_id",
+    "block_id",
+}
 REQUIRED_FEATURE_COLS = {"ch1", "ch2", "ch3", "ch4"}
 ALT_FEATURE_COLS = {"TP9", "AF7", "AF8", "TP10"}
 
@@ -90,7 +99,6 @@ def check_features_schema() -> bool:
     return True
 
 
-
 def check_time_alignment() -> bool:
     _, features_path, events_path, _ = resolve_paths()
     if not features_path.exists() or not events_path.exists():
@@ -116,7 +124,9 @@ def check_time_alignment() -> bool:
         print("ℹ No events recorded; skipping event alignment check")
         return True
 
-    event_end = (df_events["onset_s"].astype(float) + df_events["duration_s"].astype(float)).max()
+    event_end = (
+        df_events["onset_s"].astype(float) + df_events["duration_s"].astype(float)
+    ).max()
     if event_end > time_s.max() + 1.0:
         print(
             f"❌ Event end ({event_end:.3f}s) exceeds feature time range ({time_s.max():.3f}s)"
@@ -131,12 +141,12 @@ def check_feature_row_lengths() -> bool:
     if not features_path.exists():
         return False
     with features_path.open() as f:
-        header = f.readline().strip().split(',')
+        header = f.readline().strip().split(",")
         expected = len(header)
         for i, line in enumerate(f, start=2):
             if not line.strip():
                 continue
-            cols = line.strip().split(',')
+            cols = line.strip().split(",")
             if len(cols) != expected:
                 print(
                     f"❌ Row {i} in {features_path} has {len(cols)} columns, expected {expected}"
@@ -146,10 +156,13 @@ def check_feature_row_lengths() -> bool:
                 break
     return True
 
+
 def print_balance_stats() -> None:
     path = Path("eeg_windows.csv")
     if not path.exists():
-        print("ℹ eeg_windows.csv not found; run 1b_extract_windows.py to generate balance stats")
+        print(
+            "ℹ eeg_windows.csv not found; run 1b_extract_windows.py to generate balance stats"
+        )
         return
     df = pd.read_csv(path)
     if "action_id" in df.columns:
@@ -165,7 +178,9 @@ def print_balance_stats() -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Preflight data readiness check")
-    parser.add_argument("--mode", choices=["acquire", "demo", "eval"], default="acquire")
+    parser.add_argument(
+        "--mode", choices=["acquire", "demo", "eval"], default="acquire"
+    )
     args = parser.parse_args()
 
     ok = True

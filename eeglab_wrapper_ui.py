@@ -68,7 +68,8 @@ from app.process_runner import ProcessRunner
 from app.repo_probe import discover_scripts
 
 try:
-    import pylsl  # type: ignore
+    import pylsl
+
     LSL_AVAILABLE = True
 except Exception:
     pylsl = None
@@ -117,7 +118,7 @@ class FloatSlider(QWidget):
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self._factor = 10 ** decimals
+        self._factor = 10**decimals
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(int(min_val * self._factor), int(max_val * self._factor))
         self.spin = QDoubleSpinBox()
@@ -150,6 +151,7 @@ class FloatSlider(QWidget):
     def setValue(self, val: float) -> None:
         self.spin.setValue(float(val))
         self.slider.setValue(int(round(float(val) * self._factor)))
+
 
 class SubjectDialog(QDialog):
     def __init__(self, parent: QWidget, info: Optional[SubjectInfo] = None) -> None:
@@ -291,7 +293,16 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
-        for name in ["File", "Project", "Stream", "Events", "Preprocess", "Run", "Export", "Help"]:
+        for name in [
+            "File",
+            "Project",
+            "Stream",
+            "Events",
+            "Preprocess",
+            "Run",
+            "Export",
+            "Help",
+        ]:
             menu.addMenu(name)
 
     def _build_status_bar(self) -> QWidget:
@@ -377,7 +388,11 @@ class MainWindow(QMainWindow):
 
         self.csv_path = QLineEdit()
         csv_btn = QPushButton("Browse")
-        csv_btn.clicked.connect(lambda: self._browse_path(self.csv_path, "CSV (*.csv)", "Select CSV", mode="open"))
+        csv_btn.clicked.connect(
+            lambda: self._browse_path(
+                self.csv_path, "CSV (*.csv)", "Select CSV", mode="open"
+            )
+        )
         csv_row = QHBoxLayout()
         csv_row.addWidget(self.csv_path)
         csv_row.addWidget(csv_btn)
@@ -408,7 +423,9 @@ class MainWindow(QMainWindow):
             self.input_source.addItems(["CSV Offline"])
             self.input_source.setCurrentIndex(0)
             self.csv_path.setEnabled(True)
-            self.stream_status.setText("pylsl not installed; LSL controls hidden (CSV offline only).")
+            self.stream_status.setText(
+                "pylsl not installed; LSL controls hidden (CSV offline only)."
+            )
         else:
             self._update_stream_controls()
 
@@ -450,7 +467,14 @@ class MainWindow(QMainWindow):
         self.event_strict = QCheckBox()
         self.event_json_report = QLineEdit()
         json_btn = QPushButton("Browse")
-        json_btn.clicked.connect(lambda: self._browse_path(self.event_json_report, "JSON (*.json);;All Files (*)", "Save JSON Report", mode="save"))
+        json_btn.clicked.connect(
+            lambda: self._browse_path(
+                self.event_json_report,
+                "JSON (*.json);;All Files (*)",
+                "Save JSON Report",
+                mode="save",
+            )
+        )
         json_row = QHBoxLayout()
         json_row.setContentsMargins(0, 0, 0, 0)
         json_row.addWidget(self.event_json_report)
@@ -490,7 +514,9 @@ class MainWindow(QMainWindow):
     def _build_preprocess_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        msg = QLabel("No standalone preprocess/ICA script found. ICA runs inside Step 1.")
+        msg = QLabel(
+            "No standalone preprocess/ICA script found. ICA runs inside Step 1."
+        )
         msg.setWordWrap(True)
         layout.addWidget(msg)
         layout.addStretch(1)
@@ -541,7 +567,13 @@ class MainWindow(QMainWindow):
         adv_layout = QFormLayout(advanced)
         self.diag_session_meta = QLineEdit()
         meta_btn = QPushButton("Browse")
-        meta_btn.clicked.connect(lambda: self._browse_path(self.diag_session_meta, "JSON (*.json);;All Files (*)", "Select Session Meta"))
+        meta_btn.clicked.connect(
+            lambda: self._browse_path(
+                self.diag_session_meta,
+                "JSON (*.json);;All Files (*)",
+                "Select Session Meta",
+            )
+        )
         meta_row = QHBoxLayout()
         meta_row.setContentsMargins(0, 0, 0, 0)
         meta_row.addWidget(self.diag_session_meta)
@@ -648,7 +680,9 @@ class MainWindow(QMainWindow):
         self._build_checklist(step_id, layout)
 
         if include_event_tools:
-            hint = QLabel("Event marking runs inside Step 1 when enabled. Event review available on Events page.")
+            hint = QLabel(
+                "Event marking runs inside Step 1 when enabled. Event review available on Events page."
+            )
             hint.setWordWrap(True)
             layout.addWidget(hint)
 
@@ -666,55 +700,214 @@ class MainWindow(QMainWindow):
     def _populate_basic_fields(self, step_id: str, form: QFormLayout) -> None:
         defaults = self.defaults[step_id]
         if step_id in {"step1", "infer"}:
-            self._add_checkbox(step_id, form, "TRAINING_MODE", "Training mode", defaults)
+            self._add_checkbox(
+                step_id, form, "TRAINING_MODE", "Training mode", defaults
+            )
             self._add_checkbox(step_id, form, "DEMO_MODE", "Demo mode", defaults)
             self._add_checkbox(step_id, form, "ENABLE_PLOT", "Enable plot", defaults)
             self._add_checkbox(step_id, form, "SAVE_TO_DISK", "Save to disk", defaults)
             self._add_checkbox(step_id, form, "SAVE_RAW", "Save raw", defaults)
-            self._add_spin(step_id, form, "SAMPLING_RATE", "Sampling rate", defaults, 1, 4096)
-            self._add_spin(step_id, form, "CHANNELS", "Channels", defaults, 1, 64, read_only=True)
-            self._add_file_picker(step_id, form, "MODEL_PATH", "Model path", defaults, "Model (*.pt *.pth);;All Files (*)")
-            self._add_file_picker(step_id, form, "SCALER_PATH", "Scaler path", defaults, "Scaler (*.save *.pkl);;All Files (*)")
-            self._add_checkbox(step_id, form, "EVENT_MARKING_ENABLED", "Event marking", defaults)
+            self._add_spin(
+                step_id, form, "SAMPLING_RATE", "Sampling rate", defaults, 1, 4096
+            )
+            self._add_spin(
+                step_id, form, "CHANNELS", "Channels", defaults, 1, 64, read_only=True
+            )
+            self._add_file_picker(
+                step_id,
+                form,
+                "MODEL_PATH",
+                "Model path",
+                defaults,
+                "Model (*.pt *.pth);;All Files (*)",
+            )
+            self._add_file_picker(
+                step_id,
+                form,
+                "SCALER_PATH",
+                "Scaler path",
+                defaults,
+                "Scaler (*.save *.pkl);;All Files (*)",
+            )
+            self._add_checkbox(
+                step_id, form, "EVENT_MARKING_ENABLED", "Event marking", defaults
+            )
         elif step_id == "step1b":
-            self._add_spin(step_id, form, "WINDOW_SEC", "Window sec", defaults, 0, 10, is_float=True)
-            self._add_file_picker(step_id, form, "features", "Features path", defaults, "CSV (*.csv);;All Files (*)")
-            self._add_file_picker(step_id, form, "events", "Events path", defaults, "CSV (*.csv);;All Files (*)")
+            self._add_spin(
+                step_id,
+                form,
+                "WINDOW_SEC",
+                "Window sec",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
+            self._add_file_picker(
+                step_id,
+                form,
+                "features",
+                "Features path",
+                defaults,
+                "CSV (*.csv);;All Files (*)",
+            )
+            self._add_file_picker(
+                step_id,
+                form,
+                "events",
+                "Events path",
+                defaults,
+                "CSV (*.csv);;All Files (*)",
+            )
             self._add_text(step_id, form, "subject_id", "Subject ID", defaults)
-            self._add_spin(step_id, form, "target_fs", "Target FS", defaults, 1, 4096, is_float=True)
+            self._add_spin(
+                step_id,
+                form,
+                "target_fs",
+                "Target FS",
+                defaults,
+                1,
+                4096,
+                is_float=True,
+            )
             self._add_checkbox(step_id, form, "allow_gaps", "Allow gaps", defaults)
-            self._add_checkbox(step_id, form, "ignore_misalignment", "Ignore misalignment", defaults)
+            self._add_checkbox(
+                step_id, form, "ignore_misalignment", "Ignore misalignment", defaults
+            )
         elif step_id == "train":
-            self._add_file_picker(step_id, form, "npz", "Window NPZ", defaults, "NPZ (*.npz);;All Files (*)")
+            self._add_file_picker(
+                step_id,
+                form,
+                "npz",
+                "Window NPZ",
+                defaults,
+                "NPZ (*.npz);;All Files (*)",
+            )
             self._add_text(step_id, form, "subject_id", "Subject ID", defaults)
             self._add_spin(step_id, form, "epochs", "Epochs", defaults, 1, 1000)
             self._add_spin(step_id, form, "batch_size", "Batch size", defaults, 1, 1024)
-            self._add_spin(step_id, form, "lr", "Learning rate", defaults, 0, 1, is_float=True, decimals=6)
-            self._add_file_picker(step_id, form, "save_model", "Save model", defaults, "Model (*.pt *.pth);;All Files (*)", mode="save")
-            self._add_file_picker(step_id, form, "save_scaler", "Save scaler", defaults, "Scaler (*.save *.pkl);;All Files (*)", mode="save")
+            self._add_spin(
+                step_id,
+                form,
+                "lr",
+                "Learning rate",
+                defaults,
+                0,
+                1,
+                is_float=True,
+                decimals=6,
+            )
+            self._add_file_picker(
+                step_id,
+                form,
+                "save_model",
+                "Save model",
+                defaults,
+                "Model (*.pt *.pth);;All Files (*)",
+                mode="save",
+            )
+            self._add_file_picker(
+                step_id,
+                form,
+                "save_scaler",
+                "Save scaler",
+                defaults,
+                "Scaler (*.save *.pkl);;All Files (*)",
+                mode="save",
+            )
         else:
             for key, val in defaults.items():
                 if isinstance(val, bool):
                     self._add_checkbox(step_id, form, key, key, defaults)
                 elif isinstance(val, (int, float)):
-                    self._add_spin(step_id, form, key, key, defaults, 0, 100000, is_float=isinstance(val, float))
+                    self._add_spin(
+                        step_id,
+                        form,
+                        key,
+                        key,
+                        defaults,
+                        0,
+                        100000,
+                        is_float=isinstance(val, float),
+                    )
                 else:
                     self._add_text(step_id, form, key, key, defaults)
 
     def _populate_advanced_fields(self, step_id: str, form: QFormLayout) -> None:
         defaults = self.defaults[step_id]
         if step_id in {"step1", "infer"}:
-            self._add_spin(step_id, form, "WINDOW_SEC", "Window sec", defaults, 0, 10, is_float=True)
+            self._add_spin(
+                step_id,
+                form,
+                "WINDOW_SEC",
+                "Window sec",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
             self._add_spin(step_id, form, "N_FINGERS", "N fingers", defaults, 1, 50)
             self._add_spin(step_id, form, "N_ACTIONS", "N actions", defaults, 1, 50)
-            self._add_timebase_dropdown(step_id, form, "TIMEBASE_VERSION", "Timebase", defaults)
-            self._add_slider(step_id, form, "BASE_CONF_THRESH", "Base conf thresh", defaults, 0, 1, decimals=2)
-            self._add_slider(step_id, form, "UNCERTAINTY_WEIGHT", "Uncertainty weight", defaults, 0, 1, decimals=2)
-            self._add_int_dropdown(step_id, form, "STABILITY_FRAMES", "Stability frames", defaults, [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20])
-            self._add_checkbox(step_id, form, "ENABLE_ACTUATION", "Enable actuation", defaults)
-            self._add_int_dropdown(step_id, form, "MC_DROPOUT_PASSES", "MC dropout passes", defaults, [1, 2, 3, 5, 8, 10, 15, 20, 30, 50])
-            self._add_file_picker(step_id, form, "EVENTS_CSV_PATH", "Events CSV", defaults, "CSV (*.csv);;All Files (*)", mode="save")
-            self._add_file_picker(step_id, form, "EVENTS_AUTOSAVE_PATH", "Events autosave", defaults, "CSV (*.csv);;All Files (*)", mode="save")
+            self._add_timebase_dropdown(
+                step_id, form, "TIMEBASE_VERSION", "Timebase", defaults
+            )
+            self._add_slider(
+                step_id,
+                form,
+                "BASE_CONF_THRESH",
+                "Base conf thresh",
+                defaults,
+                0,
+                1,
+                decimals=2,
+            )
+            self._add_slider(
+                step_id,
+                form,
+                "UNCERTAINTY_WEIGHT",
+                "Uncertainty weight",
+                defaults,
+                0,
+                1,
+                decimals=2,
+            )
+            self._add_int_dropdown(
+                step_id,
+                form,
+                "STABILITY_FRAMES",
+                "Stability frames",
+                defaults,
+                [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20],
+            )
+            self._add_checkbox(
+                step_id, form, "ENABLE_ACTUATION", "Enable actuation", defaults
+            )
+            self._add_int_dropdown(
+                step_id,
+                form,
+                "MC_DROPOUT_PASSES",
+                "MC dropout passes",
+                defaults,
+                [1, 2, 3, 5, 8, 10, 15, 20, 30, 50],
+            )
+            self._add_file_picker(
+                step_id,
+                form,
+                "EVENTS_CSV_PATH",
+                "Events CSV",
+                defaults,
+                "CSV (*.csv);;All Files (*)",
+                mode="save",
+            )
+            self._add_file_picker(
+                step_id,
+                form,
+                "EVENTS_AUTOSAVE_PATH",
+                "Events autosave",
+                defaults,
+                "CSV (*.csv);;All Files (*)",
+                mode="save",
+            )
             self._add_editable_combo(
                 step_id,
                 form,
@@ -724,29 +917,119 @@ class MainWindow(QMainWindow):
                 ["n/a", "ch1", "ch2", "ch3", "ch4"],
             )
             self._add_text(step_id, form, "subject_id", "Subject ID", defaults)
-            self._add_checkbox(step_id, form, "force_new_session", "Force new session", defaults)
+            self._add_checkbox(
+                step_id, form, "force_new_session", "Force new session", defaults
+            )
             self._add_checkbox(step_id, form, "init_only", "Init only", defaults)
-            self._add_text(step_id, form, "SESSION_ID_OVERRIDE", "Session ID override", defaults, read_only=True)
+            self._add_text(
+                step_id,
+                form,
+                "SESSION_ID_OVERRIDE",
+                "Session ID override",
+                defaults,
+                read_only=True,
+            )
         elif step_id == "step1b":
-            self._add_spin(step_id, form, "WINDOW_SEC_DEFAULT", "Window sec (default)", defaults, 0, 10, is_float=True)
-            self._add_spin(step_id, form, "STEP_SEC", "Step sec", defaults, 0, 10, is_float=True)
-            self._add_spin(step_id, form, "PAD_SEC", "Pad sec", defaults, 0, 10, is_float=True)
-            self._add_spin(step_id, form, "GAP_THRESHOLD_SEC", "Gap threshold", defaults, 0, 10, is_float=True)
+            self._add_spin(
+                step_id,
+                form,
+                "WINDOW_SEC_DEFAULT",
+                "Window sec (default)",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id, form, "STEP_SEC", "Step sec", defaults, 0, 10, is_float=True
+            )
+            self._add_spin(
+                step_id, form, "PAD_SEC", "Pad sec", defaults, 0, 10, is_float=True
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "GAP_THRESHOLD_SEC",
+                "Gap threshold",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
             self._add_text(step_id, form, "DEDUP_POLICY", "Dedupe policy", defaults)
-            self._add_text(step_id, form, "INTERPOLATION_POLICY", "Interpolation policy", defaults)
+            self._add_text(
+                step_id, form, "INTERPOLATION_POLICY", "Interpolation policy", defaults
+            )
             self._add_checkbox(step_id, form, "LABEL_GATED", "Label gated", defaults)
-            self._add_spin(step_id, form, "KEEP_BASELINE_REST_EVENTS", "Keep baseline rest", defaults, 0, 50)
-            self._add_spin(step_id, form, "MIN_OVERLAP_RATIO", "Min overlap ratio", defaults, 0, 1, is_float=True)
-            self._add_spin(step_id, form, "GUARD_BAND_SEC", "Guard band sec", defaults, 0, 10, is_float=True)
-            self._add_spin(step_id, form, "ARTIFACT_MIN_OVERLAP_FRAC", "Artifact overlap", defaults, 0, 1, is_float=True)
+            self._add_spin(
+                step_id,
+                form,
+                "KEEP_BASELINE_REST_EVENTS",
+                "Keep baseline rest",
+                defaults,
+                0,
+                50,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "MIN_OVERLAP_RATIO",
+                "Min overlap ratio",
+                defaults,
+                0,
+                1,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "GUARD_BAND_SEC",
+                "Guard band sec",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "ARTIFACT_MIN_OVERLAP_FRAC",
+                "Artifact overlap",
+                defaults,
+                0,
+                1,
+                is_float=True,
+            )
             self._add_text(step_id, form, "OUT_FILE", "Output CSV", defaults)
             self._add_text(step_id, form, "OUT_NPZ", "Output NPZ", defaults)
         elif step_id == "train":
             self._add_spin(step_id, form, "seed", "Seed", defaults, 0, 1_000_000)
-            self._add_spin(step_id, form, "loss_action_weight", "Loss action weight", defaults, 0, 10, is_float=True)
-            self._add_spin(step_id, form, "rest_weight", "REST weight", defaults, 0, 10, is_float=True)
-            self._add_spin(step_id, form, "test_size", "Test size", defaults, 0, 1, is_float=True)
-            self._add_checkbox(step_id, form, "non_rest_only", "Non-REST only", defaults)
+            self._add_spin(
+                step_id,
+                form,
+                "loss_action_weight",
+                "Loss action weight",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "rest_weight",
+                "REST weight",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id, form, "test_size", "Test size", defaults, 0, 1, is_float=True
+            )
+            self._add_checkbox(
+                step_id, form, "non_rest_only", "Non-REST only", defaults
+            )
             self._add_text(step_id, form, "save_preds", "Save predictions", defaults)
             self._add_spin(step_id, form, "N_FINGERS", "N fingers", defaults, 1, 50)
             self._add_spin(step_id, form, "N_ACTIONS", "N actions", defaults, 1, 50)
@@ -757,7 +1040,16 @@ class MainWindow(QMainWindow):
                 if isinstance(val, bool):
                     self._add_checkbox(step_id, form, key, key, defaults)
                 elif isinstance(val, (int, float)):
-                    self._add_spin(step_id, form, key, key, defaults, 0, 100000, is_float=isinstance(val, float))
+                    self._add_spin(
+                        step_id,
+                        form,
+                        key,
+                        key,
+                        defaults,
+                        0,
+                        100000,
+                        is_float=isinstance(val, float),
+                    )
                 else:
                     self._add_text(step_id, form, key, key, defaults)
         self._add_dynamic_fields(step_id, form)
@@ -783,11 +1075,24 @@ class MainWindow(QMainWindow):
                 continue
             self.defaults[step_id].setdefault(name, value)
             if isinstance(value, bool):
-                self._add_checkbox(step_id, form, name, f"{name} (auto)", self.defaults[step_id])
+                self._add_checkbox(
+                    step_id, form, name, f"{name} (auto)", self.defaults[step_id]
+                )
             elif isinstance(value, (int, float)):
-                self._add_spin(step_id, form, name, f"{name} (auto)", self.defaults[step_id], 0, 100000, is_float=isinstance(value, float))
+                self._add_spin(
+                    step_id,
+                    form,
+                    name,
+                    f"{name} (auto)",
+                    self.defaults[step_id],
+                    0,
+                    100000,
+                    is_float=isinstance(value, float),
+                )
             else:
-                self._add_text(step_id, form, name, f"{name} (auto)", self.defaults[step_id])
+                self._add_text(
+                    step_id, form, name, f"{name} (auto)", self.defaults[step_id]
+                )
 
         for arg in info.args:
             dest = arg.dest
@@ -802,20 +1107,49 @@ class MainWindow(QMainWindow):
             label = f"{dest} (auto)"
 
             if arg.choices:
-                self._add_choice_dropdown(step_id, form, dest, label, self.defaults[step_id], arg.choices)
-            elif arg.action in {"store_true", "store_false"} or isinstance(default, bool):
+                self._add_choice_dropdown(
+                    step_id, form, dest, label, self.defaults[step_id], arg.choices
+                )
+            elif arg.action in {"store_true", "store_false"} or isinstance(
+                default, bool
+            ):
                 self._add_checkbox(step_id, form, dest, label, self.defaults[step_id])
             elif arg.arg_type in {"int"} or isinstance(default, int):
-                self._add_spin(step_id, form, dest, label, self.defaults[step_id], 0, 100000, is_float=False)
+                self._add_spin(
+                    step_id,
+                    form,
+                    dest,
+                    label,
+                    self.defaults[step_id],
+                    0,
+                    100000,
+                    is_float=False,
+                )
             elif arg.arg_type in {"float"} or isinstance(default, float):
-                self._add_spin(step_id, form, dest, label, self.defaults[step_id], 0, 100000, is_float=True)
+                self._add_spin(
+                    step_id,
+                    form,
+                    dest,
+                    label,
+                    self.defaults[step_id],
+                    0,
+                    100000,
+                    is_float=True,
+                )
             else:
                 self._add_text(step_id, form, dest, label, self.defaults[step_id])
             widget = self.fields[step_id].get(dest)
             if widget:
                 self._apply_tooltip(widget, dest, arg.help)
 
-    def _add_checkbox(self, step_id: str, form: QFormLayout, key: str, label: str, defaults: Dict[str, Any]) -> None:
+    def _add_checkbox(
+        self,
+        step_id: str,
+        form: QFormLayout,
+        key: str,
+        label: str,
+        defaults: Dict[str, Any],
+    ) -> None:
         cb = QCheckBox()
         cb.setChecked(bool(defaults.get(key, False)))
         self._apply_tooltip(cb, key)
@@ -853,7 +1187,15 @@ class MainWindow(QMainWindow):
         form.addRow(label, box)
         self.fields[step_id][key] = box
 
-    def _add_text(self, step_id: str, form: QFormLayout, key: str, label: str, defaults: Dict[str, Any], read_only: bool = False) -> None:
+    def _add_text(
+        self,
+        step_id: str,
+        form: QFormLayout,
+        key: str,
+        label: str,
+        defaults: Dict[str, Any],
+        read_only: bool = False,
+    ) -> None:
         line = QLineEdit()
         val = defaults.get(key, "")
         line.setText("" if val is None else str(val))
@@ -972,7 +1314,9 @@ class MainWindow(QMainWindow):
     ) -> None:
         combo = QComboBox()
         combo.addItem(TIMEBASE_VERSION)
-        combo.setCurrentText(str(defaults.get(key, TIMEBASE_VERSION) or TIMEBASE_VERSION))
+        combo.setCurrentText(
+            str(defaults.get(key, TIMEBASE_VERSION) or TIMEBASE_VERSION)
+        )
         combo.setEnabled(False)
         self._apply_tooltip(combo, key)
         form.addRow(label, combo)
@@ -1000,7 +1344,9 @@ class MainWindow(QMainWindow):
         form.addRow(label, combo)
         self.fields[step_id][key] = combo
 
-    def _apply_tooltip(self, widget: QWidget, key: str, fallback: Optional[str] = None) -> None:
+    def _apply_tooltip(
+        self, widget: QWidget, key: str, fallback: Optional[str] = None
+    ) -> None:
         tip = TOOLTIPS.get(key) or fallback
         if not tip:
             return
@@ -1058,7 +1404,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Project Required", "Select a project first.")
             return
         subject_id = self.subject_combo.currentText()
-        subject_dir = subject_root(self.current_project, subject_id) if subject_id and subject_id != "-" else None
+        subject_dir = (
+            subject_root(self.current_project, subject_id)
+            if subject_id and subject_id != "-"
+            else None
+        )
         existing_info = None
         if subject_dir and subject_meta_path(subject_dir).exists():
             try:
@@ -1112,19 +1462,37 @@ class MainWindow(QMainWindow):
         preferred_events = None
         preferred_features = None
         if self.current_session_backend:
-            candidate_events = events_dir / f"{self.current_subject}_{self.current_session_backend}_events.csv"
-            candidate_features = features_dir / f"{self.current_subject}_{self.current_session_backend}_eeg_features.csv"
+            candidate_events = (
+                events_dir
+                / f"{self.current_subject}_{self.current_session_backend}_events.csv"
+            )
+            candidate_features = (
+                features_dir
+                / f"{self.current_subject}_{self.current_session_backend}_eeg_features.csv"
+            )
             if candidate_events.exists():
                 preferred_events = candidate_events
             if candidate_features.exists():
                 preferred_features = candidate_features
 
-        latest_events = preferred_events or self._latest_subject_file(events_dir, f"{self.current_subject}_*_events.csv")
-        latest_features = preferred_features or self._latest_subject_file(features_dir, f"{self.current_subject}_*_eeg_features.csv")
-        self.event_events_path.setText(str(latest_events) if latest_events else str(events_dir))
-        self.event_features_path.setText(str(latest_features) if latest_features else str(features_dir))
-        self.diag_events_path.setText(str(latest_events) if latest_events else str(events_dir))
-        self.diag_features_path.setText(str(latest_features) if latest_features else str(features_dir))
+        latest_events = preferred_events or self._latest_subject_file(
+            events_dir, f"{self.current_subject}_*_events.csv"
+        )
+        latest_features = preferred_features or self._latest_subject_file(
+            features_dir, f"{self.current_subject}_*_eeg_features.csv"
+        )
+        self.event_events_path.setText(
+            str(latest_events) if latest_events else str(events_dir)
+        )
+        self.event_features_path.setText(
+            str(latest_features) if latest_features else str(features_dir)
+        )
+        self.diag_events_path.setText(
+            str(latest_events) if latest_events else str(events_dir)
+        )
+        self.diag_features_path.setText(
+            str(latest_features) if latest_features else str(features_dir)
+        )
         self._update_resume_ui()
 
     def _latest_subject_file(self, base: Path, pattern: str) -> Optional[Path]:
@@ -1134,7 +1502,9 @@ class MainWindow(QMainWindow):
         return candidates[-1] if candidates else None
 
     def _update_resume_ui(self) -> None:
-        if not hasattr(self, "resume_status_label") or not hasattr(self, "resume_checkbox"):
+        if not hasattr(self, "resume_status_label") or not hasattr(
+            self, "resume_checkbox"
+        ):
             return
         ok, reason = self._resume_available()
         self.resume_status_label.setText(f"Resume available: {'Yes' if ok else 'No'}")
@@ -1146,7 +1516,9 @@ class MainWindow(QMainWindow):
     def _resume_available(self) -> Tuple[bool, str]:
         if not self.current_subject:
             return False, "Select a subject to evaluate resume."
-        state_path = self.repo_root / "logs" / f"session_state_{self.current_subject}.json"
+        state_path = (
+            self.repo_root / "logs" / f"session_state_{self.current_subject}.json"
+        )
         if not state_path.exists():
             return False, "No session state found."
         try:
@@ -1158,7 +1530,9 @@ class MainWindow(QMainWindow):
         tb = state.get("timebase_version") or state.get("timebase")
         if tb and tb != TIMEBASE_VERSION:
             return False, f"Timebase mismatch: {tb}"
-        features_path = Path(state.get("features_path", "")) if state.get("features_path") else None
+        features_path = (
+            Path(state.get("features_path", "")) if state.get("features_path") else None
+        )
         if not features_path or not features_path.exists():
             return False, "Features file missing."
         if not self._csv_has_data_rows(features_path):
@@ -1167,7 +1541,9 @@ class MainWindow(QMainWindow):
         required = {"lsl_timestamp", "time_s", "ch1", "ch2", "ch3", "ch4"}
         if not required.issubset(set(header)):
             return False, "Features file missing required columns."
-        events_path = Path(state.get("events_path", "")) if state.get("events_path") else None
+        events_path = (
+            Path(state.get("events_path", "")) if state.get("events_path") else None
+        )
         if events_path and events_path.exists():
             return True, "Resume OK."
         if features_path.parent.exists():
@@ -1255,7 +1631,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.stream_status.setText(f"Failed to connect: {exc}")
 
-    def _browse_path(self, widget: QLineEdit, pattern: str, title: str, mode: str = "open") -> None:
+    def _browse_path(
+        self, widget: QLineEdit, pattern: str, title: str, mode: str = "open"
+    ) -> None:
         if mode == "save":
             path, _ = QFileDialog.getSaveFileName(self, title, "", pattern)
         else:
@@ -1265,14 +1643,18 @@ class MainWindow(QMainWindow):
 
     def _run_step(self, step_id: str, script_key: str) -> None:
         if not self.current_project or not self.current_subject:
-            QMessageBox.warning(self, "Project/Subject Required", "Select a project and subject first.")
+            QMessageBox.warning(
+                self, "Project/Subject Required", "Select a project and subject first."
+            )
             return
         if self.runner.is_running():
             QMessageBox.warning(self, "Busy", "Another step is still running.")
             return
         script_info = self.scripts.get(script_key)
         if not script_info:
-            QMessageBox.warning(self, "Missing Script", f"Script for {step_id} not found.")
+            QMessageBox.warning(
+                self, "Missing Script", f"Script for {step_id} not found."
+            )
             return
 
         subject_dir = subject_root(self.current_project, self.current_subject)
@@ -1280,18 +1662,30 @@ class MainWindow(QMainWindow):
 
         settings = self._collect_settings(step_id)
         settings["TIMEBASE_VERSION"] = TIMEBASE_VERSION
-        if step_id in {"step1", "infer"} and self.input_source.currentText() == "CSV Offline":
-            self._append_log("CSV Offline selected; backend does not support offline replay in Step 1.")
+        if (
+            step_id in {"step1", "infer"}
+            and self.input_source.currentText() == "CSV Offline"
+        ):
+            self._append_log(
+                "CSV Offline selected; backend does not support offline replay in Step 1."
+            )
         if step_id == "step1":
             if not settings.get("ENABLE_PLOT", True):
-                self._append_log("Note: ENABLE_PLOT is disabled; no live graph will appear.")
+                self._append_log(
+                    "Note: ENABLE_PLOT is disabled; no live graph will appear."
+                )
             if not settings.get("EVENT_MARKING_ENABLED", True):
-                self._append_log("Note: EVENT_MARKING_ENABLED is disabled; live labeling is off.")
+                self._append_log(
+                    "Note: EVENT_MARKING_ENABLED is disabled; live labeling is off."
+                )
 
         backend_session = self.current_session_backend
         if step_id == "step1":
             settings["subject_id"] = self.current_subject
-            resume_requested = bool(getattr(self, "resume_checkbox", None) and self.resume_checkbox.isChecked())
+            resume_requested = bool(
+                getattr(self, "resume_checkbox", None)
+                and self.resume_checkbox.isChecked()
+            )
             settings["force_new_session"] = not resume_requested
             backend_session = self._prepare_session_id(step_id, settings)
         elif step_id == "infer":
@@ -1332,7 +1726,9 @@ class MainWindow(QMainWindow):
 
         if backend_session:
             self.current_session_backend = backend_session
-            self.current_session_ui = ui_session_id(self.current_subject, backend_session)
+            self.current_session_ui = ui_session_id(
+                self.current_subject, backend_session
+            )
             self.session_label.setText(f"Session: {self.current_session_ui}")
 
         config_path = subject_dir / "config" / f"{step_id}.json"
@@ -1362,7 +1758,9 @@ class MainWindow(QMainWindow):
         self._append_log(f"Running: {args} (cwd={cwd})")
         self.runner.start(sys.executable, args, cwd=cwd)
 
-    def _write_session_snapshot(self, subject_dir: Path, step_payload: Dict[str, Any], step_id: str) -> None:
+    def _write_session_snapshot(
+        self, subject_dir: Path, step_payload: Dict[str, Any], step_id: str
+    ) -> None:
         if not self.current_session_ui:
             return
         session_dir = session_root(subject_dir, self.current_session_ui)
@@ -1485,7 +1883,9 @@ class MainWindow(QMainWindow):
     def _append_log(self, line: str) -> None:
         self.log_console.appendPlainText(line)
 
-    def _safe_copy(self, src: Path, dest: Path, allow_overwrite: bool) -> Optional[Path]:
+    def _safe_copy(
+        self, src: Path, dest: Path, allow_overwrite: bool
+    ) -> Optional[Path]:
         if not src.exists():
             return None
         dest_path = dest
@@ -1495,7 +1895,9 @@ class MainWindow(QMainWindow):
         shutil.copy2(src, dest_path)
         return dest_path
 
-    def _safe_copy_dir(self, src: Path, dest: Path, allow_overwrite: bool) -> Optional[Path]:
+    def _safe_copy_dir(
+        self, src: Path, dest: Path, allow_overwrite: bool
+    ) -> Optional[Path]:
         if not src.exists():
             return None
         dest_path = dest
@@ -1517,39 +1919,87 @@ class MainWindow(QMainWindow):
             self._sync_event_outputs()
 
     def _sync_step1_outputs(self) -> None:
-        if not self.current_project or not self.current_subject or not self.current_session_backend:
+        if (
+            not self.current_project
+            or not self.current_subject
+            or not self.current_session_backend
+        ):
             return
         subject_dir = subject_root(self.current_project, self.current_subject)
-        session_dir = session_root(subject_dir, self.current_session_ui or ui_session_id(self.current_subject, self.current_session_backend))
+        session_dir = session_root(
+            subject_dir,
+            self.current_session_ui
+            or ui_session_id(self.current_subject, self.current_session_backend),
+        )
         ensure_session_dirs(session_dir)
         allow_overwrite = not bool(self.active_settings.get("force_new_session", True))
 
         subject = self.current_subject
         session = self.current_session_backend
-        features_src = self.repo_root / "data" / "processed" / f"{subject}_{session}_eeg_features.csv"
-        events_src = self.repo_root / "data" / "processed" / f"{subject}_{session}_events.csv"
-        autosave_src = self.repo_root / "data" / "processed" / f"{subject}_{session}_events_autosave.csv"
+        features_src = (
+            self.repo_root
+            / "data"
+            / "processed"
+            / f"{subject}_{session}_eeg_features.csv"
+        )
+        events_src = (
+            self.repo_root / "data" / "processed" / f"{subject}_{session}_events.csv"
+        )
+        autosave_src = (
+            self.repo_root
+            / "data"
+            / "processed"
+            / f"{subject}_{session}_events_autosave.csv"
+        )
         raw_src = self.repo_root / "data" / "raw" / f"{subject}_{session}_raw.csv"
-        meta_src = self.repo_root / "data" / "processed" / f"{subject}_{session}_session_meta.json"
+        meta_src = (
+            self.repo_root
+            / "data"
+            / "processed"
+            / f"{subject}_{session}_session_meta.json"
+        )
         state_src = self.repo_root / "logs" / f"session_state_{subject}.json"
 
-        self._safe_copy(features_src, subject_dir / "features" / features_src.name, allow_overwrite)
-        self._safe_copy(events_src, subject_dir / "events" / events_src.name, allow_overwrite)
-        self._safe_copy(autosave_src, subject_dir / "events" / autosave_src.name, allow_overwrite)
+        self._safe_copy(
+            features_src, subject_dir / "features" / features_src.name, allow_overwrite
+        )
+        self._safe_copy(
+            events_src, subject_dir / "events" / events_src.name, allow_overwrite
+        )
+        self._safe_copy(
+            autosave_src, subject_dir / "events" / autosave_src.name, allow_overwrite
+        )
         self._safe_copy(raw_src, subject_dir / "raw" / raw_src.name, allow_overwrite)
-        self._safe_copy(state_src, subject_dir / "logs" / state_src.name, allow_overwrite)
+        self._safe_copy(
+            state_src, subject_dir / "logs" / state_src.name, allow_overwrite
+        )
         if meta_src.exists():
-            self._safe_copy(meta_src, session_dir / "session_meta.json", allow_overwrite)
+            self._safe_copy(
+                meta_src, session_dir / "session_meta.json", allow_overwrite
+            )
 
-        self._safe_copy(features_src, session_dir / "features" / features_src.name, allow_overwrite)
-        self._safe_copy(events_src, session_dir / "events" / events_src.name, allow_overwrite)
-        self._safe_copy(autosave_src, session_dir / "events" / autosave_src.name, allow_overwrite)
+        self._safe_copy(
+            features_src, session_dir / "features" / features_src.name, allow_overwrite
+        )
+        self._safe_copy(
+            events_src, session_dir / "events" / events_src.name, allow_overwrite
+        )
+        self._safe_copy(
+            autosave_src, session_dir / "events" / autosave_src.name, allow_overwrite
+        )
         self._safe_copy(raw_src, session_dir / "raw" / raw_src.name, allow_overwrite)
-        self._safe_copy(state_src, session_dir / "logs" / state_src.name, allow_overwrite)
+        self._safe_copy(
+            state_src, session_dir / "logs" / state_src.name, allow_overwrite
+        )
         self._auto_fill_paths()
 
     def _sync_step1b_outputs(self) -> None:
-        if not self.current_project or not self.current_subject or not self.current_session_ui or not self.current_session_backend:
+        if (
+            not self.current_project
+            or not self.current_subject
+            or not self.current_session_ui
+            or not self.current_session_backend
+        ):
             return
         subject_dir = subject_root(self.current_project, self.current_subject)
         session_dir = session_root(subject_dir, self.current_session_ui)
@@ -1588,11 +2038,17 @@ class MainWindow(QMainWindow):
         if not events_path.exists():
             return
         subject_dir = subject_root(self.current_project, self.current_subject)
-        self._safe_copy(events_path, subject_dir / "events" / events_path.name, allow_overwrite=True)
+        self._safe_copy(
+            events_path, subject_dir / "events" / events_path.name, allow_overwrite=True
+        )
         if self.current_session_ui:
             session_dir = session_root(subject_dir, self.current_session_ui)
             ensure_session_dirs(session_dir)
-            self._safe_copy(events_path, session_dir / "events" / events_path.name, allow_overwrite=True)
+            self._safe_copy(
+                events_path,
+                session_dir / "events" / events_path.name,
+                allow_overwrite=True,
+            )
 
     def _selected_stream_name(self) -> Optional[str]:
         choice = self.lsl_combo.currentText().strip()
@@ -1621,7 +2077,9 @@ class MainWindow(QMainWindow):
     def _read_session_state(self) -> Optional[str]:
         if not self.current_subject:
             return None
-        state_path = self.repo_root / "logs" / f"session_state_{self.current_subject}.json"
+        state_path = (
+            self.repo_root / "logs" / f"session_state_{self.current_subject}.json"
+        )
         if not state_path.exists():
             return None
         try:
@@ -1637,14 +2095,16 @@ class MainWindow(QMainWindow):
         features_dir = subject_dir / "features"
         if not features_dir.exists():
             return None
-        candidates = sorted(features_dir.glob(f"{self.current_subject}_*_eeg_features.csv"))
+        candidates = sorted(
+            features_dir.glob(f"{self.current_subject}_*_eeg_features.csv")
+        )
         if not candidates:
             return None
         latest = candidates[-1]
         name = latest.name
         prefix = f"{self.current_subject}_"
         if name.startswith(prefix) and name.endswith("_eeg_features.csv"):
-            return name[len(prefix):-len("_eeg_features.csv")]
+            return name[len(prefix) : -len("_eeg_features.csv")]
         return None
 
     def _update_checklist(self, step_id: str) -> None:
@@ -1669,43 +2129,139 @@ class MainWindow(QMainWindow):
             checklist.addItem(item)
 
     def _expected_step1_outputs(self) -> list[tuple[str, str]]:
-        outputs = []
+        outputs: list[tuple[str, str]] = []
         if not self.current_subject or not self.current_session_backend:
             return outputs
         subject = self.current_subject
         session = self.current_session_backend
-        outputs.append(("Features", str(self.repo_root / "data" / "processed" / f"{subject}_{session}_eeg_features.csv")))
-        outputs.append(("Events", str(self.repo_root / "data" / "processed" / f"{subject}_{session}_events.csv")))
-        outputs.append(("Events autosave", str(self.repo_root / "data" / "processed" / f"{subject}_{session}_events_autosave.csv")))
-        outputs.append(("Session meta", str(self.repo_root / "data" / "processed" / f"{subject}_{session}_session_meta.json")))
-        outputs.append(("Raw", str(self.repo_root / "data" / "raw" / f"{subject}_{session}_raw.csv")))
-        outputs.append(("Session state", str(self.repo_root / "logs" / f"session_state_{subject}.json")))
+        outputs.append(
+            (
+                "Features",
+                str(
+                    self.repo_root
+                    / "data"
+                    / "processed"
+                    / f"{subject}_{session}_eeg_features.csv"
+                ),
+            )
+        )
+        outputs.append(
+            (
+                "Events",
+                str(
+                    self.repo_root
+                    / "data"
+                    / "processed"
+                    / f"{subject}_{session}_events.csv"
+                ),
+            )
+        )
+        outputs.append(
+            (
+                "Events autosave",
+                str(
+                    self.repo_root
+                    / "data"
+                    / "processed"
+                    / f"{subject}_{session}_events_autosave.csv"
+                ),
+            )
+        )
+        outputs.append(
+            (
+                "Session meta",
+                str(
+                    self.repo_root
+                    / "data"
+                    / "processed"
+                    / f"{subject}_{session}_session_meta.json"
+                ),
+            )
+        )
+        outputs.append(
+            (
+                "Raw",
+                str(self.repo_root / "data" / "raw" / f"{subject}_{session}_raw.csv"),
+            )
+        )
+        outputs.append(
+            (
+                "Session state",
+                str(self.repo_root / "logs" / f"session_state_{subject}.json"),
+            )
+        )
         if self.current_project:
             subject_dir = subject_root(self.current_project, subject)
-            outputs.append(("Project features", str(subject_dir / "features" / f"{subject}_{session}_eeg_features.csv")))
-            outputs.append(("Project events", str(subject_dir / "events" / f"{subject}_{session}_events.csv")))
-            outputs.append(("Project raw", str(subject_dir / "raw" / f"{subject}_{session}_raw.csv")))
+            outputs.append(
+                (
+                    "Project features",
+                    str(
+                        subject_dir
+                        / "features"
+                        / f"{subject}_{session}_eeg_features.csv"
+                    ),
+                )
+            )
+            outputs.append(
+                (
+                    "Project events",
+                    str(subject_dir / "events" / f"{subject}_{session}_events.csv"),
+                )
+            )
+            outputs.append(
+                (
+                    "Project raw",
+                    str(subject_dir / "raw" / f"{subject}_{session}_raw.csv"),
+                )
+            )
             if self.current_session_ui:
                 session_dir = session_root(subject_dir, self.current_session_ui)
-                outputs.append(("Session events", str(session_dir / "events" / f"{subject}_{session}_events.csv")))
+                outputs.append(
+                    (
+                        "Session events",
+                        str(session_dir / "events" / f"{subject}_{session}_events.csv"),
+                    )
+                )
                 outputs.append(("Session meta", str(session_dir / "session_meta.json")))
         return outputs
 
     def _expected_step1b_outputs(self) -> list[tuple[str, str]]:
-        outputs = []
-        if not self.current_project or not self.current_subject or not self.current_session_ui:
+        outputs: list[tuple[str, str]] = []
+        if (
+            not self.current_project
+            or not self.current_subject
+            or not self.current_session_ui
+        ):
             return outputs
         subject_dir = subject_root(self.current_project, self.current_subject)
         session_dir = session_root(subject_dir, self.current_session_ui)
         outputs.append(("Window CSV", str(session_dir / "windows" / "eeg_windows.csv")))
         outputs.append(("Window NPZ", str(session_dir / "windows" / "eeg_windows.npz")))
         if self.current_session_backend:
-            outputs.append(("Project window CSV", str(subject_dir / "windows" / f"{self.current_subject}_{self.current_session_backend}_eeg_windows.csv")))
-            outputs.append(("Project window NPZ", str(subject_dir / "windows" / f"{self.current_subject}_{self.current_session_backend}_eeg_windows.npz")))
+            outputs.append(
+                (
+                    "Project window CSV",
+                    str(
+                        subject_dir
+                        / "windows"
+                        / f"{self.current_subject}_{self.current_session_backend}_eeg_windows.csv"
+                    ),
+                )
+            )
+            outputs.append(
+                (
+                    "Project window NPZ",
+                    str(
+                        subject_dir
+                        / "windows"
+                        / f"{self.current_subject}_{self.current_session_backend}_eeg_windows.npz"
+                    ),
+                )
+            )
         return outputs
 
     def _expected_train_outputs(self) -> list[tuple[str, str]]:
-        outputs = []
+        outputs: list[tuple[str, str]] = []
         if not self.current_project or not self.current_subject:
             return outputs
         subject_dir = subject_root(self.current_project, self.current_subject)
@@ -1713,18 +2269,25 @@ class MainWindow(QMainWindow):
         return outputs
 
     def _expected_event_outputs(self) -> list[tuple[str, str]]:
-        outputs = []
+        outputs: list[tuple[str, str]] = []
         if not self.current_project or not self.current_subject:
             return outputs
         subject_dir = subject_root(self.current_project, self.current_subject)
         outputs.append(("Events dir", str(subject_dir / "events")))
         if self.current_session_ui:
-            outputs.append(("Session events", str(session_root(subject_dir, self.current_session_ui) / "events")))
+            outputs.append(
+                (
+                    "Session events",
+                    str(session_root(subject_dir, self.current_session_ui) / "events"),
+                )
+            )
         return outputs
 
     def _run_event_review(self) -> None:
         if self.runner.is_running():
-            self._append_log("Another process is running; stop it before launching event review.")
+            self._append_log(
+                "Another process is running; stop it before launching event review."
+            )
             return
         script_info = self.scripts.get("event_review")
         if not script_info:
@@ -1742,7 +2305,9 @@ class MainWindow(QMainWindow):
 
     def _run_event_validate(self) -> None:
         if self.runner.is_running():
-            self._append_log("Another process is running; stop it before validating events.")
+            self._append_log(
+                "Another process is running; stop it before validating events."
+            )
             return
         script_info = self.scripts.get("event_validate")
         if not script_info:
@@ -1765,7 +2330,9 @@ class MainWindow(QMainWindow):
         self.runner.start(sys.executable, args, cwd=str(self.repo_root))
 
     def _finalize_event_review(self) -> None:
-        self._append_log("Finalize: use 's' in the review window to save, then 'q' to quit.")
+        self._append_log(
+            "Finalize: use 's' in the review window to save, then 'q' to quit."
+        )
 
     def _run_alignment_check(self) -> None:
         if self.runner.is_running():

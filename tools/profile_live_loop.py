@@ -5,7 +5,7 @@ import argparse
 import time
 from collections import deque
 from statistics import mean
-from typing import List, Optional, Tuple
+from typing import Deque, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -25,14 +25,16 @@ class SlidingBuffer:
         self.step_sec = step_sec
         self.window_samples = int(fs * window_sec)
         self.step_samples = max(1, int(fs * step_sec))
-        self.buffer = deque(maxlen=self.window_samples)
-        self.sample_times = deque(maxlen=self.window_samples)
-        self.stream_start = None
+        self.buffer: Deque[np.ndarray] = deque(maxlen=self.window_samples)
+        self.sample_times: Deque[float] = deque(maxlen=self.window_samples)
+        self.stream_start: Optional[float] = None
         self.sample_count = 0
         self.last_emit = 0
-        self.last_window_end_s = None
+        self.last_window_end_s: Optional[float] = None
 
-    def push(self, sample: np.ndarray, lsl_ts: float) -> Optional[Tuple[np.ndarray, float, float, float]]:
+    def push(
+        self, sample: np.ndarray, lsl_ts: float
+    ) -> Optional[Tuple[np.ndarray, float, float, float]]:
         if self.stream_start is None:
             self.stream_start = lsl_ts
         self.buffer.append(sample)
@@ -46,7 +48,9 @@ class SlidingBuffer:
         window = np.array(self.buffer, dtype=np.float32)
         start_s = float(self.sample_times[0] - self.stream_start)
         end_s = float(self.sample_times[-1] - self.stream_start)
-        start_s, end_s, _ = clamp_monotonic_window(self.last_window_end_s, start_s, end_s)
+        start_s, end_s, _ = clamp_monotonic_window(
+            self.last_window_end_s, start_s, end_s
+        )
         self.last_window_end_s = end_s
         emitted_perf = time.perf_counter()
         return window, start_s, end_s, emitted_perf
@@ -56,12 +60,14 @@ def _load_engine(device: str, mc_passes: int) -> InferenceEngine:
     root = repo_root()
     model_path = root / "finger_action_model.pt"
     normalizer = load_normalizer(root / "scaler.save")
-    model = None
+    model: Optional[CNNLSTMFingerActionNet] = None
     if model_path.exists():
         state = torch.load(model_path, map_location="cpu")
         n_fingers = int(state["finger_head.weight"].shape[0])
         n_actions = int(state["action_head.weight"].shape[0])
-        model = CNNLSTMFingerActionNet(n_channels=4, n_fingers=n_fingers, n_actions=n_actions)
+        model = CNNLSTMFingerActionNet(
+            n_channels=4, n_fingers=n_fingers, n_actions=n_actions
+        )
         model.load_state_dict(state)
         model.eval()
     return InferenceEngine(
@@ -90,7 +96,7 @@ def main() -> int:
     hop_ms: List[float] = []
     infer_ms: List[float] = []
     publish_age_ms: List[float] = []
-    last_emit_perf = None
+    last_emit_perf: Optional[float] = None
 
     start = time.perf_counter()
     samples = int(args.duration_sec * args.fs)
@@ -115,11 +121,17 @@ def main() -> int:
 
     print(f"windows: {total_windows} in {elapsed:.2f}s ({hz:.2f} Hz)")
     if infer_ms:
-        print(f"infer_ms: mean={mean(infer_ms):.2f} p50={sorted(infer_ms)[len(infer_ms)//2]:.2f}")
+        print(
+            f"infer_ms: mean={mean(infer_ms):.2f} p50={sorted(infer_ms)[len(infer_ms) // 2]:.2f}"
+        )
     if hop_ms:
-        print(f"hop_ms: mean={mean(hop_ms):.2f} p50={sorted(hop_ms)[len(hop_ms)//2]:.2f}")
+        print(
+            f"hop_ms: mean={mean(hop_ms):.2f} p50={sorted(hop_ms)[len(hop_ms) // 2]:.2f}"
+        )
     if publish_age_ms:
-        print(f"publish_age_ms: mean={mean(publish_age_ms):.2f} p50={sorted(publish_age_ms)[len(publish_age_ms)//2]:.2f}")
+        print(
+            f"publish_age_ms: mean={mean(publish_age_ms):.2f} p50={sorted(publish_age_ms)[len(publish_age_ms) // 2]:.2f}"
+        )
     return 0
 
 

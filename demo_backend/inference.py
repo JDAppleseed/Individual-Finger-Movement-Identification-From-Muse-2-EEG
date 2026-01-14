@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Deque, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -67,7 +67,7 @@ class InferenceEngine:
         self.action_names = action_names
         self.finger_names = finger_names
         self.config = config or InferenceConfig()
-        self._stability = deque(maxlen=self.config.stability_frames)
+        self._stability: Deque[int] = deque(maxlen=self.config.stability_frames)
         self._input_np: Optional[np.ndarray] = None
         self._input_tensor: Optional[torch.Tensor] = None
         self._compiled = False
@@ -88,7 +88,7 @@ class InferenceEngine:
         if not hasattr(torch, "compile"):
             return False
         try:
-            self.model = torch.compile(self.model)  # type: ignore[attr-defined]
+            self.model = torch.compile(self.model)
             self._compiled = True
             return True
         except Exception:
@@ -98,8 +98,14 @@ class InferenceEngine:
         if self._input_np is None or self._input_np.shape != shape:
             self._input_np = np.empty(shape, dtype=np.float32)
         expected = (1,) + shape
-        if self._input_tensor is None or tuple(self._input_tensor.shape) != expected or self._input_tensor.device != self.device:
-            self._input_tensor = torch.empty(expected, dtype=torch.float32, device=self.device)
+        if (
+            self._input_tensor is None
+            or tuple(self._input_tensor.shape) != expected
+            or self._input_tensor.device != self.device
+        ):
+            self._input_tensor = torch.empty(
+                expected, dtype=torch.float32, device=self.device
+            )
 
     def _normalize_window(self, window_TxC: np.ndarray) -> np.ndarray:
         window = np.asarray(window_TxC, dtype=np.float32)
@@ -109,7 +115,11 @@ class InferenceEngine:
         np.copyto(self._input_np, window)
         if self.normalizer is None:
             return self._input_np
-        if isinstance(self.normalizer, dict) and "mean" in self.normalizer and "std" in self.normalizer:
+        if (
+            isinstance(self.normalizer, dict)
+            and "mean" in self.normalizer
+            and "std" in self.normalizer
+        ):
             mean = np.asarray(self.normalizer["mean"], dtype=np.float32)
             std = np.asarray(self.normalizer["std"], dtype=np.float32)
             std = np.where(std == 0, 1.0, std)
@@ -130,11 +140,23 @@ class InferenceEngine:
             assert self._input_tensor is not None
             self._input_tensor[0].copy_(torch.from_numpy(window_TxC))
             return self._input_tensor
-        return torch.tensor(window_TxC, dtype=torch.float32, device=self.device).unsqueeze(0)
+        return torch.tensor(
+            window_TxC, dtype=torch.float32, device=self.device
+        ).unsqueeze(0)
 
-    def predict_proba(self, window_TxC: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], float, float, Dict[str, Any]]:
+    def predict_proba(
+        self, window_TxC: np.ndarray
+    ) -> Tuple[
+        Optional[np.ndarray], Optional[np.ndarray], float, float, Dict[str, Any]
+    ]:
         if self.model is None:
-            return None, None, 1.0, 1.0, {"health_score": compute_health_score(window_TxC)}
+            return (
+                None,
+                None,
+                1.0,
+                1.0,
+                {"health_score": compute_health_score(window_TxC)},
+            )
 
         normalized = self._normalize_window(window_TxC)
         x = self._to_tensor(normalized)
@@ -166,13 +188,27 @@ class InferenceEngine:
         diagnostics = {
             "health_score": compute_health_score(window_TxC),
         }
-        return action_mean, finger_mean, action_uncertainty, finger_uncertainty, diagnostics
+        return (
+            action_mean,
+            finger_mean,
+            action_uncertainty,
+            finger_uncertainty,
+            diagnostics,
+        )
 
-    def predict(self, window_TxC: np.ndarray) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
+    def predict(
+        self, window_TxC: np.ndarray
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         if self.model is None:
             return self._empty_prediction(window_TxC)
 
-        action_mean, finger_mean, action_uncertainty, finger_uncertainty, diagnostics = self.predict_proba(window_TxC)
+        (
+            action_mean,
+            finger_mean,
+            action_uncertainty,
+            finger_uncertainty,
+            diagnostics,
+        ) = self.predict_proba(window_TxC)
         if action_mean is None or finger_mean is None:
             return self._empty_prediction(window_TxC)
 
@@ -184,11 +220,18 @@ class InferenceEngine:
 
         adaptive = min(
             0.99,
-            max(self.config.base_threshold, self.config.base_threshold + self.config.uncertainty_weight * action_uncertainty),
+            max(
+                self.config.base_threshold,
+                self.config.base_threshold
+                + self.config.uncertainty_weight * action_uncertainty,
+            ),
         )
 
         self._stability.append(action_id)
-        stability_ok = len(self._stability) == self.config.stability_frames and len(set(self._stability)) == 1
+        stability_ok = (
+            len(self._stability) == self.config.stability_frames
+            and len(set(self._stability)) == 1
+        )
 
         velocity = 0.0
         if action_id != 0:
@@ -216,7 +259,9 @@ class InferenceEngine:
 
         return prediction, safety, diagnostics
 
-    def _empty_prediction(self, window_TxC: np.ndarray):
+    def _empty_prediction(
+        self, window_TxC: np.ndarray
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         prediction = {
             "action_id": -1,
             "action_name": "UNAVAILABLE",

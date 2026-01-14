@@ -109,16 +109,26 @@ def postprocess_predictions(
                 state.ema_action = alpha * action_probs + (1 - alpha) * state.ema_action
 
             smoothed_action_probs = state.ema_action
-            smoothed_action_id = int(np.argmax(smoothed_action_probs)) if smoothed_action_probs.size else 0
+            smoothed_action_id = (
+                int(np.argmax(smoothed_action_probs))
+                if smoothed_action_probs.size
+                else 0
+            )
 
             # Only smooth finger if explicitly enabled
             if getattr(settings, "finger_mode", "raw") == "smooth":
                 if state.ema_finger is None:
                     state.ema_finger = finger_probs.copy()
                 else:
-                    state.ema_finger = alpha * finger_probs + (1 - alpha) * state.ema_finger
+                    state.ema_finger = (
+                        alpha * finger_probs + (1 - alpha) * state.ema_finger
+                    )
                 smoothed_finger_probs = state.ema_finger
-                smoothed_finger_id = int(np.argmax(smoothed_finger_probs)) if smoothed_finger_probs.size else 0
+                smoothed_finger_id = (
+                    int(np.argmax(smoothed_finger_probs))
+                    if smoothed_finger_probs.size
+                    else 0
+                )
 
         else:
             # ===== vote mode for ACTION =====
@@ -139,7 +149,11 @@ def postprocess_predictions(
                 while len(state.finger_probs) > smoothing_window:
                     state.finger_probs.popleft()
                 smoothed_finger_probs = _mean_probs(state.finger_probs)
-                smoothed_finger_id = int(np.argmax(smoothed_finger_probs)) if smoothed_finger_probs.size else raw_finger_id
+                smoothed_finger_id = (
+                    int(np.argmax(smoothed_finger_probs))
+                    if smoothed_finger_probs.size
+                    else raw_finger_id
+                )
             else:
                 # finger raw: do not maintain finger histories
                 smoothed_finger_probs = finger_probs
@@ -150,9 +164,13 @@ def postprocess_predictions(
     # =========================
     # For action vote-mode: use CURRENT frame prob for the voted class (good)
     if settings.smoothing_enabled and settings.smoothing_method == "vote":
-        action_conf = float(action_probs[smoothed_action_id]) if action_probs.size else 0.0
+        action_conf = (
+            float(action_probs[smoothed_action_id]) if action_probs.size else 0.0
+        )
     else:
-        action_conf = float(np.max(smoothed_action_probs)) if smoothed_action_probs.size else 0.0
+        action_conf = (
+            float(np.max(smoothed_action_probs)) if smoothed_action_probs.size else 0.0
+        )
 
     # Finger confidence: if finger_mode="raw", use current frame confidence (recommended)
     if getattr(settings, "finger_mode", "raw") == "raw":
@@ -162,9 +180,15 @@ def postprocess_predictions(
     else:
         # finger_mode="smooth"
         if settings.smoothing_enabled and settings.smoothing_method == "vote":
-            finger_conf = float(finger_probs[smoothed_finger_id]) if finger_probs.size else 0.0
+            finger_conf = (
+                float(finger_probs[smoothed_finger_id]) if finger_probs.size else 0.0
+            )
         else:
-            finger_conf = float(np.max(smoothed_finger_probs)) if smoothed_finger_probs.size else 0.0
+            finger_conf = (
+                float(np.max(smoothed_finger_probs))
+                if smoothed_finger_probs.size
+                else 0.0
+            )
 
     decision_reason = "commit"
 
@@ -180,9 +204,15 @@ def postprocess_predictions(
         committed_action = candidate_action
 
         # ===== Hysteresis on action transitions (OPEN/CLOSE) =====
-        if settings.hysteresis_enabled and candidate_action in {1, 2} and state.last_action in {1, 2}:
+        if (
+            settings.hysteresis_enabled
+            and candidate_action in {1, 2}
+            and state.last_action in {1, 2}
+        ):
             if candidate_action != state.last_action:
-                if action_conf < float(settings.threshold_action) + float(settings.hysteresis_margin):
+                if action_conf < float(settings.threshold_action) + float(
+                    settings.hysteresis_margin
+                ):
                     committed_action = state.last_action
                     decision_reason = "hysteresis_hold"
                 else:
@@ -213,12 +243,18 @@ def postprocess_predictions(
         else:
             # Optional adjacency correction ONLY when finger_mode="smooth"
             if getattr(settings, "finger_mode", "raw") == "smooth":
-                if settings.adjacency_enabled and smoothed_finger_probs.size and state.frames_in_state >= 2:
+                if (
+                    settings.adjacency_enabled
+                    and smoothed_finger_probs.size
+                    and state.frames_in_state >= 2
+                ):
                     sorted_idx = np.argsort(smoothed_finger_probs)[::-1]
                     top1 = int(sorted_idx[0])
                     top2 = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1
                     if top1 != top2:
-                        gap = float(smoothed_finger_probs[top1] - smoothed_finger_probs[top2])
+                        gap = float(
+                            smoothed_finger_probs[top1] - smoothed_finger_probs[top2]
+                        )
                         if (
                             gap < float(settings.finger_delta)
                             and state.last_finger != 0
@@ -233,7 +269,11 @@ def postprocess_predictions(
                 if getattr(settings, "finger_mode", "raw") == "raw":
                     committed_finger_conf = float(finger_probs[committed_finger])
                 else:
-                    committed_finger_conf = float(smoothed_finger_probs[committed_finger]) if smoothed_finger_probs.size else 0.0
+                    committed_finger_conf = (
+                        float(smoothed_finger_probs[committed_finger])
+                        if smoothed_finger_probs.size
+                        else 0.0
+                    )
             else:
                 committed_finger_conf = 0.0
 

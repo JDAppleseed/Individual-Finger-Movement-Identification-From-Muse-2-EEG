@@ -32,7 +32,10 @@ import pandas as pd
 REQUIRED_COLS = [
     "lsl_timestamp",
     "time_s",
-    "ch1", "ch2", "ch3", "ch4",
+    "ch1",
+    "ch2",
+    "ch3",
+    "ch4",
 ]
 
 
@@ -52,7 +55,9 @@ def robust_read_features_csv(path: Path) -> pd.DataFrame:
     # Keep only what we need for alignment/extraction
     keep = [c for c in REQUIRED_COLS if c in df.columns]
     if not keep:
-        raise ValueError(f"No expected columns found in {path}. Columns: {list(df.columns)[:20]}")
+        raise ValueError(
+            f"No expected columns found in {path}. Columns: {list(df.columns)[:20]}"
+        )
 
     df = df[keep].copy()
 
@@ -74,7 +79,9 @@ def robust_read_features_csv(path: Path) -> pd.DataFrame:
     return df
 
 
-def stitch_time_s(time_s: np.ndarray, eps: float = 1e-6) -> tuple[np.ndarray, list[tuple[int,int,float,float]]]:
+def stitch_time_s(
+    time_s: np.ndarray, eps: float = 1e-6
+) -> tuple[np.ndarray, list[tuple[int, int, float, float]]]:
     """
     Create a monotonic time base by detecting backward jumps (resets) and adding an offset.
 
@@ -106,7 +113,7 @@ def stitch_time_s(time_s: np.ndarray, eps: float = 1e-6) -> tuple[np.ndarray, li
     offset = 0.0
     prev_end = None
 
-    for (s, e, seg_min, seg_max) in segments:
+    for s, e, seg_min, seg_max in segments:
         seg = t[s:e].copy()
 
         # Normalize to start at 0 within segment (handles weird absolute values)
@@ -130,13 +137,15 @@ def stitch_time_s(time_s: np.ndarray, eps: float = 1e-6) -> tuple[np.ndarray, li
 
     # Update segment ranges to reflect stitched coordinates
     stitched_segments = []
-    for (s, e, _, _) in segments:
+    for s, e, _, _ in segments:
         stitched_segments.append((s, e, float(t_fixed[s]), float(t_fixed[e - 1])))
 
     return t_fixed, stitched_segments
 
 
-def choose_best_segment(segments: list[tuple[int,int,float,float]], event_onsets: np.ndarray) -> int:
+def choose_best_segment(
+    segments: list[tuple[int, int, float, float]], event_onsets: np.ndarray
+) -> int:
     """
     Pick segment whose stitched time range best covers event onset range.
     Returns index into `segments`.
@@ -198,7 +207,11 @@ def main():
     events_df = pd.read_csv(events_path)
     if "onset_s" not in events_df.columns:
         raise ValueError(f"{events_path} missing onset_s column.")
-    event_onsets = pd.to_numeric(events_df["onset_s"], errors="coerce").dropna().to_numpy(dtype=float)
+    event_onsets = (
+        pd.to_numeric(events_df["onset_s"], errors="coerce")
+        .dropna()
+        .to_numpy(dtype=float)
+    )
 
     # Stitch timing
     t_fixed, segments = stitch_time_s(df["time_s"].to_numpy(dtype=float))
@@ -206,10 +219,14 @@ def main():
 
     print("\n=== Detected stitched segments (index, time range) ===")
     for i, (s, e, t0, t1) in enumerate(segments):
-        print(f"  seg[{i}] idx [{s}:{e}]  time_s_fixed: {t0:.3f} -> {t1:.3f}  (N={e - s})")
+        print(
+            f"  seg[{i}] idx [{s}:{e}]  time_s_fixed: {t0:.3f} -> {t1:.3f}  (N={e - s})"
+        )
 
     if event_onsets.size:
-        print(f"\nEvents onset range: {float(event_onsets.min()):.3f} -> {float(event_onsets.max()):.3f} s")
+        print(
+            f"\nEvents onset range: {float(event_onsets.min()):.3f} -> {float(event_onsets.max()):.3f} s"
+        )
     else:
         print("\nNo events found in events.csv (onset_s empty).")
 
@@ -229,7 +246,9 @@ def main():
     df_seg.to_csv(out_path, index=False)
     print(f"\n📝 Wrote repaired features to: {out_path}")
     print("\nNext step:")
-    print(f"  python 1b_extract_windows.py   (make sure session_meta.json points features_path to {out_path} OR set RAW_FILE accordingly)\n")
+    print(
+        f"  python 1b_extract_windows.py   (make sure session_meta.json points features_path to {out_path} OR set RAW_FILE accordingly)\n"
+    )
 
 
 if __name__ == "__main__":

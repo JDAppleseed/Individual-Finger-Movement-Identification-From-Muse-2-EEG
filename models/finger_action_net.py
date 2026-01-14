@@ -1,8 +1,6 @@
 # models/finger_action_net.py
 
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class FingerActionNet(nn.Module):
@@ -23,7 +21,7 @@ class FingerActionNet(nn.Module):
         window_samples: int = 64,
         n_fingers: int = 6,
         n_actions: int = 3,
-        dropout_p: float = 0.3
+        dropout_p: float = 0.3,
     ):
         super().__init__()
 
@@ -35,13 +33,11 @@ class FingerActionNet(nn.Module):
             nn.BatchNorm1d(16),
             nn.ReLU(),
             nn.Dropout(dropout_p),
-
             nn.Conv1d(16, 32, kernel_size=5, padding=2),
             nn.BatchNorm1d(32),
             nn.ReLU(),
             nn.Dropout(dropout_p),
-
-            nn.AdaptiveAvgPool1d(1)  # shape → (B, 32, 1)
+            nn.AdaptiveAvgPool1d(1),  # shape → (B, 32, 1)
         )
 
         self.latent_dim = 32

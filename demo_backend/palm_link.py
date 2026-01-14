@@ -92,7 +92,7 @@ class SerialUARTLink(PalmControllerLink):
         if self._serial is not None:
             return
         try:
-            import serial  # type: ignore
+            import serial
         except Exception as exc:
             raise RuntimeError("pyserial is required for SerialUARTLink") from exc
         self._serial = serial.Serial(self.port, self.baudrate, timeout=self.timeout)

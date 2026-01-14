@@ -4,17 +4,20 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from demo_backend.inference import InferenceConfig, InferenceEngine
-from demo_backend.replay import ReplaySource
-from demo_backend.utils_demo import ensure_repo_on_path, load_normalizer, resolve_device
-
-ensure_repo_on_path()
-
-from utils.label_schema import ACTION_NAMES, FINGER_NAMES  # noqa: E402
-from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet  # noqa: E402
-
 
 def test_replay_smoke():
+    from demo_backend.inference import InferenceConfig, InferenceEngine
+    from demo_backend.replay import ReplaySource
+    from demo_backend.utils_demo import (
+        ensure_repo_on_path,
+        load_normalizer,
+        resolve_device,
+    )
+    from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+    from utils.label_schema import ACTION_NAMES, FINGER_NAMES
+
+    ensure_repo_on_path()
+
     root = Path(__file__).resolve().parents[2]
     npz_path = root / "eeg_windows.npz"
     if not npz_path.exists():
@@ -25,7 +28,9 @@ def test_replay_smoke():
         pytest.skip("Model weights not found; skipping replay smoke test")
 
     normalizer = load_normalizer(root / "scaler.save")
-    model = CNNLSTMFingerActionNet(n_channels=4, n_fingers=len(FINGER_NAMES), n_actions=len(ACTION_NAMES))
+    model = CNNLSTMFingerActionNet(
+        n_channels=4, n_fingers=len(FINGER_NAMES), n_actions=len(ACTION_NAMES)
+    )
     model.load_state_dict(torch.load(model_path, map_location="cpu"))
 
     engine = InferenceEngine(

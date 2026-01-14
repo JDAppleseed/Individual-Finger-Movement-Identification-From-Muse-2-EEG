@@ -74,7 +74,7 @@ def apply_channel_normalizer(window_TxC: np.ndarray, normalizer: Any) -> np.ndar
 def compute_health_score(window_TxC: np.ndarray) -> float:
     if window_TxC.size == 0:
         return 0.0
-    rms = float(np.sqrt(np.mean(window_TxC ** 2)))
+    rms = float(np.sqrt(np.mean(window_TxC**2)))
     saturation = float(np.mean(np.abs(window_TxC) > 2000.0))
     score_rms = (rms - 5.0) / 195.0
     score_rms = float(np.clip(score_rms, 0.0, 1.0))

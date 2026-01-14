@@ -25,11 +25,15 @@ def _device_of(model: torch.nn.Module) -> torch.device:
     return torch.device("cpu")
 
 
-def load_model_and_weights(model_path: str, device: str = "cpu") -> CNNLSTMFingerActionNet:
+def load_model_and_weights(
+    model_path: str, device: str = "cpu"
+) -> CNNLSTMFingerActionNet:
     state = torch.load(model_path, map_location="cpu")
     n_fingers = int(state["finger_head.weight"].shape[0])
     n_actions = int(state["action_head.weight"].shape[0])
-    model = CNNLSTMFingerActionNet(n_channels=4, n_fingers=n_fingers, n_actions=n_actions)
+    model = CNNLSTMFingerActionNet(
+        n_channels=4, n_fingers=n_fingers, n_actions=n_actions
+    )
     model.load_state_dict(state)
     model.to(torch.device(device))
     model.eval()
@@ -91,7 +95,9 @@ def _pack_array(
     return arr.astype(np.float32).tolist()
 
 
-def pack_tensor(array: np.ndarray, *, quantize: bool = True, min_raw_size: int = 4096) -> object:
+def pack_tensor(
+    array: np.ndarray, *, quantize: bool = True, min_raw_size: int = 4096
+) -> object:
     """Pack activations to reduce websocket payload size."""
     arr = np.asarray(array)
     if arr.size < min_raw_size:
@@ -117,16 +123,20 @@ def _topk_edges(matrix: np.ndarray, k: int, name: str) -> List[Dict[str, object]
     rows, cols = np.unravel_index(idx, matrix.shape)
     edges = []
     for r, c in zip(rows, cols):
-        edges.append({
-            "matrix": name,
-            "i": int(r),
-            "j": int(c),
-            "v": float(matrix[r, c]),
-        })
+        edges.append(
+            {
+                "matrix": name,
+                "i": int(r),
+                "j": int(c),
+                "v": float(matrix[r, c]),
+            }
+        )
     return edges
 
 
-def extract_architecture_manifest(model: CNNLSTMFingerActionNet, timeline_available: bool) -> Dict[str, object]:
+def extract_architecture_manifest(
+    model: CNNLSTMFingerActionNet, timeline_available: bool
+) -> Dict[str, object]:
     conv1 = model.conv[0]
     gn1 = model.conv[1]
     conv2 = model.conv[4]
@@ -146,11 +156,26 @@ def extract_architecture_manifest(model: CNNLSTMFingerActionNet, timeline_availa
     finger_macs = _linear_macs(64, 6)
     action_macs = _linear_macs(64, 3)
 
-    totals = conv1_params + conv2_params + gn1_params + gn2_params + lstm_params + finger_params + action_params
+    totals = (
+        conv1_params
+        + conv2_params
+        + gn1_params
+        + gn2_params
+        + lstm_params
+        + finger_params
+        + action_params
+    )
     macs_total = conv1_macs + conv2_macs + lstm_macs + finger_macs + action_macs
 
     nodes = [
-        {"id": "input", "title": "Input", "kind": "input", "shape": "[64,4]", "params": 0, "macs": 0},
+        {
+            "id": "input",
+            "title": "Input",
+            "kind": "input",
+            "shape": "[64,4]",
+            "params": 0,
+            "macs": 0,
+        },
         {
             "id": "conv1",
             "title": "Conv1d 4→16 k=5",
@@ -160,9 +185,30 @@ def extract_architecture_manifest(model: CNNLSTMFingerActionNet, timeline_availa
             "params": conv1_params,
             "macs": conv1_macs,
         },
-        {"id": "gn1", "title": "GroupNorm", "kind": "norm", "shape": "[16,64]", "params": gn1_params, "macs": 0},
-        {"id": "relu1", "title": "ReLU", "kind": "activation", "shape": "[16,64]", "params": 0, "macs": 0},
-        {"id": "drop1", "title": "Dropout", "kind": "dropout", "shape": "[16,64]", "params": 0, "macs": 0},
+        {
+            "id": "gn1",
+            "title": "GroupNorm",
+            "kind": "norm",
+            "shape": "[16,64]",
+            "params": gn1_params,
+            "macs": 0,
+        },
+        {
+            "id": "relu1",
+            "title": "ReLU",
+            "kind": "activation",
+            "shape": "[16,64]",
+            "params": 0,
+            "macs": 0,
+        },
+        {
+            "id": "drop1",
+            "title": "Dropout",
+            "kind": "dropout",
+            "shape": "[16,64]",
+            "params": 0,
+            "macs": 0,
+        },
         {
             "id": "conv2",
             "title": "Conv1d 16→32 k=3",
@@ -172,9 +218,30 @@ def extract_architecture_manifest(model: CNNLSTMFingerActionNet, timeline_availa
             "params": conv2_params,
             "macs": conv2_macs,
         },
-        {"id": "gn2", "title": "GroupNorm", "kind": "norm", "shape": "[32,64]", "params": gn2_params, "macs": 0},
-        {"id": "relu2", "title": "ReLU", "kind": "activation", "shape": "[32,64]", "params": 0, "macs": 0},
-        {"id": "drop2", "title": "Dropout", "kind": "dropout", "shape": "[32,64]", "params": 0, "macs": 0},
+        {
+            "id": "gn2",
+            "title": "GroupNorm",
+            "kind": "norm",
+            "shape": "[32,64]",
+            "params": gn2_params,
+            "macs": 0,
+        },
+        {
+            "id": "relu2",
+            "title": "ReLU",
+            "kind": "activation",
+            "shape": "[32,64]",
+            "params": 0,
+            "macs": 0,
+        },
+        {
+            "id": "drop2",
+            "title": "Dropout",
+            "kind": "dropout",
+            "shape": "[32,64]",
+            "params": 0,
+            "macs": 0,
+        },
         {
             "id": "lstm",
             "title": "LSTM 32→64",
@@ -184,8 +251,22 @@ def extract_architecture_manifest(model: CNNLSTMFingerActionNet, timeline_availa
             "params": lstm_params,
             "macs": lstm_macs,
         },
-        {"id": "last", "title": "Last Timestep", "kind": "pool", "shape": "[64]", "params": 0, "macs": 0},
-        {"id": "head_dropout", "title": "Head Dropout", "kind": "dropout", "shape": "[64]", "params": 0, "macs": 0},
+        {
+            "id": "last",
+            "title": "Last Timestep",
+            "kind": "pool",
+            "shape": "[64]",
+            "params": 0,
+            "macs": 0,
+        },
+        {
+            "id": "head_dropout",
+            "title": "Head Dropout",
+            "kind": "dropout",
+            "shape": "[64]",
+            "params": 0,
+            "macs": 0,
+        },
         {
             "id": "finger_head",
             "title": "Finger Head 64→6",
@@ -222,13 +303,17 @@ def extract_architecture_manifest(model: CNNLSTMFingerActionNet, timeline_availa
         {"from": "head_dropout", "to": "action_head"},
     ]
 
-    timeline = {"available": timeline_available}
+    timeline: Dict[str, object] = {"available": timeline_available}
     if timeline_available:
         timeline["manifest_url"] = "/nnvis/timeline/manifest"
 
     return {
         "model_name": "CNNLSTMFingerActionNet",
-        "input": {"timesteps": 64, "channels": 4, "channel_names": ["TP9", "AF7", "AF8", "TP10"]},
+        "input": {
+            "timesteps": 64,
+            "channels": 4,
+            "channel_names": ["TP9", "AF7", "AF8", "TP10"],
+        },
         "labels": {
             "action": {str(k): v for k, v in ACTION_NAMES.items()},
             "finger": {str(k): v for k, v in FINGER_NAMES.items()},
@@ -257,16 +342,36 @@ def extract_weights(
             {
                 "id": "conv1",
                 "weight_shape": list(conv1.weight.shape),
-                "weights": _pack_array(conv1.weight.detach().cpu().numpy(), quantize=quantize, max_abs=max_abs, downsample=downsample),
-                "bias": _pack_array(conv1.bias.detach().cpu().numpy(), quantize=quantize, max_abs=max_abs, downsample=downsample)
+                "weights": _pack_array(
+                    conv1.weight.detach().cpu().numpy(),
+                    quantize=quantize,
+                    max_abs=max_abs,
+                    downsample=downsample,
+                ),
+                "bias": _pack_array(
+                    conv1.bias.detach().cpu().numpy(),
+                    quantize=quantize,
+                    max_abs=max_abs,
+                    downsample=downsample,
+                )
                 if conv1.bias is not None
                 else None,
             },
             {
                 "id": "conv2",
                 "weight_shape": list(conv2.weight.shape),
-                "weights": _pack_array(conv2.weight.detach().cpu().numpy(), quantize=quantize, max_abs=max_abs, downsample=downsample),
-                "bias": _pack_array(conv2.bias.detach().cpu().numpy(), quantize=quantize, max_abs=max_abs, downsample=downsample)
+                "weights": _pack_array(
+                    conv2.weight.detach().cpu().numpy(),
+                    quantize=quantize,
+                    max_abs=max_abs,
+                    downsample=downsample,
+                ),
+                "bias": _pack_array(
+                    conv2.bias.detach().cpu().numpy(),
+                    quantize=quantize,
+                    max_abs=max_abs,
+                    downsample=downsample,
+                )
                 if conv2.bias is not None
                 else None,
             },
@@ -281,7 +386,11 @@ def extract_weights(
                     max_abs=max_abs,
                     downsample=downsample,
                 ),
-                "bias": _pack_array(model.finger_head.bias.detach().cpu().numpy(), quantize=quantize, max_abs=max_abs),
+                "bias": _pack_array(
+                    model.finger_head.bias.detach().cpu().numpy(),
+                    quantize=quantize,
+                    max_abs=max_abs,
+                ),
             },
             {
                 "id": "action_head",
@@ -292,7 +401,11 @@ def extract_weights(
                     max_abs=max_abs,
                     downsample=downsample,
                 ),
-                "bias": _pack_array(model.action_head.bias.detach().cpu().numpy(), quantize=quantize, max_abs=max_abs),
+                "bias": _pack_array(
+                    model.action_head.bias.detach().cpu().numpy(),
+                    quantize=quantize,
+                    max_abs=max_abs,
+                ),
             },
         ],
     }
@@ -302,7 +415,9 @@ def extract_weights(
     bias_ih = model.lstm.bias_ih_l0.detach().cpu().numpy()
     bias_hh = model.lstm.bias_hh_l0.detach().cpu().numpy()
 
-    top_edges = _topk_edges(weight_ih, topk, "weight_ih_l0") + _topk_edges(weight_hh, topk, "weight_hh_l0")
+    top_edges = _topk_edges(weight_ih, topk, "weight_ih_l0") + _topk_edges(
+        weight_hh, topk, "weight_hh_l0"
+    )
 
     weights["lstm"] = {
         "id": "lstm",
@@ -310,8 +425,12 @@ def extract_weights(
         "weight_hh_l0_shape": list(weight_hh.shape),
         "bias_ih_l0_shape": list(bias_ih.shape),
         "bias_hh_l0_shape": list(bias_hh.shape),
-        "weight_ih_l0": _pack_array(weight_ih, quantize=quantize, max_abs=max_abs, downsample=downsample),
-        "weight_hh_l0": _pack_array(weight_hh, quantize=quantize, max_abs=max_abs, downsample=downsample),
+        "weight_ih_l0": _pack_array(
+            weight_ih, quantize=quantize, max_abs=max_abs, downsample=downsample
+        ),
+        "weight_hh_l0": _pack_array(
+            weight_hh, quantize=quantize, max_abs=max_abs, downsample=downsample
+        ),
         "bias_ih_l0": _pack_array(bias_ih, quantize=quantize, max_abs=max_abs),
         "bias_hh_l0": _pack_array(bias_hh, quantize=quantize, max_abs=max_abs),
         "topk": {"k": int(topk), "edges": top_edges},
@@ -327,7 +446,7 @@ def extract_activations(
     deterministic: bool = True,
     normalizer: Optional[object] = None,
     mc_passes: Optional[int] = None,
-) -> Tuple[Dict[str, object], Dict[str, Optional[float]]]:
+) -> Tuple[Dict[str, object], Dict[str, float | bool | None]]:
     device = _device_of(model)
     window_TxC = window_TxC.astype(np.float32)
     window_TxC = apply_channel_normalizer(window_TxC, normalizer)
@@ -372,7 +491,7 @@ def extract_activations(
         "action_probs": action_probs.squeeze(0).detach().cpu().numpy(),
     }
 
-    uncertainty = {
+    uncertainty: Dict[str, float | bool | None] = {
         "present": False,
         "finger_std_mean": None,
         "action_std_mean": None,

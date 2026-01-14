@@ -105,14 +105,16 @@ def score_segments(segments, lsl_ts, ev_min, ev_max):
         seg_end = lsl_ts[e - 1] - lsl0
         overlap = max(0.0, min(seg_end, ev_max) - max(0.0, ev_min))
         score = overlap - 0.01 * ev_min
-        scored.append({
-            "start": s,
-            "end": e,
-            "rows": e - s,
-            "seg_end": seg_end,
-            "overlap": overlap,
-            "score": score,
-        })
+        scored.append(
+            {
+                "start": s,
+                "end": e,
+                "rows": e - s,
+                "seg_end": seg_end,
+                "overlap": overlap,
+                "score": score,
+            }
+        )
     if not scored:
         return []
     scored.sort(key=lambda x: (x["score"], x["seg_end"], x["rows"]), reverse=True)
@@ -134,7 +136,9 @@ def repair_time_s(df, lsl_col, time_col, seg_start, seg_end, ev_min):
 
 
 def run_extract_windows():
-    return subprocess.run(["python", "1b_extract_windows.py"], capture_output=True, text=True)
+    return subprocess.run(
+        ["python", "1b_extract_windows.py"], capture_output=True, text=True
+    )
 
 
 def load_window_stats():
@@ -144,8 +148,12 @@ def load_window_stats():
     df = pd.read_csv(path)
     stats = {
         "rows": len(df),
-        "action_counts": df["action_id"].value_counts().sort_index().to_dict() if "action_id" in df.columns else {},
-        "finger_counts": df["finger_id"].value_counts().sort_index().to_dict() if "finger_id" in df.columns else {},
+        "action_counts": df["action_id"].value_counts().sort_index().to_dict()
+        if "action_id" in df.columns
+        else {},
+        "finger_counts": df["finger_id"].value_counts().sort_index().to_dict()
+        if "finger_id" in df.columns
+        else {},
     }
     non_rest = df[df["action_id"] != 0] if "action_id" in df.columns else df.iloc[0:0]
     stats["non_rest_rows"] = len(non_rest)
@@ -156,7 +164,10 @@ def list_feature_candidates(subject_id):
     processed = Path("data/processed")
     if not processed.exists():
         return []
-    patterns = [f"{subject_id}_*_eeg_features.csv", f"{subject_id}_*_eeg_features_repaired.csv"]
+    patterns = [
+        f"{subject_id}_*_eeg_features.csv",
+        f"{subject_id}_*_eeg_features_repaired.csv",
+    ]
     candidates = []
     for pat in patterns:
         candidates.extend(processed.glob(pat))
@@ -174,7 +185,11 @@ def analyze_features(path, ev_min, ev_max):
     if "lsl_timestamp" not in df_feat.columns:
         raise RuntimeError(f"lsl_timestamp column missing in {path}")
     lsl = df_feat["lsl_timestamp"].astype(float).to_numpy()
-    time_s = df_feat["time_s"].astype(float).to_numpy() if "time_s" in df_feat.columns else None
+    time_s = (
+        df_feat["time_s"].astype(float).to_numpy()
+        if "time_s" in df_feat.columns
+        else None
+    )
     segments = segment_indices(lsl)
     scored = score_segments(segments, lsl, ev_min, ev_max)
     return {
@@ -183,8 +198,12 @@ def analyze_features(path, ev_min, ev_max):
         "mismatch": mismatch,
         "notes": feat_notes + norm_notes,
         "lsl_range": (float(lsl.min()), float(lsl.max())),
-        "time_range": (float(time_s.min()), float(time_s.max())) if time_s is not None else None,
-        "time_nonmono": int((np.diff(time_s) < -1e-6).sum()) if time_s is not None else None,
+        "time_range": (float(time_s.min()), float(time_s.max()))
+        if time_s is not None
+        else None,
+        "time_nonmono": int((np.diff(time_s) < -1e-6).sum())
+        if time_s is not None
+        else None,
         "segments": segments,
         "scored": scored,
         "df": df_feat,
@@ -201,7 +220,11 @@ def action_finger_table(df):
 
 def coverage_report(events_df, window_df):
     events_pairs = set(zip(events_df["action_id"], events_df["finger_id"]))
-    window_pairs = set(zip(window_df["action_id"], window_df["finger_id"])) if not window_df.empty else set()
+    window_pairs = (
+        set(zip(window_df["action_id"], window_df["finger_id"]))
+        if not window_df.empty
+        else set()
+    )
     missing = sorted(events_pairs - window_pairs)
     return {
         "missing_pairs": missing,
@@ -238,9 +261,15 @@ def main():
 
     print_header("DIAGNOSTIC REPORT")
     print(f"session_meta.json       : {abs_path(meta_path)}")
-    print(f"features_path           : {abs_path(features_path)} ({features_path.exists()}) {features_path.stat().st_size if features_path.exists() else 0} bytes")
-    print(f"events_path             : {abs_path(events_path)} ({events_path.exists()}) {events_path.stat().st_size if events_path.exists() else 0} bytes")
-    print(f"raw_path                : {abs_path(raw_path)} ({raw_path.exists()}) {raw_path.stat().st_size if raw_path.exists() else 0} bytes")
+    print(
+        f"features_path           : {abs_path(features_path)} ({features_path.exists()}) {features_path.stat().st_size if features_path.exists() else 0} bytes"
+    )
+    print(
+        f"events_path             : {abs_path(events_path)} ({events_path.exists()}) {events_path.stat().st_size if events_path.exists() else 0} bytes"
+    )
+    print(
+        f"raw_path                : {abs_path(raw_path)} ({raw_path.exists()}) {raw_path.stat().st_size if raw_path.exists() else 0} bytes"
+    )
 
     if not events_path.exists():
         print("❌ Missing events file")
@@ -276,7 +305,9 @@ def main():
     for info in analyses:
         mismatch = "YES" if info["mismatch"] else "NO"
         print(f"candidate               : {abs_path(info['path'])}")
-        print(f"  header cols           : {info['header_cols']} (mismatch sample: {mismatch})")
+        print(
+            f"  header cols           : {info['header_cols']} (mismatch sample: {mismatch})"
+        )
         if info["notes"]:
             for note in info["notes"]:
                 print(f"  note                  : {note}")
@@ -295,17 +326,19 @@ def main():
             )
         else:
             print("  best segment          : <none>")
-        report["candidates"].append({
-            "path": abs_path(info["path"]),
-            "header_cols": info["header_cols"],
-            "mismatch": bool(info["mismatch"]),
-            "notes": info["notes"],
-            "lsl_range": info["lsl_range"],
-            "time_range": info["time_range"],
-            "time_nonmono": info["time_nonmono"],
-            "segments": len(info["segments"]),
-            "best_segment": info["scored"][0] if info["scored"] else None,
-        })
+        report["candidates"].append(
+            {
+                "path": abs_path(info["path"]),
+                "header_cols": info["header_cols"],
+                "mismatch": bool(info["mismatch"]),
+                "notes": info["notes"],
+                "lsl_range": info["lsl_range"],
+                "time_range": info["time_range"],
+                "time_nonmono": info["time_nonmono"],
+                "segments": len(info["segments"]),
+                "best_segment": info["scored"][0] if info["scored"] else None,
+            }
+        )
 
     ranked = []
     for info in analyses:
@@ -371,7 +404,10 @@ def main():
         raise SystemExit(1)
 
     experiment_hash = meta.get("experiment_hash", "UNKNOWN")
-    out_path = Path("data/processed") / f"{subject_id}_{experiment_hash}_eeg_features_repaired.csv"
+    out_path = (
+        Path("data/processed")
+        / f"{subject_id}_{experiment_hash}_eeg_features_repaired.csv"
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     repaired.to_csv(out_path, index=False)
@@ -450,7 +486,7 @@ def main():
         "coverage": coverage,
     }
 
-    if (df_events['action_id'] != 0).any() and stats['non_rest_rows'] == 0:
+    if (df_events["action_id"] != 0).any() and stats["non_rest_rows"] == 0:
         print("❌ HARD ERROR: non-REST events exist, but all windows are REST")
         print("Likely causes:")
         print("- wrong segment chosen")

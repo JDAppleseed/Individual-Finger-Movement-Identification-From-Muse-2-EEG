@@ -3,6 +3,8 @@
 Deterministic simulation for time-based window extraction.
 """
 
+from __future__ import annotations
+
 import json
 import subprocess
 import sys
@@ -10,13 +12,20 @@ import tempfile
 import time
 from pathlib import Path
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 np = pytest.importorskip("numpy")
 pd = pytest.importorskip("pandas")
 
 
-def _write_features(path: Path, times: np.ndarray, lsl_start: float):
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+    from numpy import floating as NpFloating
+
+
+def _write_features(path: Path, times: "NDArray[NpFloating]", lsl_start: float):
     lsl_ts = lsl_start + times
     ch1 = np.sin(2 * np.pi * 8.0 * times)
     ch2 = np.cos(2 * np.pi * 6.0 * times)
@@ -24,19 +33,21 @@ def _write_features(path: Path, times: np.ndarray, lsl_start: float):
     ch4 = np.cos(2 * np.pi * 10.0 * times)
     noise = np.random.default_rng(123).normal(0, 0.05, size=times.shape)
 
-    df = pd.DataFrame({
-        "lsl_timestamp": lsl_ts,
-        "time_s": times,
-        "ch1": ch1 + noise,
-        "ch2": ch2 + noise,
-        "ch3": ch3 + noise,
-        "ch4": ch4 + noise,
-    })
+    df = pd.DataFrame(
+        {
+            "lsl_timestamp": lsl_ts,
+            "time_s": times,
+            "ch1": ch1 + noise,
+            "ch2": ch2 + noise,
+            "ch3": ch3 + noise,
+            "ch4": ch4 + noise,
+        }
+    )
     df.to_csv(path, index=False)
 
 
 def _write_events(path: Path, lsl_start: float):
-    events = [
+    events: list[dict[str, float | int | str]] = [
         {
             "onset_s": 1.0,
             "duration_s": 0.4,
@@ -59,42 +70,49 @@ def _write_events(path: Path, lsl_start: float):
 
     rows = []
     for e in events:
-        onset_lsl = lsl_start + e["onset_s"]
-        end_s = e["onset_s"] + e["duration_s"]
+        onset_s = float(e["onset_s"])
+        duration_s = float(e["duration_s"])
+        onset_lsl = lsl_start + onset_s
+        end_s = onset_s + duration_s
         end_lsl = lsl_start + end_s
-        rows.append([
-            onset_lsl,
-            e["onset_s"],
-            e["duration_s"],
-            end_lsl,
-            end_s,
-            e["type"],
-            "n/a",
-            "",
-            "",
-            e["finger_id"],
-            e["action_id"],
-            e["trial_id"],
-            e["block_id"],
-            "manual",
-        ])
+        rows.append(
+            [
+                onset_lsl,
+                onset_s,
+                duration_s,
+                end_lsl,
+                end_s,
+                e["type"],
+                "n/a",
+                "",
+                "",
+                e["finger_id"],
+                e["action_id"],
+                e["trial_id"],
+                e["block_id"],
+                "manual",
+            ]
+        )
 
-    df = pd.DataFrame(rows, columns=[
-        "onset_lsl",
-        "onset_s",
-        "duration_s",
-        "end_lsl",
-        "end_s",
-        "type",
-        "channel",
-        "confidence",
-        "notes",
-        "finger_id",
-        "action_id",
-        "trial_id",
-        "block_id",
-        "source",
-    ])
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "onset_lsl",
+            "onset_s",
+            "duration_s",
+            "end_lsl",
+            "end_s",
+            "type",
+            "channel",
+            "confidence",
+            "notes",
+            "finger_id",
+            "action_id",
+            "trial_id",
+            "block_id",
+            "source",
+        ],
+    )
     df.to_csv(path, index=False)
 
 
@@ -146,7 +164,8 @@ def main():
         cmd = [
             sys.executable,
             str(extractor),
-            "--target-fs", "256",
+            "--target-fs",
+            "256",
         ]
         result = subprocess.run(cmd, cwd=tmp_dir, capture_output=True, text=True)
         if result.returncode != 0:

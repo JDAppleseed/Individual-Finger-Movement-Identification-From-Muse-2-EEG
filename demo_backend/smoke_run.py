@@ -26,7 +26,9 @@ def main():
     state = torch.load(model_path, map_location="cpu")
     n_fingers = int(state["finger_head.weight"].shape[0])
     n_actions = int(state["action_head.weight"].shape[0])
-    model = CNNLSTMFingerActionNet(n_channels=4, n_fingers=n_fingers, n_actions=n_actions)
+    model = CNNLSTMFingerActionNet(
+        n_channels=4, n_fingers=n_fingers, n_actions=n_actions
+    )
     model.load_state_dict(state)
 
     engine = InferenceEngine(
@@ -41,7 +43,9 @@ def main():
     replay = ReplaySource(npz_path)
     for idx, (window, meta) in enumerate(replay.iter_windows()):
         pred, safety, diag = engine.predict(window)
-        print(f"tick {idx} | action={pred['action_name']} conf={pred['action_confidence']:.2f} health={diag['health_score']:.2f}")
+        print(
+            f"tick {idx} | action={pred['action_name']} conf={pred['action_confidence']:.2f} health={diag['health_score']:.2f}"
+        )
         if idx >= 4:
             break
 

@@ -12,7 +12,9 @@ def test_encode_packet_format():
         speed=0.5,
         flags=0xA5,
     )
-    magic, ver, seq, ts, finger, action, speed_u8, flags = struct.unpack("<BBH I BBBB", payload)
+    magic, ver, seq, ts, finger, action, speed_u8, flags = struct.unpack(
+        "<BBH I BBBB", payload
+    )
     assert magic == MAGIC
     assert ver == PKT_VER
     assert seq == 0x1234

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Deque, Optional, Sequence, Tuple, List
 
 import numpy as np
 
 try:
     from pylsl import StreamInlet, resolve_streams, local_clock
+
     LSL_AVAILABLE = True
 except Exception:
     StreamInlet = None
@@ -24,20 +25,22 @@ class LiveWindow:
 
 
 class LiveLSLSource:
-    def __init__(self, fs: int = 256, window_sec: float = 0.25, step_sec: float = 0.05) -> None:
+    def __init__(
+        self, fs: int = 256, window_sec: float = 0.25, step_sec: float = 0.05
+    ) -> None:
         self.fs = fs
         self.window_sec = window_sec
         self.step_sec = step_sec
         self.window_samples = int(fs * window_sec)
         self.step_samples = max(1, int(fs * step_sec))
-        self.inlet = None
-        self.channel_indices = None
+        self.inlet: Optional[StreamInlet] = None
+        self.channel_indices: Optional[List[int]] = None
         self.status_message = ""
-        self.buffer = deque(maxlen=self.window_samples)
-        self.sample_times = deque(maxlen=self.window_samples)
+        self.buffer: Deque[Sequence[float]] = deque(maxlen=self.window_samples)
+        self.sample_times: Deque[float] = deque(maxlen=self.window_samples)
         self._last_emit_idx = 0
         self._sample_count = 0
-        self._stream_start = None
+        self._stream_start: Optional[float] = None
 
     def connect(self) -> Tuple[bool, str]:
         if not LSL_AVAILABLE:
@@ -57,7 +60,10 @@ class LiveLSLSource:
 
         stream = eeg_stream
         if stream.channel_count() < 4:
-            return False, f"EEG stream has {stream.channel_count()} channels; expected at least 4"
+            return (
+                False,
+                f"EEG stream has {stream.channel_count()} channels; expected at least 4",
+            )
 
         self.inlet = StreamInlet(stream)
         self.channel_indices = None
@@ -74,7 +80,7 @@ class LiveLSLSource:
                     labels.append(label.strip())
                 ch = ch.next_sibling()
             if labels:
-                labels_lower = [l.lower() for l in labels]
+                labels_lower = [label.lower() for label in labels]
                 wanted = ["tp9", "af7", "af8", "tp10"]
                 indices = []
                 for name in wanted:
@@ -86,7 +92,9 @@ class LiveLSLSource:
         except Exception:
             self.channel_indices = None
 
-        self.status_message = f"Connected to LSL stream: {stream.name()} ({channel_note})"
+        self.status_message = (
+            f"Connected to LSL stream: {stream.name()} ({channel_note})"
+        )
         return True, self.status_message
 
     def pull_window(self) -> Optional[LiveWindow]:
