@@ -98,7 +98,7 @@ def default_step1b_settings() -> Dict[str, Any]:
     return {
         "features": None,
         "events": None,
-        "subject_id": "1-M17",
+        "subject_id": "1-M60",
         "target_fs": None,
         "allow_gaps": False,
         "ignore_misalignment": False,
@@ -124,7 +124,7 @@ def default_step1b_settings() -> Dict[str, Any]:
 def default_train_settings() -> Dict[str, Any]:
     return {
         "npz": "eeg_windows.npz",
-        "subject_id": "1-M17",
+        "subject_id": "1-M60",
         "epochs": 60,
         "batch_size": 64,
         "lr": 0.001,

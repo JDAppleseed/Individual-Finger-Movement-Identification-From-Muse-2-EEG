@@ -6,7 +6,7 @@ const sampleTick = {
   ts_utc: "2025-12-29T22:10:05.123Z",
   mode: "replay",
   session: {
-    subject_id: "1-M17",
+    subject_id: "1-M60",
     experiment_hash: "abc123def456",
     window_index: 1234,
     window_start_s: 12.3,

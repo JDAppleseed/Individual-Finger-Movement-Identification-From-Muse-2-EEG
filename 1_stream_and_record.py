@@ -121,8 +121,8 @@ SESSION_ID_OVERRIDE = None
 # ===== SUBJECT INFO ======
 # =========================
 GENDER = "M"
-AGE = 17
-SUBJECT_ID_OVERRIDE = "1-M17"  # Set to None to use auto-increment registry
+AGE = 60
+SUBJECT_ID_OVERRIDE = "1-M60"  # Set to None to use auto-increment registry
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
