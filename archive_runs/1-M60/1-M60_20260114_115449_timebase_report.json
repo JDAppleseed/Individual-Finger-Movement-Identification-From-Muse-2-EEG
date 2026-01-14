@@ -1,0 +1,95 @@
+{
+  "ts_utc": "2026-01-14T20:08:15.042076Z",
+  "subject_id": "1-M60",
+  "session_id": "20260114_115449",
+  "segment_id": 0,
+  "timebase_version": "absolute_v1",
+  "stream_start_lsl_ts": 41304.74565586412,
+  "stream_start_local": 69560.325924458,
+  "clock_offset": -28255.580268593876,
+  "samples_seen": 49176,
+  "samples_written": 49113,
+  "time_s_clamped_count": 10295,
+  "max_backwards_jump_s": 32.56856764767144,
+  "event_stamps_count": 128,
+  "event_clamped_count": 0,
+  "nearest_sample_delta_s_abs_max": 234.78390078817756,
+  "nearest_sample_delta_s_abs_mean": 200.9779039722569,
+  "nearest_sample_delta_s_samples": [
+    {
+      "label": "onset",
+      "event_time_s": 121.08306629200524,
+      "nearest_sample_s": 33.42709674395883,
+      "delta_s": 87.65596954804641
+    },
+    {
+      "label": "onset",
+      "event_time_s": 141.38156241700926,
+      "nearest_sample_s": 38.22763317504723,
+      "delta_s": 103.15392924196203
+    },
+    {
+      "label": "onset",
+      "event_time_s": 273.1149262079998,
+      "nearest_sample_s": 67.29492840154853,
+      "delta_s": 205.81999780645128
+    },
+    {
+      "label": "onset",
+      "event_time_s": 299.7191856249992,
+      "nearest_sample_s": 73.2872675612598,
+      "delta_s": 226.43191806373943
+    },
+    {
+      "label": "onset",
+      "event_time_s": 300.69337025001005,
+      "nearest_sample_s": 73.30979602945445,
+      "delta_s": 227.3835742205556
+    },
+    {
+      "label": "onset",
+      "event_time_s": 302.73248004200286,
+      "nearest_sample_s": 73.99664235857199,
+      "delta_s": 228.73583768343087
+    },
+    {
+      "label": "onset",
+      "event_time_s": 305.45885620800254,
+      "nearest_sample_s": 74.5652154119598,
+      "delta_s": 230.89364079604275
+    },
+    {
+      "label": "onset",
+      "event_time_s": 306.80877662501007,
+      "nearest_sample_s": 74.74643418327469,
+      "delta_s": 232.06234244173538
+    },
+    {
+      "label": "onset",
+      "event_time_s": 308.00652116700076,
+      "nearest_sample_s": 75.14859203457308,
+      "delta_s": 232.85792913242767
+    },
+    {
+      "label": "onset",
+      "event_time_s": 310.5294964580098,
+      "nearest_sample_s": 75.74559566983226,
+      "delta_s": 234.78390078817756
+    }
+  ],
+  "timebase_selfcheck": {
+    "max_abs_delta_s": 157.66160084767034,
+    "mean_abs_delta_s": 46.96122826453647,
+    "warn_threshold_s": 0.05,
+    "error_threshold_s": 0.2,
+    "warn": true,
+    "error": true
+  },
+  "dt_median_ms": 3.8197193716769107,
+  "dt_p95_ms": 6.053992292436305,
+  "first_time_s": 0.0,
+  "last_time_s": 280.71297860452614,
+  "first_lsl_ts": 41304.74565586412,
+  "last_lsl_ts": 41585.45863446865,
+  "label": "final"
+}
