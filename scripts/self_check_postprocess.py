@@ -4,13 +4,17 @@ from pathlib import Path
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from demo_backend.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
 
 
 def main():
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from demo_backend.postprocess import (
+        PostprocessSettings,
+        PostprocessState,
+        postprocess_predictions,
+    )
+
     settings = PostprocessSettings(
         smoothing_enabled=True,
         smoothing_method="vote",
@@ -40,7 +44,9 @@ def main():
     # Below-threshold forces REST
     low_action_probs = np.array([0.34, 0.33, 0.33])
     low_finger_probs = np.array([0.34, 0.33, 0.33, 0.0, 0.0, 0.0])
-    post_low = postprocess_predictions(low_action_probs, low_finger_probs, settings, state)
+    post_low = postprocess_predictions(
+        low_action_probs, low_finger_probs, settings, state
+    )
     if int(post_low["committed_action_id"]) != 0:
         raise SystemExit("Postprocess did not force REST below threshold")
 

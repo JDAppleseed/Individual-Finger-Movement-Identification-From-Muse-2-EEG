@@ -8,11 +8,8 @@ Experiment Logger
 
 import json
 import hashlib
-import time
 from pathlib import Path
 from datetime import datetime
-from tempfile import NamedTemporaryFile
-import shutil
 
 try:
     import fcntl  # Unix/macOS
@@ -29,6 +26,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # =========================
 # ===== SUBJECT ID ========
 # =========================
+
 
 def get_subject_id(gender: str, age: int):
     gender = gender.upper()
@@ -60,15 +58,13 @@ def get_subject_id(gender: str, age: int):
 # ===== HASH ==============
 # =========================
 
+
 def generate_experiment_hash(subject_id: str, config_dict: dict):
     """
     Deterministic hash:
     Same subject + same config → same hash
     """
-    payload = {
-        "subject_id": subject_id,
-        "config": config_dict
-    }
+    payload = {"subject_id": subject_id, "config": config_dict}
     serialized = json.dumps(payload, sort_keys=True).encode()
     return hashlib.sha256(serialized).hexdigest()[:12]
 
@@ -77,24 +73,21 @@ def generate_experiment_hash(subject_id: str, config_dict: dict):
 # ===== LOGGING ===========
 # =========================
 
+
 def log_experiment(subject_id, exp_hash, step, notes=None):
     log_path = LOG_DIR / f"{exp_hash}.json"
 
     entry = {
         "step": step,
         "datetime": datetime.utcnow().isoformat(),
-        "notes": notes or ""
+        "notes": notes or "",
     }
 
     if log_path.exists():
         data = json.loads(log_path.read_text())
         data["steps"].append(entry)
     else:
-        data = {
-            "experiment_hash": exp_hash,
-            "subject_id": subject_id,
-            "steps": [entry]
-        }
+        data = {"experiment_hash": exp_hash, "subject_id": subject_id, "steps": [entry]}
 
     log_path.write_text(json.dumps(data, indent=2))
 
@@ -102,6 +95,7 @@ def log_experiment(subject_id, exp_hash, step, notes=None):
 # =========================
 # ===== UTIL ==============
 # =========================
+
 
 def get_latest_experiment_hash():
     logs = sorted(LOG_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime)

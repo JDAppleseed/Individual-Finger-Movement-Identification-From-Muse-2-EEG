@@ -2,6 +2,8 @@
 Shared label schema for action/finger classification.
 """
 
+from typing import Optional
+
 ACTION_REST = 0
 ACTION_OPEN = 1
 ACTION_CLOSE = 2
@@ -43,10 +45,9 @@ def is_valid_action_finger(action_id: int, finger_id: int) -> bool:
     }
 
 
-from typing import Optional
-
-
-def event_type_for(action_id: int, finger_id: int, override: Optional[str] = None) -> str:
+def event_type_for(
+    action_id: int, finger_id: int, override: Optional[str] = None
+) -> str:
     if override:
         return override
     if action_id == ACTION_REST:

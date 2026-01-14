@@ -1,9 +1,9 @@
 """Export NN Visualizer timeline weights from checkpoint files."""
+
 from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
 import torch
 
@@ -15,18 +15,33 @@ from demo_backend.utils_demo import repo_root
 def _load_model_from_state(state_dict: dict) -> CNNLSTMFingerActionNet:
     n_fingers = int(state_dict["finger_head.weight"].shape[0])
     n_actions = int(state_dict["action_head.weight"].shape[0])
-    model = CNNLSTMFingerActionNet(n_channels=4, n_fingers=n_fingers, n_actions=n_actions)
+    model = CNNLSTMFingerActionNet(
+        n_channels=4, n_fingers=n_fingers, n_actions=n_actions
+    )
     model.load_state_dict(state_dict)
     model.eval()
     return model
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Export nnvis timeline snapshots from checkpoints")
-    parser.add_argument("--checkpoints", type=str, default="checkpoints", help="Checkpoint directory to scan")
-    parser.add_argument("--pattern", type=str, default="*.pt", help="Filename glob for checkpoints")
-    parser.add_argument("--output", type=str, default="exports/nnvis_timeline", help="Output directory")
-    parser.add_argument("--topk", type=int, default=150, help="Top-K edges for LSTM matrices")
+    parser = argparse.ArgumentParser(
+        description="Export nnvis timeline snapshots from checkpoints"
+    )
+    parser.add_argument(
+        "--checkpoints",
+        type=str,
+        default="checkpoints",
+        help="Checkpoint directory to scan",
+    )
+    parser.add_argument(
+        "--pattern", type=str, default="*.pt", help="Filename glob for checkpoints"
+    )
+    parser.add_argument(
+        "--output", type=str, default="exports/nnvis_timeline", help="Output directory"
+    )
+    parser.add_argument(
+        "--topk", type=int, default=150, help="Top-K edges for LSTM matrices"
+    )
     args = parser.parse_args()
 
     root = repo_root()
@@ -55,11 +70,13 @@ def main() -> None:
         import numpy as np
 
         np.savez_compressed(weights_path, weights=weights_payload)
-        manifest_steps.append({
-            "step": idx,
-            "label": ckpt.stem,
-            "file": weights_path.name,
-        })
+        manifest_steps.append(
+            {
+                "step": idx,
+                "label": ckpt.stem,
+                "file": weights_path.name,
+            }
+        )
 
     manifest = {"steps": manifest_steps}
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))

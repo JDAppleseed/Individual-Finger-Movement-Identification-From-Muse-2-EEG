@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, Tuple
+from typing import Iterator, Tuple
 
 import numpy as np
 
@@ -39,7 +39,9 @@ class ReplaySource:
             X = data["X"].astype(np.float32)
             y_action = data["y_action"].astype(np.int64)
             y_finger = data["y_finger"].astype(np.int64)
-            meta = {k: data[k] for k in data.files if k not in {"X", "y_action", "y_finger"}}
+            meta = {
+                k: data[k] for k in data.files if k not in {"X", "y_action", "y_finger"}
+            }
 
         self.X = X
         self.y_action = y_action
@@ -65,8 +67,16 @@ class ReplaySource:
             if self.experiment_hashes is not None:
                 exp_hash = str(self.experiment_hashes[idx])
 
-            window_start = float(self.window_start[idx]) if self.window_start is not None else float(idx)
-            window_end = float(self.window_end[idx]) if self.window_end is not None else float(idx)
+            window_start = (
+                float(self.window_start[idx])
+                if self.window_start is not None
+                else float(idx)
+            )
+            window_end = (
+                float(self.window_end[idx])
+                if self.window_end is not None
+                else float(idx)
+            )
             timebase_version = "absolute_v1"
             if self.timebase_version is not None:
                 try:
@@ -74,11 +84,14 @@ class ReplaySource:
                 except Exception:
                     timebase_version = str(self.timebase_version)
 
-            yield self.X[idx], ReplayMeta(
-                subject_id=subject_id,
-                experiment_hash=exp_hash,
-                window_start_s=window_start,
-                window_end_s=window_end,
-                index=idx,
-                timebase_version=timebase_version,
+            yield (
+                self.X[idx],
+                ReplayMeta(
+                    subject_id=subject_id,
+                    experiment_hash=exp_hash,
+                    window_start_s=window_start,
+                    window_end_s=window_end,
+                    index=idx,
+                    timebase_version=timebase_version,
+                ),
             )

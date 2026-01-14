@@ -7,18 +7,13 @@ import argparse
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
 import joblib
 import numpy as np
 import torch
 
-from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
-from demo_backend.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
-from utils.label_schema import ACTION_NAMES, FINGER_NAMES
-from utils.sequence_data import load_sequence_npz
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 
 def _apply_scaler(window_txc: np.ndarray, scaler_obj):
@@ -40,13 +35,30 @@ def _apply_scaler(window_txc: np.ndarray, scaler_obj):
 
 
 def main():
+    from demo_backend.postprocess import (
+        PostprocessSettings,
+        PostprocessState,
+        postprocess_predictions,
+    )
+    from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+    from utils.label_schema import ACTION_NAMES, FINGER_NAMES
+    from utils.sequence_data import load_sequence_npz
+
     parser = argparse.ArgumentParser(description="Smoke inference on a single window")
-    parser.add_argument("--npz", type=str, default="eeg_windows.npz", help="Path to window dataset")
-    parser.add_argument("--model", type=str, default="finger_action_model.pt", help="Model weights path")
+    parser.add_argument(
+        "--npz", type=str, default="eeg_windows.npz", help="Path to window dataset"
+    )
+    parser.add_argument(
+        "--model", type=str, default="finger_action_model.pt", help="Model weights path"
+    )
     parser.add_argument("--scaler", type=str, default="scaler.save", help="Scaler path")
     parser.add_argument("--index", type=int, default=0, help="Window index to use")
-    parser.add_argument("--n-fingers", type=int, default=6, help="Number of finger classes")
-    parser.add_argument("--n-actions", type=int, default=3, help="Number of action classes")
+    parser.add_argument(
+        "--n-fingers", type=int, default=6, help="Number of finger classes"
+    )
+    parser.add_argument(
+        "--n-actions", type=int, default=3, help="Number of action classes"
+    )
     parser.add_argument("--device", type=str, default="cpu", help="Device to run on")
     args = parser.parse_args()
 

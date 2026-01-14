@@ -13,7 +13,6 @@ Key goals:
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
@@ -90,7 +89,10 @@ def _unique_nonempty(values: np.ndarray) -> np.ndarray:
 # Public API
 # -------------------------
 
-def load_sequence_npz(path: str | Path = "eeg_windows.npz", mmap_mode: Optional[str] = None):
+
+def load_sequence_npz(
+    path: str | Path = "eeg_windows.npz", mmap_mode: Optional[str] = None
+):
     """
     Load an EEG window dataset from .npz.
 
@@ -195,8 +197,12 @@ def split_indices(
                     splitter = GroupShuffleSplit(
                         n_splits=1, test_size=test_size, random_state=random_state
                     )
-                    train_idx, test_idx = next(splitter.split(indices, y_action, groups=trial))
-                    return np.asarray(train_idx, dtype=np.int64), np.asarray(test_idx, dtype=np.int64)
+                    train_idx, test_idx = next(
+                        splitter.split(indices, y_action, groups=trial)
+                    )
+                    return np.asarray(train_idx, dtype=np.int64), np.asarray(
+                        test_idx, dtype=np.int64
+                    )
         except Exception:
             pass
 
@@ -215,7 +221,9 @@ def split_indices(
                     train_idx, test_idx = next(
                         splitter.split(indices, y_action, groups=subject_ids)
                     )
-                    return np.asarray(train_idx, dtype=np.int64), np.asarray(test_idx, dtype=np.int64)
+                    return np.asarray(train_idx, dtype=np.int64), np.asarray(
+                        test_idx, dtype=np.int64
+                    )
         except Exception:
             pass
 
@@ -291,13 +299,13 @@ def summarize_windows(X: np.ndarray) -> pd.DataFrame:
     C = int(X.shape[2])
     for idx in range(C):
         feats.append(means[:, idx])
-        names.append(f"ch{idx+1}_mean")
+        names.append(f"ch{idx + 1}_mean")
         feats.append(stds[:, idx])
-        names.append(f"ch{idx+1}_std")
+        names.append(f"ch{idx + 1}_std")
         feats.append(rms[:, idx])
-        names.append(f"ch{idx+1}_rms")
+        names.append(f"ch{idx + 1}_rms")
         feats.append(ptp[:, idx])
-        names.append(f"ch{idx+1}_ptp")
+        names.append(f"ch{idx + 1}_ptp")
 
     feat_mat = np.stack(feats, axis=1)
     return pd.DataFrame(feat_mat, columns=names)

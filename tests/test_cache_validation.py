@@ -2,10 +2,10 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from utils.eval_utils import validate_cached_predictions
-
 
 def test_cached_predictions_reject_duplicate_indices():
+    from utils.eval_utils import validate_cached_predictions
+
     action_probs = np.zeros((3, 2), dtype=np.float32)
     finger_probs = np.zeros((3, 2), dtype=np.float32)
     y_action = np.array([0, 1, 0])
@@ -25,6 +25,8 @@ def test_cached_predictions_reject_duplicate_indices():
 
 
 def test_cached_predictions_accept_unique_indices():
+    from utils.eval_utils import validate_cached_predictions
+
     action_probs = np.zeros((2, 2), dtype=np.float32)
     finger_probs = np.zeros((2, 2), dtype=np.float32)
     y_action = np.array([0, 1])

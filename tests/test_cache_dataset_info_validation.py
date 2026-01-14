@@ -2,8 +2,6 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from utils.eval_utils import validate_cached_predictions_with_dataset_info
-
 
 def _base_payload():
     n_actions = 3
@@ -45,7 +43,11 @@ def _base_payload():
 
 def test_cache_accepts_matching_dataset_info():
     payload = _base_payload()
-    ok, reasons = validate_cached_predictions_with_dataset_info(**payload, spotcheck_k=10, rng_seed=0)
+    from utils.eval_utils import validate_cached_predictions_with_dataset_info
+
+    ok, reasons = validate_cached_predictions_with_dataset_info(
+        **payload, spotcheck_k=10, rng_seed=0
+    )
     assert ok is True
     assert reasons == []
 
@@ -53,7 +55,11 @@ def test_cache_accepts_matching_dataset_info():
 def test_cache_rejects_subject_filter_mismatch():
     payload = _base_payload()
     payload["dataset_info_cache"]["filters"]["subject_id"] = "subject-x"
-    ok, reasons = validate_cached_predictions_with_dataset_info(**payload, spotcheck_k=10, rng_seed=0)
+    from utils.eval_utils import validate_cached_predictions_with_dataset_info
+
+    ok, reasons = validate_cached_predictions_with_dataset_info(
+        **payload, spotcheck_k=10, rng_seed=0
+    )
     assert ok is False
     assert "filter_subject_id_mismatch" in reasons
 
@@ -61,7 +67,11 @@ def test_cache_rejects_subject_filter_mismatch():
 def test_cache_rejects_max_samples_mismatch():
     payload = _base_payload()
     payload["dataset_info_cache"]["filters"]["max_samples"] = 50
-    ok, reasons = validate_cached_predictions_with_dataset_info(**payload, spotcheck_k=10, rng_seed=0)
+    from utils.eval_utils import validate_cached_predictions_with_dataset_info
+
+    ok, reasons = validate_cached_predictions_with_dataset_info(
+        **payload, spotcheck_k=10, rng_seed=0
+    )
     assert ok is False
     assert "filter_max_samples_mismatch" in reasons
 
@@ -69,7 +79,11 @@ def test_cache_rejects_max_samples_mismatch():
 def test_cache_rejects_experiment_hash_mismatch():
     payload = _base_payload()
     payload["dataset_info_cache"]["experiment_hash"] = "different"
-    ok, reasons = validate_cached_predictions_with_dataset_info(**payload, spotcheck_k=10, rng_seed=0)
+    from utils.eval_utils import validate_cached_predictions_with_dataset_info
+
+    ok, reasons = validate_cached_predictions_with_dataset_info(
+        **payload, spotcheck_k=10, rng_seed=0
+    )
     assert ok is False
     assert "experiment_hash_mismatch" in reasons
 
@@ -77,7 +91,11 @@ def test_cache_rejects_experiment_hash_mismatch():
 def test_cache_rejects_legacy_missing_dataset_info():
     payload = _base_payload()
     payload["dataset_info_cache"] = None
-    ok, reasons = validate_cached_predictions_with_dataset_info(**payload, spotcheck_k=10, rng_seed=0)
+    from utils.eval_utils import validate_cached_predictions_with_dataset_info
+
+    ok, reasons = validate_cached_predictions_with_dataset_info(
+        **payload, spotcheck_k=10, rng_seed=0
+    )
     assert ok is False
     assert reasons == ["legacy_cache_missing_dataset_info"]
 
@@ -85,7 +103,11 @@ def test_cache_rejects_legacy_missing_dataset_info():
 def test_cache_rejects_spotcheck_mismatch():
     payload = _base_payload()
     payload["y_action_test"][1] = 99
-    ok, reasons = validate_cached_predictions_with_dataset_info(**payload, spotcheck_k=10, rng_seed=0)
+    from utils.eval_utils import validate_cached_predictions_with_dataset_info
+
+    ok, reasons = validate_cached_predictions_with_dataset_info(
+        **payload, spotcheck_k=10, rng_seed=0
+    )
     assert ok is False
     assert "spotcheck_label_mismatch" in reasons
 
@@ -93,6 +115,10 @@ def test_cache_rejects_spotcheck_mismatch():
 def test_cache_rejects_sha256_mismatch():
     payload = _base_payload()
     payload["dataset_info_cache"]["npz_sha256"] = "def"
-    ok, reasons = validate_cached_predictions_with_dataset_info(**payload, spotcheck_k=10, rng_seed=0)
+    from utils.eval_utils import validate_cached_predictions_with_dataset_info
+
+    ok, reasons = validate_cached_predictions_with_dataset_info(
+        **payload, spotcheck_k=10, rng_seed=0
+    )
     assert ok is False
     assert "npz_sha256_mismatch" in reasons

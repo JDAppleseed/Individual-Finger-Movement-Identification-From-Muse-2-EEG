@@ -6,6 +6,7 @@ ISEF / Paper-Ready
 
 # Work around duplicate libomp on macOS (MKL/torch/scipy); must be set before imports.
 import os
+
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
@@ -34,8 +35,16 @@ from utils.eval_utils import (
     resolve_cached_test_indices,
     validate_cached_predictions_with_dataset_info,
 )
-from utils.sequence_data import load_sequence_npz, split_indices, apply_channel_normalizer
-from demo_backend.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
+from utils.sequence_data import (
+    load_sequence_npz,
+    split_indices,
+    apply_channel_normalizer,
+)
+from demo_backend.postprocess import (
+    PostprocessSettings,
+    PostprocessState,
+    postprocess_predictions,
+)
 
 # =========================
 # ===== CONFIG ============
@@ -150,6 +159,7 @@ def _apply_config_to_args(args_obj, settings: Dict[str, Any], defaults: Dict[str
         if key in settings and getattr(args_obj, key) == default:
             setattr(args_obj, key, settings[key])
 
+
 def _has_len(x) -> bool:
     try:
         _ = len(x)
@@ -241,6 +251,7 @@ def _first_meta_scalar(meta: dict, keys, default="UNKNOWN") -> str:
                     return s
     return str(default)
 
+
 def reliability_bins(conf, preds, labels, n_bins=10):
     bins = np.linspace(0, 1, n_bins + 1)
     bin_centers = (bins[:-1] + bins[1:]) / 2
@@ -267,7 +278,9 @@ def expected_calibration_error(conf, preds, labels, n_bins=10):
     return ece
 
 
-def apply_postprocess_sequence(action_probs, finger_probs, order, settings, trial_ids=None):
+def apply_postprocess_sequence(
+    action_probs, finger_probs, order, settings, trial_ids=None
+):
     """
     Apply stateful postprocess across a sequence order.
     Reset behavior: if trial_ids provided, RESET PostprocessState when trial_id changes.
@@ -343,7 +356,14 @@ def _load_predictions_if_present(path: Path):
             out["dataset_info"] = d["dataset_info"]
 
         # Optional metadata aligned to rows of probs/labels
-        for k in ["window_start", "window_end", "trial_id", "block_id", "subject_id", "experiment_hash"]:
+        for k in [
+            "window_start",
+            "window_end",
+            "trial_id",
+            "block_id",
+            "subject_id",
+            "experiment_hash",
+        ]:
             if k in d.files:
                 out[k] = d[k]
 
@@ -383,7 +403,9 @@ def _unique_non_rest_fingers(y_action: np.ndarray, y_finger: np.ndarray):
     return len(np.unique(y_finger[mask]))
 
 
-def _apply_sample_limit(X, y_action, y_finger, meta, max_samples: Optional[int], seed: int):
+def _apply_sample_limit(
+    X, y_action, y_finger, meta, max_samples: Optional[int], seed: int
+):
     if not max_samples or len(y_action) <= max_samples:
         return X, y_action, y_finger, meta
 
@@ -428,7 +450,9 @@ def _apply_sample_limit(X, y_action, y_finger, meta, max_samples: Optional[int],
     return X, y_action, y_finger, meta
 
 
-def _split_with_checks(y_action, y_finger, meta, seed: int) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], int]:
+def _split_with_checks(
+    y_action, y_finger, meta, seed: int
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], int]:
     overall_action_unique = len(np.unique(y_action))
     overall_finger_unique = _unique_non_rest_fingers(y_action, y_finger)
 
@@ -446,11 +470,19 @@ def _split_with_checks(y_action, y_finger, meta, seed: int) -> Tuple[Optional[np
 
         action_train_unique = len(np.unique(y_action[train_idx]))
         action_test_unique = len(np.unique(y_action[test_idx]))
-        finger_train_unique = _unique_non_rest_fingers(y_action[train_idx], y_finger[train_idx])
-        finger_test_unique = _unique_non_rest_fingers(y_action[test_idx], y_finger[test_idx])
+        finger_train_unique = _unique_non_rest_fingers(
+            y_action[train_idx], y_finger[train_idx]
+        )
+        finger_test_unique = _unique_non_rest_fingers(
+            y_action[test_idx], y_finger[test_idx]
+        )
 
-        action_ok = overall_action_unique < 2 or (action_train_unique >= 2 and action_test_unique >= 2)
-        finger_ok = overall_finger_unique < 2 or (finger_train_unique >= 2 and finger_test_unique >= 2)
+        action_ok = overall_action_unique < 2 or (
+            action_train_unique >= 2 and action_test_unique >= 2
+        )
+        finger_ok = overall_finger_unique < 2 or (
+            finger_train_unique >= 2 and finger_test_unique >= 2
+        )
 
         if action_ok and finger_ok:
             return train_idx, test_idx, attempt + 1
@@ -461,15 +493,45 @@ def _split_with_checks(y_action, y_finger, meta, seed: int) -> Tuple[Optional[np
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
-    parser.add_argument("--npz", type=str, default="eeg_windows.npz", help="Sequence npz file")
-    parser.add_argument("--pred-npz", type=str, default="test_predictions.npz", help="Optional cached test predictions")
-    parser.add_argument("--model", type=str, default="finger_action_model.pt", help="Model weights path")
-    parser.add_argument("--scaler", type=str, default="scaler.save", help="Normalizer/scaler path")
-    parser.add_argument("--subject-id", type=str, default="", help="Filter evaluation to a single subject_id")
-    parser.add_argument("--max-samples", type=int, default=None, help="Limit samples for eval (memory guard)")
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Inference batch size")
-    parser.add_argument("--save-manifest", type=str, default=None, help="Path to write JSON manifest")
-    parser.add_argument("--no-manifest", action="store_true", help="Disable manifest output")
+    parser.add_argument(
+        "--npz", type=str, default="eeg_windows.npz", help="Sequence npz file"
+    )
+    parser.add_argument(
+        "--pred-npz",
+        type=str,
+        default="test_predictions.npz",
+        help="Optional cached test predictions",
+    )
+    parser.add_argument(
+        "--model", type=str, default="finger_action_model.pt", help="Model weights path"
+    )
+    parser.add_argument(
+        "--scaler", type=str, default="scaler.save", help="Normalizer/scaler path"
+    )
+    parser.add_argument(
+        "--subject-id",
+        type=str,
+        default="",
+        help="Filter evaluation to a single subject_id",
+    )
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Limit samples for eval (memory guard)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help="Inference batch size",
+    )
+    parser.add_argument(
+        "--save-manifest", type=str, default=None, help="Path to write JSON manifest"
+    )
+    parser.add_argument(
+        "--no-manifest", action="store_true", help="Disable manifest output"
+    )
     parser.add_argument(
         "--deterministic",
         dest="deterministic",
@@ -483,19 +545,38 @@ def main():
         action="store_false",
         help="Disable deterministic behavior (not recommended)",
     )
-    parser.add_argument("--split-seed", type=int, default=SEED, help="Seed used for split attempts")
-    parser.add_argument("--export-test-pred", action="store_true", help="Export test_predictions.npz for test split")
-    parser.add_argument("--smooth-action-only", action="store_true",
-                    help="Smooth action only; finger stays raw (except forced NONE during REST)")
+    parser.add_argument(
+        "--split-seed", type=int, default=SEED, help="Seed used for split attempts"
+    )
+    parser.add_argument(
+        "--export-test-pred",
+        action="store_true",
+        help="Export test_predictions.npz for test split",
+    )
+    parser.add_argument(
+        "--smooth-action-only",
+        action="store_true",
+        help="Smooth action only; finger stays raw (except forced NONE during REST)",
+    )
 
-    parser.add_argument("--smooth", action="store_true", help="Enable postprocess smoothing")
-    parser.add_argument("--smooth-method", type=str, default="vote", choices=["vote", "ema"])
+    parser.add_argument(
+        "--smooth", action="store_true", help="Enable postprocess smoothing"
+    )
+    parser.add_argument(
+        "--smooth-method", type=str, default="vote", choices=["vote", "ema"]
+    )
     parser.add_argument("--smooth-window", type=int, default=5)
-    parser.add_argument("--hysteresis", action="store_true", help="Enable action hysteresis")
+    parser.add_argument(
+        "--hysteresis", action="store_true", help="Enable action hysteresis"
+    )
     parser.add_argument("--hysteresis-frames", type=int, default=3)
     parser.add_argument("--threshold-action", type=float, default=0.75)
     parser.add_argument("--threshold-finger", type=float, default=0.75)
-    parser.add_argument("--adjacency", action="store_true", help="Enable adjacency assist (finger correction)")
+    parser.add_argument(
+        "--adjacency",
+        action="store_true",
+        help="Enable adjacency assist (finger correction)",
+    )
     args = parser.parse_args()
     defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
     settings = _load_config(args.config)
@@ -519,7 +600,11 @@ def main():
     model_path = Path(args.model)
     scaler_path = Path(args.scaler)
     manifest_enabled = not args.no_manifest
-    manifest_path = Path(args.save_manifest) if args.save_manifest else Path("reports/last_eval_manifest.json")
+    manifest_path = (
+        Path(args.save_manifest)
+        if args.save_manifest
+        else Path("reports/last_eval_manifest.json")
+    )
 
     def _path_info(path: Path, used: Optional[bool] = None) -> Dict[str, Any]:
         info: Dict[str, Any] = {
@@ -610,7 +695,6 @@ def main():
     X, y_action, y_finger, meta = load_sequence_npz(str(npz_path), mmap_mode="r")
     n_total = int(len(y_action))
     manifest["dataset"]["n_total"] = n_total
-    subject_filtered = False
     if args.subject_id is not None and args.subject_id.strip() != "":
         subject_id_filter = args.subject_id.strip()
         if "subject_id" not in meta:
@@ -634,7 +718,6 @@ def main():
         y_action = y_action[mask]
         y_finger = y_finger[mask]
         meta = mask_meta(meta, mask)
-        subject_filtered = True
         manifest["filters"]["subject_filtered"] = True
         manifest["filters"]["subject_id"] = subject_id_filter
     else:
@@ -647,12 +730,16 @@ def main():
         X, y_action, y_finger, meta, args.max_samples, split_seed
     )
     manifest["dataset"]["n_after_filter"] = int(len(y_action))
-    manifest["dataset"]["meta_keys"] = sorted(list(meta.keys())) if isinstance(meta, dict) else []
+    manifest["dataset"]["meta_keys"] = (
+        sorted(list(meta.keys())) if isinstance(meta, dict) else []
+    )
 
     _print_label_summary("Filtered", y_action, y_finger)
 
     subject_ids = meta.get("subject_id", None)
-    exp_hash = _first_meta_scalar(meta, ["experiment_hash", "exp_hash"], default="UNKNOWN")
+    exp_hash = _first_meta_scalar(
+        meta, ["experiment_hash", "exp_hash"], default="UNKNOWN"
+    )
     subject_id_filter = args.subject_id.strip() if args.subject_id else ""
     dataset_info_current = _build_dataset_info(
         npz_path=npz_path,
@@ -667,11 +754,17 @@ def main():
     manifest["dataset"]["n_actions"] = n_actions
     manifest["dataset"]["n_fingers"] = n_fingers
     manifest["dataset"]["exp_hash"] = exp_hash
-    manifest["dataset"]["label_counts"]["action"] = _format_label_counts(y_action, ACTION_NAMES)
-    manifest["dataset"]["label_counts"]["finger"] = _format_label_counts(y_finger, FINGER_NAMES)
+    manifest["dataset"]["label_counts"]["action"] = _format_label_counts(
+        y_action, ACTION_NAMES
+    )
+    manifest["dataset"]["label_counts"]["finger"] = _format_label_counts(
+        y_finger, FINGER_NAMES
+    )
     non_rest_mask = y_action != ACTION_REST
     manifest["dataset"]["label_counts"]["finger_non_rest"] = (
-        _format_label_counts(y_finger[non_rest_mask], FINGER_NAMES) if np.any(non_rest_mask) else "none"
+        _format_label_counts(y_finger[non_rest_mask], FINGER_NAMES)
+        if np.any(non_rest_mask)
+        else "none"
     )
 
     # =========================
@@ -734,7 +827,9 @@ def main():
             y_action, y_finger, meta=meta, seed=split_seed
         )
         if train_idx is None or test_idx is None:
-            print("⚠️ Unable to create a split with multiple classes. Aborting evaluation.")
+            print(
+                "⚠️ Unable to create a split with multiple classes. Aborting evaluation."
+            )
             manifest["abort_reason"] = "split_failed"
             _maybe_write_manifest()
             return 2
@@ -769,20 +864,32 @@ def main():
                 X_batch = apply_channel_normalizer(X_batch, normalizer)
                 X_t = torch.tensor(X_batch, dtype=torch.float32)
                 finger_logits, action_logits = model(X_t)
-                action_probs[start:end] = torch.softmax(action_logits, dim=1).cpu().numpy()
-                finger_probs[start:end] = torch.softmax(finger_logits, dim=1).cpu().numpy()
+                action_probs[start:end] = (
+                    torch.softmax(action_logits, dim=1).cpu().numpy()
+                )
+                finger_probs[start:end] = (
+                    torch.softmax(finger_logits, dim=1).cpu().numpy()
+                )
 
         print("✅ Ran deterministic inference (no cached test_predictions.npz found).")
 
     manifest["paths"]["pred_npz"]["used"] = cached_used
     if cached_used:
-        manifest["paths"]["pred_npz"]["sha256"] = sha256_file(pred_npz_path) if pred_npz_path.exists() else None
-        manifest["paths"]["pred_npz"]["size_bytes"] = pred_npz_path.stat().st_size if pred_npz_path.exists() else None
+        manifest["paths"]["pred_npz"]["sha256"] = (
+            sha256_file(pred_npz_path) if pred_npz_path.exists() else None
+        )
+        manifest["paths"]["pred_npz"]["size_bytes"] = (
+            pred_npz_path.stat().st_size if pred_npz_path.exists() else None
+        )
     manifest["split"]["attempts"] = None if cached_used else split_attempts
     manifest["split"]["train_n"] = int(len(train_idx))
     manifest["split"]["test_n"] = int(len(test_idx))
-    manifest["split"]["train_idx_sha256"] = numpy_sha256(np.asarray(train_idx, dtype=np.int64))
-    manifest["split"]["test_idx_sha256"] = numpy_sha256(np.asarray(test_idx, dtype=np.int64))
+    manifest["split"]["train_idx_sha256"] = numpy_sha256(
+        np.asarray(train_idx, dtype=np.int64)
+    )
+    manifest["split"]["test_idx_sha256"] = numpy_sha256(
+        np.asarray(test_idx, dtype=np.int64)
+    )
     if cache_rejected_reasons is not None:
         manifest["split"]["cache_rejected_reasons"] = cache_rejected_reasons
 
@@ -802,7 +909,14 @@ def main():
             "test_indices_local": np.asarray(test_idx, dtype=np.int64),
             "dataset_info": np.array([json.dumps(dataset_info_current)], dtype="U"),
         }
-        optional_keys = ["window_start", "window_end", "trial_id", "block_id", "subject_id", "experiment_hash"]
+        optional_keys = [
+            "window_start",
+            "window_end",
+            "trial_id",
+            "block_id",
+            "subject_id",
+            "experiment_hash",
+        ]
         n_expected = int(len(y_action))
         if isinstance(meta, dict):
             for key in optional_keys:
@@ -823,7 +937,9 @@ def main():
     overall_finger_unique = _unique_non_rest_fingers(y_action, y_finger)
     action_train_unique = len(np.unique(y_action[train_idx])) if len(train_idx) else 0
     action_test_unique = len(np.unique(y_action_test)) if len(y_action_test) else 0
-    finger_train_unique = _unique_non_rest_fingers(y_action[train_idx], y_finger[train_idx])
+    finger_train_unique = _unique_non_rest_fingers(
+        y_action[train_idx], y_finger[train_idx]
+    )
     finger_test_unique = _unique_non_rest_fingers(y_action_test, y_finger_test)
 
     if overall_action_unique < 2:
@@ -868,12 +984,14 @@ def main():
         exit_code = max(exit_code, 1)
 
     finger_acc = (
-        accuracy_score(y_finger_test[mask], finger_preds[mask]) if (finger_metrics_ok and mask.any()) else None
+        accuracy_score(y_finger_test[mask], finger_preds[mask])
+        if (finger_metrics_ok and mask.any())
+        else None
     )
 
-    print(f"\n🎯 Action Accuracy: {action_acc*100:.2f}%")
+    print(f"\n🎯 Action Accuracy: {action_acc * 100:.2f}%")
     if finger_acc is not None:
-        print(f"🎯 Finger Accuracy (non-REST): {finger_acc*100:.2f}%\n")
+        print(f"🎯 Finger Accuracy (non-REST): {finger_acc * 100:.2f}%\n")
     else:
         print("🎯 Finger Accuracy (non-REST): skipped\n")
 
@@ -907,7 +1025,9 @@ def main():
         trial_ids_for_probs = None
         if "trial_id" in meta:
             try:
-                trial_ids_for_probs = np.asarray(meta["trial_id"])[test_idx].astype(np.int64)
+                trial_ids_for_probs = np.asarray(meta["trial_id"])[test_idx].astype(
+                    np.int64
+                )
             except Exception:
                 trial_ids_for_probs = None
 
@@ -928,9 +1048,11 @@ def main():
             else None
         )
 
-        print(f"🎯 Smoothed Action Accuracy: {action_acc_s*100:.2f}%")
+        print(f"🎯 Smoothed Action Accuracy: {action_acc_s * 100:.2f}%")
         if finger_acc_s is not None:
-            print(f"🎯 Smoothed Finger Accuracy (non-REST): {finger_acc_s*100:.2f}%\n")
+            print(
+                f"🎯 Smoothed Finger Accuracy (non-REST): {finger_acc_s * 100:.2f}%\n"
+            )
         else:
             print("🎯 Smoothed Finger Accuracy (non-REST): skipped\n")
 
@@ -938,7 +1060,9 @@ def main():
     # ===== ECE COMPUTATION ===
     # =========================
     finger_ece = None
-    action_ece = expected_calibration_error(action_conf, action_preds, y_action_test, N_BINS)
+    action_ece = expected_calibration_error(
+        action_conf, action_preds, y_action_test, N_BINS
+    )
     print(f"📏 Action ECE: {action_ece:.4f}")
 
     if finger_metrics_ok and mask.any():
@@ -948,11 +1072,19 @@ def main():
         print(f"📏 Finger ECE (non-REST): {finger_ece:.4f}")
 
     manifest["metrics"]["action_acc"] = float(action_acc)
-    manifest["metrics"]["finger_acc_non_rest"] = float(finger_acc) if finger_acc is not None else None
+    manifest["metrics"]["finger_acc_non_rest"] = (
+        float(finger_acc) if finger_acc is not None else None
+    )
     manifest["metrics"]["action_ece"] = float(action_ece)
-    manifest["metrics"]["finger_ece_non_rest"] = float(finger_ece) if finger_ece is not None else None
-    manifest["metrics"]["smoothed_action_acc"] = float(action_acc_s) if action_acc_s is not None else None
-    manifest["metrics"]["smoothed_finger_acc_non_rest"] = float(finger_acc_s) if finger_acc_s is not None else None
+    manifest["metrics"]["finger_ece_non_rest"] = (
+        float(finger_ece) if finger_ece is not None else None
+    )
+    manifest["metrics"]["smoothed_action_acc"] = (
+        float(action_acc_s) if action_acc_s is not None else None
+    )
+    manifest["metrics"]["smoothed_finger_acc_non_rest"] = (
+        float(finger_acc_s) if finger_acc_s is not None else None
+    )
 
     if subject_ids is not None:
         try:
@@ -961,11 +1093,14 @@ def main():
             if len(unique_subjects) > 1:
                 print("\nPer-subject ECE (test set):")
                 for subj in unique_subjects:
-                    subj_mask = (subj_test == subj)
+                    subj_mask = subj_test == subj
                     if not np.any(subj_mask):
                         continue
                     subj_action_ece = expected_calibration_error(
-                        action_conf[subj_mask], action_preds[subj_mask], y_action_test[subj_mask], N_BINS
+                        action_conf[subj_mask],
+                        action_preds[subj_mask],
+                        y_action_test[subj_mask],
+                        N_BINS,
                     )
 
                     subj_finger_mask = subj_mask & (y_action_test != ACTION_REST)
@@ -979,7 +1114,9 @@ def main():
                     else:
                         subj_finger_ece = float("nan")
 
-                    print(f"  {subj}: action_ece={subj_action_ece:.4f}, finger_ece={subj_finger_ece:.4f}")
+                    print(
+                        f"  {subj}: action_ece={subj_action_ece:.4f}, finger_ece={subj_finger_ece:.4f}"
+                    )
         except Exception:
             pass
 
@@ -988,7 +1125,9 @@ def main():
     # =========================
     fig, axs = plt.subplots(2, 2, figsize=(14, 10))
 
-    action_cm = confusion_matrix(y_action_test, action_preds, labels=list(range(n_actions)))
+    action_cm = confusion_matrix(
+        y_action_test, action_preds, labels=list(range(n_actions))
+    )
     action_labels = _safe_label_list(ACTION_NAMES, n_actions)
 
     sns.heatmap(
@@ -1011,7 +1150,9 @@ def main():
             finger_preds[mask],
             labels=finger_label_ids,
         )
-        finger_labels = [_safe_label_list(FINGER_NAMES, n_fingers)[i] for i in finger_label_ids]
+        finger_labels = [
+            _safe_label_list(FINGER_NAMES, n_fingers)[i] for i in finger_label_ids
+        ]
 
         sns.heatmap(
             finger_cm,
@@ -1029,7 +1170,9 @@ def main():
         axs[0, 1].axis("off")
         axs[0, 1].text(0.5, 0.5, "Finger metrics skipped", ha="center", va="center")
 
-    bin_centers, bin_accs = reliability_bins(action_conf, action_preds, y_action_test, N_BINS)
+    bin_centers, bin_accs = reliability_bins(
+        action_conf, action_preds, y_action_test, N_BINS
+    )
     axs[1, 0].plot([0, 1], [0, 1], "--", color="gray", label="Perfect Calibration")
     axs[1, 0].bar(bin_centers, bin_accs, width=0.08, alpha=0.7)
     axs[1, 0].set_title("Action Reliability Diagram")

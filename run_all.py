@@ -31,7 +31,6 @@ CALIBRATION
 
 import subprocess
 import sys
-import json
 import os
 from pathlib import Path
 
@@ -47,14 +46,14 @@ CALIBRATION_PATH = PROJECT_ROOT / "logs" / "calibration"
 # ===== RUN FLAGS ========
 # =========================
 
-RUN_STEP_1 = False      # EEG streaming / labeling
+RUN_STEP_1 = False  # EEG streaming / labeling
 RUN_STEP_1_REVIEW = False  # Post-recording event review
 RUN_STEP_1_VALIDATE = True  # Event validation/repair
-RUN_STEP_1B = True     # Window extraction
-RUN_STEP_2 = True      # Training
-RUN_STEP_3A = True     # Evaluation
-RUN_STEP_3B = True     # Deepchecks
-RUN_STEP_3C = True     # Visualization
+RUN_STEP_1B = True  # Window extraction
+RUN_STEP_2 = True  # Training
+RUN_STEP_3A = True  # Evaluation
+RUN_STEP_3B = True  # Deepchecks
+RUN_STEP_3C = True  # Visualization
 RUN_STEP_4 = True
 
 # =========================
@@ -65,8 +64,9 @@ CALIBRATION_CONFIG = {
     "init_threshold": 0.75,
     "min_threshold": 0.55,
     "max_threshold": 0.90,
-    "ema_alpha": 0.05
+    "ema_alpha": 0.05,
 }
+
 
 def initialize_calibration():
     """
@@ -75,28 +75,27 @@ def initialize_calibration():
     CALIBRATION_PATH.mkdir(parents=True, exist_ok=True)
     print("🧠 Calibration directory ready")
 
+
 # =========================
 # ===== RUNNER ===========
 # =========================
+
 
 def run_step(script, desc):
     print(f"\n▶ {script} — {desc}")
     env = dict(**os.environ)
     env.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-    result = subprocess.run(
-        [PYTHON_EXEC, script],
-        cwd=PROJECT_ROOT,
-        env=env
-    )
+    result = subprocess.run([PYTHON_EXEC, script], cwd=PROJECT_ROOT, env=env)
     if result.returncode != 0:
         raise RuntimeError(f"{script} failed")
+
 
 # =========================
 # ===== VALIDATION =======
 # =========================
 
-#Also need utils and models, those are referenced inside of the scripts
-#Scripts will NOT run without utils and models
+# Also need utils and models, those are referenced inside of the scripts
+# Scripts will NOT run without utils and models
 
 required_scripts = [
     "1_stream_and_record.py",
@@ -107,7 +106,7 @@ required_scripts = [
     "3_evaluate_model.py",
     "3b_deepchecks_evaluate.py",
     "3c_live_paper_figures.py",
-    "4_generate_reports.py"
+    "4_generate_reports.py",
 ]
 
 for script in required_scripts:

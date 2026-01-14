@@ -16,7 +16,57 @@ FIXES (this version):
 
 # Work around duplicate libomp on macOS (MKL/torch/scipy); must be set before imports.
 import os
+
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+import argparse
+import threading
+import time
+import csv
+import json
+import shutil
+from datetime import datetime
+from collections import deque
+from pathlib import Path
+
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import joblib
+from scipy.signal import welch
+
+from pylsl import StreamInlet, resolve_streams, local_clock
+from sklearn.decomposition import FastICA
+from sklearn.preprocessing import StandardScaler
+
+from utils.experiment_logger import (
+    get_subject_id,
+    generate_experiment_hash,
+    log_experiment,
+)
+
+from utils.per_subject_calibration import record_prediction
+from utils.online_calibration import OnlineCalibrator
+from utils.label_schema import (
+    ACTION_REST,
+    ACTION_OPEN,
+    ACTION_CLOSE,
+    FINGER_NONE,
+    ACTION_NAMES,
+    FINGER_NAMES,
+    event_type_for,
+)
+from utils.session_timebase import compute_event_lsl_ts
+from utils.timebase import clamp_monotonic_time
+
+try:
+    from pynput import keyboard
+except Exception:
+    keyboard = None
+
+from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # =========================
 # ===== CONFIG FLAGS ======
@@ -63,58 +113,6 @@ CSV_OFFLINE_PATH = None
 SESSION_ID_OVERRIDE = None
 
 # =========================
-# ===== IMPORTS ===========
-# =========================
-import argparse
-import threading
-import time
-import csv
-import json
-import shutil
-from datetime import datetime
-from collections import deque
-from pathlib import Path
-
-import numpy as np
-import matplotlib.pyplot as plt
-import torch
-import joblib
-from scipy.signal import welch
-
-from pylsl import StreamInlet, resolve_streams, local_clock
-from sklearn.decomposition import FastICA
-from sklearn.preprocessing import StandardScaler
-
-from utils.experiment_logger import (
-    get_subject_id,
-    generate_experiment_hash,
-    log_experiment
-)
-
-from utils.per_subject_calibration import record_prediction
-from utils.online_calibration import OnlineCalibrator
-from utils.label_schema import (
-    ACTION_REST,
-    ACTION_OPEN,
-    ACTION_CLOSE,
-    FINGER_NONE,
-    ACTION_NAMES,
-    FINGER_NAMES,
-    event_type_for,
-)
-from utils.session_timebase import compute_event_lsl_ts
-from utils.timebase import clamp_monotonic_time
-
-try:
-    from pynput import keyboard
-except Exception:
-    keyboard = None
-
-from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# =========================
 # ===== SUBJECT INFO ======
 # =========================
 GENDER = "M"
@@ -123,9 +121,20 @@ SUBJECT_ID_OVERRIDE = "1-M17"  # Set to None to use auto-increment registry
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
-parser.add_argument("--subject-id", type=str, default=None, help="Override subject ID for this run")
-parser.add_argument("--init-only", action="store_true", help="Initialize session and exit before LSL streaming")
-parser.add_argument("--force-new-session", action="store_true", help="Always start a new session (ignore resume state)")
+parser.add_argument(
+    "--subject-id", type=str, default=None, help="Override subject ID for this run"
+)
+parser.add_argument(
+    "--init-only",
+    action="store_true",
+    help="Initialize session and exit before LSL streaming",
+)
+parser.add_argument(
+    "--force-new-session",
+    action="store_true",
+    help="Always start a new session (ignore resume state)",
+)
+
 
 def _load_config(path: str):
     if not path:
@@ -136,15 +145,18 @@ def _load_config(path: str):
         return {}
     return payload.get("settings", payload)
 
+
 def _apply_config(settings: dict):
     for key, val in settings.items():
         if key in globals():
             globals()[key] = val
 
+
 def _apply_config_to_args(args_obj, settings: dict, defaults: dict):
     for key, default in defaults.items():
         if key in settings and getattr(args_obj, key) == default:
             setattr(args_obj, key, settings[key])
+
 
 args, _ = parser.parse_known_args()
 defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
@@ -182,8 +194,8 @@ if SESSION_STATE_PATH.exists():
 # Defaults
 session_id = None
 segment_id = 0
-total_elapsed_s = 0.0      # session-continuous elapsed time (excludes downtime)
-last_time_s = -1.0         # last written session-continuous time_s
+total_elapsed_s = 0.0  # session-continuous elapsed time (excludes downtime)
+last_time_s = -1.0  # last written session-continuous time_s
 BLOCK_ID = 0
 experiment_hash = None
 features_path_state = None
@@ -198,9 +210,10 @@ stream_start_lsl_ts = None
 local_clock_at_start = None
 
 # Canonical timebase fields (THIS FIX)
-run_start_lsl_ts = None     # first LSL timestamp observed THIS run
-run_start_local = None      # local_clock() at run start
-clock_offset = None         # run_start_lsl_ts - run_start_local
+run_start_lsl_ts = None  # first LSL timestamp observed THIS run
+run_start_local = None  # local_clock() at run start
+clock_offset = None  # run_start_lsl_ts - run_start_local
+
 
 def _coerce_float(value, default=None):
     if value is None:
@@ -210,6 +223,7 @@ def _coerce_float(value, default=None):
     except Exception:
         return default
 
+
 def _read_csv_header(path: Path):
     try:
         with open(path, "r", newline="") as f:
@@ -217,6 +231,7 @@ def _read_csv_header(path: Path):
             return next(reader, [])
     except Exception:
         return []
+
 
 def _csv_has_data_rows(path: Path) -> bool:
     if not path.exists() or path.stat().st_size == 0:
@@ -232,11 +247,13 @@ def _csv_has_data_rows(path: Path) -> bool:
         return False
     return False
 
+
 def _header_has_columns(header, required_cols) -> bool:
     if not header:
         return False
     header_set = {str(h).strip() for h in header}
     return required_cols.issubset(header_set)
+
 
 def _infer_session_id_from_path(path: Path, subject: str):
     if path is None:
@@ -246,10 +263,11 @@ def _infer_session_id_from_path(path: Path, subject: str):
     if not name.startswith(prefix):
         return None
     if name.endswith("_eeg_features.csv"):
-        return name[len(prefix):-len("_eeg_features.csv")]
+        return name[len(prefix) : -len("_eeg_features.csv")]
     if name.endswith("_events.csv"):
-        return name[len(prefix):-len("_events.csv")]
+        return name[len(prefix) : -len("_events.csv")]
     return None
+
 
 def _resolve_events_path(state_events_path, state_features_path, subject, session):
     if state_events_path:
@@ -257,6 +275,7 @@ def _resolve_events_path(state_events_path, state_features_path, subject, sessio
     if state_features_path and session:
         return Path(state_features_path).parent / f"{subject}_{session}_events.csv"
     return None
+
 
 def _infer_stream_start_lsl_ts(path: Path):
     # Legacy helper (still used only if you need to backfill diagnostics)
@@ -273,6 +292,7 @@ def _infer_stream_start_lsl_ts(path: Path):
         return None
     return None
 
+
 def _load_session_meta(path: Path):
     if not path or not path.exists():
         return {}
@@ -281,10 +301,12 @@ def _load_session_meta(path: Path):
     except Exception:
         return {}
 
+
 def _write_json_atomic(path: Path, payload: dict):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2))
     tmp.replace(path)
+
 
 def _maybe_backup_path(path: Path, label: str):
     if path.exists():
@@ -295,12 +317,14 @@ def _maybe_backup_path(path: Path, label: str):
         return backup_path
     return None
 
+
 def _merge_non_none(existing: dict, updates: dict) -> dict:
     merged = dict(existing)
     for key, value in updates.items():
         if value is not None:
             merged[key] = value
     return merged
+
 
 resume_requested = not bool(args.force_new_session)
 resume_blockers = []
@@ -315,7 +339,9 @@ state_features_path = session_state.get("features_path")
 state_events_path = session_state.get("events_path")
 state_raw_path = session_state.get("raw_path")
 state_session_id = session_state.get("session_id")
-state_timebase_version = session_state.get("timebase_version") or session_state.get("timebase")
+state_timebase_version = session_state.get("timebase_version") or session_state.get(
+    "timebase"
+)
 
 required_feature_cols = {"lsl_timestamp", "time_s"}
 state_features_ok = False
@@ -325,7 +351,9 @@ if resume_subject_match and state_features_path:
     state_features = Path(state_features_path)
     state_features_ok = _csv_has_data_rows(state_features)
     if state_features_ok:
-        state_features_header_ok = _header_has_columns(_read_csv_header(state_features), required_feature_cols)
+        state_features_header_ok = _header_has_columns(
+            _read_csv_header(state_features), required_feature_cols
+        )
     if not state_features_ok:
         resume_blockers.append("features_missing_or_empty")
     elif not state_features_header_ok:
@@ -334,7 +362,9 @@ else:
     if resume_subject_match:
         resume_blockers.append("features_missing")
 
-resolved_events_path = _resolve_events_path(state_events_path, state_features_path, subject_id, state_session_id)
+resolved_events_path = _resolve_events_path(
+    state_events_path, state_features_path, subject_id, state_session_id
+)
 events_path_safe = False
 state_events_missing = False
 if resume_subject_match and resolved_events_path:
@@ -349,31 +379,44 @@ if not events_path_safe:
 
 state_meta = {}
 if state_session_id:
-    meta_candidate = Path("data/processed") / f"{subject_id}_{state_session_id}_session_meta.json"
+    meta_candidate = (
+        Path("data/processed") / f"{subject_id}_{state_session_id}_session_meta.json"
+    )
     state_meta = _load_session_meta(meta_candidate)
     if not state_timebase_version:
-        state_timebase_version = state_meta.get("timebase_version") or state_meta.get("timebase")
+        state_timebase_version = state_meta.get("timebase_version") or state_meta.get(
+            "timebase"
+        )
 if state_timebase_version and state_timebase_version != TIMEBASE_VERSION:
     resume_blockers.append(f"timebase_mismatch({state_timebase_version})")
 
-resume_allowed = resume_subject_match and state_features_ok and state_features_header_ok and events_path_safe
-true_resume = resume_requested and resume_allowed and not any(
-    b for b in resume_blockers if b not in {"forced_new_session"}
+resume_allowed = (
+    resume_subject_match
+    and state_features_ok
+    and state_features_header_ok
+    and events_path_safe
+)
+true_resume = (
+    resume_requested
+    and resume_allowed
+    and not any(b for b in resume_blockers if b not in {"forced_new_session"})
 )
 
 if true_resume:
     session_id = state_session_id
     if not session_id:
-        session_id = _infer_session_id_from_path(state_features, subject_id) or _infer_session_id_from_path(
-            resolved_events_path, subject_id
-        )
+        session_id = _infer_session_id_from_path(
+            state_features, subject_id
+        ) or _infer_session_id_from_path(resolved_events_path, subject_id)
     BLOCK_ID = int(session_state.get("block_id", 0))
     segment_id = int(session_state.get("segment_id", -1)) + 1
     total_elapsed_s = float(session_state.get("total_elapsed_s", 0.0))
     last_time_s = float(session_state.get("last_time_s", -1.0))
     experiment_hash = session_state.get("experiment_hash")
     features_path_state = state_features_path
-    events_path_state = str(resolved_events_path) if resolved_events_path else state_events_path
+    events_path_state = (
+        str(resolved_events_path) if resolved_events_path else state_events_path
+    )
     raw_path_state = state_raw_path
     created_utc = session_state.get("created_utc") or state_meta.get("created_utc")
 
@@ -406,17 +449,34 @@ if experiment_hash is None:
 
 FEATURES_ARCHIVE_DIR = Path("data/processed")
 
-FEATURES_ARCHIVE_PATH = Path(features_path_state) if features_path_state else FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_eeg_features.csv"
-EVENTS_ARCHIVE_PATH = Path(events_path_state) if events_path_state else FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_events.csv"
+FEATURES_ARCHIVE_PATH = (
+    Path(features_path_state)
+    if features_path_state
+    else FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_eeg_features.csv"
+)
+EVENTS_ARCHIVE_PATH = (
+    Path(events_path_state)
+    if events_path_state
+    else FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_events.csv"
+)
 if EVENTS_AUTOSAVE_PATH is None:
-    EVENTS_AUTOSAVE_PATH = str(FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_events_autosave.csv")
+    EVENTS_AUTOSAVE_PATH = str(
+        FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_events_autosave.csv"
+    )
 if EVENTS_CSV_PATH is None:
     EVENTS_CSV_PATH = str(EVENTS_ARCHIVE_PATH)
 FEATURES_PATH = FEATURES_ARCHIVE_PATH
 
-RAW_ARCHIVE_PATH = Path(raw_path_state) if raw_path_state else Path("data/raw") / f"{subject_id}_{session_id}_raw.csv"
-SESSION_META_PATH = FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_session_meta.json"
+RAW_ARCHIVE_PATH = (
+    Path(raw_path_state)
+    if raw_path_state
+    else Path("data/raw") / f"{subject_id}_{session_id}_raw.csv"
+)
+SESSION_META_PATH = (
+    FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_session_meta.json"
+)
 ROOT_SESSION_META_PATH = Path("session_meta.json")
+
 
 def _build_session_meta_payload(complete: bool):
     return {
@@ -432,19 +492,17 @@ def _build_session_meta_payload(complete: bool):
         "raw_path": str(RAW_ARCHIVE_PATH),
         "timebase_version": TIMEBASE_VERSION,
         "timebase": TIMEBASE_VERSION,
-
         # Canonical (session-continuous) bookkeeping
         "total_elapsed_s": float(total_elapsed_s),
         "last_time_s": float(last_time_s),
-
         # Legacy/diagnostic (kept)
         "stream_start_lsl_ts": stream_start_lsl_ts,
         "local_clock_at_start": local_clock_at_start,
-
         "complete": bool(complete),
         "created_utc": created_utc,
         "updated_utc": datetime.utcnow().isoformat() + "Z",
     }
+
 
 def _update_session_meta(complete: bool, label: str):
     if INIT_ONLY:
@@ -462,6 +520,7 @@ def _update_session_meta(complete: bool, label: str):
     print(f"ℹ️ {root_msg} root session meta ({label}): {ROOT_SESSION_META_PATH}")
     _write_json_atomic(ROOT_SESSION_META_PATH, root_merged)
 
+
 def _build_session_state_payload(
     total_elapsed_override=None,
     last_time_override=None,
@@ -472,13 +531,21 @@ def _build_session_state_payload(
         "subject_id": subject_id,
         "session_id": session_id,
         "experiment_hash": experiment_hash,
-        "block_id": int(block_id_override if block_id_override is not None else BLOCK_ID),
-        "segment_id": int(segment_id_override if segment_id_override is not None else segment_id),
-
+        "block_id": int(
+            block_id_override if block_id_override is not None else BLOCK_ID
+        ),
+        "segment_id": int(
+            segment_id_override if segment_id_override is not None else segment_id
+        ),
         # Canonical session-continuous time
-        "total_elapsed_s": float(total_elapsed_override if total_elapsed_override is not None else total_elapsed_s),
-        "last_time_s": float(last_time_override if last_time_override is not None else last_time_s),
-
+        "total_elapsed_s": float(
+            total_elapsed_override
+            if total_elapsed_override is not None
+            else total_elapsed_s
+        ),
+        "last_time_s": float(
+            last_time_override if last_time_override is not None else last_time_s
+        ),
         "features_path": str(FEATURES_ARCHIVE_PATH),
         "events_path": str(EVENTS_ARCHIVE_PATH),
         "raw_path": str(RAW_ARCHIVE_PATH),
@@ -488,11 +555,11 @@ def _build_session_state_payload(
         "timebase": TIMEBASE_VERSION,
         "time_s_clamped_count": int(time_s_clamped_count),
         "event_clamped_count": int(event_clamped_count),
-
         # Legacy/diagnostic
         "stream_start_lsl_ts": stream_start_lsl_ts,
         "local_clock_at_start": local_clock_at_start,
     }
+
 
 def _write_session_state(
     label: str,
@@ -514,13 +581,16 @@ def _write_session_state(
     print(f"ℹ️ {msg} session state ({label}): {SESSION_STATE_PATH}")
     _write_json_atomic(SESSION_STATE_PATH, payload)
 
+
 resume_flag = "YES" if true_resume else "NO"
 resume_request_reason = "forced_new_session" if args.force_new_session else "auto"
+
 
 def _fmt_time_value(value):
     if isinstance(value, (int, float)) and np.isfinite(value):
         return f"{float(value):.6f}"
     return "pending"
+
 
 channel_list = "TP9, AF7, AF8, TP10"
 
@@ -531,15 +601,21 @@ print(f"Subject ID        : {subject_id}")
 print(f"Session ID        : {session_id}")
 print(f"Experiment Hash   : {experiment_hash}")
 print("")
-print(f"Resume Requested  : {'YES' if resume_requested else 'NO'} ({resume_request_reason})")
+print(
+    f"Resume Requested  : {'YES' if resume_requested else 'NO'} ({resume_request_reason})"
+)
 print(f"Resume Decision   : {resume_flag}")
 if resume_blockers and not true_resume:
     print(f"Resume Blockers   : {', '.join(resume_blockers)}")
 print(f"Current Block ID  : {BLOCK_ID}")
-print(f"Total Elapsed Time: {total_elapsed_s:.2f} s (stream-relative, monotonic-clamped)")
+print(
+    f"Total Elapsed Time: {total_elapsed_s:.2f} s (stream-relative, monotonic-clamped)"
+)
 print("")
 if true_resume and state_events_missing:
-    print(f"⚠️ Resume note: events file missing at {resolved_events_path}; a new events file will be created.")
+    print(
+        f"⚠️ Resume note: events file missing at {resolved_events_path}; a new events file will be created."
+    )
 print(f"EEG Channels      : {channel_list} ({CHANNELS})")
 print(f"Sampling Rate     : {SAMPLING_RATE} Hz")
 print(f"Window Length     : {WINDOW_SEC} s")
@@ -604,13 +680,15 @@ log_experiment(
     subject_id,
     experiment_hash,
     step="STEP_1_STREAM",
-    notes="EEG collection + ICA + optional inference + event marking (session-continuous timebase)"
+    notes="EEG collection + ICA + optional inference + event marking (session-continuous timebase)",
 )
 
 # =========================
 # ===== CALIBRATION STATE ==
 # =========================
-CALIBRATION_STATE_PATH = Path("logs/calibration") / f"calibration_state_{subject_id}_{experiment_hash}.json"
+CALIBRATION_STATE_PATH = (
+    Path("logs/calibration") / f"calibration_state_{subject_id}_{experiment_hash}.json"
+)
 CALIBRATION_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
 calibrator = OnlineCalibrator()
 
@@ -633,6 +711,7 @@ if CALIBRATION_STATE_PATH.exists():
 # =========================
 stop_event = threading.Event()
 
+
 def listen_for_exit():
     while not stop_event.is_set():
         try:
@@ -642,7 +721,9 @@ def listen_for_exit():
         except EOFError:
             break
 
+
 threading.Thread(target=listen_for_exit, daemon=True).start()
+
 
 # =========================
 # ===== TIMEBASE HELPERS ===
@@ -653,11 +734,13 @@ def _lsl_now():
         return None
     return compute_event_lsl_ts(local_clock(), clock_offset)
 
+
 def _time_s_from_lsl(lsl_ts: float):
     """Stream-relative time_s from an LSL timestamp."""
     if stream_start_lsl_ts is None:
         return None
     return float(lsl_ts - stream_start_lsl_ts)
+
 
 def _clamp_event_time(event_time_s: float):
     if event_time_s is None:
@@ -670,6 +753,7 @@ def _clamp_event_time(event_time_s: float):
         return clamped_time_s, clamped_lsl, True
     return event_time_s, None, False
 
+
 def _record_nearest_sample_delta(event_time_s: float, label: str):
     if event_time_s is None or len(nearest_sample_delta_samples) >= NEAREST_SAMPLE_MAX:
         return
@@ -678,12 +762,15 @@ def _record_nearest_sample_delta(event_time_s: float, label: str):
     recent = list(recent_sample_times)
     nearest = min(recent, key=lambda t: abs(t - event_time_s))
     delta = float(event_time_s - nearest)
-    nearest_sample_delta_samples.append({
-        "label": label,
-        "event_time_s": float(event_time_s),
-        "nearest_sample_s": float(nearest),
-        "delta_s": float(delta),
-    })
+    nearest_sample_delta_samples.append(
+        {
+            "label": label,
+            "event_time_s": float(event_time_s),
+            "nearest_sample_s": float(nearest),
+            "delta_s": float(delta),
+        }
+    )
+
 
 def _timebase_report_payload():
     dt_median_ms = None
@@ -724,8 +811,11 @@ def _timebase_report_payload():
         "last_lsl_ts": last_lsl_ts,
     }
 
+
 def _write_timebase_report(label: str):
-    report_path = FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_timebase_report.json"
+    report_path = (
+        FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_timebase_report.json"
+    )
     pointer_path = Path("reports") / "last_timebase_report.json"
     try:
         payload = _timebase_report_payload()
@@ -737,6 +827,7 @@ def _write_timebase_report(label: str):
     except Exception as exc:
         print(f"⚠️ Failed to write timebase report: {exc}")
 
+
 def _maybe_write_timebase_report(force: bool = False, label: str = "periodic"):
     global last_report_time, last_report_samples_written
     now = time.time()
@@ -746,11 +837,14 @@ def _maybe_write_timebase_report(force: bool = False, label: str = "periodic"):
         last_report_time = now
         last_report_samples_written = samples_written
         return
-    if (now - last_report_time) >= 10.0 or (samples_written - last_report_samples_written) >= 2500:
+    if (now - last_report_time) >= 10.0 or (
+        samples_written - last_report_samples_written
+    ) >= 2500:
         _write_timebase_report(label)
         _write_session_state(label=f"timebase_report:{label}")
         last_report_time = now
         last_report_samples_written = samples_written
+
 
 # =========================
 # ===== EVENT MARKING =====
@@ -786,6 +880,7 @@ recent_sample_times = deque(maxlen=512)
 last_report_time = None
 last_report_samples_written = 0
 timebase_report_initialized = False
+
 
 def _load_existing_events(path: Path):
     """Load existing events to support resume without overwriting."""
@@ -864,6 +959,7 @@ def _load_existing_events(path: Path):
         return []
     return loaded
 
+
 # Resume-safe: load any existing events so we don't overwrite them on exit
 if true_resume:
     loaded_events = _load_existing_events(EVENTS_ARCHIVE_PATH)
@@ -871,8 +967,13 @@ if true_resume:
         with events_lock:
             events.extend(loaded_events)
             last_event_index = len(events) - 1
-        trial_id_counter = max([int(e.get("trial_id", 0) or 0) for e in loaded_events] + [0])
-        print(f"🧾 Resumed events: loaded {len(loaded_events)} existing events (trial_id_counter={trial_id_counter}).")
+        trial_id_counter = max(
+            [int(e.get("trial_id", 0) or 0) for e in loaded_events] + [0]
+        )
+        print(
+            f"🧾 Resumed events: loaded {len(loaded_events)} existing events (trial_id_counter={trial_id_counter})."
+        )
+
 
 def save_events_csv(path, items):
     """
@@ -910,6 +1011,7 @@ def save_events_csv(path, items):
         writer = csv.writer(f)
         writer.writerow(header)
         for item in items:
+
             def _f(val, default=np.nan):
                 try:
                     if val is None or val == "":
@@ -937,8 +1039,12 @@ def save_events_csv(path, items):
                 f"{float(duration_s):.6f}",
                 f"{float(end_lsl):.6f}" if np.isfinite(end_lsl) else "",
                 f"{float(end_s):.6f}" if np.isfinite(end_s) else "",
-                f"{float(_f(item.get('event_lsl_ts'), np.nan)):.6f}" if np.isfinite(_f(item.get("event_lsl_ts"), np.nan)) else "",
-                f"{float(_f(item.get('event_time_s'), np.nan)):.6f}" if np.isfinite(_f(item.get("event_time_s"), np.nan)) else "",
+                f"{float(_f(item.get('event_lsl_ts'), np.nan)):.6f}"
+                if np.isfinite(_f(item.get("event_lsl_ts"), np.nan))
+                else "",
+                f"{float(_f(item.get('event_time_s'), np.nan)):.6f}"
+                if np.isfinite(_f(item.get("event_time_s"), np.nan))
+                else "",
                 item.get("type", ""),
                 item.get("channel", "n/a"),
                 item.get("confidence", ""),
@@ -961,6 +1067,7 @@ def save_events_csv(path, items):
         FEATURES_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, EVENTS_ARCHIVE_PATH)
 
+
 def finalize_event():
     global current_event, last_event_index, trial_id_counter, event_stamps_count
     if current_event is None:
@@ -974,9 +1081,15 @@ def finalize_event():
     onset_lsl = current_event.get("onset_lsl", np.nan)
     onset_s = current_event.get("onset_s", np.nan)
 
-    if (current_event.get("end_lsl") is None or not np.isfinite(current_event.get("end_lsl", np.nan))) and np.isfinite(onset_lsl):
+    if (
+        current_event.get("end_lsl") is None
+        or not np.isfinite(current_event.get("end_lsl", np.nan))
+    ) and np.isfinite(onset_lsl):
         current_event["end_lsl"] = float(onset_lsl + duration_s)
-    if (current_event.get("end_s") is None or not np.isfinite(current_event.get("end_s", np.nan))) and np.isfinite(onset_s):
+    if (
+        current_event.get("end_s") is None
+        or not np.isfinite(current_event.get("end_s", np.nan))
+    ) and np.isfinite(onset_s):
         current_event["end_s"] = float(onset_s + duration_s)
 
     current_event["type"] = event_type_for(
@@ -999,6 +1112,7 @@ def finalize_event():
 
     current_event = None
 
+
 def update_last_event_finger(finger_id):
     global last_event_index
     with events_lock:
@@ -1010,8 +1124,14 @@ def update_last_event_finger(finger_id):
         event["type"] = event_type_for(int(event["action_id"]), int(event["finger_id"]))
         save_events_csv(EVENTS_AUTOSAVE_PATH, events)
 
+
 def on_key_press(key):
-    global current_event, current_action_id, current_override, event_clamped_count, event_clamp_warned
+    global \
+        current_event, \
+        current_action_id, \
+        current_override, \
+        event_clamped_count, \
+        event_clamp_warned
     if not EVENT_MARKING_ENABLED:
         return
 
@@ -1026,7 +1146,9 @@ def on_key_press(key):
             # In this fixed design, we refuse to stamp events until run_start_lsl_ts exists,
             # because that's the anchor for session-continuous time.
             if run_start_lsl_ts is None or clock_offset is None:
-                print("⚠️ Event ignored: timebase not initialized yet (waiting for first LSL sample).")
+                print(
+                    "⚠️ Event ignored: timebase not initialized yet (waiting for first LSL sample)."
+                )
                 return
 
             event_local = local_clock()
@@ -1042,7 +1164,9 @@ def on_key_press(key):
             clamped_onset_s, clamped_onset_lsl, clamped = _clamp_event_time(onset_s)
             if clamped:
                 onset_s = clamped_onset_s
-                onset_lsl = clamped_onset_lsl if clamped_onset_lsl is not None else onset_lsl
+                onset_lsl = (
+                    clamped_onset_lsl if clamped_onset_lsl is not None else onset_lsl
+                )
                 event_clamped_count += 1
                 if not event_clamp_warned:
                     print("⚠️ Event time behind stream; clamped.")
@@ -1120,6 +1244,7 @@ def on_key_press(key):
         update_last_event_finger(finger_id)
         print(f"📝 Finger assigned: {FINGER_NAMES.get(finger_id, 'UNKNOWN')}")
 
+
 def on_key_release(key):
     global event_clamped_count, event_clamp_warned
     if not EVENT_MARKING_ENABLED:
@@ -1164,6 +1289,7 @@ def on_key_release(key):
 
         finalize_event()
 
+
 if EVENT_MARKING_ENABLED and keyboard is None:
     print("⚠️ Event marking disabled (pynput not installed).")
     EVENT_MARKING_ENABLED = False
@@ -1179,6 +1305,7 @@ if EVENT_MARKING_ENABLED:
 # =========================
 model = None
 scaler = None
+
 
 def standardize_window_TxC(window_TxC: np.ndarray, scaler_obj) -> np.ndarray:
     if scaler_obj is None:
@@ -1198,6 +1325,7 @@ def standardize_window_TxC(window_TxC: np.ndarray, scaler_obj) -> np.ndarray:
         return (window_TxC - mean) / scale
 
     return window_TxC
+
 
 def mc_dropout_predict(model, x_BTC, passes: int):
     was_training = model.training
@@ -1219,11 +1347,10 @@ def mc_dropout_predict(model, x_BTC, passes: int):
         "action_std": probs_a.std(dim=0),
     }
 
+
 if DEMO_MODE:
     model = CNNLSTMFingerActionNet(
-        n_channels=CHANNELS,
-        n_fingers=N_FINGERS,
-        n_actions=N_ACTIONS
+        n_channels=CHANNELS, n_fingers=N_FINGERS, n_actions=N_ACTIONS
     ).to(DEVICE)
 
     if not os.path.exists(MODEL_PATH):
@@ -1234,6 +1361,7 @@ if DEMO_MODE:
 
     if os.path.exists(SCALER_PATH):
         scaler = joblib.load(SCALER_PATH)
+
 
 # =========================
 # ===== LSL SETUP =========
@@ -1258,6 +1386,7 @@ def resolve_eeg_channel_indices(info, expected):
             indices.append(idx)
         return indices
     return None
+
 
 print("🔍 Resolving EEG stream...")
 if CSV_OFFLINE_PATH:
@@ -1288,7 +1417,9 @@ if channel_indices is None:
         raise RuntimeError(
             f"LSL EEG stream has {info.channel_count()} channels; expected at least {CHANNELS}."
         )
-print(f"✅ EEG connected ({info.channel_count()} channels, using indices {channel_indices})")
+print(
+    f"✅ EEG connected ({info.channel_count()} channels, using indices {channel_indices})"
+)
 
 # =========================
 # ===== BUFFERS ===========
@@ -1308,7 +1439,10 @@ raw_writer = None
 header = [
     "lsl_timestamp",
     "time_s",
-    "ch1", "ch2", "ch3", "ch4",
+    "ch1",
+    "ch2",
+    "ch3",
+    "ch4",
     "pred_action",
     "pred_finger",
     "action_confidence",
@@ -1316,7 +1450,7 @@ header = [
     "finger_confidence",
     "finger_uncertainty",
     "velocity",
-    "latency_ms"
+    "latency_ms",
 ]
 
 if SAVE_TO_DISK:
@@ -1336,6 +1470,7 @@ if SAVE_RAW:
     if not raw_exists:
         raw_writer.writerow(["lsl_timestamp", "ch1", "ch2", "ch3", "ch4"])
 
+
 # =========================
 # ===== ICA SETUP =========
 # =========================
@@ -1349,6 +1484,7 @@ def is_artifact(ic_signal, fs):
     high = pxx[f > 35].sum()
     mid = max(mid, 1e-12)
     return (low > mid * 2.0) or (high > mid * 2.0)
+
 
 ica = FastICA(n_components=CHANNELS, random_state=42)
 ica_scaler = StandardScaler()
@@ -1380,7 +1516,7 @@ try:
 
         if len(sample) < max(channel_indices) + 1:
             raise RuntimeError(
-                f"LSL EEG sample has {len(sample)} channels; expected at least {max(channel_indices)+1}."
+                f"LSL EEG sample has {len(sample)} channels; expected at least {max(channel_indices) + 1}."
             )
         if len(sample) != CHANNELS:
             sample = [sample[i] for i in channel_indices]
@@ -1412,7 +1548,11 @@ try:
                 clock_offset_estimated = True
             timebase_written = False
 
-        if not timebase_written and run_start_lsl_ts is not None and clock_offset is not None:
+        if (
+            not timebase_written
+            and run_start_lsl_ts is not None
+            and clock_offset is not None
+        ):
             _update_session_meta(complete=False, label="timebase")
             _write_session_state(label="timebase")
             timebase_written = True
@@ -1427,7 +1567,9 @@ try:
         clamped_time_s, clamped = clamp_monotonic_time(last_sample_time_s, raw_time_s)
         if clamped and raw_time_s is not None and last_sample_time_s is not None:
             time_s_clamped_count += 1
-            max_backwards_jump_s = max(max_backwards_jump_s, float(last_sample_time_s - raw_time_s))
+            max_backwards_jump_s = max(
+                max_backwards_jump_s, float(last_sample_time_s - raw_time_s)
+            )
             if not time_s_clamp_warned:
                 print("⚠️ LSL time went backwards; time_s was clamped.")
                 time_s_clamp_warned = True
@@ -1492,7 +1634,9 @@ try:
             window_input = cleaned.astype(np.float32)
             window_input = standardize_window_TxC(window_input, scaler)
 
-            x_BTC = torch.tensor(window_input, dtype=torch.float32).unsqueeze(0).to(DEVICE)
+            x_BTC = (
+                torch.tensor(window_input, dtype=torch.float32).unsqueeze(0).to(DEVICE)
+            )
 
             if hasattr(model, "mc_forward"):
                 mc = model.mc_forward(x_BTC, passes=MC_DROPOUT_PASSES)
@@ -1500,9 +1644,9 @@ try:
                 mc = mc_dropout_predict(model, x_BTC, passes=MC_DROPOUT_PASSES)
 
             action_mean = mc["action_mean"].squeeze(0).detach().cpu().numpy()
-            action_std  = mc["action_std"].squeeze(0).detach().cpu().numpy()
+            action_std = mc["action_std"].squeeze(0).detach().cpu().numpy()
             finger_mean = mc["finger_mean"].squeeze(0).detach().cpu().numpy()
-            finger_std  = mc["finger_std"].squeeze(0).detach().cpu().numpy()
+            finger_std = mc["finger_std"].squeeze(0).detach().cpu().numpy()
 
             pred_action = int(np.argmax(action_mean))
             action_confidence = float(action_mean[pred_action])
@@ -1514,7 +1658,10 @@ try:
 
             adaptive_thresh = min(
                 0.99,
-                max(BASE_CONF_THRESH, BASE_CONF_THRESH + UNCERTAINTY_WEIGHT * action_uncertainty)
+                max(
+                    BASE_CONF_THRESH,
+                    BASE_CONF_THRESH + UNCERTAINTY_WEIGHT * action_uncertainty,
+                ),
             )
 
             action_pred_buffer.append(pred_action)
@@ -1523,8 +1670,17 @@ try:
                 velocity = action_confidence * (1.0 - action_uncertainty)
 
             if ENABLE_ACTUATION and pred_action != ACTION_REST:
-                stable = (len(action_pred_buffer) == STABILITY_FRAMES and len(set(action_pred_buffer)) == 1)
-                if stable and calibrator.allow_actuation(action_confidence, action_uncertainty) and action_confidence >= adaptive_thresh:
+                stable = (
+                    len(action_pred_buffer) == STABILITY_FRAMES
+                    and len(set(action_pred_buffer)) == 1
+                )
+                if (
+                    stable
+                    and calibrator.allow_actuation(
+                        action_confidence, action_uncertainty
+                    )
+                    and action_confidence >= adaptive_thresh
+                ):
                     pass
 
             _ = time.perf_counter() - t0
@@ -1535,7 +1691,9 @@ try:
                 true_action = int(input("Action label (0=REST,1=OPEN,2=CLOSE): "))
                 true_finger = int(input("Finger label (0=NONE,1-5): "))
 
-                correct = (pred_action == true_action) and (true_action == ACTION_REST or pred_finger == true_finger)
+                correct = (pred_action == true_action) and (
+                    true_action == ACTION_REST or pred_finger == true_finger
+                )
 
                 calibrator.update(action_confidence, correct)
                 record_prediction(
@@ -1544,19 +1702,24 @@ try:
                     confidence=action_confidence,
                     uncertainty=action_uncertainty,
                     correct=correct,
-                    threshold=calibrator.threshold
+                    threshold=calibrator.threshold,
                 )
 
-                CALIBRATION_STATE_PATH.write_text(json.dumps({
-                    "threshold": calibrator.threshold,
-                    "history": [],
-                    "config": {
-                        "init_threshold": calibrator.threshold,
-                        "min_threshold": calibrator.min_threshold,
-                        "max_threshold": calibrator.max_threshold,
-                        "ema_alpha": calibrator.alpha,
-                    }
-                }, indent=2))
+                CALIBRATION_STATE_PATH.write_text(
+                    json.dumps(
+                        {
+                            "threshold": calibrator.threshold,
+                            "history": [],
+                            "config": {
+                                "init_threshold": calibrator.threshold,
+                                "min_threshold": calibrator.min_threshold,
+                                "max_threshold": calibrator.max_threshold,
+                                "ema_alpha": calibrator.alpha,
+                            },
+                        },
+                        indent=2,
+                    )
+                )
             except Exception:
                 pass
 
@@ -1577,10 +1740,12 @@ try:
                 finger_confidence,
                 finger_uncertainty,
                 velocity,
-                latency_ms
+                latency_ms,
             ]
             if len(row) != len(header):
-                raise RuntimeError(f"Feature row length {len(row)} does not match header length {len(header)}")
+                raise RuntimeError(
+                    f"Feature row length {len(row)} does not match header length {len(header)}"
+                )
             csv_writer.writerow(row)
             last_written_time_s = float(time_s)
             last_time_s = float(last_written_time_s)  # keep session meta/state current
@@ -1598,7 +1763,8 @@ try:
             latency_text.set_text(f"Latency: {latency_ms:.1f} ms" if DEMO_MODE else "")
             info_text.set_text(
                 f"Act: {ACTION_NAMES.get(pred_action, '?')}  Conf: {action_confidence:.2f}  Unc: {action_uncertainty:.3f}  Vel: {velocity:.3f}"
-                if DEMO_MODE else ""
+                if DEMO_MODE
+                else ""
             )
             plt.pause(0.001)
 
@@ -1632,8 +1798,12 @@ if EVENT_MARKING_ENABLED:
 _maybe_write_timebase_report(force=True, label="final")
 
 # Update session-continuous elapsed time at end of run
-last_time_s_updated = float(last_written_time_s if last_written_time_s >= 0 else last_time_s)
-total_elapsed_s_updated = float(last_time_s_updated if last_time_s_updated >= 0 else total_elapsed_s)
+last_time_s_updated = float(
+    last_written_time_s if last_written_time_s >= 0 else last_time_s
+)
+total_elapsed_s_updated = float(
+    last_time_s_updated if last_time_s_updated >= 0 else total_elapsed_s
+)
 
 # Commit updated times so next resume uses the correct anchor
 total_elapsed_s = total_elapsed_s_updated

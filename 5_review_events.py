@@ -13,7 +13,6 @@ Keyboard controls:
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -40,7 +39,12 @@ def latest_subject_file(subject_id, suffix, base_dir):
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--subject-id", type=str, default="1-M17", help="Subject ID to select latest session files")
+parser.add_argument(
+    "--subject-id",
+    type=str,
+    default="1-M17",
+    help="Subject ID to select latest session files",
+)
 parser.add_argument("--events", type=str, default=None, help="Override events path")
 parser.add_argument("--features", type=str, default=None, help="Override features path")
 args = parser.parse_args()
@@ -50,10 +54,16 @@ events_candidate = None
 features_candidate = None
 
 if args.subject_id:
-    events_candidate = latest_subject_file(args.subject_id, "events.csv", "data/processed")
-    features_candidate = latest_subject_file(args.subject_id, "eeg_features.csv", "data/processed")
+    events_candidate = latest_subject_file(
+        args.subject_id, "events.csv", "data/processed"
+    )
+    features_candidate = latest_subject_file(
+        args.subject_id, "eeg_features.csv", "data/processed"
+    )
     if events_candidate is None or features_candidate is None:
-        print(f"No session files found for subject_id={args.subject_id} in data/processed.")
+        print(
+            f"No session files found for subject_id={args.subject_id} in data/processed."
+        )
         raise SystemExit(2)
 
 if args.events:
@@ -86,8 +96,15 @@ if not FEATURES_PATH.exists():
 events_df = pd.read_csv(EVENTS_PATH)
 
 required_cols = [
-    "onset_s", "duration_s", "type", "channel",
-    "confidence", "notes", "finger_id", "action_id", "source"
+    "onset_s",
+    "duration_s",
+    "type",
+    "channel",
+    "confidence",
+    "notes",
+    "finger_id",
+    "action_id",
+    "source",
 ]
 for col in required_cols:
     if col not in events_df.columns:
@@ -122,7 +139,11 @@ times_range = times_end - times_start
 if events and times_range > 0:
     events_range = events_end - events_start
     # Rescale if events extend beyond the signal or are much longer.
-    if events_end > times_end or events_start < times_start or events_range > times_range * 1.25:
+    if (
+        events_end > times_end
+        or events_start < times_start
+        or events_range > times_range * 1.25
+    ):
         scale = events_range / times_range
         times = (times - times_start) * scale + events_start
         times_start = float(times[0])
@@ -189,9 +210,7 @@ def normalize_event(event):
         event["finger_id"] = FINGER_NONE
     else:
         event["type"] = event_type_for(
-            int(event["action_id"]),
-            int(event["finger_id"]),
-            None
+            int(event["action_id"]), int(event["finger_id"]), None
         )
     return event
 
