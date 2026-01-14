@@ -711,6 +711,63 @@ if __name__ == "__main__":
     raise SystemExit(main())
 \end{filecontents*}
 
+\begin{filecontents*}{make_figs.py}
+#!/usr/bin/env python3
+import json
+from pathlib import Path
+
+def load(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def main():
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        raise SystemExit("matplotlib required for figure generation") from e
+
+    root = Path(__file__).resolve().parent
+    out = root
+    out.mkdir(parents=True, exist_ok=True)
+
+    # --- Fig: timebase effect (ex04) ---
+    p = Path("exercises/out/ex04_timebase_break_and_measure.json")
+    if p.exists():
+        d = load(p)
+        labels = ["aligned_kept","offset_kept","aligned_only","offset_only"]
+        vals = [d.get(k,0) for k in labels]
+        plt.figure()
+        plt.bar(labels, vals)
+        plt.xticks(rotation=20, ha="right")
+        plt.ylabel("count")
+        plt.title(f"Timebase misalignment impact (offset={d.get('offset_s')})")
+        plt.tight_layout()
+        plt.savefig(out / "timebase_alignment_effect.pdf")
+        plt.close()
+
+    # --- Fig: stability gate (ex09) ---
+    p = Path("exercises/out/ex09_stability_gate_demo.json")
+    if p.exists():
+        d = load(p)
+        events = d.get("events", [])
+        allow = [1 if e.get("allow") else 0 for e in events]
+        plt.figure()
+        plt.plot(allow)
+        plt.ylim(-0.1, 1.1)
+        plt.xlabel("frame")
+        plt.ylabel("allow (0/1)")
+        plt.title("Stability gate allow/deny over time")
+        plt.tight_layout()
+        plt.savefig(out / "stability_gate_timeline.pdf")
+        plt.close()
+
+    print("wrote figures into figs/")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{filecontents*}
+
 \maketitle
 \tableofcontents
 \clearpage
@@ -723,6 +780,22 @@ EEG-based finger control. Each coding exercise has a minimal standalone script
 that is emitted when you compile this document. The scripts are written to
 \texttt{\detokenize{exercises/}} via \texttt{\detokenize{filecontents*}} blocks in the LaTeX source.
 
+YES—\textbf{PyTorch methods are (and should be) explicitly included} in the lesson plan, but right now they’re only \emph{lightly} present via excerpts (e.g., MC dropout). To bring this up to a true upper-undergrad → grad “mastery” course, you want a \textbf{full PyTorch workflow lesson thread}: tensors/shapes, \texttt{\detokenize{Dataset/DataLoader}}, training loop, two-head losses, calibration metrics, eval mode vs train mode, checkpointing, determinism, and debugging. (I’ll outline exactly where to add these.)
+
+Inside the course, make it explicit in the TOC:
+\begin{itemize}
+\item Add a chapter titled \textbf{PyTorch Methods for Two-Head EEG Models} (above), and
+\item In Lesson 9, explicitly list the PyTorch primitives used in realtime inference:
+\begin{itemize}
+\item \texttt{\detokenize{torch.no_grad()}}
+\item \texttt{\detokenize{model.eval()}} / \texttt{\detokenize{model.train()}}
+\item \texttt{\detokenize{torch.softmax}}
+\item batching
+\item device placement
+\item latency measurement
+\end{itemize}
+\end{itemize}
+
 Compile the document (this writes the scripts):
 \begin{lstlisting}
 pdflatex -interaction=nonstopmode eeg_hand_lessons.tex
@@ -734,8 +807,53 @@ python exercises/ex00_run_all_sanity.py
 python exercises/ex03_artifact_probe.py --synthetic
 \end{lstlisting}
 
+Generate figures from exercise outputs:
+\begin{lstlisting}
+python make_figs.py
+\end{lstlisting}
+
 By default, each script writes outputs to \texttt{\detokenize{exercises/out/}} and accepts
 CLI flags to point at real data when you have it.
+
+\section*{Validated technical details to weave into lessons}
+
+\subsection*{Clock alignment (LSL vs local clock)}
+LSL provides functions to estimate timing offsets/drift (e.g., \texttt{\detokenize{time_correction()}} and related API patterns) and the core idea is: \textbf{convert everything into one clock domain before labeling}. LSL’s design goal is precisely synchronized multi-stream acquisition with consistent timestamps.
+
+\subsection*{Sensorimotor rhythms (mu/beta) and movement-related EEG}
+For movement and motor imagery, \textbf{event-related desynchronization/synchronization (ERD/ERS)} in sensorimotor rhythms (mu \textasciitilde 8--13 Hz; beta \textasciitilde 13--30 Hz) is a standard phenomenon used in BCI. Treat these as \emph{statistical tendencies}, not guaranteed features—consumer EEG makes this messy.
+
+\subsection*{Calibration and ECE}
+If you’re gating actuation on confidence, you must teach calibration. A common reference is the “On Calibration of Modern Neural Networks” line of work that formalizes reliability diagrams and Expected Calibration Error (ECE).
+
+\subsection*{Uncertainty via MC Dropout}
+MC Dropout is a standard practical method to estimate epistemic uncertainty by sampling under dropout at inference time (“dropout as a Bayesian approximation”).
+
+\subsection*{Muse-class constraints (consumer EEG)}
+A peer-reviewed comparison paper reports Muse sampling rate around \textbf{256 Hz} (device variant dependent), highlighting the broader point: consumer EEG has limited channels + artifact vulnerability.
+(Your course should avoid over-claiming exact electrode names unless you cite vendor docs that explicitly list them.)
+
+\section*{Figure strategy that stays consistent with your workflow}
+
+You already have: exercises → JSON outputs in \texttt{\detokenize{exercises/out/}}. The clean solution is:
+\begin{itemize}
+\item Add \textbf{one “make\_figs.py” script embedded via \texttt{\detokenize{filecontents*}}} (so still only \texttt{\detokenize{.tex}} changes).
+\item It reads JSON outputs and produces \textbf{PDF figures} into \texttt{\detokenize{figs/}}.
+\item Your \texttt{\detokenize{\todofig{...}{figs/...pdf}}} placeholders become real with zero manual plotting.
+\end{itemize}
+
+Figures that you can generate from existing outputs \textbf{without touching the pipeline code}:
+\begin{itemize}
+\item \textbf{Timebase misalignment effect}: from \texttt{\detokenize{ex04_timebase_break_and_measure.json}} (bar chart aligned\_kept vs offset\_kept; optionally aligned\_only/offset\_only).
+\item \textbf{Guard band sweep tradeoffs}: from \texttt{\detokenize{ex05_guard_band_sweep.json}} (heatmap/table-like plot).
+\item \textbf{Gap policy impact}: from \texttt{\detokenize{ex06_gap_policy_sim.json}} (fraction of windows flagged).
+\item \textbf{Stability gate}: from \texttt{\detokenize{ex09_stability_gate_demo.json}} (timeline of allow/deny events).
+\item \textbf{Reliability diagram}: once you add a tiny “export bins” step in eval (later), but for now keep placeholder + plan.
+\end{itemize}
+
+\section*{Recommended upgrades (suggestions only)}
+
+If you want the next iteration to be maximally “graduate-level,” the single biggest upgrade after the above is adding one short section on \textbf{identifiability + limits} (why finger separability is fundamentally bounded in low-channel EEG, and what evidence would justify a claim). That keeps the document rigorous without turning it into a textbook.
 
 % =====================================================
 \part{Foundations}
@@ -880,6 +998,18 @@ t_{\mathrm{event\,stream}} = t_{\mathrm{event\,LSL}} - t_{\mathrm{LSL\,start}}.
 
 \todofig{Timebase alignment diagram: local clock and LSL clock mapped by an offset.}{figs/timebase_alignment.pdf}
 
+\section{Why a Constant Offset Is Usually Enough (and When It Isn't)}
+If both clocks are stable over a session, a constant offset $\Delta$ maps event times into stream time.
+However, drift can occur due to OS scheduling, Bluetooth jitter, or long sessions.
+Your \texttt{\detokenize{timebase_selfcheck}} is a runtime statistical test:
+it measures nearest-sample deltas for recent events and flags warning/error when alignment degrades.
+
+\section{Engineering Rule}
+\textbf{Never train} on data collected under a timebase warning without explicitly labeling it as such.
+For real systems, misalignment is not “noise”—it is \emph{systematic label corruption}.
+
+\todofig{Timebase misalignment impact generated from Exercise 4 output.}{figs/timebase_alignment_effect.pdf}
+
 \section{Code Excerpts: Monotonic Clamping and Self-Check}
 
 \begin{lstlisting}[language=PythonSafe,caption={Excerpt from \texttt{\detokenize{utils/timebase.py}} L6--L17}]
@@ -897,7 +1027,7 @@ def clamp_monotonic_time(
     return current_s, False
 \end{lstlisting}
 
-\begin{lstlisting}[language=PythonSafe,caption={Excerpt from \texttt{\detokenize{utils/timebase_selfcheck.py}} L19--L53}]
+\begin{lstlisting}[language=PythonSafe,caption={Excerpt from \texttt{\detokenize{utils/timebase_selfcheck.py}} L19--L65}]
 def evaluate_timebase_alignment(
     recent_sample_times: Sequence[float],
     event_times: Iterable[float],
@@ -923,8 +1053,20 @@ def evaluate_timebase_alignment(
     deltas_arr = np.abs(np.asarray(deltas, dtype=float))
     max_abs = float(np.max(deltas_arr)) if deltas_arr.size else None
     mean_abs = float(np.mean(deltas_arr)) if deltas_arr.size else None
-    warn = max_abs is not None and max_abs > warn_threshold_s
-    error = max_abs is not None and max_abs > error_threshold_s
+    warn = (
+        (max_abs is not None and max_abs >= warn_threshold_s)
+        or (mean_abs is not None and mean_abs >= warn_threshold_s)
+    )
+    error = (
+        (max_abs is not None and max_abs >= error_threshold_s)
+        or (mean_abs is not None and mean_abs >= error_threshold_s)
+        or (
+            max_abs is not None
+            and mean_abs is not None
+            and max_abs >= warn_threshold_s
+            and mean_abs >= warn_threshold_s
+        )
+    )
     return TimebaseSelfCheck(
         max_abs_delta_s=max_abs,
         mean_abs_delta_s=mean_abs,
@@ -1096,6 +1238,45 @@ Why can joint training improve finger prediction compared to training finger-onl
 
 % ============================================================
 
+\chapter{Lesson X: PyTorch Methods for Neuroengineering Models}
+
+\section{Tensor Shapes Are the Real Interface}
+In this project, your model interface is a contract on \emph{shape}, \emph{dtype}, and \emph{time meaning}.
+A typical input window is shaped as:
+\[
+\texttt{x} \in \mathbb{R}^{B \times T \times C},
+\]
+where $B$ is batch size, $T$ samples per window, and $C$ channels.
+If you reorder dimensions (e.g., $B \times C \times T$), do it intentionally and document it.
+
+\section{Dataset and DataLoader}
+Use \texttt{\detokenize{torch.utils.data.Dataset}} to define exactly what a “sample” is:
+a window tensor + action label + finger label + metadata (subject, session, timebase version).
+Then DataLoader handles batching, shuffling, and determinism.
+
+\section{Two-Head Loss: Action + Finger}
+Let $f_\theta(x)$ output logits for both heads:
+\[
+(\ell_f, \ell_a) = f_\theta(x)
+\]
+where $\ell_f \in \mathbb{R}^{B\times N_f}$ and $\ell_a \in \mathbb{R}^{B\times N_a}$.
+Use cross-entropy per head and combine:
+\[
+\mathcal{L} = \lambda_a \,\mathrm{CE}(\ell_a, y_a) + \lambda_f \,\mathrm{CE}(\ell_f, y_f).
+\]
+Tune $(\lambda_a,\lambda_f)$ to prevent trivial REST solutions.
+
+\section{Train/Eval Mode Is Not Optional}
+\texttt{\detokenize{model.train()}} enables dropout and batchnorm updates.
+\texttt{\detokenize{model.eval()}} freezes them.
+Incorrect mode usage silently corrupts calibration and uncertainty estimates.
+
+\section{Reproducibility Controls}
+At minimum: seed Python, NumPy, and PyTorch; log versions; log dataset hashes/filters.
+Reproducibility is part of safety: you must be able to explain a behavior regression.
+
+% ============================================================
+
 \chapter{Lesson 8: Evaluation Without Self-Deception}
 
 \section{Why Accuracy Is a Trap}
@@ -1106,6 +1287,22 @@ Accuracy can look good even if:
   \item the model is miscalibrated (probabilities meaningless),
   \item cached predictions are mismatched to the current dataset.
 \end{itemize}
+
+\section{Decision-Theoretic View of Actuation}
+You are not maximizing accuracy; you are minimizing expected harm.
+A safe controller triggers only when expected utility is positive:
+\begin{itemize}
+\item confidence high,
+\item uncertainty low,
+\item stability satisfied,
+\item context constraints satisfied (e.g., not in an artifact interval).
+\end{itemize}
+Calibration matters because it links reported probability to real-world correctness.
+
+\section{Reliability Diagrams and ECE}
+A reliability diagram bins predictions by confidence and plots empirical accuracy per bin.
+ECE summarizes the gap between confidence and accuracy across bins.
+If you threshold at 0.8 confidence but your 0.8 bin is only 0.55 accurate, your gate is unsafe.
 
 \section{Calibration: Expected Calibration Error (ECE)}
 
@@ -1285,6 +1482,19 @@ A safe policy:
 \item require uncertainty below threshold,
 \item require stability across $k$ windows.
 \end{itemize}
+
+\section{PyTorch Primitives for Realtime Inference}
+PyTorch primitives used in realtime inference:
+\begin{itemize}
+\item \texttt{\detokenize{torch.no_grad()}}
+\item \texttt{\detokenize{model.eval()}} / \texttt{\detokenize{model.train()}}
+\item \texttt{\detokenize{torch.softmax}}
+\item batching
+\item device placement
+\item latency measurement
+\end{itemize}
+
+\todofig{Stability gate allow/deny timeline generated from Exercise 9 output.}{figs/stability_gate_timeline.pdf}
 
 \section{Code Excerpts: MC Dropout and Safety Gating}
 
@@ -1576,20 +1786,21 @@ reducing spurious correlations that can dominate finger-only training.
 \item \textbf{Timebase alignment} (\texttt{\detokenize{figs/timebase_alignment.pdf}}): local clock and LSL clock with offset mapping.
 \item \textbf{Window overlap policy} (\texttt{\detokenize{figs/window_overlap_policy.pdf}}): window, event, overlap fraction, and guard band geometry.
 \item \textbf{Resampling grid} (\texttt{\detokenize{figs/resampling_grid.pdf}}): irregular timestamps mapped to uniform grid.
+\item \textbf{Timebase misalignment impact} (\texttt{\detokenize{figs/timebase_alignment_effect.pdf}}): bar chart aligned vs offset window retention from Exercise 4.
 \item \textbf{Model architecture} (\texttt{\detokenize{figs/model_architecture.pdf}}): shared backbone with action and finger heads.
 \item \textbf{Reliability diagram} (\texttt{\detokenize{figs/reliability_diagram.pdf}}): confidence bins vs accuracy with ECE.
 \item \textbf{Latency vs accuracy} (\texttt{\detokenize{figs/latency_accuracy_tradeoff.pdf}}): tradeoff curve with chosen operating point.
+\item \textbf{Stability gate timeline} (\texttt{\detokenize{figs/stability_gate_timeline.pdf}}): allow/deny trace over frames from Exercise 9.
 \end{itemize}
 
 \chapter{Reference Links}
 
-These are placeholders to remind you what to cite as you refine lessons. Replace with the specific sources you used.
-
 \begin{itemize}
-\item Lab Streaming Layer (LSL): \url{https://labstreaminglayer.org/}
-\item Muse / consumer EEG device documentation (vendor docs)
-\item Calibration / reliability diagrams: search "Expected Calibration Error reliability diagram"
-\item Motor rhythms (mu/beta) overview: standard EEG textbooks or review articles
+\item Lab Streaming Layer docs/repo for clock functions and timing model. \url{https://labstreaminglayer.org/} \url{https://github.com/sccn/labstreaminglayer}
+\item ERD/ERS foundational review for mu/beta movement modulation. \url{https://doi.org/10.1016/S1388-2457(99)00185-5}
+\item Calibration + reliability diagrams (ECE). \url{https://arxiv.org/abs/1706.04599}
+\item MC Dropout uncertainty. \url{https://arxiv.org/abs/1506.02142}
+\item Consumer EEG constraints + sampling rate context (Muse-class). \url{https://doi.org/10.3389/fnins.2017.00109}
 \end{itemize}
 
 \chapter*{Final Reflection}
