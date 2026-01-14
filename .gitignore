@@ -36,3 +36,18 @@ demo_app/node_modules/
 demo_app/dist/
 demo_app/.vite/
 demo_app/src-tauri/target/
+
+# LaTeX
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.pdf
+
+# Generated exercises/outputs
+exercises/
+figs/*.pdf

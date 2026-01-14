@@ -1,4 +1,4 @@
-\documentclass[11pt]{book}
+\documentclass[11pt,openany]{book}
 
 % =====================================================
 % Fonts & Encoding (CRITICAL FIXES)
@@ -780,22 +780,6 @@ EEG-based finger control. Each coding exercise has a minimal standalone script
 that is emitted when you compile this document. The scripts are written to
 \texttt{\detokenize{exercises/}} via \texttt{\detokenize{filecontents*}} blocks in the LaTeX source.
 
-YES—\textbf{PyTorch methods are (and should be) explicitly included} in the lesson plan, but right now they’re only \emph{lightly} present via excerpts (e.g., MC dropout). To bring this up to a true upper-undergrad → grad “mastery” course, you want a \textbf{full PyTorch workflow lesson thread}: tensors/shapes, \texttt{\detokenize{Dataset/DataLoader}}, training loop, two-head losses, calibration metrics, eval mode vs train mode, checkpointing, determinism, and debugging. (I’ll outline exactly where to add these.)
-
-Inside the course, make it explicit in the TOC:
-\begin{itemize}
-\item Add a chapter titled \textbf{PyTorch Methods for Two-Head EEG Models} (above), and
-\item In Lesson 9, explicitly list the PyTorch primitives used in realtime inference:
-\begin{itemize}
-\item \texttt{\detokenize{torch.no_grad()}}
-\item \texttt{\detokenize{model.eval()}} / \texttt{\detokenize{model.train()}}
-\item \texttt{\detokenize{torch.softmax}}
-\item batching
-\item device placement
-\item latency measurement
-\end{itemize}
-\end{itemize}
-
 Compile the document (this writes the scripts):
 \begin{lstlisting}
 pdflatex -interaction=nonstopmode eeg_hand_lessons.tex
@@ -814,46 +798,6 @@ python make_figs.py
 
 By default, each script writes outputs to \texttt{\detokenize{exercises/out/}} and accepts
 CLI flags to point at real data when you have it.
-
-\section*{Validated technical details to weave into lessons}
-
-\subsection*{Clock alignment (LSL vs local clock)}
-LSL provides functions to estimate timing offsets/drift (e.g., \texttt{\detokenize{time_correction()}} and related API patterns) and the core idea is: \textbf{convert everything into one clock domain before labeling}. LSL’s design goal is precisely synchronized multi-stream acquisition with consistent timestamps.
-
-\subsection*{Sensorimotor rhythms (mu/beta) and movement-related EEG}
-For movement and motor imagery, \textbf{event-related desynchronization/synchronization (ERD/ERS)} in sensorimotor rhythms (mu \textasciitilde 8--13 Hz; beta \textasciitilde 13--30 Hz) is a standard phenomenon used in BCI. Treat these as \emph{statistical tendencies}, not guaranteed features—consumer EEG makes this messy.
-
-\subsection*{Calibration and ECE}
-If you’re gating actuation on confidence, you must teach calibration. A common reference is the “On Calibration of Modern Neural Networks” line of work that formalizes reliability diagrams and Expected Calibration Error (ECE).
-
-\subsection*{Uncertainty via MC Dropout}
-MC Dropout is a standard practical method to estimate epistemic uncertainty by sampling under dropout at inference time (“dropout as a Bayesian approximation”).
-
-\subsection*{Muse-class constraints (consumer EEG)}
-A peer-reviewed comparison paper reports Muse sampling rate around \textbf{256 Hz} (device variant dependent), highlighting the broader point: consumer EEG has limited channels + artifact vulnerability.
-(Your course should avoid over-claiming exact electrode names unless you cite vendor docs that explicitly list them.)
-
-\section*{Figure strategy that stays consistent with your workflow}
-
-You already have: exercises → JSON outputs in \texttt{\detokenize{exercises/out/}}. The clean solution is:
-\begin{itemize}
-\item Add \textbf{one “make\_figs.py” script embedded via \texttt{\detokenize{filecontents*}}} (so still only \texttt{\detokenize{.tex}} changes).
-\item It reads JSON outputs and produces \textbf{PDF figures} into \texttt{\detokenize{figs/}}.
-\item Your \texttt{\detokenize{\todofig{...}{figs/...pdf}}} placeholders become real with zero manual plotting.
-\end{itemize}
-
-Figures that you can generate from existing outputs \textbf{without touching the pipeline code}:
-\begin{itemize}
-\item \textbf{Timebase misalignment effect}: from \texttt{\detokenize{ex04_timebase_break_and_measure.json}} (bar chart aligned\_kept vs offset\_kept; optionally aligned\_only/offset\_only).
-\item \textbf{Guard band sweep tradeoffs}: from \texttt{\detokenize{ex05_guard_band_sweep.json}} (heatmap/table-like plot).
-\item \textbf{Gap policy impact}: from \texttt{\detokenize{ex06_gap_policy_sim.json}} (fraction of windows flagged).
-\item \textbf{Stability gate}: from \texttt{\detokenize{ex09_stability_gate_demo.json}} (timeline of allow/deny events).
-\item \textbf{Reliability diagram}: once you add a tiny “export bins” step in eval (later), but for now keep placeholder + plan.
-\end{itemize}
-
-\section*{Recommended upgrades (suggestions only)}
-
-If you want the next iteration to be maximally “graduate-level,” the single biggest upgrade after the above is adding one short section on \textbf{identifiability + limits} (why finger separability is fundamentally bounded in low-channel EEG, and what evidence would justify a claim). That keeps the document rigorous without turning it into a textbook.
 
 % =====================================================
 \part{Foundations}
@@ -1801,6 +1745,7 @@ reducing spurious correlations that can dominate finger-only training.
 \item Calibration + reliability diagrams (ECE). \url{https://arxiv.org/abs/1706.04599}
 \item MC Dropout uncertainty. \url{https://arxiv.org/abs/1506.02142}
 \item Consumer EEG constraints + sampling rate context (Muse-class). \url{https://doi.org/10.3389/fnins.2017.00109}
+\item PyTorch documentation for model building and training utilities used in the pipeline. \url{https://docs.pytorch.org/docs/stable/index.html}
 \end{itemize}
 
 \chapter*{Final Reflection}
