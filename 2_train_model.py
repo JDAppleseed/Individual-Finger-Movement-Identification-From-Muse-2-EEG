@@ -4,6 +4,7 @@ STEP 2 — Train Multi-Head EEG Model (CNN + LSTM)
 """
 
 import os
+
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
@@ -109,7 +110,9 @@ class EEGWindowDataset(Dataset):
         return self.X[idx], self.y_finger[idx], self.y_action[idx]
 
 
-def _first_nonempty_meta_value(meta: Dict[str, Any], keys, n_expected: int) -> Optional[str]:
+def _first_nonempty_meta_value(
+    meta: Dict[str, Any], keys, n_expected: int
+) -> Optional[str]:
     if not meta:
         return None
     for key in keys:
@@ -134,7 +137,9 @@ def _first_nonempty_meta_value(meta: Dict[str, Any], keys, n_expected: int) -> O
 
 
 def resolve_experiment_hash(meta: Dict[str, Any], n_expected: int) -> str:
-    exp_hash = _first_nonempty_meta_value(meta, ["experiment_hash", "exp_hash"], n_expected)
+    exp_hash = _first_nonempty_meta_value(
+        meta, ["experiment_hash", "exp_hash"], n_expected
+    )
     if exp_hash:
         return exp_hash
     meta_path = ROOT_DIR / "session_meta.json"
@@ -155,19 +160,48 @@ def resolve_experiment_hash(meta: Dict[str, Any], n_expected: int) -> str:
 def build_arg_parser():
     p = argparse.ArgumentParser(description="Train CNN+LSTM EEG multi-head model")
     p.add_argument("--config", type=str, default=None, help="Path to JSON config")
-    p.add_argument("--npz", type=str, default=DEFAULT_NPZ, help="Path to window dataset")
-    p.add_argument("--subject-id", type=str, default="1-M17", help="Filter training data to a single subject_id")
-    p.add_argument("--epochs", type=int, default=EPOCHS, help="Number of training epochs")
-    p.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="Training batch size")
+    p.add_argument(
+        "--npz", type=str, default=DEFAULT_NPZ, help="Path to window dataset"
+    )
+    p.add_argument(
+        "--subject-id",
+        type=str,
+        default="1-M17",
+        help="Filter training data to a single subject_id",
+    )
+    p.add_argument(
+        "--epochs", type=int, default=EPOCHS, help="Number of training epochs"
+    )
+    p.add_argument(
+        "--batch-size", type=int, default=BATCH_SIZE, help="Training batch size"
+    )
     p.add_argument("--lr", type=float, default=LR, help="Learning rate")
     p.add_argument("--seed", type=int, default=SEED, help="Random seed")
-    p.add_argument("--loss-action-weight", type=float, default=LOSS_ACTION_WEIGHT, help="Action loss weight")
-    p.add_argument("--rest-weight", type=float, default=REST_WEIGHT, help="Class weight for REST action (0=ignore)")
+    p.add_argument(
+        "--loss-action-weight",
+        type=float,
+        default=LOSS_ACTION_WEIGHT,
+        help="Action loss weight",
+    )
+    p.add_argument(
+        "--rest-weight",
+        type=float,
+        default=REST_WEIGHT,
+        help="Class weight for REST action (0=ignore)",
+    )
     p.add_argument("--test-size", type=float, default=0.2, help="Test split fraction")
-    p.add_argument("--non-rest-only", action="store_true", help="Train only on non-REST windows")
-    p.add_argument("--save-model", type=str, default=DEFAULT_MODEL, help="Model output path")
-    p.add_argument("--save-scaler", type=str, default=DEFAULT_SCALER, help="Scaler output path")
-    p.add_argument("--save-preds", type=str, default=DEFAULT_PREDS, help="Predictions output path")
+    p.add_argument(
+        "--non-rest-only", action="store_true", help="Train only on non-REST windows"
+    )
+    p.add_argument(
+        "--save-model", type=str, default=DEFAULT_MODEL, help="Model output path"
+    )
+    p.add_argument(
+        "--save-scaler", type=str, default=DEFAULT_SCALER, help="Scaler output path"
+    )
+    p.add_argument(
+        "--save-preds", type=str, default=DEFAULT_PREDS, help="Predictions output path"
+    )
     return p
 
 
@@ -299,7 +333,13 @@ def mask_meta(meta: Dict[str, Any], mask: np.ndarray, n_before: int):
     return out, masked_keys
 
 
-def take_meta(meta: Dict[str, Any], keys, idx: np.ndarray, n_expected: int, dtype: Optional[Any] = None):
+def take_meta(
+    meta: Dict[str, Any],
+    keys,
+    idx: np.ndarray,
+    n_expected: int,
+    dtype: Optional[Any] = None,
+):
     if not meta:
         return None
     idx = np.asarray(idx)
@@ -454,7 +494,9 @@ def main():
         if subject_ids.ndim == 0 or len(subject_ids) != n_full:
             print("subject_id metadata length mismatch; cannot filter.")
             print(f"NPZ path: {npz_path}")
-            print(f"subject_id length: {len(subject_ids) if subject_ids.ndim != 0 else 0}, N={n_full}")
+            print(
+                f"subject_id length: {len(subject_ids) if subject_ids.ndim != 0 else 0}, N={n_full}"
+            )
             return 2
         subject_ids = subject_ids.astype("U")
         mask = subject_ids == args.subject_id
@@ -481,9 +523,17 @@ def main():
             try:
                 val = meta.get(key)
                 if isinstance(val, np.ndarray) and val.ndim == 1 and len(val) != kept:
-                    raise AssertionError(f"Meta length mismatch for {key}: {len(val)} != {kept}")
-                if not isinstance(val, np.ndarray) and hasattr(val, "__len__") and len(val) != kept:
-                    raise AssertionError(f"Meta length mismatch for {key}: {len(val)} != {kept}")
+                    raise AssertionError(
+                        f"Meta length mismatch for {key}: {len(val)} != {kept}"
+                    )
+                if (
+                    not isinstance(val, np.ndarray)
+                    and hasattr(val, "__len__")
+                    and len(val) != kept
+                ):
+                    raise AssertionError(
+                        f"Meta length mismatch for {key}: {len(val)} != {kept}"
+                    )
             except Exception as exc:
                 print(str(exc))
                 return 2
@@ -504,6 +554,7 @@ def main():
     def class_counts(y):
         u, c = np.unique(y, return_counts=True)
         return dict(zip(u.tolist(), c.tolist()))
+
     print(f"Action class counts: {class_counts(y_action)}")
     print(f"Finger class counts: {class_counts(y_finger)}")
 
@@ -573,7 +624,9 @@ def main():
     )
 
     # ===== MODEL =====
-    model = CNNLSTMFingerActionNet(n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions)
+    model = CNNLSTMFingerActionNet(
+        n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions
+    )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
@@ -633,7 +686,7 @@ def main():
 
         if (epoch + 1) % 10 == 0 or epoch == 0:
             print(
-                f"Epoch {epoch+1:03d}/{args.epochs} | loss={avg_loss:.4f} "
+                f"Epoch {epoch + 1:03d}/{args.epochs} | loss={avg_loss:.4f} "
                 f"action_acc={action_acc:.3f} finger_acc={finger_acc:.3f}"
             )
 
@@ -654,7 +707,10 @@ def main():
         "n_fingers": n_fingers,
         "n_actions": n_actions,
         "input_shape": list(X.shape[1:]),
-        "normalizer": {"type": normalizer.get("type", "unknown"), "channels": normalizer.get("channels", None)},
+        "normalizer": {
+            "type": normalizer.get("type", "unknown"),
+            "channels": normalizer.get("channels", None),
+        },
         "device": str(device),
         "model": "CNNLSTMFingerActionNet",
         "subject_id_filter": args.subject_id or "",
@@ -684,16 +740,28 @@ def main():
 
     # ===== SAVE PREDICTIONS WITH ROBUST INDEXING + META =====
     test_indices_local = test_idx.astype(np.int64)
-    test_indices_global = global_indices[test_idx].astype(np.int64)  # maps back to original NPZ index
+    test_indices_global = global_indices[test_idx].astype(
+        np.int64
+    )  # maps back to original NPZ index
 
     # Save *test-set* meta (aligned to prediction rows)
     n_expected = len(y_action)
-    test_window_start = take_meta(meta, ["window_start", "start_s", "onset_s"], test_idx, n_expected, np.float32)
-    test_window_end = take_meta(meta, ["window_end", "end_s", "offset_s"], test_idx, n_expected, np.float32)
-    test_trial_id = take_meta(meta, ["trial_id", "trial", "event_trial_id"], test_idx, n_expected, np.int64)
-    test_block_id = take_meta(meta, ["block_id", "block", "event_block_id"], test_idx, n_expected, np.int64)
+    test_window_start = take_meta(
+        meta, ["window_start", "start_s", "onset_s"], test_idx, n_expected, np.float32
+    )
+    test_window_end = take_meta(
+        meta, ["window_end", "end_s", "offset_s"], test_idx, n_expected, np.float32
+    )
+    test_trial_id = take_meta(
+        meta, ["trial_id", "trial", "event_trial_id"], test_idx, n_expected, np.int64
+    )
+    test_block_id = take_meta(
+        meta, ["block_id", "block", "event_block_id"], test_idx, n_expected, np.int64
+    )
     test_subject_id = take_meta(meta, ["subject_id"], test_idx, n_expected, "U")
-    test_experiment_hash = take_meta(meta, ["experiment_hash", "exp_hash"], test_idx, n_expected, "U")
+    test_experiment_hash = take_meta(
+        meta, ["experiment_hash", "exp_hash"], test_idx, n_expected, "U"
+    )
 
     dataset_info = {
         "npz_path": safe_resolve(npz_path),

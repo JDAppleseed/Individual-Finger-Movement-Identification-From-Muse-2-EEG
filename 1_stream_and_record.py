@@ -58,6 +58,7 @@ from utils.label_schema import (
 )
 from utils.session_timebase import compute_event_lsl_ts
 from utils.timebase import clamp_monotonic_time
+from utils.timebase_selfcheck import evaluate_timebase_alignment
 
 try:
     from pynput import keyboard
@@ -95,6 +96,9 @@ UNCERTAINTY_WEIGHT = 0.5
 STABILITY_FRAMES = 3
 ENABLE_ACTUATION = True
 MC_DROPOUT_PASSES = 10
+
+TIMEBASE_SELF_CHECK_WARN_S = 0.05
+TIMEBASE_SELF_CHECK_ERROR_S = 0.2
 
 # =========================
 # ===== EVENT MARKING =====
@@ -784,6 +788,13 @@ def _timebase_report_payload():
     delta_abs = [abs(s["delta_s"]) for s in nearest_sample_delta_samples]
     delta_abs_max = float(max(delta_abs)) if delta_abs else None
     delta_abs_mean = float(np.mean(delta_abs)) if delta_abs else None
+    event_times = [s["event_time_s"] for s in nearest_sample_delta_samples]
+    selfcheck = evaluate_timebase_alignment(
+        recent_sample_times,
+        event_times,
+        warn_threshold_s=TIMEBASE_SELF_CHECK_WARN_S,
+        error_threshold_s=TIMEBASE_SELF_CHECK_ERROR_S,
+    )
 
     return {
         "ts_utc": datetime.utcnow().isoformat() + "Z",
@@ -803,6 +814,14 @@ def _timebase_report_payload():
         "nearest_sample_delta_s_abs_max": delta_abs_max,
         "nearest_sample_delta_s_abs_mean": delta_abs_mean,
         "nearest_sample_delta_s_samples": list(nearest_sample_delta_samples),
+        "timebase_selfcheck": {
+            "max_abs_delta_s": selfcheck.max_abs_delta_s,
+            "mean_abs_delta_s": selfcheck.mean_abs_delta_s,
+            "warn_threshold_s": selfcheck.warn_threshold_s,
+            "error_threshold_s": selfcheck.error_threshold_s,
+            "warn": selfcheck.warn,
+            "error": selfcheck.error,
+        },
         "dt_median_ms": dt_median_ms,
         "dt_p95_ms": dt_p95_ms,
         "first_time_s": first_time_s,
@@ -820,6 +839,15 @@ def _write_timebase_report(label: str):
     try:
         payload = _timebase_report_payload()
         payload["label"] = label
+        selfcheck = payload.get("timebase_selfcheck", {})
+        if selfcheck.get("error"):
+            print(
+                "⚠️ Timebase self-check error: event/sample alignment exceeds threshold."
+            )
+        elif selfcheck.get("warn"):
+            print(
+                "⚠️ Timebase self-check warning: event/sample alignment drift detected."
+            )
         report_path.parent.mkdir(parents=True, exist_ok=True)
         _write_json_atomic(report_path, payload)
         pointer_path.parent.mkdir(parents=True, exist_ok=True)

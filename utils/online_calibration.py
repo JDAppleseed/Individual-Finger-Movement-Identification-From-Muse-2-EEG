@@ -13,7 +13,7 @@ class OnlineCalibrator:
         init_threshold=0.75,
         min_threshold=0.55,
         max_threshold=0.90,
-        ema_alpha=0.05
+        ema_alpha=0.05,
     ):
         self.threshold = init_threshold
         self.min_threshold = min_threshold
@@ -35,9 +35,7 @@ class OnlineCalibrator:
 
         # EMA threshold adaptation
         target = confidence if acc > 0.8 else self.threshold + 0.02
-        self.threshold = (
-            (1 - self.alpha) * self.threshold + self.alpha * target
-        )
+        self.threshold = (1 - self.alpha) * self.threshold + self.alpha * target
 
         self.threshold = float(
             np.clip(self.threshold, self.min_threshold, self.max_threshold)
@@ -47,7 +45,4 @@ class OnlineCalibrator:
         """
         Safety gate
         """
-        return (
-            confidence >= self.threshold
-            and uncertainty < 0.15
-        )
+        return confidence >= self.threshold and uncertainty < 0.15

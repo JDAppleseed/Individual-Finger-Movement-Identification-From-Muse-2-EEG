@@ -7,7 +7,9 @@ def compute_run_time_s(run_start_lsl_ts: float, lsl_ts: float) -> float:
     return float(lsl_ts - run_start_lsl_ts)
 
 
-def compute_time_s(total_elapsed_s: float, run_start_lsl_ts: float, lsl_ts: float) -> float:
+def compute_time_s(
+    total_elapsed_s: float, run_start_lsl_ts: float, lsl_ts: float
+) -> float:
     return float(total_elapsed_s + compute_run_time_s(run_start_lsl_ts, lsl_ts))
 
 

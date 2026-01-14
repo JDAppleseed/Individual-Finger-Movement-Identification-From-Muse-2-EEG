@@ -6,6 +6,7 @@
 *.fdb_latexmk
 
 .DS_Store
+/.venv_codex/
 
 __pycache__/
 *.pyc

@@ -24,14 +24,16 @@ def test_extraction_report_contents(tmp_path, monkeypatch):
     events_path = tmp_path / "events.csv"
 
     times = np.arange(0.0, 1.0, 0.01)
-    df_features = pd.DataFrame({
-        "lsl_timestamp": 10.0 + times,
-        "time_s": times,
-        "ch1": np.sin(times),
-        "ch2": np.cos(times),
-        "ch3": np.sin(times * 2.0),
-        "ch4": np.cos(times * 2.0),
-    })
+    df_features = pd.DataFrame(
+        {
+            "lsl_timestamp": 10.0 + times,
+            "time_s": times,
+            "ch1": np.sin(times),
+            "ch2": np.cos(times),
+            "ch3": np.sin(times * 2.0),
+            "ch4": np.cos(times * 2.0),
+        }
+    )
     df_features.to_csv(features_path, index=False)
 
     events = [

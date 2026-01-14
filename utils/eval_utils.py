@@ -89,8 +89,16 @@ def validate_cached_predictions_with_dataset_info(
     cache_filters = dataset_info_cache.get("filters", {}) or {}
     current_filters = dataset_info_current.get("filters", {}) or {}
 
-    cache_subject_id = "" if cache_filters.get("subject_id") is None else str(cache_filters.get("subject_id"))
-    current_subject_id = "" if current_filters.get("subject_id") is None else str(current_filters.get("subject_id"))
+    cache_subject_id = (
+        ""
+        if cache_filters.get("subject_id") is None
+        else str(cache_filters.get("subject_id"))
+    )
+    current_subject_id = (
+        ""
+        if current_filters.get("subject_id") is None
+        else str(current_filters.get("subject_id"))
+    )
     if cache_subject_id != current_subject_id:
         reasons.append("filter_subject_id_mismatch")
 
@@ -99,7 +107,9 @@ def validate_cached_predictions_with_dataset_info(
     if cache_max_samples != current_max_samples:
         reasons.append("filter_max_samples_mismatch")
 
-    if dataset_info_cache.get("experiment_hash") != dataset_info_current.get("experiment_hash"):
+    if dataset_info_cache.get("experiment_hash") != dataset_info_current.get(
+        "experiment_hash"
+    ):
         reasons.append("experiment_hash_mismatch")
 
     if dataset_info_cache.get("n_samples") != dataset_info_current.get("n_samples"):
@@ -132,7 +142,10 @@ def validate_cached_predictions_with_dataset_info(
         positions = rng.choice(len(test_idx), size=sample_count, replace=False)
         for pos in positions:
             idx = int(test_idx[pos])
-            if y_action_test[pos] != y_action_current[idx] or y_finger_test[pos] != y_finger_current[idx]:
+            if (
+                y_action_test[pos] != y_action_current[idx]
+                or y_finger_test[pos] != y_finger_current[idx]
+            ):
                 reasons.append("spotcheck_label_mismatch")
                 break
 

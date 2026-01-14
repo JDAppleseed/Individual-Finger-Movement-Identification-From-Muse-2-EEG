@@ -54,7 +54,7 @@ class CommandShaper:
         speed = max(0.0, min(1.0, speed))
         gamma = float(self.config.speed_gamma)
         if gamma != 1.0:
-            speed = speed ** gamma
+            speed = speed**gamma
         return speed
 
     def note_valid(self, timebase_ms: Optional[int] = None) -> None:
@@ -73,7 +73,9 @@ class CommandShaper:
         thermal_c: Optional[float] = None,
     ) -> ActuationCommand:
         _ = stability_ok  # reserved for future safety hooks
-        timebase_ms = int(timestamp_stream_ms) if timebase_ms is None else int(timebase_ms)
+        timebase_ms = (
+            int(timestamp_stream_ms) if timebase_ms is None else int(timebase_ms)
+        )
         self._last_valid_timebase_ms = timebase_ms
 
         target_action = int(action_id)
@@ -99,7 +101,8 @@ class CommandShaper:
                 or target_finger != self._last_cmd.finger_id
             )
             near_thresh = conf < float(self.config.base_conf_thresh) and conf >= (
-                float(self.config.base_conf_thresh) - float(self.config.hold_conf_margin)
+                float(self.config.base_conf_thresh)
+                - float(self.config.hold_conf_margin)
             )
             if changed:
                 last_delta = None
@@ -107,12 +110,20 @@ class CommandShaper:
                     last_delta = timebase_ms - self._last_cmd_timebase_ms
                 if last_delta is None or last_delta < int(self.config.hold_ms):
                     hold_requested = True
-                    self._hold_until_ms = max(self._hold_until_ms, timebase_ms + int(self.config.hold_ms))
+                    self._hold_until_ms = max(
+                        self._hold_until_ms, timebase_ms + int(self.config.hold_ms)
+                    )
             if near_thresh:
                 hold_requested = True
-                self._hold_until_ms = max(self._hold_until_ms, timebase_ms + int(self.config.hold_ms))
+                self._hold_until_ms = max(
+                    self._hold_until_ms, timebase_ms + int(self.config.hold_ms)
+                )
 
-        if hold_requested and self._last_cmd is not None and timebase_ms < self._hold_until_ms:
+        if (
+            hold_requested
+            and self._last_cmd is not None
+            and timebase_ms < self._hold_until_ms
+        ):
             flags |= FLAG_HOLD
             target_action = self._last_cmd.action_id
             target_finger = self._last_cmd.finger_id
@@ -136,7 +147,9 @@ class CommandShaper:
         self._last_cmd_timebase_ms = timebase_ms
         return cmd
 
-    def watchdog_command(self, timebase_ms: Optional[int] = None) -> Optional[ActuationCommand]:
+    def watchdog_command(
+        self, timebase_ms: Optional[int] = None
+    ) -> Optional[ActuationCommand]:
         if timebase_ms is None:
             return None
         now_ms = int(timebase_ms)

@@ -80,7 +80,15 @@ def validate_events(events):
     warnings = []
 
     required_cols = {"onset_s", "duration_s", "type", "finger_id", "action_id"}
-    optional_cols = {"trial_id", "block_id", "session_mode", "channel", "confidence", "notes", "source"}
+    optional_cols = {
+        "trial_id",
+        "block_id",
+        "session_mode",
+        "channel",
+        "confidence",
+        "notes",
+        "source",
+    }
 
     missing_required = sorted(required_cols - set(events.columns))
     missing_optional = sorted(optional_cols - set(events.columns))
@@ -89,11 +97,13 @@ def validate_events(events):
         warnings.append(f"Missing optional columns: {missing_optional}")
 
     if missing_required:
-        issues.append({
-            "row": -1,
-            "type": "missing_required_columns",
-            "detail": missing_required,
-        })
+        issues.append(
+            {
+                "row": -1,
+                "type": "missing_required_columns",
+                "detail": missing_required,
+            }
+        )
         return issues, warnings, missing_required, missing_optional
 
     for idx, row in events.iterrows():
@@ -126,7 +136,11 @@ def validate_events(events):
             if (onset_series.diff().fillna(0) < 0).any():
                 warnings.append("onset_s is non-monotonic (decreases at least once)")
 
-    duplicate_cols = [c for c in ["onset_s", "duration_s", "action_id", "finger_id", "type"] if c in events.columns]
+    duplicate_cols = [
+        c
+        for c in ["onset_s", "duration_s", "action_id", "finger_id", "type"]
+        if c in events.columns
+    ]
     if duplicate_cols:
         dup_mask = events.duplicated(subset=duplicate_cols, keep=False)
         if dup_mask.any():
@@ -134,9 +148,15 @@ def validate_events(events):
 
     if {"onset_s", "duration_s"}.issubset(events.columns):
         events_sorted = events.copy()
-        events_sorted["onset_s"] = pd.to_numeric(events_sorted["onset_s"], errors="coerce")
-        events_sorted["duration_s"] = pd.to_numeric(events_sorted["duration_s"], errors="coerce")
-        events_sorted = events_sorted.dropna(subset=["onset_s", "duration_s"]).sort_values("onset_s")
+        events_sorted["onset_s"] = pd.to_numeric(
+            events_sorted["onset_s"], errors="coerce"
+        )
+        events_sorted["duration_s"] = pd.to_numeric(
+            events_sorted["duration_s"], errors="coerce"
+        )
+        events_sorted = events_sorted.dropna(
+            subset=["onset_s", "duration_s"]
+        ).sort_values("onset_s")
         prev_end = None
         for _, row in events_sorted.iterrows():
             onset = float(row["onset_s"])
@@ -244,9 +264,15 @@ def json_safe_dict(data):
 def summary_counts(events):
     summary = {
         "total_events": int(len(events)),
-        "counts_by_action_id": events["action_id"].value_counts().sort_index().to_dict() if "action_id" in events.columns else {},
-        "counts_by_finger_id": events["finger_id"].value_counts().sort_index().to_dict() if "finger_id" in events.columns else {},
-        "counts_by_type": events["type"].value_counts().head(10).to_dict() if "type" in events.columns else {},
+        "counts_by_action_id": events["action_id"].value_counts().sort_index().to_dict()
+        if "action_id" in events.columns
+        else {},
+        "counts_by_finger_id": events["finger_id"].value_counts().sort_index().to_dict()
+        if "finger_id" in events.columns
+        else {},
+        "counts_by_type": events["type"].value_counts().head(10).to_dict()
+        if "type" in events.columns
+        else {},
     }
     if "action_id" in events.columns:
         summary["non_rest_count"] = int((events["action_id"] != ACTION_REST).sum())
@@ -268,23 +294,42 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true", help="Apply fixes in-place")
     parser.add_argument("--events", type=str, default=None, help="Override events path")
-    parser.add_argument("--features", type=str, default=None, help="Override features path")
-    parser.add_argument("--subject-id", type=str, default="1-M17", help="Subject ID to select latest session files")
-    parser.add_argument("--strict", action="store_true", help="Exit with code 1 on warnings")
-    parser.add_argument("--json-report", type=str, default=None, help="Write JSON report to path")
+    parser.add_argument(
+        "--features", type=str, default=None, help="Override features path"
+    )
+    parser.add_argument(
+        "--subject-id",
+        type=str,
+        default="1-M17",
+        help="Subject ID to select latest session files",
+    )
+    parser.add_argument(
+        "--strict", action="store_true", help="Exit with code 1 on warnings"
+    )
+    parser.add_argument(
+        "--json-report", type=str, default=None, help="Write JSON report to path"
+    )
     args = parser.parse_args()
 
     if args.subject_id:
         if args.events is None:
-            events_path = latest_subject_file(args.subject_id, "events.csv", "data/processed")
+            events_path = latest_subject_file(
+                args.subject_id, "events.csv", "data/processed"
+            )
             if events_path is None:
-                print(f"No events file found for subject_id={args.subject_id} in data/processed.")
+                print(
+                    f"No events file found for subject_id={args.subject_id} in data/processed."
+                )
                 raise SystemExit(2)
             args.events = str(events_path)
         if args.features is None:
-            features_path = latest_subject_file(args.subject_id, "eeg_features.csv", "data/processed")
+            features_path = latest_subject_file(
+                args.subject_id, "eeg_features.csv", "data/processed"
+            )
             if features_path is None:
-                print(f"No features file found for subject_id={args.subject_id} in data/processed.")
+                print(
+                    f"No features file found for subject_id={args.subject_id} in data/processed."
+                )
                 raise SystemExit(2)
             args.features = str(features_path)
 
@@ -387,31 +432,50 @@ def main():
                 if issue_type in {"invalid_action_finger"}:
                     before, after = repair_event(row)
                     events.loc[row_idx] = after
-                    log_event_edit("repair", json_safe_dict(before), json_safe_dict(dict(after)), note=issue_type)
+                    log_event_edit(
+                        "repair",
+                        json_safe_dict(before),
+                        json_safe_dict(dict(after)),
+                        note=issue_type,
+                    )
                 if issue_type == "negative_onset":
                     before = dict(row)
                     events.at[row_idx, "onset_s"] = 0.0
                     after = dict(events.loc[row_idx])
-                    log_event_edit("repair", json_safe_dict(before), json_safe_dict(after), note=issue_type)
+                    log_event_edit(
+                        "repair",
+                        json_safe_dict(before),
+                        json_safe_dict(after),
+                        note=issue_type,
+                    )
                 if issue_type == "negative_duration":
                     before = dict(row)
                     events.at[row_idx, "duration_s"] = 0.0
                     after = dict(events.loc[row_idx])
-                    log_event_edit("repair", json_safe_dict(before), json_safe_dict(after), note=issue_type)
+                    log_event_edit(
+                        "repair",
+                        json_safe_dict(before),
+                        json_safe_dict(after),
+                        note=issue_type,
+                    )
 
             events.to_csv(events_path, index=False)
             print(f"✅ Applied fixes and saved {events_path}")
             print(f"✅ Backup saved to {backup_path}")
 
             events = pd.read_csv(events_path)
-            issues, warnings, missing_required, missing_optional = validate_events(events)
+            issues, warnings, missing_required, missing_optional = validate_events(
+                events
+            )
             if missing_required:
                 print("❌ Missing required columns after apply; validation failed.")
                 issues = issues or [{"row": -1, "type": "missing_required_columns"}]
             alignment_metrics = None
             alignment_warnings = []
             if features_path is not None and Path(features_path).exists():
-                alignment_metrics, alignment_warnings = alignment_check(features_path, events)
+                alignment_metrics, alignment_warnings = alignment_check(
+                    features_path, events
+                )
             warnings.extend(alignment_warnings)
 
     summary = summary_counts(events)

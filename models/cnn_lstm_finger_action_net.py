@@ -30,7 +30,11 @@ class CNNLSTMFingerActionNet(nn.Module):
         in_ch = n_channels
         for out_ch, k in zip(conv_channels, kernel_sizes):
             conv_layers.append(nn.Conv1d(in_ch, out_ch, kernel_size=k, padding=k // 2))
-            conv_layers.append(nn.GroupNorm(num_groups=min(group_norm_groups, out_ch), num_channels=out_ch))
+            conv_layers.append(
+                nn.GroupNorm(
+                    num_groups=min(group_norm_groups, out_ch), num_channels=out_ch
+                )
+            )
             conv_layers.append(nn.ReLU())
             conv_layers.append(nn.Dropout(p=dropout))
             in_ch = out_ch

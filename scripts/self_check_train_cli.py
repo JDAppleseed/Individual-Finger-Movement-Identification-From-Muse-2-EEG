@@ -11,7 +11,14 @@ from pathlib import Path
 
 
 def run(cmd, cwd, env):
-    proc = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    proc = subprocess.run(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
     return proc.returncode, proc.stdout
 
 

@@ -16,7 +16,9 @@ class StreamClock:
         self.last_stream_ms = None
         self.last_perf_s = None
 
-    def update_from_window_end_s(self, window_end_s: float, perf_s: Optional[float] = None) -> int:
+    def update_from_window_end_s(
+        self, window_end_s: float, perf_s: Optional[float] = None
+    ) -> int:
         perf_s = time.perf_counter() if perf_s is None else perf_s
         stream_ms = int(window_end_s * 1000.0)
         self.last_stream_ms = stream_ms

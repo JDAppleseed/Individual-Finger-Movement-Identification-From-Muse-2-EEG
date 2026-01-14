@@ -46,7 +46,9 @@ exp_hash = str(experiment_hashes[0]) if experiment_hashes is not None else "UNKN
 # ===== SAME SPLIT =========
 # =========================
 
-train_idx, test_idx = split_indices(y_action, y_finger, meta=meta, test_size=0.2, random_state=SEED)
+train_idx, test_idx = split_indices(
+    y_action, y_finger, meta=meta, test_size=0.2, random_state=SEED
+)
 X_test = X[test_idx]
 y_action_test = y_action[test_idx]
 y_finger_test = y_finger[test_idx]
@@ -68,7 +70,9 @@ X_test = apply_channel_normalizer(X_test, normalizer)
 n_fingers = int(y_finger.max()) + 1
 n_actions = int(y_action.max()) + 1
 
-model = CNNLSTMFingerActionNet(n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions)
+model = CNNLSTMFingerActionNet(
+    n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions
+)
 model_path = "finger_action_model.pt"
 if not os.path.exists(model_path):
     raise FileNotFoundError(f"Model file not found: {model_path}")
@@ -99,6 +103,7 @@ finger_uncertainty = np.mean(finger_std, axis=1)
 # ===== METRICS ===========
 # =========================
 
+
 def reliability_bins(conf, preds, labels, n_bins=10):
     bins = np.linspace(0, 1, n_bins + 1)
     bin_centers = (bins[:-1] + bins[1:]) / 2
@@ -114,10 +119,12 @@ def reliability_bins(conf, preds, labels, n_bins=10):
 
 action_acc = accuracy_score(y_action_test, action_preds)
 mask = y_action_test != ACTION_REST
-finger_acc = accuracy_score(y_finger_test[mask], finger_preds[mask]) if mask.any() else 0.0
+finger_acc = (
+    accuracy_score(y_finger_test[mask], finger_preds[mask]) if mask.any() else 0.0
+)
 
-print(f"\n🎯 Action Accuracy: {action_acc*100:.2f}%")
-print(f"🎯 Finger Accuracy (non-REST): {finger_acc*100:.2f}%")
+print(f"\n🎯 Action Accuracy: {action_acc * 100:.2f}%")
+print(f"🎯 Finger Accuracy (non-REST): {finger_acc * 100:.2f}%")
 
 # =========================
 # ===== PLOTS =============
@@ -135,7 +142,7 @@ sns.heatmap(
     cmap="Blues",
     xticklabels=action_labels,
     yticklabels=action_labels,
-    ax=axs[0, 0]
+    ax=axs[0, 0],
 )
 axs[0, 0].set_title("Action Confusion Matrix")
 axs[0, 0].set_xlabel("Predicted")
@@ -145,9 +152,7 @@ axs[0, 0].set_ylabel("True")
 if mask.any():
     finger_label_ids = [i for i in sorted(FINGER_NAMES.keys()) if i != 0]
     finger_cm = confusion_matrix(
-        y_finger_test[mask],
-        finger_preds[mask],
-        labels=finger_label_ids
+        y_finger_test[mask], finger_preds[mask], labels=finger_label_ids
     )
     finger_labels = [FINGER_NAMES[i] for i in finger_label_ids]
     sns.heatmap(
@@ -157,7 +162,7 @@ if mask.any():
         cmap="Greens",
         xticklabels=finger_labels,
         yticklabels=finger_labels,
-        ax=axs[0, 1]
+        ax=axs[0, 1],
     )
     axs[0, 1].set_title("Finger Confusion Matrix (non-REST)")
     axs[0, 1].set_xlabel("Predicted")
@@ -178,7 +183,9 @@ axs[1, 1].set_title("Finger Confidence vs Uncertainty")
 axs[1, 1].legend()
 
 # --- Reliability Diagram (Action) ---
-bin_centers, bin_accs = reliability_bins(action_conf, action_preds, y_action_test, n_bins=10)
+bin_centers, bin_accs = reliability_bins(
+    action_conf, action_preds, y_action_test, n_bins=10
+)
 axs[2, 0].plot([0, 1], [0, 1], "--", color="gray")
 axs[2, 0].bar(bin_centers, bin_accs, width=0.08, alpha=0.7)
 axs[2, 0].set_title("Action Reliability Diagram")

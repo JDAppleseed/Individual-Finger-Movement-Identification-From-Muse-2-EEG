@@ -72,7 +72,14 @@ def _find_models(root: Path) -> List[Path]:
 
 def _find_scalers(root: Path) -> List[Path]:
     candidates = []
-    for pattern in ("scaler.save", "*normalizer*.save", "*scaler*.pkl", "*scaler*.joblib", "*normalizer*.pkl", "*normalizer*.joblib"):
+    for pattern in (
+        "scaler.save",
+        "*normalizer*.save",
+        "*scaler*.pkl",
+        "*scaler*.joblib",
+        "*normalizer*.pkl",
+        "*normalizer*.joblib",
+    ):
         candidates.extend(root.rglob(pattern))
     return sorted({p.resolve() for p in candidates})
 
@@ -88,7 +95,9 @@ def _load_json(path: Path) -> Dict:
         return {}
 
 
-def _candidate_from_config(cfg_path: Path, root: Path) -> Optional[Tuple[Path, Path, Path, Optional[str]]]:
+def _candidate_from_config(
+    cfg_path: Path, root: Path
+) -> Optional[Tuple[Path, Path, Path, Optional[str]]]:
     cfg = _load_json(cfg_path)
     if not cfg:
         return None
@@ -97,7 +106,11 @@ def _candidate_from_config(cfg_path: Path, root: Path) -> Optional[Tuple[Path, P
     scaler_path = cfg.get("save_scaler_path")
     subject_id = cfg.get("subject_id_filter")
     if npz_path:
-        npz_path = (root / npz_path).resolve() if not os.path.isabs(npz_path) else Path(npz_path)
+        npz_path = (
+            (root / npz_path).resolve()
+            if not os.path.isabs(npz_path)
+            else Path(npz_path)
+        )
     if model_path:
         model_path = Path(model_path)
     if scaler_path:
@@ -109,7 +122,9 @@ def _candidate_from_config(cfg_path: Path, root: Path) -> Optional[Tuple[Path, P
     return npz_path.resolve(), model_path.resolve(), scaler_path.resolve(), subject_id
 
 
-def _pair_models_and_scalers(models: Iterable[Path], scalers: Iterable[Path]) -> List[Tuple[Path, Path]]:
+def _pair_models_and_scalers(
+    models: Iterable[Path], scalers: Iterable[Path]
+) -> List[Tuple[Path, Path]]:
     scalers_by_dir: Dict[Path, List[Path]] = {}
     for scaler in scalers:
         scalers_by_dir.setdefault(scaler.parent, []).append(scaler)
@@ -149,7 +164,9 @@ def _build_candidates(root: Path) -> List[Tuple[Path, Path, Path, Optional[str]]
     return deduped
 
 
-def _parse_metrics(stdout: str) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+def _parse_metrics(
+    stdout: str,
+) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
     action_acc = None
     finger_acc = None
     action_ece = None
@@ -171,7 +188,9 @@ def _parse_metrics(stdout: str) -> Tuple[Optional[float], Optional[float], Optio
     return action_acc, finger_acc, action_ece, finger_ece
 
 
-def _run_eval(npz: Path, model: Path, scaler: Path, subject_id: Optional[str]) -> EvalResult:
+def _run_eval(
+    npz: Path, model: Path, scaler: Path, subject_id: Optional[str]
+) -> EvalResult:
     subject_id_arg = subject_id
     if subject_id_arg is None:
         subject_id_arg = ""
@@ -222,13 +241,17 @@ def _rank_results(results: Sequence[EvalResult]) -> List[EvalResult]:
     )
 
 
-def _write_outputs(results: Sequence[EvalResult], out_json: Path, out_txt: Path) -> None:
+def _write_outputs(
+    results: Sequence[EvalResult], out_json: Path, out_txt: Path
+) -> None:
     out_json.parent.mkdir(parents=True, exist_ok=True)
     payload = [asdict(r) for r in results]
     out_json.write_text(json.dumps(payload, indent=2))
 
     lines = []
-    lines.append("rank\taction_acc\tfinger_acc\taction_ece\tfinger_ece\tscore\tnpz\tmodel\tscaler\tsubject_id")
+    lines.append(
+        "rank\taction_acc\tfinger_acc\taction_ece\tfinger_ece\tscore\tnpz\tmodel\tscaler\tsubject_id"
+    )
     for idx, r in enumerate(results, start=1):
         lines.append(
             f"{idx}\t{r.action_acc}\t{r.finger_acc}\t{r.action_ece}\t{r.finger_ece}\t{r.score}\t{r.npz}\t{r.model}\t{r.scaler}\t{r.subject_id}"
@@ -238,7 +261,9 @@ def _write_outputs(results: Sequence[EvalResult], out_json: Path, out_txt: Path)
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--max-runs", type=int, default=None, help="Limit number of evaluations")
+    parser.add_argument(
+        "--max-runs", type=int, default=None, help="Limit number of evaluations"
+    )
     args = parser.parse_args()
 
     root = _repo_root()

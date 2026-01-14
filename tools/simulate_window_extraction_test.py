@@ -24,14 +24,16 @@ def _write_features(path: Path, times: np.ndarray, lsl_start: float):
     ch4 = np.cos(2 * np.pi * 10.0 * times)
     noise = np.random.default_rng(123).normal(0, 0.05, size=times.shape)
 
-    df = pd.DataFrame({
-        "lsl_timestamp": lsl_ts,
-        "time_s": times,
-        "ch1": ch1 + noise,
-        "ch2": ch2 + noise,
-        "ch3": ch3 + noise,
-        "ch4": ch4 + noise,
-    })
+    df = pd.DataFrame(
+        {
+            "lsl_timestamp": lsl_ts,
+            "time_s": times,
+            "ch1": ch1 + noise,
+            "ch2": ch2 + noise,
+            "ch3": ch3 + noise,
+            "ch4": ch4 + noise,
+        }
+    )
     df.to_csv(path, index=False)
 
 
@@ -62,39 +64,44 @@ def _write_events(path: Path, lsl_start: float):
         onset_lsl = lsl_start + e["onset_s"]
         end_s = e["onset_s"] + e["duration_s"]
         end_lsl = lsl_start + end_s
-        rows.append([
-            onset_lsl,
-            e["onset_s"],
-            e["duration_s"],
-            end_lsl,
-            end_s,
-            e["type"],
-            "n/a",
-            "",
-            "",
-            e["finger_id"],
-            e["action_id"],
-            e["trial_id"],
-            e["block_id"],
-            "manual",
-        ])
+        rows.append(
+            [
+                onset_lsl,
+                e["onset_s"],
+                e["duration_s"],
+                end_lsl,
+                end_s,
+                e["type"],
+                "n/a",
+                "",
+                "",
+                e["finger_id"],
+                e["action_id"],
+                e["trial_id"],
+                e["block_id"],
+                "manual",
+            ]
+        )
 
-    df = pd.DataFrame(rows, columns=[
-        "onset_lsl",
-        "onset_s",
-        "duration_s",
-        "end_lsl",
-        "end_s",
-        "type",
-        "channel",
-        "confidence",
-        "notes",
-        "finger_id",
-        "action_id",
-        "trial_id",
-        "block_id",
-        "source",
-    ])
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "onset_lsl",
+            "onset_s",
+            "duration_s",
+            "end_lsl",
+            "end_s",
+            "type",
+            "channel",
+            "confidence",
+            "notes",
+            "finger_id",
+            "action_id",
+            "trial_id",
+            "block_id",
+            "source",
+        ],
+    )
     df.to_csv(path, index=False)
 
 
@@ -146,7 +153,8 @@ def main():
         cmd = [
             sys.executable,
             str(extractor),
-            "--target-fs", "256",
+            "--target-fs",
+            "256",
         ]
         result = subprocess.run(cmd, cwd=tmp_dir, capture_output=True, text=True)
         if result.returncode != 0:

@@ -30,8 +30,12 @@ def _run_and_log(cmd: str, log_path: Path) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run sweep with separate train/eval logs.")
-    parser.add_argument("--runs", type=int, default=1, help="Number of sweep runs to execute")
+    parser = argparse.ArgumentParser(
+        description="Run sweep with separate train/eval logs."
+    )
+    parser.add_argument(
+        "--runs", type=int, default=1, help="Number of sweep runs to execute"
+    )
     parser.add_argument(
         "--train-cmd",
         type=str,
@@ -44,7 +48,9 @@ def main() -> int:
         default=f"{sys.executable} 3_evaluate_model.py",
         help="Eval command to execute",
     )
-    parser.add_argument("--log-dir", type=str, default="logs/sweep", help="Directory for sweep logs")
+    parser.add_argument(
+        "--log-dir", type=str, default="logs/sweep", help="Directory for sweep logs"
+    )
     args = parser.parse_args()
 
     log_dir = Path(args.log_dir)

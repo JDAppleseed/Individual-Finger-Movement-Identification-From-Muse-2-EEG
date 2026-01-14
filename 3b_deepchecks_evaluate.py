@@ -13,7 +13,11 @@ import numpy as np
 import torch
 
 from deepchecks.tabular import Dataset
-from deepchecks.tabular.suites import data_integrity, train_test_validation, model_evaluation
+from deepchecks.tabular.suites import (
+    data_integrity,
+    train_test_validation,
+    model_evaluation,
+)
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from utils.label_schema import ACTION_NAMES, ACTION_REST, FINGER_NAMES
@@ -73,7 +77,9 @@ def _unique_non_rest_fingers(y_action: np.ndarray, y_finger: np.ndarray):
     return len(np.unique(y_finger[mask]))
 
 
-def _apply_sample_limit(X, y_action, y_finger, meta, max_samples: Optional[int], seed: int):
+def _apply_sample_limit(
+    X, y_action, y_finger, meta, max_samples: Optional[int], seed: int
+):
     if not max_samples or len(y_action) <= max_samples:
         return X, y_action, y_finger, meta
 
@@ -96,7 +102,11 @@ def _apply_sample_limit(X, y_action, y_finger, meta, max_samples: Optional[int],
     y_finger = y_finger[keep_idx]
     if meta:
         meta = {
-            key: (np.asarray(val)[keep_idx] if isinstance(val, np.ndarray) and len(val) == len(indices) else val)
+            key: (
+                np.asarray(val)[keep_idx]
+                if isinstance(val, np.ndarray) and len(val) == len(indices)
+                else val
+            )
             for key, val in meta.items()
         }
     return X, y_action, y_finger, meta
@@ -120,11 +130,19 @@ def _split_with_checks(y_action, y_finger, meta, seed: int):
 
         action_train_unique = len(np.unique(y_action[train_idx]))
         action_test_unique = len(np.unique(y_action[test_idx]))
-        finger_train_unique = _unique_non_rest_fingers(y_action[train_idx], y_finger[train_idx])
-        finger_test_unique = _unique_non_rest_fingers(y_action[test_idx], y_finger[test_idx])
+        finger_train_unique = _unique_non_rest_fingers(
+            y_action[train_idx], y_finger[train_idx]
+        )
+        finger_test_unique = _unique_non_rest_fingers(
+            y_action[test_idx], y_finger[test_idx]
+        )
 
-        action_ok = overall_action_unique < 2 or (action_train_unique >= 2 and action_test_unique >= 2)
-        finger_ok = overall_finger_unique < 2 or (finger_train_unique >= 2 and finger_test_unique >= 2)
+        action_ok = overall_action_unique < 2 or (
+            action_train_unique >= 2 and action_test_unique >= 2
+        )
+        finger_ok = overall_finger_unique < 2 or (
+            finger_train_unique >= 2 and finger_test_unique >= 2
+        )
 
         if action_ok and finger_ok:
             return train_idx, test_idx
@@ -142,16 +160,27 @@ def _dataset_kwargs():
         pass
     return {}
 
+
 # =========================
 # ===== LOAD DATA =========
 # =========================
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--npz", type=str, default="eeg_windows.npz", help="Sequence npz file")
-parser.add_argument("--model", type=str, default="finger_action_model.pt", help="Model weights path")
-parser.add_argument("--scaler", type=str, default="scaler.save", help="Normalizer/scaler path")
-parser.add_argument("--max-samples", type=int, default=None, help="Limit samples for Deepchecks")
-parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Inference batch size")
+parser.add_argument(
+    "--npz", type=str, default="eeg_windows.npz", help="Sequence npz file"
+)
+parser.add_argument(
+    "--model", type=str, default="finger_action_model.pt", help="Model weights path"
+)
+parser.add_argument(
+    "--scaler", type=str, default="scaler.save", help="Normalizer/scaler path"
+)
+parser.add_argument(
+    "--max-samples", type=int, default=None, help="Limit samples for Deepchecks"
+)
+parser.add_argument(
+    "--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Inference batch size"
+)
 args = parser.parse_args()
 
 X, y_action, y_finger, meta = load_sequence_npz(args.npz, mmap_mode="r")
@@ -201,7 +230,9 @@ assert action_train_unique > 1, "Action target collapsed in train set."
 assert action_test_unique > 1, "Action target collapsed in test set."
 
 if finger_train_unique < 2 or finger_test_unique < 2:
-    print("⚠️ Finger labels collapsed in train/test split; Deepchecks will ignore finger labels.")
+    print(
+        "⚠️ Finger labels collapsed in train/test split; Deepchecks will ignore finger labels."
+    )
 
 # =========================
 # ===== REUSE SCALER ======
@@ -257,16 +288,20 @@ test_ds = Dataset(
 n_fingers = int(y_finger.max()) + 1
 n_actions = int(y_action.max()) + 1
 
-model = CNNLSTMFingerActionNet(n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions)
+model = CNNLSTMFingerActionNet(
+    n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions
+)
 model_path = args.model
 model.load_state_dict(torch.load(model_path, map_location="cpu"))
 model.eval()
+
 
 class TorchModelWrapper:
     """
     Deepchecks-compatible wrapper.
     Returns deterministic action probabilities.
     """
+
     def predict(self, X_tabular):
         if "window_idx" not in X_tabular:
             raise KeyError("Deepchecks input is missing required column 'window_idx'.")
@@ -289,6 +324,7 @@ class TorchModelWrapper:
                 probs = torch.softmax(action_logits, dim=1)
                 probs_out[start:end] = probs.detach().cpu().numpy()
         return probs_out
+
 
 print("🔍 Running Deepchecks suites...")
 

@@ -24,3 +24,14 @@ python 1b_extract_windows.py --help
 python -c "import json; from pathlib import Path; print('ok')"
 python -c "from utils.timebase import clamp_monotonic_time; print('ok')"
 ```
+
+## Environment setup (clean clone)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip wheel setuptools
+python -m pip install -r requirements.txt
+```
+
+System-level dependencies (LaTeX/Node) are listed in `SYSTEM_DEPS.md`.

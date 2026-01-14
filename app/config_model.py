@@ -143,11 +143,13 @@ def default_train_settings() -> Dict[str, Any]:
 
 def default_infer_settings() -> Dict[str, Any]:
     settings = default_step1_settings()
-    settings.update({
-        "DEMO_MODE": True,
-        "SAVE_TO_DISK": False,
-        "EVENT_MARKING_ENABLED": False,
-    })
+    settings.update(
+        {
+            "DEMO_MODE": True,
+            "SAVE_TO_DISK": False,
+            "EVENT_MARKING_ENABLED": False,
+        }
+    )
     return settings
 
 
