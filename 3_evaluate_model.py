@@ -336,6 +336,8 @@ def _load_predictions_if_present(path: Path):
             "y_finger": d["y_finger"],
             "test_indices": test_idx,
         }
+        if "test_indices_local" in d.files:
+            out["test_indices_local"] = d["test_indices_local"]
 
         if "dataset_info" in d.files:
             out["dataset_info"] = d["dataset_info"]
