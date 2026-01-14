@@ -910,6 +910,7 @@ recent_sample_times: Deque[float] = deque(maxlen=512)
 last_report_time: Optional[float] = None
 last_report_samples_written = 0
 timebase_report_initialized = False
+non_finite_sample_warned = False
 
 
 def _load_existing_events(path: Path):
@@ -1550,6 +1551,14 @@ try:
             )
         if len(sample) != CHANNELS:
             sample = [sample[i] for i in channel_indices]
+
+        if not np.all(np.isfinite(sample)):
+            if not non_finite_sample_warned:
+                print(
+                    "⚠️ Non-finite EEG sample detected (NaN/Inf). Skipping sample to keep ICA stable."
+                )
+                non_finite_sample_warned = True
+            continue
 
         # =========================
         # ===== TIMEBASE INIT ======

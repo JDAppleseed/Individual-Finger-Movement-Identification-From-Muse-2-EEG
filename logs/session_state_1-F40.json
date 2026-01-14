@@ -1,0 +1,20 @@
+{
+  "subject_id": "1-F40",
+  "session_id": "20260114_142658",
+  "experiment_hash": "b0ae0c57c683",
+  "block_id": 2,
+  "segment_id": 1,
+  "total_elapsed_s": 761.1209625631382,
+  "last_time_s": 761.1209625631382,
+  "features_path": "data/processed/1-F40_20260114_142658_eeg_features.csv",
+  "events_path": "data/processed/1-F40_20260114_142658_events.csv",
+  "raw_path": "data/raw/1-F40_20260114_142658_raw.csv",
+  "created_utc": "2026-01-14T22:26:58.322266Z",
+  "updated_utc": "2026-01-14T22:45:40.330508Z",
+  "timebase_version": "absolute_v1",
+  "timebase": "absolute_v1",
+  "time_s_clamped_count": 1394,
+  "event_clamped_count": 0,
+  "stream_start_lsl_ts": 49027.27856193699,
+  "local_clock_at_start": 78689.307442041
+}
