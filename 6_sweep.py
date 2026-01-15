@@ -12,7 +12,7 @@ import argparse
 import shlex
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -54,7 +54,7 @@ def main() -> int:
     args = parser.parse_args()
 
     log_dir = Path(args.log_dir)
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
     for run_idx in range(1, max(1, args.runs) + 1):
         run_id = f"{timestamp}_run{run_idx}"

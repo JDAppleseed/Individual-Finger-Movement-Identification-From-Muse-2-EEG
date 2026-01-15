@@ -25,7 +25,7 @@ import time
 import csv
 import json
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import deque
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
@@ -60,6 +60,8 @@ from utils.label_schema import (
 from utils.session_timebase import compute_event_lsl_ts
 from utils.timebase import clamp_monotonic_time
 from utils.timebase_selfcheck import evaluate_timebase_alignment
+from utils.ica_guard import guard_ica_fit, validate_ica_input
+from utils.stream_health import StreamHealthMonitor
 
 try:
     from pynput import keyboard
@@ -116,6 +118,23 @@ LSL_STREAM_NAME = None
 LSL_STREAM_TYPE = None
 CSV_OFFLINE_PATH = None
 SESSION_ID_OVERRIDE = None
+
+# =========================
+# ===== ICA SAFETY ========
+# =========================
+ENABLE_ICA = False
+ICA_WARMUP_S = 10.0
+ICA_MIN_SAMPLES = 256 * 5
+ICA_MIN_VAR = 1e-8
+ICA_FAIL_POLICY = "skip"
+ICA_MAX_RETRIES_PER_SESSION = 1
+LOG_ICA_DIAGNOSTICS = True
+
+# =========================
+# ===== STREAM HEALTH =====
+# =========================
+DATA_STREAM_TIMEOUT_S = 5.0
+DATA_STREAM_CHECK_INTERVAL_S = 0.5
 
 # =========================
 # ===== SUBJECT INFO ======
@@ -183,6 +202,10 @@ experiment_config = {
     "model": "CNNLSTMFingerActionNet + ICA",
 }
 
+
+def utc_now_iso_z() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
 # =========================
 # ===== SESSION STATE =====
 # =========================
@@ -209,6 +232,23 @@ raw_path_state = None
 created_utc = None
 time_s_clamped_count = 0
 event_clamped_count = 0
+
+ica_enabled_requested = bool(ENABLE_ICA)
+ica_ran = False
+ica_skipped_reason = None
+ica_failed_exception = None
+ica_disabled_due_to_error = False
+ica_retries = 0
+
+if not ENABLE_ICA:
+    ica_skipped_reason = "disabled"
+
+selected_channel_indices = None
+selected_channel_variances = None
+
+data_stream_active = False
+data_stream_last_write_ts = None
+data_stream_stalled_reason = None
 
 # Legacy/diagnostic fields (kept for compatibility)
 stream_start_lsl_ts = None
@@ -506,7 +546,7 @@ def _build_session_meta_payload(complete: bool):
         "local_clock_at_start": local_clock_at_start,
         "complete": bool(complete),
         "created_utc": created_utc,
-        "updated_utc": datetime.utcnow().isoformat() + "Z",
+        "updated_utc": utc_now_iso_z(),
     }
 
 
@@ -556,11 +596,20 @@ def _build_session_state_payload(
         "events_path": str(EVENTS_ARCHIVE_PATH),
         "raw_path": str(RAW_ARCHIVE_PATH),
         "created_utc": created_utc,
-        "updated_utc": datetime.utcnow().isoformat() + "Z",
+        "updated_utc": utc_now_iso_z(),
         "timebase_version": TIMEBASE_VERSION,
         "timebase": TIMEBASE_VERSION,
         "time_s_clamped_count": int(time_s_clamped_count),
         "event_clamped_count": int(event_clamped_count),
+        "ica_enabled_requested": bool(ica_enabled_requested),
+        "ica_ran": bool(ica_ran),
+        "ica_skipped_reason": ica_skipped_reason,
+        "ica_failed_exception": ica_failed_exception,
+        "selected_channel_indices": selected_channel_indices,
+        "selected_channel_variances": selected_channel_variances,
+        "data_stream_active": bool(data_stream_active),
+        "data_stream_last_write_ts": data_stream_last_write_ts,
+        "data_stream_stalled_reason": data_stream_stalled_reason,
         # Legacy/diagnostic
         "stream_start_lsl_ts": stream_start_lsl_ts,
         "local_clock_at_start": local_clock_at_start,
@@ -635,6 +684,7 @@ print(f"  Event Marking   : {'ENABLED' if EVENT_MARKING_ENABLED else 'DISABLED'}
 print(f"  Demo Mode       : {'ON' if DEMO_MODE else 'OFF'}")
 print(f"  Training Mode   : {'ON' if TRAINING_MODE else 'OFF'}")
 print(f"  Actuation       : {'ENABLED' if ENABLE_ACTUATION else 'DISABLED'}")
+print(f"  ICA             : {'ENABLED' if ENABLE_ICA else 'DISABLED'}")
 print("")
 print("Output Paths:")
 print(f"  Features CSV    : {FEATURES_ARCHIVE_PATH}")
@@ -677,7 +727,7 @@ if not true_resume:
     _maybe_backup_path(SESSION_META_PATH, "Existing session meta file")
 
 if not created_utc:
-    created_utc = datetime.utcnow().isoformat() + "Z"
+    created_utc = utc_now_iso_z()
 
 _update_session_meta(complete=False, label="init")
 _write_session_state(label="init")
@@ -799,7 +849,7 @@ def _timebase_report_payload():
     )
 
     return {
-        "ts_utc": datetime.utcnow().isoformat() + "Z",
+        "ts_utc": utc_now_iso_z(),
         "subject_id": subject_id,
         "session_id": session_id,
         "segment_id": segment_id,
@@ -1326,10 +1376,38 @@ if EVENT_MARKING_ENABLED and keyboard is None:
     EVENT_MARKING_ENABLED = False
 
 listener = None
-if EVENT_MARKING_ENABLED:
+event_marking_active = False
+
+
+def start_event_listener() -> None:
+    global listener, event_marking_active
+    if (
+        not EVENT_MARKING_ENABLED
+        or keyboard is None
+        or event_marking_active
+        or not data_stream_active
+    ):
+        return
     listener = keyboard.Listener(on_press=on_key_press, on_release=on_key_release)
     listener.daemon = True
     listener.start()
+    event_marking_active = True
+
+
+def stop_event_listener() -> None:
+    global listener, event_marking_active
+    if listener is None:
+        return
+    try:
+        listener.stop()
+    except Exception:
+        pass
+    listener = None
+    event_marking_active = False
+
+
+if EVENT_MARKING_ENABLED:
+    start_event_listener()
 
 # =========================
 # ===== MODEL (MC DROPOUT) =====
@@ -1419,6 +1497,31 @@ def resolve_eeg_channel_indices(info, expected):
     return None
 
 
+def probe_channel_variances(
+    inlet: StreamInlet,
+    channel_count: int,
+    *,
+    probe_duration_s: float,
+    min_samples: int = 10,
+) -> Optional[np.ndarray]:
+    samples: List[np.ndarray] = []
+    start = time.monotonic()
+    while time.monotonic() - start < probe_duration_s:
+        sample, _ = inlet.pull_sample(timeout=0.0)
+        if sample is None:
+            continue
+        if len(sample) < channel_count:
+            continue
+        sample_arr = np.asarray(sample[:channel_count], dtype=np.float64)
+        if not np.all(np.isfinite(sample_arr)):
+            continue
+        samples.append(sample_arr)
+    if len(samples) < min_samples:
+        return None
+    stacked = np.vstack(samples)
+    return np.var(stacked, axis=0)
+
+
 print("🔍 Resolving EEG stream...")
 if CSV_OFFLINE_PATH:
     raise RuntimeError("CSV offline mode is not supported in 1_stream_and_record.py.")
@@ -1441,16 +1544,46 @@ info = inlet.info()
 expected_labels = ["TP9", "AF7", "AF8", "TP10"]
 channel_indices = resolve_eeg_channel_indices(info, expected_labels)
 if channel_indices is None:
-    if info.channel_count() >= CHANNELS:
-        channel_indices = list(range(CHANNELS))
-        print("⚠️ EEG channel labels not found; using first four channels by index.")
-    else:
+    if info.channel_count() < CHANNELS:
         raise RuntimeError(
             f"LSL EEG stream has {info.channel_count()} channels; expected at least {CHANNELS}."
+        )
+    probe_duration = min(float(ICA_WARMUP_S), 2.0)
+    probe_variances = probe_channel_variances(
+        inlet, info.channel_count(), probe_duration_s=probe_duration
+    )
+    if probe_variances is None:
+        channel_indices = list(range(CHANNELS))
+        selected_channel_variances = None
+        print(
+            "⚠️ EEG channel labels not found; probe window insufficient. Using first four channels by index."
+        )
+    else:
+        valid_mask = np.isfinite(probe_variances)
+        valid_indices = np.where(valid_mask)[0].tolist()
+        filtered = [
+            (idx, float(probe_variances[idx]))
+            for idx in valid_indices
+            if probe_variances[idx] >= ICA_MIN_VAR
+        ]
+        if len(filtered) < CHANNELS:
+            filtered = sorted(
+                [(idx, float(probe_variances[idx])) for idx in valid_indices],
+                key=lambda x: x[1],
+                reverse=True,
+            )
+        channel_indices = [idx for idx, _ in filtered[:CHANNELS]]
+        selected_channel_variances = [var for _, var in filtered[:CHANNELS]]
+        print(
+            "⚠️ EEG channel labels not found; selected channels by variance probe window."
+        )
+        print(
+            f"🔎 Selected indices: {channel_indices} with variances {selected_channel_variances}"
         )
 print(
     f"✅ EEG connected ({info.channel_count()} channels, using indices {channel_indices})"
 )
+selected_channel_indices = channel_indices
 
 # =========================
 # ===== BUFFERS ===========
@@ -1501,6 +1634,9 @@ if SAVE_RAW:
     if not raw_exists:
         raw_writer.writerow(["lsl_timestamp", "ch1", "ch2", "ch3", "ch4"])
 
+stream_health = StreamHealthMonitor(DATA_STREAM_TIMEOUT_S)
+last_stream_check = time.monotonic()
+
 
 # =========================
 # ===== ICA SETUP =========
@@ -1517,7 +1653,7 @@ def is_artifact(ic_signal, fs):
     return (low > mid * 2.0) or (high > mid * 2.0)
 
 
-ica = FastICA(n_components=CHANNELS, random_state=42)
+ica = FastICA(n_components=CHANNELS, random_state=42) if ENABLE_ICA else None
 ica_scaler = StandardScaler()
 ica_fitted = False
 ARTIFACT_ATTENUATION = 0.3
@@ -1534,6 +1670,25 @@ if ENABLE_PLOT:
     ax.set_ylim(-150, 150)
     ax.set_title("Cleaned EEG + Confidence Info")
 
+
+def _update_stream_health(now_monotonic: float) -> None:
+    global data_stream_active, data_stream_last_write_ts, data_stream_stalled_reason
+    status = stream_health.check(now_monotonic)
+    data_stream_last_write_ts = status.last_write_utc
+    if status.active and not data_stream_active:
+        data_stream_active = True
+        data_stream_stalled_reason = None
+        print("✅ EEG stream resumed; re-enabling event marking popup.")
+        if EVENT_MARKING_ENABLED:
+            start_event_listener()
+        _write_session_state(label="stream_resumed")
+    elif not status.active and data_stream_active:
+        data_stream_active = False
+        data_stream_stalled_reason = status.stalled_reason
+        print("⚠️ EEG stream stalled: stopping event marking popup.")
+        stop_event_listener()
+        _write_session_state(label="stream_stalled")
+
 # =========================
 # ===== MAIN LOOP =========
 # =========================
@@ -1541,6 +1696,11 @@ print("▶ Streaming — type 'end_stream' OR press q/ESC to stop")
 
 try:
     while not stop_event.is_set():
+        now_monotonic = time.monotonic()
+        if now_monotonic - last_stream_check >= DATA_STREAM_CHECK_INTERVAL_S:
+            _update_stream_health(now_monotonic)
+            last_stream_check = now_monotonic
+
         sample, lsl_ts = inlet.pull_sample(timeout=0.0)
         if sample is None:
             continue
@@ -1629,6 +1789,7 @@ try:
 
         if raw_writer:
             raw_writer.writerow([lsl_ts, *sample])
+            stream_health.mark_write(time.monotonic(), utc_now_iso_z())
 
         if len(eeg_buffer) < buffer_len:
             continue
@@ -1642,20 +1803,66 @@ try:
             continue
 
         # ===== ICA =====
-        if not ica_fitted:
-            X_scaled = ica_scaler.fit_transform(compressed)
-            ica.fit(X_scaled)
-            ica_fitted = True
-
-        X_scaled = ica_scaler.transform(window)
-        S = ica.transform(X_scaled)
-
-        for k in range(S.shape[1]):
-            if is_artifact(S[:, k], fs=SAMPLING_RATE):
-                S[:, k] *= ARTIFACT_ATTENUATION
-
-        cleaned = ica.inverse_transform(S)
-        latest_sample = cleaned[-1] if len(cleaned) else window[-1]
+        cleaned = window
+        latest_sample = window[-1]
+        if ENABLE_ICA and ica is not None and not ica_disabled_due_to_error:
+            ica_skipped_reason = None
+            if not ica_fitted:
+                warmup_ready = samples_seen >= int(ICA_WARMUP_S * SAMPLING_RATE)
+                if not warmup_ready:
+                    ica_skipped_reason = "warmup"
+                else:
+                    try:
+                        result = guard_ica_fit(
+                            compressed,
+                            scaler=ica_scaler,
+                            ica=ica,
+                            min_samples=int(ICA_MIN_SAMPLES),
+                            min_var=float(ICA_MIN_VAR),
+                        )
+                        if result.ok:
+                            ica_fitted = True
+                            ica_ran = True
+                        else:
+                            ica_skipped_reason = result.reason
+                            if LOG_ICA_DIAGNOSTICS:
+                                print(f"⚠️ ICA skipped: {result.reason} {result.diagnostics}")
+                    except Exception as exc:
+                        ica_failed_exception = repr(exc)
+                        ica_retries += 1
+                        ica_skipped_reason = "fit_exception"
+                        print(f"⚠️ ICA fit failed: {exc}")
+                        if ica_retries >= ICA_MAX_RETRIES_PER_SESSION:
+                            ica_disabled_due_to_error = True
+                            print("⚠️ ICA disabled for session due to repeated failures.")
+            if ica_fitted:
+                reason, diag = validate_ica_input(
+                    window, min_samples=None, min_var=float(ICA_MIN_VAR)
+                )
+                if reason is not None:
+                    ica_skipped_reason = reason
+                    if LOG_ICA_DIAGNOSTICS:
+                        print(f"⚠️ ICA skipped: {reason} {diag}")
+                else:
+                    try:
+                        X_scaled = ica_scaler.transform(window)
+                        if not np.isfinite(X_scaled).all():
+                            raise ValueError("ICA scaling produced non-finite values.")
+                        S = ica.transform(X_scaled)
+                        for k in range(S.shape[1]):
+                            if is_artifact(S[:, k], fs=SAMPLING_RATE):
+                                S[:, k] *= ARTIFACT_ATTENUATION
+                        cleaned = ica.inverse_transform(S)
+                        latest_sample = cleaned[-1] if len(cleaned) else window[-1]
+                        ica_ran = True
+                    except Exception as exc:
+                        ica_failed_exception = repr(exc)
+                        ica_retries += 1
+                        ica_skipped_reason = "transform_exception"
+                        print(f"⚠️ ICA transform failed: {exc}")
+                        if ica_retries >= ICA_MAX_RETRIES_PER_SESSION:
+                            ica_disabled_due_to_error = True
+                            print("⚠️ ICA disabled for session due to repeated failures.")
 
         # ===== DEFAULTS =====
         pred_action = -1
@@ -1786,6 +1993,7 @@ try:
                     f"Feature row length {len(row)} does not match header length {len(header)}"
                 )
             csv_writer.writerow(row)
+            stream_health.mark_write(time.monotonic(), utc_now_iso_z())
             last_written_time_s = float(time_s)
             last_time_s = float(last_written_time_s)  # keep session meta/state current
             samples_written += 1
