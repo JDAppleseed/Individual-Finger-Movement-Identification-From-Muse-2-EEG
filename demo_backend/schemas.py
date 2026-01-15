@@ -151,7 +151,7 @@ def sample_tick():
         "ts_utc": _now_iso(),
         "mode": "replay",
         "session": {
-            "subject_id": "1-F40",
+            "subject_id": "1-F35",
             "experiment_hash": "abc123def456",
             "window_index": 1234,
             "window_start_s": 12.3,

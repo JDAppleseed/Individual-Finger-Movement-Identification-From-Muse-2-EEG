@@ -139,9 +139,9 @@ DATA_STREAM_CHECK_INTERVAL_S = 0.5
 # =========================
 # ===== SUBJECT INFO ======
 # =========================
-GENDER = "M"
-AGE = 60
-SUBJECT_ID_OVERRIDE = "1-F40"  # Set to None to use auto-increment registry
+GENDER = "F"
+AGE = 35
+SUBJECT_ID_OVERRIDE = "1-F35"  # Set to None to use auto-increment registry
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
