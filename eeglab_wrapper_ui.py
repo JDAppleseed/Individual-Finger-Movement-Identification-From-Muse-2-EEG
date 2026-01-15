@@ -8,6 +8,15 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import (
+    QFontMetrics,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QSyntaxHighlighter,
+    QTextCharFormat,
+    QPalette,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -28,6 +37,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QProxyStyle,
     QScrollArea,
     QSpinBox,
     QDoubleSpinBox,
@@ -39,6 +49,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QWidgetAction,
+    QStyle,
+    QStyleOptionFrame,
+    QStyleOptionViewItem,
+    QStyledItemDelegate,
 )
 
 from app.config_model import (
@@ -133,7 +147,7 @@ QMainWindow {
 }
 QMenuBar {
     background: #e4e8f2;
-    color: #1d2a44;
+    color: white;
     padding: 4px;
     font-weight: 600;
 }
@@ -143,7 +157,7 @@ QMenuBar::item:selected {
 }
 QMenu {
     background: #f2f4fb;
-    color: #1d2a44;
+    color: white;
     border: 1px solid #7a8fb8;
 }
 QMenu::item:selected {
@@ -156,7 +170,7 @@ QDockWidget {
     font-weight: 600;
 }
 QDockWidget::title {
-    color: #1d2a44;
+    color: white;
     background: #dbe3f4;
     padding: 4px;
 }
@@ -171,7 +185,7 @@ QGroupBox::title {
     left: 8px;
     top: -8px;
     padding: 0 4px;
-    color: #24345b;
+    color: white;
 }
 QPushButton {
     background: #6c86c7;
@@ -193,7 +207,7 @@ QListWidget {
     border: 1px solid #7a8fb8;
 }
 QLabel {
-    color: #1d2a44;
+    color: white;
 }
 QToolButton {
     background: #6c86c7;
@@ -203,7 +217,7 @@ QToolButton {
 }
 QToolTip {
     background-color: #f2f4fb;
-    color: #1d2a44;
+    color: white;
     border: 1px solid #7a8fb8;
 }
 QFrame#StatusBarFrame {
@@ -212,6 +226,122 @@ QFrame#StatusBarFrame {
     border-radius: 6px;
 }
 """
+
+
+class OutlineStyle(QProxyStyle):
+    def drawItemText(self, painter, rect, flags, pal, enabled, text, textRole):
+        if not text:
+            return super().drawItemText(
+                painter, rect, flags, pal, enabled, text, textRole
+            )
+        painter.save()
+        painter.setPen(Qt.black)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                painter.drawText(rect.translated(dx, dy), flags, text)
+        painter.restore()
+        super().drawItemText(painter, rect, flags, pal, enabled, text, textRole)
+
+
+class OutlineItemDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index) -> None:
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = opt.text
+        opt.text = ""
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+        if not text:
+            return
+        text_rect = style.subElementRect(QStyle.SE_ItemViewItemText, opt, opt.widget)
+        text = opt.fontMetrics.elidedText(text, opt.textElideMode, text_rect.width())
+        align = opt.displayAlignment | Qt.TextSingleLine
+        if not (align & Qt.AlignVertical_Mask):
+            align |= Qt.AlignVCenter
+        text_color = opt.palette.color(
+            QPalette.HighlightedText if opt.state & QStyle.State_Selected else QPalette.Text
+        )
+        painter.save()
+        painter.setFont(opt.font)
+        painter.setPen(Qt.black)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                painter.drawText(text_rect.translated(dx, dy), align, text)
+        painter.setPen(text_color)
+        painter.drawText(text_rect, align, text)
+        painter.restore()
+
+
+class OutlineTextHighlighter(QSyntaxHighlighter):
+    def __init__(self, document) -> None:
+        super().__init__(document)
+        self._outline_pen = QPen(Qt.black, 1)
+
+    def highlightBlock(self, text: str) -> None:
+        if not text:
+            return
+        fmt = QTextCharFormat()
+        fmt.setTextOutline(self._outline_pen)
+        self.setFormat(0, len(text), fmt)
+
+
+class OutlineLineEdit(QLineEdit):
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        text = self.displayText()
+        if not text:
+            text = self.placeholderText()
+            if not text:
+                return
+        option = QStyleOptionFrame()
+        option.initFrom(self)
+        option.rect = self.rect()
+        contents = self.style().subElementRect(QStyle.SE_LineEditContents, option, self)
+        margins = self.textMargins()
+        contents = contents.adjusted(
+            margins.left(), margins.top(), -margins.right(), -margins.bottom()
+        )
+        flags = self.alignment() | Qt.TextSingleLine
+        if not (flags & Qt.AlignVertical_Mask):
+            flags |= Qt.AlignVCenter
+        fm = QFontMetrics(self.font())
+        text_rect = fm.boundingRect(contents, flags, text)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setClipRect(contents)
+        path = QPainterPath()
+        path.addText(text_rect.left(), text_rect.top() + fm.ascent(), self.font(), text)
+        painter.strokePath(path, QPen(Qt.black, 1))
+
+
+class OutlinePlainTextEdit(QPlainTextEdit):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._outline_highlighter = OutlineTextHighlighter(self.document())
+
+
+class OutlineTextEdit(QTextEdit):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._outline_highlighter = OutlineTextHighlighter(self.document())
+
+
+class OutlineSpinBox(QSpinBox):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setLineEdit(OutlineLineEdit(self))
+        self.lineEdit().setAlignment(self.alignment())
+
+
+class OutlineDoubleSpinBox(QDoubleSpinBox):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setLineEdit(OutlineLineEdit(self))
+        self.lineEdit().setAlignment(self.alignment())
 
 
 class FloatSlider(QWidget):
@@ -227,7 +357,7 @@ class FloatSlider(QWidget):
         self._factor = 10**decimals
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(int(min_val * self._factor), int(max_val * self._factor))
-        self.spin = QDoubleSpinBox()
+        self.spin = OutlineDoubleSpinBox()
         self.spin.setRange(min_val, max_val)
         self.spin.setDecimals(decimals)
         self.spin.setSingleStep(0.01)
@@ -268,20 +398,20 @@ class SubjectDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
-        self.subject_id = QLineEdit(self._info.subject_id)
+        self.subject_id = OutlineLineEdit(self._info.subject_id)
         self.handedness = QComboBox()
         self.handedness.addItems(["Right", "Left", "Ambidextrous", "Unknown"])
         if self._info.handedness:
             idx = self.handedness.findText(self._info.handedness)
             if idx >= 0:
                 self.handedness.setCurrentIndex(idx)
-        self.age = QSpinBox()
+        self.age = OutlineSpinBox()
         self.age.setRange(0, 120)
         if self._info.age is not None:
             self.age.setValue(int(self._info.age))
         else:
             self.age.setValue(0)
-        self.notes = QTextEdit(self._info.notes)
+        self.notes = OutlineTextEdit(self._info.notes)
         self.notes.setFixedHeight(100)
 
         form.addRow("Subject ID*", self.subject_id)
@@ -357,6 +487,7 @@ class MainWindow(QMainWindow):
         splitter.setOrientation(Qt.Horizontal)
 
         self.workflow_list = QListWidget()
+        self.workflow_list.setItemDelegate(OutlineItemDelegate(self.workflow_list))
         for item in [
             "Project",
             "Subject",
@@ -550,7 +681,7 @@ class MainWindow(QMainWindow):
         return bar
 
     def _build_log_dock(self) -> None:
-        self.log_console = QPlainTextEdit()
+        self.log_console = OutlinePlainTextEdit()
         self.log_console.setReadOnly(True)
         self.log_console.setMaximumBlockCount(10000)
         dock = QDockWidget("Log Console", self)
@@ -735,9 +866,11 @@ class MainWindow(QMainWindow):
         self.project_combo = QComboBox()
         self._refresh_projects()
         self.project_combo.currentTextChanged.connect(self._open_project)
-        self.project_name_input = QLineEdit()
+        self.project_name_input = OutlineLineEdit()
 
-        form.addRow("Open Project", self.project_combo)
+        open_project_label = QLabel("Open Project")
+        open_project_label.setStyleSheet("color: white;")
+        form.addRow(open_project_label, self.project_combo)
         form.addRow("New Project", self.project_name_input)
         layout.addLayout(form)
 
@@ -780,7 +913,7 @@ class MainWindow(QMainWindow):
         self.detect_btn = QPushButton("Detect LSL Streams")
         self.detect_btn.clicked.connect(self._detect_lsl_streams)
 
-        self.csv_path = QLineEdit()
+        self.csv_path = OutlineLineEdit()
         csv_btn = QPushButton("Browse")
         csv_btn.clicked.connect(
             lambda: self._browse_path(
@@ -849,8 +982,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(note)
 
         form = QFormLayout()
-        self.event_features_path = QLineEdit()
-        self.event_events_path = QLineEdit()
+        self.event_features_path = OutlineLineEdit()
+        self.event_events_path = OutlineLineEdit()
         form.addRow("Features CSV", self.event_features_path)
         form.addRow("Events CSV", self.event_events_path)
         layout.addLayout(form)
@@ -859,7 +992,7 @@ class MainWindow(QMainWindow):
         adv_layout = QFormLayout(advanced)
         self.event_apply_fix = QCheckBox()
         self.event_strict = QCheckBox()
-        self.event_json_report = QLineEdit()
+        self.event_json_report = OutlineLineEdit()
         json_btn = QPushButton("Browse")
         json_btn.clicked.connect(
             lambda: self._browse_path(
@@ -951,15 +1084,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(msg)
 
         form = QFormLayout()
-        self.diag_features_path = QLineEdit()
-        self.diag_events_path = QLineEdit()
+        self.diag_features_path = OutlineLineEdit()
+        self.diag_events_path = OutlineLineEdit()
         form.addRow("Features CSV", self.diag_features_path)
         form.addRow("Events CSV", self.diag_events_path)
         layout.addLayout(form)
 
         advanced = QGroupBox("Advanced")
         adv_layout = QFormLayout(advanced)
-        self.diag_session_meta = QLineEdit()
+        self.diag_session_meta = OutlineLineEdit()
         meta_btn = QPushButton("Browse")
         meta_btn.clicked.connect(
             lambda: self._browse_path(
@@ -975,7 +1108,7 @@ class MainWindow(QMainWindow):
         meta_widget = QWidget()
         meta_widget.setLayout(meta_row)
 
-        self.diag_target_fs = QDoubleSpinBox()
+        self.diag_target_fs = OutlineDoubleSpinBox()
         self.diag_target_fs.setRange(1, 4096)
         self.diag_target_fs.setValue(256.0)
         self.diag_target_fs.setDecimals(2)
@@ -1148,7 +1281,7 @@ class MainWindow(QMainWindow):
             if source_widget is not None:
                 widget = self._clone_bound_widget(source_widget, spec.name)
             else:
-                widget = QLineEdit()
+                widget = OutlineLineEdit()
                 widget.setPlaceholderText("Value")
             self._apply_tooltip(widget, spec.name, spec.description)
             row = QWidget()
@@ -1173,7 +1306,7 @@ class MainWindow(QMainWindow):
             self._apply_tooltip(target, key)
             return target
         if isinstance(source_widget, QSpinBox):
-            target = QSpinBox()
+            target = OutlineSpinBox()
             target.setRange(source_widget.minimum(), source_widget.maximum())
             target.setValue(source_widget.value())
             target.valueChanged.connect(
@@ -1185,7 +1318,7 @@ class MainWindow(QMainWindow):
             self._apply_tooltip(target, key)
             return target
         if isinstance(source_widget, QDoubleSpinBox):
-            target = QDoubleSpinBox()
+            target = OutlineDoubleSpinBox()
             target.setRange(source_widget.minimum(), source_widget.maximum())
             target.setDecimals(source_widget.decimals())
             target.setSingleStep(source_widget.singleStep())
@@ -1199,7 +1332,7 @@ class MainWindow(QMainWindow):
             self._apply_tooltip(target, key)
             return target
         if isinstance(source_widget, QLineEdit):
-            target = QLineEdit()
+            target = OutlineLineEdit()
             target.setText(source_widget.text())
             target.textChanged.connect(
                 lambda text: self._sync_line_edit(source_widget, text)
@@ -1210,7 +1343,7 @@ class MainWindow(QMainWindow):
             self._apply_tooltip(target, key)
             return target
         if isinstance(source_widget, QTextEdit):
-            target = QTextEdit()
+            target = OutlineTextEdit()
             target.setPlainText(source_widget.toPlainText())
             target.textChanged.connect(
                 lambda: self._sync_text_edit(source_widget, target.toPlainText())
@@ -1811,12 +1944,12 @@ class MainWindow(QMainWindow):
         decimals: int = 3,
     ) -> None:
         if is_float:
-            box: QWidget = QDoubleSpinBox()
+            box: QWidget = OutlineDoubleSpinBox()
             box.setProperty("is_float", True)
             box.setDecimals(decimals)
             box.setSingleStep(0.01)
         else:
-            box = QSpinBox()
+            box = OutlineSpinBox()
         if isinstance(box, QDoubleSpinBox):
             box.setRange(float(min_val), float(max_val))
             box.setValue(float(defaults.get(key, 0.0) or 0.0))
@@ -1837,7 +1970,7 @@ class MainWindow(QMainWindow):
         defaults: Dict[str, Any],
         read_only: bool = False,
     ) -> None:
-        line = QLineEdit()
+        line = OutlineLineEdit()
         val = defaults.get(key, "")
         line.setText("" if val is None else str(val))
         line.setReadOnly(read_only)
@@ -1855,7 +1988,7 @@ class MainWindow(QMainWindow):
         pattern: str,
         mode: str = "open",
     ) -> None:
-        line = QLineEdit()
+        line = OutlineLineEdit()
         val = defaults.get(key, "")
         line.setText("" if val is None else str(val))
         btn = QPushButton("Browse")
@@ -3027,6 +3160,7 @@ class MainWindow(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
+    app.setStyle(OutlineStyle(app.style()))
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
