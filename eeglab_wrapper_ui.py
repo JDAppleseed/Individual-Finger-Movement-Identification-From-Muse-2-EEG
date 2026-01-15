@@ -88,6 +88,15 @@ TOOLTIPS: Dict[str, str] = {
     "ENABLE_PLOT": "Show live plots during streaming.",
     "SAVE_TO_DISK": "Write features/events to disk during run.",
     "SAVE_RAW": "Write raw EEG CSV.",
+    "ENABLE_ICA": "Enable ICA preprocessing during streaming.",
+    "ICA_WARMUP_S": "Seconds of warmup before ICA fitting.",
+    "ICA_MIN_SAMPLES": "Minimum samples required for ICA fit.",
+    "ICA_MIN_VAR": "Minimum per-channel variance required for ICA.",
+    "ICA_FAIL_POLICY": "ICA failure policy (skip to keep streaming).",
+    "ICA_MAX_RETRIES_PER_SESSION": "Max ICA retries before disabling.",
+    "LOG_ICA_DIAGNOSTICS": "Log ICA diagnostics when skipped.",
+    "DATA_STREAM_TIMEOUT_S": "Seconds before stream stall disables event marking.",
+    "DATA_STREAM_CHECK_INTERVAL_S": "Stream health check interval in seconds.",
     "SAMPLING_RATE": "Expected sampling rate (Hz).",
     "CHANNELS": "Number of EEG channels (read-only).",
     "TIMEBASE_VERSION": "Enforced absolute timebase (absolute_v1).",
@@ -106,6 +115,73 @@ TOOLTIPS: Dict[str, str] = {
     "EVENTS_AUTOSAVE_PATH": "Autosave events CSV path.",
     "EVENTS_CHANNEL": "Event channel label.",
 }
+
+EEGLAB_STYLE = """
+QMainWindow {
+    background: #b7c7e6;
+}
+QMenuBar {
+    background: #e4e8f2;
+    color: #1d2a44;
+    padding: 4px;
+    font-weight: 600;
+}
+QMenuBar::item:selected {
+    background: #6c86c7;
+    color: white;
+}
+QMenu {
+    background: #f2f4fb;
+    color: #1d2a44;
+    border: 1px solid #7a8fb8;
+}
+QMenu::item:selected {
+    background: #6c86c7;
+    color: white;
+}
+QDockWidget {
+    titlebar-close-icon: url(none);
+    titlebar-normal-icon: url(none);
+    font-weight: 600;
+}
+QGroupBox {
+    background: #e6edf9;
+    border: 1px solid #8ba0c7;
+    border-radius: 6px;
+    margin-top: 12px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 8px;
+    top: -8px;
+    padding: 0 4px;
+    color: #24345b;
+}
+QPushButton {
+    background: #6c86c7;
+    color: white;
+    border-radius: 4px;
+    padding: 4px 10px;
+}
+QPushButton:disabled {
+    background: #9fb0d8;
+}
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {
+    background: white;
+    border: 1px solid #7a8fb8;
+    border-radius: 4px;
+    padding: 2px 4px;
+}
+QListWidget {
+    background: #f7f9ff;
+    border: 1px solid #7a8fb8;
+}
+QFrame#StatusBarFrame {
+    background: #e4e8f2;
+    border: 1px solid #7a8fb8;
+    border-radius: 6px;
+}
+"""
 
 
 class FloatSlider(QWidget):
@@ -208,6 +284,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("EEGLAB Wrapper UI")
         self.resize(1200, 780)
+        self.setStyleSheet(EEGLAB_STYLE)
 
         self.repo_root = Path(__file__).resolve().parent
         self.scripts = discover_scripts(self.repo_root)
@@ -282,6 +359,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(main)
 
         self._build_log_dock()
+        self._build_control_docks()
+        self._wire_status_updates()
+        self._refresh_status_summary()
         self.workflow_list.setCurrentRow(0)
 
     def _wrap_scroll(self, widget: QWidget) -> QWidget:
@@ -293,20 +373,42 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
-        for name in [
-            "File",
-            "Project",
-            "Stream",
-            "Events",
-            "Preprocess",
-            "Run",
-            "Export",
-            "Help",
-        ]:
-            menu.addMenu(name)
+        file_menu = menu.addMenu("File")
+        file_menu.addAction("Project Manager", lambda: self.workflow_list.setCurrentRow(0))
+        file_menu.addAction("Subject Manager", lambda: self.workflow_list.setCurrentRow(1))
+        file_menu.addSeparator()
+        file_menu.addAction("Quit", self.close)
+
+        edit_menu = menu.addMenu("Edit")
+        edit_menu.addAction("Session Settings", lambda: self.workflow_list.setCurrentRow(2))
+
+        tools_menu = menu.addMenu("Tools")
+        tools_menu.addAction("Stream Setup", lambda: self.workflow_list.setCurrentRow(2))
+        tools_menu.addAction("Event Review", lambda: self.workflow_list.setCurrentRow(4))
+        tools_menu.addAction("Diagnostics", lambda: self.workflow_list.setCurrentRow(9))
+
+        plot_menu = menu.addMenu("Plot")
+        plot_menu.addAction("Live Plot (Step 1)", lambda: self.workflow_list.setCurrentRow(3))
+
+        study_menu = menu.addMenu("Study")
+        study_menu.addAction("Windowing", lambda: self.workflow_list.setCurrentRow(5))
+        study_menu.addAction("Training", lambda: self.workflow_list.setCurrentRow(6))
+
+        datasets_menu = menu.addMenu("Datasets")
+        datasets_menu.addAction("Export", lambda: self.workflow_list.setCurrentRow(8))
+
+        run_menu = menu.addMenu("Run")
+        run_menu.addAction("Run Step 1", lambda: self._run_step("step1", "step1"))
+        run_menu.addAction("Run Step 1b", lambda: self._run_step("step1b", "step1b"))
+        run_menu.addAction("Run Train", lambda: self._run_step("train", "train"))
+        run_menu.addAction("Run Inference", lambda: self._run_step("infer", "step1"))
+
+        help_menu = menu.addMenu("Help")
+        help_menu.addAction("Logs", lambda: self.workflow_list.setCurrentRow(9))
 
     def _build_status_bar(self) -> QWidget:
         bar = QFrame()
+        bar.setObjectName("StatusBarFrame")
         bar.setFrameShape(QFrame.StyledPanel)
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(6, 4, 6, 4)
@@ -314,10 +416,16 @@ class MainWindow(QMainWindow):
         self.project_label = QLabel("Project: -")
         self.subject_label = QLabel("Subject: -")
         self.session_label = QLabel("Session: -")
+        self.stream_state_label = QLabel("Stream: idle")
+        self.ica_state_label = QLabel("ICA: off")
+        self.events_state_label = QLabel("Events: off")
 
         layout.addWidget(self.project_label)
         layout.addWidget(self.subject_label)
         layout.addWidget(self.session_label)
+        layout.addWidget(self.stream_state_label)
+        layout.addWidget(self.ica_state_label)
+        layout.addWidget(self.events_state_label)
         layout.addStretch(1)
 
         return bar
@@ -330,8 +438,169 @@ class MainWindow(QMainWindow):
         dock.setWidget(self.log_console)
         self.addDockWidget(Qt.BottomDockWidgetArea, dock)
 
+    def _build_control_docks(self) -> None:
+        self.stream_status_dock = QLabel("Stream status: idle")
+        stream_widget = QWidget()
+        stream_layout = QVBoxLayout(stream_widget)
+        stream_layout.addWidget(self.stream_status_dock)
+        stream_layout.addWidget(QLabel("Quick Actions"))
+        detect_btn = QPushButton("Detect LSL Streams")
+        detect_btn.clicked.connect(self._detect_lsl_streams)
+        test_btn = QPushButton("Test Connection")
+        test_btn.clicked.connect(self._test_lsl)
+        stream_layout.addWidget(detect_btn)
+        stream_layout.addWidget(test_btn)
+        open_stream_btn = QPushButton("Open Stream Setup")
+        open_stream_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(2))
+        stream_layout.addWidget(open_stream_btn)
+        stream_layout.addStretch(1)
+        stream_dock = QDockWidget("Stream Control", self)
+        stream_dock.setWidget(stream_widget)
+        self.addDockWidget(Qt.LeftDockWidgetArea, stream_dock)
+
+        pipeline_widget = QWidget()
+        pipeline_layout = QVBoxLayout(pipeline_widget)
+        pipeline_layout.addWidget(QLabel("Pipeline Controls"))
+        run_step1_btn = QPushButton("Run Step 1")
+        run_step1_btn.clicked.connect(lambda: self._run_step("step1", "step1"))
+        pipeline_layout.addWidget(run_step1_btn)
+        run_step1b_btn = QPushButton("Run Step 1b")
+        run_step1b_btn.clicked.connect(lambda: self._run_step("step1b", "step1b"))
+        pipeline_layout.addWidget(run_step1b_btn)
+        run_train_btn = QPushButton("Run Train")
+        run_train_btn.clicked.connect(lambda: self._run_step("train", "train"))
+        pipeline_layout.addWidget(run_train_btn)
+        run_infer_btn = QPushButton("Run Inference")
+        run_infer_btn.clicked.connect(lambda: self._run_step("infer", "step1"))
+        pipeline_layout.addWidget(run_infer_btn)
+        stop_btn = QPushButton("Stop Active Run")
+        stop_btn.clicked.connect(self._stop_process)
+        pipeline_layout.addWidget(stop_btn)
+        pipeline_layout.addStretch(1)
+        pipeline_dock = QDockWidget("Pipeline", self)
+        pipeline_dock.setWidget(pipeline_widget)
+        self.addDockWidget(Qt.LeftDockWidgetArea, pipeline_dock)
+
+        event_widget = QWidget()
+        event_layout = QVBoxLayout(event_widget)
+        event_layout.addWidget(QLabel("Event Marking"))
+        self.event_toggle_dock = QCheckBox("Enable event marking")
+        self._bind_checkbox(self.event_toggle_dock, "step1", "EVENT_MARKING_ENABLED")
+        event_layout.addWidget(self.event_toggle_dock)
+        event_review_btn = QPushButton("Event Review")
+        event_review_btn.clicked.connect(self._run_event_review)
+        event_layout.addWidget(event_review_btn)
+        event_validate_btn = QPushButton("Event Validate")
+        event_validate_btn.clicked.connect(self._run_event_validate)
+        event_layout.addWidget(event_validate_btn)
+        open_event_btn = QPushButton("Open Event Tools")
+        open_event_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(4))
+        event_layout.addWidget(open_event_btn)
+        event_layout.addStretch(1)
+        event_dock = QDockWidget("Events", self)
+        event_dock.setWidget(event_widget)
+        self.addDockWidget(Qt.RightDockWidgetArea, event_dock)
+
+        model_widget = QWidget()
+        model_layout = QVBoxLayout(model_widget)
+        model_layout.addWidget(QLabel("Model & Preprocess"))
+        self.ica_toggle_dock = QCheckBox("Enable ICA")
+        self._bind_checkbox(self.ica_toggle_dock, "step1", "ENABLE_ICA")
+        model_layout.addWidget(self.ica_toggle_dock)
+        self.demo_toggle_dock = QCheckBox("Demo mode")
+        self._bind_checkbox(self.demo_toggle_dock, "step1", "DEMO_MODE")
+        model_layout.addWidget(self.demo_toggle_dock)
+        self.training_toggle_dock = QCheckBox("Training mode")
+        self._bind_checkbox(self.training_toggle_dock, "step1", "TRAINING_MODE")
+        model_layout.addWidget(self.training_toggle_dock)
+        self.plot_toggle_dock = QCheckBox("Enable plot")
+        self._bind_checkbox(self.plot_toggle_dock, "step1", "ENABLE_PLOT")
+        model_layout.addWidget(self.plot_toggle_dock)
+        open_infer_btn = QPushButton("Open Live Inference")
+        open_infer_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(7))
+        model_layout.addWidget(open_infer_btn)
+        model_layout.addStretch(1)
+        model_dock = QDockWidget("Model", self)
+        model_dock.setWidget(model_widget)
+        self.addDockWidget(Qt.RightDockWidgetArea, model_dock)
+
+        session_widget = QWidget()
+        session_layout = QVBoxLayout(session_widget)
+        session_layout.addWidget(QLabel("Session Overview"))
+        self.project_label_dock = QLabel("Project: -")
+        self.subject_label_dock = QLabel("Subject: -")
+        self.session_label_dock = QLabel("Session: -")
+        session_layout.addWidget(self.project_label_dock)
+        session_layout.addWidget(self.subject_label_dock)
+        session_layout.addWidget(self.session_label_dock)
+        project_btn = QPushButton("Project Page")
+        project_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(0))
+        session_layout.addWidget(project_btn)
+        subject_btn = QPushButton("Subject Page")
+        subject_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(1))
+        session_layout.addWidget(subject_btn)
+        session_layout.addStretch(1)
+        session_dock = QDockWidget("Session", self)
+        session_dock.setWidget(session_widget)
+        self.addDockWidget(Qt.RightDockWidgetArea, session_dock)
+
+    def _bind_checkbox(self, dock_cb: QCheckBox, step_id: str, key: str) -> None:
+        field_cb = self.fields.get(step_id, {}).get(key)
+        if not isinstance(field_cb, QCheckBox):
+            dock_cb.setEnabled(False)
+            return
+        dock_cb.setChecked(field_cb.isChecked())
+        dock_cb.toggled.connect(field_cb.setChecked)
+        field_cb.toggled.connect(dock_cb.setChecked)
+
     def _switch_page(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
+
+    def _set_stream_status(self, text: str) -> None:
+        if hasattr(self, "stream_status") and self.stream_status is not None:
+            self.stream_status.setText(text)
+        if hasattr(self, "stream_status_dock") and self.stream_status_dock is not None:
+            self.stream_status_dock.setText(text)
+
+    def _set_project_label(self, text: str) -> None:
+        self.project_label.setText(text)
+        if hasattr(self, "project_label_dock") and self.project_label_dock is not None:
+            self.project_label_dock.setText(text)
+
+    def _set_subject_label(self, text: str) -> None:
+        self.subject_label.setText(text)
+        if hasattr(self, "subject_label_dock") and self.subject_label_dock is not None:
+            self.subject_label_dock.setText(text)
+
+    def _set_session_label(self, text: str) -> None:
+        self.session_label.setText(text)
+        if hasattr(self, "session_label_dock") and self.session_label_dock is not None:
+            self.session_label_dock.setText(text)
+
+    def _wire_status_updates(self) -> None:
+        for step_id in ("step1", "infer"):
+            for key in ("ENABLE_ICA", "EVENT_MARKING_ENABLED"):
+                widget = self.fields.get(step_id, {}).get(key)
+                if isinstance(widget, QCheckBox):
+                    widget.toggled.connect(self._refresh_status_summary)
+        self.input_source.currentTextChanged.connect(self._refresh_status_summary)
+
+    def _refresh_status_summary(self) -> None:
+        stream_label = self.input_source.currentText()
+        self.stream_state_label.setText(f"Stream: {stream_label}")
+        ica_enabled = False
+        event_enabled = False
+        for step_id in ("step1", "infer"):
+            if isinstance(
+                self.fields.get(step_id, {}).get("ENABLE_ICA"), QCheckBox
+            ) and self.fields[step_id]["ENABLE_ICA"].isChecked():
+                ica_enabled = True
+            if isinstance(
+                self.fields.get(step_id, {}).get("EVENT_MARKING_ENABLED"), QCheckBox
+            ) and self.fields[step_id]["EVENT_MARKING_ENABLED"].isChecked():
+                event_enabled = True
+        self.ica_state_label.setText(f"ICA: {'on' if ica_enabled else 'off'}")
+        self.events_state_label.setText(f"Events: {'on' if event_enabled else 'off'}")
 
     def _build_project_page(self) -> QWidget:
         page = QWidget()
@@ -423,7 +692,7 @@ class MainWindow(QMainWindow):
             self.input_source.addItems(["CSV Offline"])
             self.input_source.setCurrentIndex(0)
             self.csv_path.setEnabled(True)
-            self.stream_status.setText(
+            self._set_stream_status(
                 "pylsl not installed; LSL controls hidden (CSV offline only)."
             )
         else:
@@ -881,6 +1150,72 @@ class MainWindow(QMainWindow):
             )
             self._add_checkbox(
                 step_id, form, "ENABLE_ACTUATION", "Enable actuation", defaults
+            )
+            self._add_checkbox(step_id, form, "ENABLE_ICA", "Enable ICA", defaults)
+            self._add_spin(
+                step_id,
+                form,
+                "ICA_WARMUP_S",
+                "ICA warmup (s)",
+                defaults,
+                0,
+                120,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "ICA_MIN_SAMPLES",
+                "ICA min samples",
+                defaults,
+                0,
+                100000,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "ICA_MIN_VAR",
+                "ICA min var",
+                defaults,
+                0,
+                1,
+                is_float=True,
+                decimals=8,
+            )
+            self._add_text(
+                step_id, form, "ICA_FAIL_POLICY", "ICA fail policy", defaults
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "ICA_MAX_RETRIES_PER_SESSION",
+                "ICA max retries",
+                defaults,
+                0,
+                10,
+            )
+            self._add_checkbox(
+                step_id, form, "LOG_ICA_DIAGNOSTICS", "Log ICA diagnostics", defaults
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "DATA_STREAM_TIMEOUT_S",
+                "Stream timeout (s)",
+                defaults,
+                0,
+                60,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "DATA_STREAM_CHECK_INTERVAL_S",
+                "Stream check interval (s)",
+                defaults,
+                0,
+                10,
+                is_float=True,
             )
             self._add_int_dropdown(
                 step_id,
@@ -1376,7 +1711,7 @@ class MainWindow(QMainWindow):
         if name == "-" or not name:
             return
         self.current_project = name
-        self.project_label.setText(f"Project: {name}")
+        self._set_project_label(f"Project: {name}")
         self._refresh_subjects()
 
     def _refresh_subjects(self) -> None:
@@ -1392,7 +1727,7 @@ class MainWindow(QMainWindow):
         if subject_id == "-" or not subject_id:
             return
         self.current_subject = subject_id
-        self.subject_label.setText(f"Subject: {subject_id}")
+        self._set_subject_label(f"Subject: {subject_id}")
         if self.current_project:
             subject_dir = subject_root(self.current_project, subject_id)
             ensure_subject_dirs(subject_dir)
@@ -1586,11 +1921,11 @@ class MainWindow(QMainWindow):
         self.lsl_combo.clear()
         if not items:
             self.lsl_combo.addItem("-")
-            self.stream_status.setText("No LSL streams detected.")
+            self._set_stream_status("No LSL streams detected.")
             return
         for info in items:
             self.lsl_combo.addItem(f"{info.name} ({info.stype})")
-        self.stream_status.setText(f"Detected {len(items)} LSL stream(s).")
+        self._set_stream_status(f"Detected {len(items)} LSL stream(s).")
 
     def _update_stream_controls(self) -> None:
         if not LSL_AVAILABLE:
@@ -1601,13 +1936,14 @@ class MainWindow(QMainWindow):
         self.detect_btn.setEnabled(not csv_mode)
         self.test_btn.setEnabled(not csv_mode)
         self.csv_path.setEnabled(csv_mode)
+        self._refresh_status_summary()
 
     def _test_lsl(self) -> None:
         if not LSL_AVAILABLE:
             return
         choice = self.lsl_combo.currentText()
         if not choice or choice == "-":
-            self.stream_status.setText("No LSL stream selected.")
+            self._set_stream_status("No LSL stream selected.")
             return
         name = choice.split("(")[0].strip()
         streams = pylsl.resolve_streams() if pylsl else []
@@ -1617,19 +1953,19 @@ class MainWindow(QMainWindow):
                 match = stream
                 break
         if match is None:
-            self.stream_status.setText("Selected stream not found.")
+            self._set_stream_status("Selected stream not found.")
             return
         try:
             inlet = pylsl.StreamInlet(match)
             inlet.pull_sample(timeout=0.0)
-            self.stream_status.setText(f"Connected to {match.name()} ({match.type()})")
+            self._set_stream_status(f"Connected to {match.name()} ({match.type()})")
             try:
                 srate = match.nominal_srate()
                 self.sample_rate_display.setText(str(srate))
             except Exception:
                 self.sample_rate_display.setText("-")
         except Exception as exc:
-            self.stream_status.setText(f"Failed to connect: {exc}")
+            self._set_stream_status(f"Failed to connect: {exc}")
 
     def _browse_path(
         self, widget: QLineEdit, pattern: str, title: str, mode: str = "open"
@@ -1729,7 +2065,7 @@ class MainWindow(QMainWindow):
             self.current_session_ui = ui_session_id(
                 self.current_subject, backend_session
             )
-            self.session_label.setText(f"Session: {self.current_session_ui}")
+            self._set_session_label(f"Session: {self.current_session_ui}")
 
         config_path = subject_dir / "config" / f"{step_id}.json"
         config = build_config(
@@ -1860,6 +2196,8 @@ class MainWindow(QMainWindow):
     def _on_process_started(self) -> None:
         if self.active_step:
             self._set_step_status(self.active_step, "Running")
+        if self.active_step == "step1":
+            self.stream_state_label.setText("Stream: running")
 
     def _on_process_finished(self, exit_code: int, _exit_status: int) -> None:
         step = self.active_step
@@ -1873,6 +2211,7 @@ class MainWindow(QMainWindow):
         self._update_checklist(step)
         if step == "step1":
             self._update_resume_ui()
+            self._refresh_status_summary()
         self.active_step = None
 
     def _set_step_status(self, step_id: str, text: str) -> None:

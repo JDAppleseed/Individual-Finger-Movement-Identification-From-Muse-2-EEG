@@ -8,7 +8,7 @@ Automatic Per-Subject Experiment Report Generator
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -206,7 +206,7 @@ def generate_subject_report(subject_id, experiment_hash):
     <h2>Subject</h2>
     <p><b>ID:</b> {subject_id}</p>
     <p><b>Experiment Hash:</b> {experiment_hash}</p>
-    <p><b>Generated:</b> {datetime.utcnow().isoformat()}</p>
+    <p><b>Generated:</b> {datetime.now(timezone.utc).isoformat()}</p>
 
     <h2>Performance</h2>
     <ul>
