@@ -9,7 +9,7 @@ Experiment Logger
 import json
 import hashlib
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from types import ModuleType
 from typing import Optional
 
@@ -84,7 +84,7 @@ def log_experiment(subject_id, exp_hash, step, notes=None):
 
     entry = {
         "step": step,
-        "datetime": datetime.utcnow().isoformat(),
+        "datetime": datetime.now(timezone.utc).isoformat(),
         "notes": notes or "",
     }
 

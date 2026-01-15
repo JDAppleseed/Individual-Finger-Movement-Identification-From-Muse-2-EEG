@@ -4,7 +4,7 @@ Lightweight edit log for event corrections.
 
 import json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def log_event_edit(action: str, before: dict, after: dict, note: str = ""):
@@ -13,7 +13,7 @@ def log_event_edit(action: str, before: dict, after: dict, note: str = ""):
     log_path = log_dir / "events_edits.txt"
 
     entry = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "action": action,
         "note": note,
         "before": before,
