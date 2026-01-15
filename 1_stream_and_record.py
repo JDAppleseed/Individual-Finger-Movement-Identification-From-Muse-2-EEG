@@ -58,10 +58,9 @@ from utils.label_schema import (
     event_type_for,
 )
 from utils.session_timebase import compute_event_lsl_ts
-from utils.timebase import clamp_monotonic_time
 from utils.timebase_selfcheck import evaluate_timebase_alignment
 from utils.ica_guard import guard_ica_fit, validate_ica_input
-from utils.stream_health import StreamHealthMonitor
+from utils.stream_health import RollingStreamHealthGate
 
 try:
     from pynput import keyboard
@@ -135,6 +134,16 @@ LOG_ICA_DIAGNOSTICS = True
 # =========================
 DATA_STREAM_TIMEOUT_S = 5.0
 DATA_STREAM_CHECK_INTERVAL_S = 0.5
+GAP_BREAK_S = 1.0
+STALL_S = 0.25
+HEALTH_WINDOW_S = 2.0
+MIN_WRITE_FRACTION = 0.90
+MAX_QUEUE = 512
+RECOVERY_S = 2.0
+BACKWARDS_WINDOW_S = 1.0
+BACKWARDS_LIMIT = 3
+EVENT_MAX_LAG_S = 2.0
+EVENT_MAX_LEAD_S = 0.5
 
 # =========================
 # ===== SUBJECT INFO ======
@@ -249,6 +258,13 @@ selected_channel_variances = None
 data_stream_active = False
 data_stream_last_write_ts = None
 data_stream_stalled_reason = None
+stream_health_measured_fs = None
+stream_health_write_rate = 0.0
+stream_health_queue_size = 0
+stream_health_backwards_count = 0
+stream_health_last_received_lsl_ts = None
+stream_health_last_written_lsl_ts = None
+event_marking_allowed = False
 
 # Legacy/diagnostic fields (kept for compatibility)
 stream_start_lsl_ts = None
@@ -258,6 +274,7 @@ local_clock_at_start = None
 run_start_lsl_ts = None  # first LSL timestamp observed THIS run
 run_start_local = None  # local_clock() at run start
 clock_offset = None  # run_start_lsl_ts - run_start_local
+segment_start_lsl_ts = None
 
 
 def _coerce_float(value, default=None):
@@ -494,30 +511,31 @@ if experiment_hash is None:
     experiment_hash = generate_experiment_hash(subject_id, experiment_config)
 
 FEATURES_ARCHIVE_DIR = Path("data/processed")
+RAW_ARCHIVE_DIR = Path("data/raw")
 
-FEATURES_ARCHIVE_PATH = (
-    Path(features_path_state)
-    if features_path_state
-    else FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_eeg_features.csv"
-)
-EVENTS_ARCHIVE_PATH = (
-    Path(events_path_state)
-    if events_path_state
-    else FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_events.csv"
-)
-if EVENTS_AUTOSAVE_PATH is None:
-    EVENTS_AUTOSAVE_PATH = str(
-        FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_events_autosave.csv"
+
+def _segment_tag(seg_id: int) -> str:
+    return f"SEG{int(seg_id):02d}"
+
+
+def _segment_paths(seg_id: int):
+    tag = _segment_tag(seg_id)
+    features = FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_{tag}_eeg_features.csv"
+    events = FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_{tag}_events.csv"
+    autosave = (
+        FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_{tag}_events_autosave.csv"
     )
+    raw = RAW_ARCHIVE_DIR / f"{subject_id}_{session_id}_{tag}_raw.csv"
+    return features, events, autosave, raw
+
+
+FEATURES_ARCHIVE_PATH, EVENTS_ARCHIVE_PATH, EVENTS_AUTOSAVE_PATH_SEG, RAW_ARCHIVE_PATH = (
+    _segment_paths(segment_id)
+)
+EVENTS_AUTOSAVE_PATH = str(EVENTS_AUTOSAVE_PATH_SEG)
 if EVENTS_CSV_PATH is None:
     EVENTS_CSV_PATH = str(EVENTS_ARCHIVE_PATH)
 FEATURES_PATH = FEATURES_ARCHIVE_PATH
-
-RAW_ARCHIVE_PATH = (
-    Path(raw_path_state)
-    if raw_path_state
-    else Path("data/raw") / f"{subject_id}_{session_id}_raw.csv"
-)
 SESSION_META_PATH = (
     FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_session_meta.json"
 )
@@ -610,9 +628,17 @@ def _build_session_state_payload(
         "data_stream_active": bool(data_stream_active),
         "data_stream_last_write_ts": data_stream_last_write_ts,
         "data_stream_stalled_reason": data_stream_stalled_reason,
+        "stream_health_measured_fs": stream_health_measured_fs,
+        "stream_health_write_rate": float(stream_health_write_rate),
+        "stream_health_queue_size": int(stream_health_queue_size),
+        "stream_health_backwards_count": int(stream_health_backwards_count),
+        "stream_health_last_received_lsl_ts": stream_health_last_received_lsl_ts,
+        "stream_health_last_written_lsl_ts": stream_health_last_written_lsl_ts,
+        "event_marking_allowed": bool(event_marking_allowed),
         # Legacy/diagnostic
         "stream_start_lsl_ts": stream_start_lsl_ts,
         "local_clock_at_start": local_clock_at_start,
+        "segment_start_lsl_ts": segment_start_lsl_ts,
     }
 
 
@@ -664,7 +690,7 @@ if resume_blockers and not true_resume:
     print(f"Resume Blockers   : {', '.join(resume_blockers)}")
 print(f"Current Block ID  : {BLOCK_ID}")
 print(
-    f"Total Elapsed Time: {total_elapsed_s:.2f} s (stream-relative, monotonic-clamped)"
+    f"Total Elapsed Time: {total_elapsed_s:.2f} s (segment-relative)"
 )
 print("")
 if true_resume and state_events_missing:
@@ -793,21 +819,21 @@ def _lsl_now():
 
 def _time_s_from_lsl(lsl_ts: float):
     """Stream-relative time_s from an LSL timestamp."""
-    if stream_start_lsl_ts is None:
+    if segment_start_lsl_ts is None:
         return None
-    return float(lsl_ts - stream_start_lsl_ts)
+    return float(lsl_ts - segment_start_lsl_ts)
 
 
-def _clamp_event_time(event_time_s: float):
-    if event_time_s is None:
-        return None, None, False
-    if last_sample_time_s is None or stream_start_lsl_ts is None:
-        return event_time_s, None, False
-    if event_time_s < (last_sample_time_s - 2.0):
-        clamped_time_s = float(last_sample_time_s)
-        clamped_lsl = float(stream_start_lsl_ts + clamped_time_s)
-        return clamped_time_s, clamped_lsl, True
-    return event_time_s, None, False
+def _event_time_ok(event_time_s: float) -> bool:
+    if event_time_s is None or not np.isfinite(event_time_s):
+        return False
+    if last_sample_time_s is None:
+        return False
+    if event_time_s < (last_sample_time_s - EVENT_MAX_LAG_S):
+        return False
+    if event_time_s > (last_sample_time_s + EVENT_MAX_LEAD_S):
+        return False
+    return True
 
 
 def _record_nearest_sample_delta(event_time_s: float, label: str):
@@ -855,6 +881,7 @@ def _timebase_report_payload():
         "segment_id": segment_id,
         "timebase_version": TIMEBASE_VERSION,
         "stream_start_lsl_ts": stream_start_lsl_ts,
+        "segment_start_lsl_ts": segment_start_lsl_ts,
         "stream_start_local": local_clock_at_start,
         "clock_offset": clock_offset,
         "samples_seen": int(samples_seen),
@@ -947,13 +974,13 @@ samples_seen = 0
 samples_written = 0
 last_sample_time_s: Optional[float] = None
 last_sample_lsl_ts: Optional[float] = None
+last_written_lsl_ts: Optional[float] = None
+last_received_lsl_ts: Optional[float] = None
 first_time_s: Optional[float] = None
 last_time_s_seen: Optional[float] = None
 first_lsl_ts: Optional[float] = None
 last_lsl_ts: Optional[float] = None
 max_backwards_jump_s = 0.0
-time_s_clamp_warned = False
-event_clamp_warned = False
 nearest_sample_delta_samples: List[Dict[str, Any]] = []
 NEAREST_SAMPLE_MAX = 10
 recent_sample_times: Deque[float] = deque(maxlen=512)
@@ -961,6 +988,78 @@ last_report_time: Optional[float] = None
 last_report_samples_written = 0
 timebase_report_initialized = False
 non_finite_sample_warned = False
+sample_queue: Deque[tuple[float, List[float]]] = deque()
+queue_drop_count = 0
+segment_break_hold_until: Optional[float] = None
+last_health_warning_time = 0.0
+
+
+def _apply_segment_paths(seg_id: int) -> None:
+    global FEATURES_ARCHIVE_PATH, EVENTS_ARCHIVE_PATH, EVENTS_AUTOSAVE_PATH
+    global EVENTS_CSV_PATH, FEATURES_PATH, RAW_ARCHIVE_PATH
+    features, events, autosave, raw = _segment_paths(seg_id)
+    FEATURES_ARCHIVE_PATH = features
+    EVENTS_ARCHIVE_PATH = events
+    EVENTS_AUTOSAVE_PATH = str(autosave)
+    EVENTS_CSV_PATH = str(events)
+    FEATURES_PATH = FEATURES_ARCHIVE_PATH
+    RAW_ARCHIVE_PATH = raw
+
+
+def _reset_segment_state() -> None:
+    global segment_start_lsl_ts, last_written_lsl_ts, last_sample_time_s
+    global last_sample_lsl_ts, first_time_s, last_time_s_seen
+    global first_lsl_ts, last_lsl_ts, last_report_time
+    global last_report_samples_written, timebase_report_initialized
+    segment_start_lsl_ts = None
+    last_written_lsl_ts = None
+    last_sample_time_s = None
+    last_sample_lsl_ts = None
+    first_time_s = None
+    last_time_s_seen = None
+    first_lsl_ts = None
+    last_lsl_ts = None
+    nearest_sample_delta_samples.clear()
+    recent_sample_times.clear()
+    eeg_buffer.clear()
+    action_pred_buffer.clear()
+    last_report_time = None
+    last_report_samples_written = 0
+    timebase_report_initialized = False
+
+
+def _flush_events_for_segment() -> None:
+    global current_event, last_event_index
+    if current_event is not None:
+        current_event = None
+    with events_lock:
+        if events:
+            save_events_csv(EVENTS_CSV_PATH, events)
+            last_event_index = len(events) - 1
+
+
+def _start_segment(reason: str) -> None:
+    global segment_id, events, last_event_index
+    global last_written_time_s, last_time_s, total_elapsed_s
+    global segment_break_hold_until
+
+    _flush_events_for_segment()
+
+    if last_written_time_s >= 0:
+        total_elapsed_s += float(last_written_time_s)
+    last_written_time_s = -1.0
+    last_time_s = -1.0
+
+    _close_segment_files()
+    segment_id += 1
+    _apply_segment_paths(segment_id)
+    _reset_segment_state()
+    _open_segment_files()
+    events = []
+    last_event_index = None
+    segment_break_hold_until = time.monotonic() + float(RECOVERY_S)
+    _write_session_state(label=f"segment_break:{reason}", segment_id_override=segment_id)
+    print(f"⚠️ Segment break ({reason}); now writing segment {segment_id:02d}")
 
 
 def _load_existing_events(path: Path):
@@ -1210,9 +1309,7 @@ def on_key_press(key):
     global \
         current_event, \
         current_action_id, \
-        current_override, \
-        event_clamped_count, \
-        event_clamp_warned
+        current_override
     if not EVENT_MARKING_ENABLED:
         return
 
@@ -1223,6 +1320,8 @@ def on_key_press(key):
 
     # Hold SPACE = event active
     if key == keyboard.Key.space:
+        if not event_marking_allowed:
+            return
         if current_event is None:
             # In this fixed design, we refuse to stamp events until run_start_lsl_ts exists,
             # because that's the anchor for session-continuous time.
@@ -1237,21 +1336,11 @@ def on_key_press(key):
             if onset_lsl is None:
                 return
 
-            if stream_start_lsl_ts is None:
+            if segment_start_lsl_ts is None:
                 return
-            onset_s = float(onset_lsl - stream_start_lsl_ts)
-            if onset_s is None:
+            onset_s = float(onset_lsl - segment_start_lsl_ts)
+            if onset_s is None or not _event_time_ok(onset_s):
                 return
-            clamped_onset_s, clamped_onset_lsl, clamped = _clamp_event_time(onset_s)
-            if clamped:
-                onset_s = clamped_onset_s
-                onset_lsl = (
-                    clamped_onset_lsl if clamped_onset_lsl is not None else onset_lsl
-                )
-                event_clamped_count += 1
-                if not event_clamp_warned:
-                    print("⚠️ Event time behind stream; clamped.")
-                    event_clamp_warned = True
 
             current_event = {
                 "onset_lsl": float(onset_lsl),
@@ -1327,10 +1416,13 @@ def on_key_press(key):
 
 
 def on_key_release(key):
-    global event_clamped_count, event_clamp_warned
+    global current_event
     if not EVENT_MARKING_ENABLED:
         return
     if key == keyboard.Key.space and current_event is not None:
+        if not event_marking_allowed:
+            current_event = None
+            return
         if run_start_lsl_ts is None or clock_offset is None:
             return
 
@@ -1343,19 +1435,11 @@ def on_key_release(key):
         if not np.isfinite(onset_lsl):
             return
 
-        if stream_start_lsl_ts is None:
+        if segment_start_lsl_ts is None:
             return
-        end_s = float(end_lsl - stream_start_lsl_ts)
-        if end_s is None:
+        end_s = float(end_lsl - segment_start_lsl_ts)
+        if end_s is None or not _event_time_ok(end_s):
             return
-        clamped_end_s, clamped_end_lsl, clamped = _clamp_event_time(end_s)
-        if clamped:
-            end_s = clamped_end_s
-            end_lsl = clamped_end_lsl if clamped_end_lsl is not None else end_lsl
-            event_clamped_count += 1
-            if not event_clamp_warned:
-                print("⚠️ Event time behind stream; clamped.")
-                event_clamp_warned = True
 
         duration_s = float(end_s - current_event.get("onset_s", end_s))
         if duration_s < 0:
@@ -1386,6 +1470,7 @@ def start_event_listener() -> None:
         or keyboard is None
         or event_marking_active
         or not data_stream_active
+        or not event_marking_allowed
     ):
         return
     listener = keyboard.Listener(on_press=on_key_press, on_release=on_key_release)
@@ -1408,6 +1493,10 @@ def stop_event_listener() -> None:
 
 if EVENT_MARKING_ENABLED:
     start_event_listener()
+
+# Initialize first segment files/state
+_reset_segment_state()
+_open_segment_files()
 
 # =========================
 # ===== MODEL (MC DROPOUT) =====
@@ -1617,24 +1706,48 @@ header = [
     "latency_ms",
 ]
 
-if SAVE_TO_DISK:
-    features_exists = FEATURES_PATH.exists() and FEATURES_PATH.stat().st_size > 0
-    csv_file = open(FEATURES_PATH, "a", newline="")
-    csv_writer = csv.writer(csv_file)
-    if not features_exists:
-        csv_writer.writerow(header)
+def _close_segment_files() -> None:
+    global csv_file, csv_writer, raw_file, raw_writer
+    if csv_file:
+        csv_file.flush()
+        csv_file.close()
+    csv_file = None
+    csv_writer = None
+    if raw_file:
+        raw_file.flush()
+        raw_file.close()
+    raw_file = None
+    raw_writer = None
 
-if SAVE_RAW:
-    raw_dir = Path("data/raw")
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = RAW_ARCHIVE_PATH
-    raw_exists = raw_path.exists() and raw_path.stat().st_size > 0
-    raw_file = open(raw_path, "a", newline="")
-    raw_writer = csv.writer(raw_file)
-    if not raw_exists:
-        raw_writer.writerow(["lsl_timestamp", "ch1", "ch2", "ch3", "ch4"])
 
-stream_health = StreamHealthMonitor(DATA_STREAM_TIMEOUT_S)
+def _open_segment_files() -> None:
+    global csv_file, csv_writer, raw_file, raw_writer
+    if SAVE_TO_DISK:
+        FEATURES_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        features_exists = FEATURES_PATH.exists() and FEATURES_PATH.stat().st_size > 0
+        csv_file = open(FEATURES_PATH, "a", newline="")
+        csv_writer = csv.writer(csv_file)
+        if not features_exists:
+            csv_writer.writerow(header)
+    if SAVE_RAW:
+        RAW_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        raw_exists = RAW_ARCHIVE_PATH.exists() and RAW_ARCHIVE_PATH.stat().st_size > 0
+        raw_file = open(RAW_ARCHIVE_PATH, "a", newline="")
+        raw_writer = csv.writer(raw_file)
+        if not raw_exists:
+            raw_writer.writerow(["lsl_timestamp", "ch1", "ch2", "ch3", "ch4"])
+
+
+health_gate = RollingStreamHealthGate(
+    expected_fs=float(SAMPLING_RATE),
+    health_window_s=float(HEALTH_WINDOW_S),
+    stall_s=float(STALL_S),
+    min_write_fraction=float(MIN_WRITE_FRACTION),
+    max_queue=int(MAX_QUEUE),
+    recovery_s=float(RECOVERY_S),
+    backwards_threshold=int(BACKWARDS_LIMIT),
+    backwards_window_s=float(BACKWARDS_WINDOW_S),
+)
 last_stream_check = time.monotonic()
 
 
@@ -1672,22 +1785,57 @@ if ENABLE_PLOT:
 
 
 def _update_stream_health(now_monotonic: float) -> None:
-    global data_stream_active, data_stream_last_write_ts, data_stream_stalled_reason
-    status = stream_health.check(now_monotonic)
-    data_stream_last_write_ts = status.last_write_utc
-    if status.active and not data_stream_active:
-        data_stream_active = True
-        data_stream_stalled_reason = None
-        print("✅ EEG stream resumed; re-enabling event marking popup.")
+    global data_stream_active, data_stream_stalled_reason, data_stream_last_write_ts
+    global stream_health_measured_fs, stream_health_write_rate, stream_health_queue_size
+    global stream_health_backwards_count, stream_health_last_received_lsl_ts
+    global stream_health_last_written_lsl_ts, event_marking_allowed
+    global segment_break_hold_until, last_health_warning_time
+    global current_event
+
+    prev_active = data_stream_active
+    prev_event_allowed = event_marking_allowed
+    decision = health_gate.evaluate(now_monotonic)
+    stream_health_measured_fs = decision.measured_fs
+    stream_health_write_rate = decision.write_rate
+    stream_health_queue_size = decision.queue_size
+    stream_health_backwards_count = decision.backwards_count
+    stream_health_last_received_lsl_ts = decision.last_received_lsl_ts
+    stream_health_last_written_lsl_ts = decision.last_written_lsl_ts
+
+    data_stream_stalled_reason = decision.reason
+    data_stream_active = decision.healthy
+    event_allowed = decision.event_allowed
+
+    if segment_break_hold_until is not None and now_monotonic < segment_break_hold_until:
+        event_allowed = False
+
+    if not data_stream_active:
+        if (now_monotonic - last_health_warning_time) >= 2.0:
+            reason = data_stream_stalled_reason or "unhealthy"
+            print(f"⚠️ Stream unhealthy ({reason}); event marking disabled.")
+            last_health_warning_time = now_monotonic
+        if event_marking_active:
+            stop_event_listener()
+        if current_event is not None:
+            current_event = None
+        event_marking_allowed = False
+        if prev_active or prev_event_allowed:
+            _write_session_state(label="stream_unhealthy")
+        return
+
+    if event_allowed and not event_marking_allowed:
+        event_marking_allowed = True
+        print("✅ Stream healthy; event marking re-enabled.")
         if EVENT_MARKING_ENABLED:
             start_event_listener()
-        _write_session_state(label="stream_resumed")
-    elif not status.active and data_stream_active:
-        data_stream_active = False
-        data_stream_stalled_reason = status.stalled_reason
-        print("⚠️ EEG stream stalled: stopping event marking popup.")
+        if not prev_event_allowed:
+            _write_session_state(label="stream_healthy")
+    elif not event_allowed and event_marking_allowed:
+        event_marking_allowed = False
+        print("⚠️ Event marking disabled due to stalled writes.")
         stop_event_listener()
-        _write_session_state(label="stream_stalled")
+        if prev_event_allowed:
+            _write_session_state(label="event_marking_disabled")
 
 # =========================
 # ===== MAIN LOOP =========
@@ -1701,100 +1849,116 @@ try:
             _update_stream_health(now_monotonic)
             last_stream_check = now_monotonic
 
-        sample, lsl_ts = inlet.pull_sample(timeout=0.0)
-        if sample is None:
-            continue
+        # Drain incoming samples into a bounded queue.
+        while True:
+            sample, lsl_ts = inlet.pull_sample(timeout=0.0)
+            if sample is None:
+                break
 
-        if len(sample) < max(channel_indices) + 1:
-            raise RuntimeError(
-                f"LSL EEG sample has {len(sample)} channels; expected at least {max(channel_indices) + 1}."
-            )
-        if len(sample) != CHANNELS:
-            sample = [sample[i] for i in channel_indices]
-
-        if not np.all(np.isfinite(sample)):
-            if not non_finite_sample_warned:
-                print(
-                    "⚠️ Non-finite EEG sample detected (NaN/Inf). Skipping sample to keep ICA stable."
+            if len(sample) < max(channel_indices) + 1:
+                raise RuntimeError(
+                    f"LSL EEG sample has {len(sample)} channels; expected at least {max(channel_indices) + 1}."
                 )
-                non_finite_sample_warned = True
+            if len(sample) != CHANNELS:
+                sample = [sample[i] for i in channel_indices]
+
+            if not np.all(np.isfinite(sample)):
+                if not non_finite_sample_warned:
+                    print(
+                        "⚠️ Non-finite EEG sample detected (NaN/Inf). Skipping sample to keep ICA stable."
+                    )
+                    non_finite_sample_warned = True
+                continue
+
+            samples_seen += 1
+            last_received_lsl_ts = float(lsl_ts)
+            sample_monotonic = time.monotonic()
+            health_gate.record_received(float(lsl_ts), sample_monotonic)
+
+            if len(sample_queue) >= MAX_QUEUE:
+                queue_drop_count += 1
+                health_gate.set_queue_size(len(sample_queue) + 1)
+                if (sample_monotonic - last_health_warning_time) >= 2.0:
+                    print("⚠️ Sample queue overflow; dropping samples.")
+                    last_health_warning_time = sample_monotonic
+                continue
+
+            sample_queue.append((float(lsl_ts), sample))
+            health_gate.set_queue_size(len(sample_queue))
+
+        if not sample_queue:
             continue
 
-        # =========================
-        # ===== TIMEBASE INIT ======
-        # =========================
-        # On the FIRST sample of THIS run, anchor run_start_lsl_ts and compute clock_offset.
-        # This makes time_s continuous across resumes without including downtime.
-        if run_start_lsl_ts is None:
-            run_start_lsl_ts = float(lsl_ts)
-            run_start_local = float(local_clock())
-            clock_offset = float(run_start_lsl_ts - run_start_local)
+        while sample_queue and not stop_event.is_set():
+            lsl_ts, sample = sample_queue.popleft()
+            health_gate.set_queue_size(len(sample_queue))
 
-            # Legacy diagnostics: keep stream_start_* set once if absent
-            if stream_start_lsl_ts is None:
-                stream_start_lsl_ts = run_start_lsl_ts
-            if local_clock_at_start is None:
-                local_clock_at_start = run_start_local
+            # =========================
+            # ===== TIMEBASE INIT ======
+            # =========================
+            # On the FIRST sample of THIS run, anchor run_start_lsl_ts and compute clock_offset.
+            # This makes time_s continuous across resumes without including downtime.
+            if run_start_lsl_ts is None:
+                run_start_lsl_ts = float(lsl_ts)
+                run_start_local = float(local_clock())
+                clock_offset = float(run_start_lsl_ts - run_start_local)
 
-            timebase_written = False
-            timebase_report_initialized = False
+                # Legacy diagnostics: keep stream_start_* set once if absent
+                if stream_start_lsl_ts is None:
+                    stream_start_lsl_ts = run_start_lsl_ts
+                if local_clock_at_start is None:
+                    local_clock_at_start = run_start_local
 
-        # If clock_offset is missing (shouldn't happen after init), estimate from current sample
-        if clock_offset is None:
-            clock_offset = float(lsl_ts - local_clock())
-            if not clock_offset_estimated:
-                print("⚠️ clock_offset missing; estimating from current sample.")
-                clock_offset_estimated = True
-            timebase_written = False
+                timebase_written = False
+                timebase_report_initialized = False
 
-        if (
-            not timebase_written
-            and run_start_lsl_ts is not None
-            and clock_offset is not None
-        ):
-            _update_session_meta(complete=False, label="timebase")
-            _write_session_state(label="timebase")
-            timebase_written = True
-        if run_start_lsl_ts is not None and not timebase_report_initialized:
-            _write_timebase_report("init")
-            timebase_report_initialized = True
+            # If clock_offset is missing (shouldn't happen after init), estimate from current sample
+            if clock_offset is None:
+                clock_offset = float(lsl_ts - local_clock())
+                if not clock_offset_estimated:
+                    print("⚠️ clock_offset missing; estimating from current sample.")
+                    clock_offset_estimated = True
+                timebase_written = False
 
-        samples_seen += 1
-        raw_time_s = None
-        if stream_start_lsl_ts is not None:
-            raw_time_s = float(lsl_ts - stream_start_lsl_ts)
-        clamped_time_s, clamped = clamp_monotonic_time(last_sample_time_s, raw_time_s)
-        if clamped and raw_time_s is not None and last_sample_time_s is not None:
-            time_s_clamped_count += 1
-            max_backwards_jump_s = max(
-                max_backwards_jump_s, float(last_sample_time_s - raw_time_s)
-            )
-            if not time_s_clamp_warned:
-                print("⚠️ LSL time went backwards; time_s was clamped.")
-                time_s_clamp_warned = True
-        if clamped_time_s is not None and stream_start_lsl_ts is not None:
-            last_sample_time_s = float(clamped_time_s)
-            last_sample_lsl_ts = float(stream_start_lsl_ts + clamped_time_s)
-            recent_sample_times.append(last_sample_time_s)
-            if first_time_s is None:
-                first_time_s = last_sample_time_s
-            last_time_s_seen = last_sample_time_s
-            if first_lsl_ts is None:
-                first_lsl_ts = last_sample_lsl_ts
-            last_lsl_ts = last_sample_lsl_ts
+            if (
+                not timebase_written
+                and run_start_lsl_ts is not None
+                and clock_offset is not None
+            ):
+                _update_session_meta(complete=False, label="timebase")
+                _write_session_state(label="timebase")
+                timebase_written = True
+            if run_start_lsl_ts is not None and not timebase_report_initialized:
+                _write_timebase_report("init")
+                timebase_report_initialized = True
 
-        latency_ms = (local_clock() - lsl_ts) * 1000.0
+            if segment_start_lsl_ts is None:
+                segment_start_lsl_ts = float(lsl_ts)
+                _write_session_state(label="segment_start")
 
-        eeg_buffer.append(sample)
+            if last_written_lsl_ts is not None:
+                if lsl_ts <= last_written_lsl_ts:
+                    max_backwards_jump_s = max(
+                        max_backwards_jump_s, float(last_written_lsl_ts - lsl_ts)
+                    )
+                    _start_segment("backwards")
+                    segment_start_lsl_ts = float(lsl_ts)
+                elif (lsl_ts - last_written_lsl_ts) > GAP_BREAK_S:
+                    _start_segment("gap")
+                    segment_start_lsl_ts = float(lsl_ts)
 
-        if raw_writer:
-            raw_writer.writerow([lsl_ts, *sample])
-            stream_health.mark_write(time.monotonic(), utc_now_iso_z())
+            raw_time_s = float(lsl_ts - segment_start_lsl_ts)
+            latency_ms = (local_clock() - lsl_ts) * 1000.0
 
-        if len(eeg_buffer) < buffer_len:
-            continue
+            eeg_buffer.append(sample)
 
-        window = np.array(eeg_buffer)  # (T, C)
+            if raw_writer:
+                raw_writer.writerow([lsl_ts, *sample])
+
+            if len(eeg_buffer) < buffer_len:
+                continue
+
+            window = np.array(eeg_buffer)  # (T, C)
 
         # ===== Compression =====
         diff_mask = np.any(np.diff(window, axis=0) != 0, axis=1)
@@ -1971,8 +2135,8 @@ try:
 
         # ===== SAVE FEATURES =====
         if SAVE_TO_DISK and csv_writer:
-            time_s = clamped_time_s
-            if time_s is None:
+            time_s = raw_time_s
+            if time_s is None or not np.isfinite(time_s):
                 continue
 
             row = [
@@ -1993,9 +2157,20 @@ try:
                     f"Feature row length {len(row)} does not match header length {len(header)}"
                 )
             csv_writer.writerow(row)
-            stream_health.mark_write(time.monotonic(), utc_now_iso_z())
+            data_stream_last_write_ts = utc_now_iso_z()
+            health_gate.record_written(float(lsl_ts), time.monotonic())
+            last_written_lsl_ts = float(lsl_ts)
             last_written_time_s = float(time_s)
             last_time_s = float(last_written_time_s)  # keep session meta/state current
+            last_sample_time_s = float(time_s)
+            last_sample_lsl_ts = float(lsl_ts)
+            recent_sample_times.append(last_sample_time_s)
+            if first_time_s is None:
+                first_time_s = last_sample_time_s
+            last_time_s_seen = last_sample_time_s
+            if first_lsl_ts is None:
+                first_lsl_ts = float(lsl_ts)
+            last_lsl_ts = float(lsl_ts)
             samples_written += 1
             _maybe_write_timebase_report()
 
@@ -2023,13 +2198,7 @@ except KeyboardInterrupt:
 # =========================
 print("\n🧹 Cleaning up")
 
-if csv_file:
-    csv_file.flush()
-    csv_file.close()
-
-if raw_file:
-    raw_file.flush()
-    raw_file.close()
+_close_segment_files()
 
 if ENABLE_PLOT:
     plt.close("all")
@@ -2048,9 +2217,8 @@ _maybe_write_timebase_report(force=True, label="final")
 last_time_s_updated = float(
     last_written_time_s if last_written_time_s >= 0 else last_time_s
 )
-total_elapsed_s_updated = float(
-    last_time_s_updated if last_time_s_updated >= 0 else total_elapsed_s
-)
+segment_elapsed_s = last_time_s_updated if last_time_s_updated >= 0 else 0.0
+total_elapsed_s_updated = float(total_elapsed_s + segment_elapsed_s)
 
 # Commit updated times so next resume uses the correct anchor
 total_elapsed_s = total_elapsed_s_updated

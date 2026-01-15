@@ -29,3 +29,137 @@ class StreamHealthMonitor:
         if elapsed > self.timeout_s:
             return StreamHealthStatus(False, self.reason, self.last_write_utc)
         return StreamHealthStatus(True, None, self.last_write_utc)
+
+
+@dataclass
+class RollingHealthDecision:
+    healthy: bool
+    reason: Optional[str]
+    measured_fs: Optional[float]
+    write_rate: float
+    event_allowed: bool
+    queue_size: int
+    backwards_count: int
+    last_received_lsl_ts: Optional[float]
+    last_written_lsl_ts: Optional[float]
+
+
+class RollingStreamHealthGate:
+    def __init__(
+        self,
+        *,
+        expected_fs: float,
+        health_window_s: float,
+        stall_s: float,
+        min_write_fraction: float,
+        max_queue: int,
+        recovery_s: float,
+        backwards_threshold: int,
+        backwards_window_s: float,
+    ) -> None:
+        self.expected_fs = float(expected_fs)
+        self.health_window_s = float(health_window_s)
+        self.stall_s = float(stall_s)
+        self.min_write_fraction = float(min_write_fraction)
+        self.max_queue = int(max_queue)
+        self.recovery_s = float(recovery_s)
+        self.backwards_threshold = int(backwards_threshold)
+        self.backwards_window_s = float(backwards_window_s)
+
+        self._received = []
+        self._written = []
+        self._backwards = []
+        self._queue_size = 0
+        self._last_received_mono: Optional[float] = None
+        self._last_received_lsl_ts: Optional[float] = None
+        self._last_written_lsl_ts: Optional[float] = None
+        self._event_allowed = False
+        self._healthy_since: Optional[float] = None
+
+    def _trim(self, now_monotonic: float, window_s: float, items: list) -> None:
+        cutoff = float(now_monotonic - window_s)
+        while items and items[0][0] < cutoff:
+            items.pop(0)
+
+    def record_received(self, lsl_ts: float, now_monotonic: float) -> None:
+        if self._last_received_lsl_ts is not None and lsl_ts <= self._last_received_lsl_ts:
+            self._backwards.append((float(now_monotonic), float(lsl_ts)))
+        self._last_received_mono = float(now_monotonic)
+        self._last_received_lsl_ts = float(lsl_ts)
+        self._received.append((float(now_monotonic), float(lsl_ts)))
+
+    def record_written(self, lsl_ts: float, now_monotonic: float) -> None:
+        self._last_written_lsl_ts = float(lsl_ts)
+        self._written.append((float(now_monotonic), float(lsl_ts)))
+
+    def set_queue_size(self, size: int) -> None:
+        self._queue_size = int(size)
+
+    def evaluate(self, now_monotonic: float) -> RollingHealthDecision:
+        now = float(now_monotonic)
+        self._trim(now, self.health_window_s, self._received)
+        self._trim(now, self.health_window_s, self._written)
+        self._trim(now, self.backwards_window_s, self._backwards)
+
+        if self._last_received_mono is None or (now - self._last_received_mono) > self.stall_s:
+            healthy = False
+            reason = "stall_no_samples"
+            measured_fs = None
+            write_rate = 0.0
+        else:
+            measured_fs = self._compute_measured_fs()
+            write_rate = (
+                len(self._written) / self.health_window_s
+                if self.health_window_s > 0
+                else 0.0
+            )
+            reason = None
+            healthy = True
+            if self._queue_size > self.max_queue:
+                healthy = False
+                reason = "queue_overflow"
+            elif len(self._backwards) >= self.backwards_threshold:
+                healthy = False
+                reason = "backwards_timestamps"
+            else:
+                expected_fs = measured_fs or self.expected_fs
+                if expected_fs > 0 and write_rate < (self.min_write_fraction * expected_fs):
+                    healthy = False
+                    reason = "write_rate_low"
+
+        if healthy:
+            if self._healthy_since is None:
+                self._healthy_since = now
+            if now - self._healthy_since >= self.recovery_s:
+                self._event_allowed = True
+        else:
+            self._event_allowed = False
+            self._healthy_since = None
+
+        return RollingHealthDecision(
+            healthy=healthy,
+            reason=reason,
+            measured_fs=measured_fs,
+            write_rate=float(write_rate),
+            event_allowed=self._event_allowed,
+            queue_size=self._queue_size,
+            backwards_count=len(self._backwards),
+            last_received_lsl_ts=self._last_received_lsl_ts,
+            last_written_lsl_ts=self._last_written_lsl_ts,
+        )
+
+    def _compute_measured_fs(self) -> Optional[float]:
+        if len(self._received) < 2:
+            return None
+        diffs = []
+        for idx in range(1, len(self._received)):
+            dt = self._received[idx][1] - self._received[idx - 1][1]
+            if dt > 0:
+                diffs.append(dt)
+        if not diffs:
+            return None
+        diffs.sort()
+        mid = diffs[len(diffs) // 2]
+        if mid <= 0:
+            return None
+        return float(1.0 / mid)

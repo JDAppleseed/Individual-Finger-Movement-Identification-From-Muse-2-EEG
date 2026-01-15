@@ -24,6 +24,7 @@ def _base_payload():
         "created_utc": "2020-01-01T00:00:00Z",
     }
     dataset_info_cache = dict(dataset_info_current)
+    dataset_info_cache["filters"] = dict(dataset_info_current["filters"])
 
     return {
         "action_probs": action_probs,
@@ -102,7 +103,7 @@ def test_cache_rejects_legacy_missing_dataset_info():
 
 def test_cache_rejects_spotcheck_mismatch():
     payload = _base_payload()
-    payload["y_action_test"][1] = 99
+    payload["y_action_test"][1] = 2
     from utils.eval_utils import validate_cached_predictions_with_dataset_info
 
     ok, reasons = validate_cached_predictions_with_dataset_info(

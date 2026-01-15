@@ -35,6 +35,7 @@ def test_event_time_from_local_clock():
     local_ts = 1000.0
     clock_offset = 5.0
     event_lsl_ts = mod.compute_event_lsl_ts(local_ts, clock_offset)
+    assert event_lsl_ts is not None
     event_time_s = mod.compute_event_time_s(
         total_elapsed_s, run_start_lsl_ts, event_lsl_ts
     )

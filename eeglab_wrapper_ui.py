@@ -856,7 +856,24 @@ class MainWindow(QMainWindow):
             ) and self.fields[step_id]["EVENT_MARKING_ENABLED"].isChecked():
                 event_enabled = True
         self.ica_state_label.setText(f"ICA: {'on' if ica_enabled else 'off'}")
-        self.events_state_label.setText(f"Events: {'on' if event_enabled else 'off'}")
+        runtime_note = ""
+        if self.current_subject:
+            state_path = (
+                self.repo_root / "logs" / f"session_state_{self.current_subject}.json"
+            )
+            if state_path.exists():
+                try:
+                    data = json.loads(state_path.read_text())
+                    runtime_allowed = data.get("event_marking_allowed")
+                    if runtime_allowed is not None:
+                        runtime_note = (
+                            f" (runtime: {'on' if runtime_allowed else 'off'})"
+                        )
+                except Exception:
+                    runtime_note = ""
+        self.events_state_label.setText(
+            f"Events: {'on' if event_enabled else 'off'}{runtime_note}"
+        )
 
     def _build_project_page(self) -> QWidget:
         page = QWidget()

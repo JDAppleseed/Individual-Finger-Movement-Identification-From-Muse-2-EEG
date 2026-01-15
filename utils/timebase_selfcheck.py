@@ -41,8 +41,16 @@ def evaluate_timebase_alignment(
     deltas_arr = np.abs(np.asarray(deltas, dtype=float))
     max_abs = float(np.max(deltas_arr)) if deltas_arr.size else None
     mean_abs = float(np.mean(deltas_arr)) if deltas_arr.size else None
-    warn = max_abs is not None and max_abs > warn_threshold_s
-    error = max_abs is not None and max_abs > error_threshold_s
+    warn = False
+    error = False
+    if max_abs is not None and max_abs > warn_threshold_s:
+        warn = True
+    if mean_abs is not None and mean_abs > warn_threshold_s:
+        warn = True
+    if max_abs is not None and max_abs > error_threshold_s:
+        error = True
+    if mean_abs is not None and mean_abs > error_threshold_s:
+        error = True
     return TimebaseSelfCheck(
         max_abs_delta_s=max_abs,
         mean_abs_delta_s=mean_abs,
