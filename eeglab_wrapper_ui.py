@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
@@ -33,9 +34,11 @@ from PySide6.QtWidgets import (
     QSlider,
     QSplitter,
     QStackedWidget,
+    QToolButton,
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from app.config_model import (
@@ -80,6 +83,14 @@ except Exception:
 class StreamInfo:
     name: str
     stype: str
+
+
+@dataclass
+class ArgSpec:
+    name: str
+    flag: str
+    kind: str
+    description: str
 
 
 TOOLTIPS: Dict[str, str] = {
@@ -144,6 +155,11 @@ QDockWidget {
     titlebar-normal-icon: url(none);
     font-weight: 600;
 }
+QDockWidget::title {
+    color: #1d2a44;
+    background: #dbe3f4;
+    padding: 4px;
+}
 QGroupBox {
     background: #e6edf9;
     border: 1px solid #8ba0c7;
@@ -174,6 +190,20 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {
 }
 QListWidget {
     background: #f7f9ff;
+    border: 1px solid #7a8fb8;
+}
+QLabel {
+    color: #1d2a44;
+}
+QToolButton {
+    background: #6c86c7;
+    color: white;
+    border-radius: 4px;
+    padding: 4px 10px;
+}
+QToolTip {
+    background-color: #f2f4fb;
+    color: #1d2a44;
     border: 1px solid #7a8fb8;
 }
 QFrame#StatusBarFrame {
@@ -300,6 +330,9 @@ class MainWindow(QMainWindow):
         self.step_checklists: Dict[str, QListWidget] = {}
         self.step_script_key: Dict[str, str] = {}
         self.active_settings: Dict[str, Any] = {}
+        self.step_arg_specs = self._build_step_arg_specs()
+        self.step_arg_widgets: Dict[str, Dict[str, QWidget]] = {}
+        self.step_arg_includes: Dict[str, Dict[str, QCheckBox]] = {}
 
         self.runner = ProcessRunner(self)
         self.runner.line_ready.connect(self._append_log)
@@ -364,12 +397,88 @@ class MainWindow(QMainWindow):
         self._refresh_status_summary()
         self.workflow_list.setCurrentRow(0)
 
+    def _build_step_arg_specs(self) -> Dict[str, list[ArgSpec]]:
+        return {
+            "step1": [
+                ArgSpec("subject_id", "--subject-id", "text", "Override subject ID."),
+                ArgSpec("init_only", "--init-only", "bool", "Initialize session then exit."),
+                ArgSpec(
+                    "force_new_session",
+                    "--force-new-session",
+                    "bool",
+                    "Force a new session (ignore resume).",
+                ),
+            ],
+            "infer": [
+                ArgSpec("subject_id", "--subject-id", "text", "Override subject ID."),
+                ArgSpec("init_only", "--init-only", "bool", "Initialize session then exit."),
+                ArgSpec(
+                    "force_new_session",
+                    "--force-new-session",
+                    "bool",
+                    "Force a new session (ignore resume).",
+                ),
+            ],
+            "step1b": [
+                ArgSpec("features", "--features", "text", "Override features path."),
+                ArgSpec("events", "--events", "text", "Override events path."),
+                ArgSpec("subject_id", "--subject-id", "text", "Subject ID override."),
+                ArgSpec("target_fs", "--target-fs", "float", "Target resample rate."),
+                ArgSpec("allow_gaps", "--allow-gaps", "bool", "Allow gaps in windows."),
+                ArgSpec(
+                    "ignore_misalignment",
+                    "--ignore-misalignment",
+                    "bool",
+                    "Continue if events are out of range.",
+                ),
+                ArgSpec("seed", "--seed", "int", "Seed for REST subsampling."),
+            ],
+            "train": [
+                ArgSpec("npz", "--npz", "text", "Window dataset path."),
+                ArgSpec("subject_id", "--subject-id", "text", "Filter by subject ID."),
+                ArgSpec("epochs", "--epochs", "int", "Training epochs."),
+                ArgSpec("batch_size", "--batch-size", "int", "Training batch size."),
+                ArgSpec("lr", "--lr", "float", "Learning rate."),
+                ArgSpec("seed", "--seed", "int", "Random seed."),
+                ArgSpec(
+                    "loss_action_weight",
+                    "--loss-action-weight",
+                    "float",
+                    "Action loss weight.",
+                ),
+                ArgSpec("rest_weight", "--rest-weight", "float", "REST class weight."),
+                ArgSpec("test_size", "--test-size", "float", "Test split fraction."),
+                ArgSpec("non_rest_only", "--non-rest-only", "bool", "Train on non-REST only."),
+                ArgSpec("save_model", "--save-model", "text", "Model output path."),
+                ArgSpec("save_scaler", "--save-scaler", "text", "Scaler output path."),
+                ArgSpec("save_preds", "--save-preds", "text", "Predictions output path."),
+            ],
+        }
+
     def _wrap_scroll(self, widget: QWidget) -> QWidget:
         area = QScrollArea()
         area.setWidgetResizable(True)
         area.setFrameShape(QFrame.NoFrame)
         area.setWidget(widget)
         return area
+
+    def _build_dropdown_button(self, title: str, panel: QWidget) -> QToolButton:
+        button = QToolButton()
+        button.setText(title)
+        button.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(button)
+        menu.setMinimumWidth(360)
+        action = QWidgetAction(menu)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setMinimumWidth(340)
+        scroll.setMinimumHeight(260)
+        scroll.setWidget(panel)
+        action.setDefaultWidget(scroll)
+        menu.addAction(action)
+        button.setMenu(menu)
+        return button
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
@@ -419,6 +528,16 @@ class MainWindow(QMainWindow):
         self.stream_state_label = QLabel("Stream: idle")
         self.ica_state_label = QLabel("ICA: off")
         self.events_state_label = QLabel("Events: off")
+        for label in (
+            self.project_label,
+            self.subject_label,
+            self.session_label,
+            self.stream_state_label,
+            self.ica_state_label,
+            self.events_state_label,
+        ):
+            label.setMinimumWidth(140)
+            label.setWordWrap(False)
 
         layout.addWidget(self.project_label)
         layout.addWidget(self.subject_label)
@@ -530,6 +649,12 @@ class MainWindow(QMainWindow):
         self.project_label_dock = QLabel("Project: -")
         self.subject_label_dock = QLabel("Subject: -")
         self.session_label_dock = QLabel("Session: -")
+        for label in (
+            self.project_label_dock,
+            self.subject_label_dock,
+            self.session_label_dock,
+        ):
+            label.setWordWrap(False)
         session_layout.addWidget(self.project_label_dock)
         session_layout.addWidget(self.subject_label_dock)
         session_layout.addWidget(self.session_label_dock)
@@ -930,6 +1055,22 @@ class MainWindow(QMainWindow):
         advanced_group.setLayout(adv_layout)
         layout.addWidget(advanced_group)
 
+        dropdown_row = QHBoxLayout()
+        dropdown_row.addWidget(
+            self._build_dropdown_button(
+                "Config Flags",
+                self._build_config_flags_panel(step_id),
+            )
+        )
+        dropdown_row.addWidget(
+            self._build_dropdown_button(
+                "Passable Args",
+                self._build_step_args_panel(step_id),
+            )
+        )
+        dropdown_row.addStretch(1)
+        layout.addLayout(dropdown_row)
+
         buttons = QHBoxLayout()
         run_btn = QPushButton("Run")
         stop_btn = QPushButton("Stop")
@@ -965,6 +1106,171 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(checklist)
         layout.addWidget(box)
         self.step_checklists[step_id] = checklist
+
+    def _build_config_flags_panel(self, step_id: str) -> QWidget:
+        panel = QWidget()
+        layout = QFormLayout(panel)
+        layout.setLabelAlignment(Qt.AlignRight)
+        fields = self.fields.get(step_id, {})
+        for key in sorted(fields.keys()):
+            source_widget = fields[key]
+            proxy = self._clone_bound_widget(source_widget, key)
+            label = QLabel(key)
+            label.setMinimumWidth(160)
+            label.setWordWrap(True)
+            layout.addRow(label, proxy)
+        return panel
+
+    def _build_step_args_panel(self, step_id: str) -> QWidget:
+        panel = QWidget()
+        layout = QFormLayout(panel)
+        layout.setLabelAlignment(Qt.AlignRight)
+        specs = self.step_arg_specs.get(step_id, [])
+        self.step_arg_widgets.setdefault(step_id, {})
+        self.step_arg_includes.setdefault(step_id, {})
+        for spec in specs:
+            if spec.kind == "bool":
+                widget = QCheckBox()
+                self._apply_tooltip(widget, spec.name, spec.description)
+                source_widget = self.fields.get(step_id, {}).get(spec.name)
+                if isinstance(source_widget, QCheckBox):
+                    widget.setChecked(source_widget.isChecked())
+                    widget.toggled.connect(source_widget.setChecked)
+                    source_widget.toggled.connect(widget.setChecked)
+                layout.addRow(QLabel(spec.flag), widget)
+                self.step_arg_widgets[step_id][spec.name] = widget
+                continue
+
+            include_cb = QCheckBox("Include")
+            include_cb.setChecked(False)
+            self.step_arg_includes[step_id][spec.name] = include_cb
+            source_widget = self.fields.get(step_id, {}).get(spec.name)
+            if source_widget is not None:
+                widget = self._clone_bound_widget(source_widget, spec.name)
+            else:
+                widget = QLineEdit()
+                widget.setPlaceholderText("Value")
+            self._apply_tooltip(widget, spec.name, spec.description)
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(include_cb)
+            row_layout.addWidget(widget)
+            layout.addRow(QLabel(spec.flag), row)
+            self.step_arg_widgets[step_id][spec.name] = widget
+        return panel
+
+    def _clone_bound_widget(self, source_widget: QWidget, key: str) -> QWidget:
+        if isinstance(source_widget, QCheckBox):
+            target = QCheckBox()
+            target.setChecked(source_widget.isChecked())
+            target.toggled.connect(
+                lambda val: self._sync_checkbox(source_widget, val)
+            )
+            source_widget.toggled.connect(
+                lambda val: self._sync_checkbox(target, val)
+            )
+            self._apply_tooltip(target, key)
+            return target
+        if isinstance(source_widget, QSpinBox):
+            target = QSpinBox()
+            target.setRange(source_widget.minimum(), source_widget.maximum())
+            target.setValue(source_widget.value())
+            target.valueChanged.connect(
+                lambda val: self._sync_spinbox(source_widget, val)
+            )
+            source_widget.valueChanged.connect(
+                lambda val: self._sync_spinbox(target, val)
+            )
+            self._apply_tooltip(target, key)
+            return target
+        if isinstance(source_widget, QDoubleSpinBox):
+            target = QDoubleSpinBox()
+            target.setRange(source_widget.minimum(), source_widget.maximum())
+            target.setDecimals(source_widget.decimals())
+            target.setSingleStep(source_widget.singleStep())
+            target.setValue(source_widget.value())
+            target.valueChanged.connect(
+                lambda val: self._sync_spinbox(source_widget, val)
+            )
+            source_widget.valueChanged.connect(
+                lambda val: self._sync_spinbox(target, val)
+            )
+            self._apply_tooltip(target, key)
+            return target
+        if isinstance(source_widget, QLineEdit):
+            target = QLineEdit()
+            target.setText(source_widget.text())
+            target.textChanged.connect(
+                lambda text: self._sync_line_edit(source_widget, text)
+            )
+            source_widget.textChanged.connect(
+                lambda text: self._sync_line_edit(target, text)
+            )
+            self._apply_tooltip(target, key)
+            return target
+        if isinstance(source_widget, QTextEdit):
+            target = QTextEdit()
+            target.setPlainText(source_widget.toPlainText())
+            target.textChanged.connect(
+                lambda: self._sync_text_edit(source_widget, target.toPlainText())
+            )
+            source_widget.textChanged.connect(
+                lambda: self._sync_text_edit(target, source_widget.toPlainText())
+            )
+            self._apply_tooltip(target, key)
+            return target
+        if isinstance(source_widget, QComboBox):
+            target = QComboBox()
+            for idx in range(source_widget.count()):
+                target.addItem(source_widget.itemText(idx))
+            target.setCurrentText(source_widget.currentText())
+            target.currentTextChanged.connect(
+                lambda text: self._sync_combo(source_widget, text)
+            )
+            source_widget.currentTextChanged.connect(
+                lambda text: self._sync_combo(target, text)
+            )
+            self._apply_tooltip(target, key)
+            return target
+        fallback = QLabel("Unsupported")
+        return fallback
+
+    def _sync_checkbox(self, checkbox: QCheckBox, value: bool) -> None:
+        if checkbox.isChecked() == value:
+            return
+        checkbox.blockSignals(True)
+        checkbox.setChecked(value)
+        checkbox.blockSignals(False)
+
+    def _sync_spinbox(self, spinbox: QWidget, value: float) -> None:
+        if isinstance(spinbox, (QSpinBox, QDoubleSpinBox)):
+            if spinbox.value() == value:
+                return
+            spinbox.blockSignals(True)
+            spinbox.setValue(value)
+            spinbox.blockSignals(False)
+
+    def _sync_line_edit(self, widget: QLineEdit, text: str) -> None:
+        if widget.text() == text:
+            return
+        widget.blockSignals(True)
+        widget.setText(text)
+        widget.blockSignals(False)
+
+    def _sync_text_edit(self, widget: QTextEdit, text: str) -> None:
+        if widget.toPlainText() == text:
+            return
+        widget.blockSignals(True)
+        widget.setPlainText(text)
+        widget.blockSignals(False)
+
+    def _sync_combo(self, combo: QComboBox, text: str) -> None:
+        if combo.currentText() == text:
+            return
+        combo.blockSignals(True)
+        combo.setCurrentText(text)
+        combo.blockSignals(False)
 
     def _populate_basic_fields(self, step_id: str, form: QFormLayout) -> None:
         defaults = self.defaults[step_id]
@@ -2080,6 +2386,7 @@ class MainWindow(QMainWindow):
         self._write_session_snapshot(subject_dir, config.to_dict(), step_id)
 
         args = [str(script_info.path), "--config", str(config_path)]
+        args.extend(self._collect_step_args(step_id))
         cwd = str(self.repo_root)
         if step_id == "step1b" and self.current_session_ui:
             session_dir = session_root(subject_dir, self.current_session_ui)
@@ -2130,6 +2437,28 @@ class MainWindow(QMainWindow):
             defaults["LSL_STREAM_TYPE"] = self._selected_stream_type()
         defaults["CSV_OFFLINE_PATH"] = self.csv_path.text().strip() or None
         return defaults
+
+    def _collect_step_args(self, step_id: str) -> list[str]:
+        specs = self.step_arg_specs.get(step_id, [])
+        args: list[str] = []
+        widgets = self.step_arg_widgets.get(step_id, {})
+        includes = self.step_arg_includes.get(step_id, {})
+        for spec in specs:
+            widget = widgets.get(spec.name)
+            if widget is None:
+                continue
+            value = self._widget_value(widget)
+            if spec.kind == "bool":
+                if bool(value):
+                    args.append(spec.flag)
+                continue
+            include_cb = includes.get(spec.name)
+            if include_cb is None or not include_cb.isChecked():
+                continue
+            if value is None:
+                continue
+            args.extend([spec.flag, str(value)])
+        return args
 
     def _widget_value(self, widget: QWidget) -> Any:
         if isinstance(widget, QCheckBox):
