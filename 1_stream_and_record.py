@@ -721,10 +721,10 @@ def _build_session_state_payload(
         "total_elapsed_s": float(
             total_elapsed_override
             if total_elapsed_override is not None
-            else total_elapsed_s
+            else g.get("total_elapsed_s", 0.0)
         ),
         "last_time_s": float(
-            last_time_override if last_time_override is not None else last_time_s
+            last_time_override if last_time_override is not None else g.get("last_time_s", -1.0)
         ),
         "features_path": state.features_path,
         "events_path": state.events_path,
@@ -767,7 +767,7 @@ def _build_session_state_payload(
         "stream_health_last_written_lsl_ts": stream_health_last_written_lsl_ts,
         "event_marking_allowed": bool(event_marking_allowed),
         # Legacy/diagnostic
-        "segment_start_lsl_ts": segment_start_lsl_ts,
+        "segment_start_lsl_ts": g.get("segment_start_lsl_ts"),
     }
 
 
