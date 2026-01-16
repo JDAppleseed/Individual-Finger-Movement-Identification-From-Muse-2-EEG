@@ -1,7 +1,4 @@
 import csv
-import json
-
-import numpy as np
 
 from diagnostics_cli import diagnostics
 
