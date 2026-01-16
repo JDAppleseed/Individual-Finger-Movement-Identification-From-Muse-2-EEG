@@ -178,6 +178,8 @@ raw_file = None
 raw_writer = None
 predictions_file = None
 predictions_writer = None
+ica = None
+ica_scaler = None
 
 
 @dataclass
@@ -449,9 +451,35 @@ def _load_session_meta(path: Path):
         return {}
 
 
+def _to_jsonable(obj):
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    if isinstance(obj, (np.integer, np.floating, np.bool_)):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return _to_jsonable(obj.tolist())
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, dict):
+        normalized = {}
+        for key, value in obj.items():
+            if isinstance(key, Path):
+                normalized_key = str(key)
+            elif isinstance(key, (np.integer, np.floating, np.bool_)):
+                normalized_key = key.item()
+            else:
+                normalized_key = key
+            normalized[normalized_key] = _to_jsonable(value)
+        return normalized
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(item) for item in obj]
+    return obj
+
+
 def _write_json_atomic(path: Path, payload: dict):
+    normalized_payload = _to_jsonable(payload)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2))
+    tmp.write_text(json.dumps(normalized_payload, indent=2))
     tmp.replace(path)
 
 
@@ -706,10 +734,11 @@ def _build_session_state_payload(
     block_id_override=None,
     segment_id_override=None,
 ):
+    g = globals()
     segment_id_val = (
         int(segment_id_override)
         if segment_id_override is not None
-        else int(state.segment_id)
+        else state.segment_id
     )
     return {
         "subject_id": state.subject_id,
@@ -739,16 +768,16 @@ def _build_session_state_payload(
         "stream_start_lsl_ts": state.stream_start_lsl_ts,
         "local_clock_at_start": state.local_clock_at_start,
         "clock_offset": state.clock_offset,
-        "gap_count": int(state.gap_count),
-        "gap_max_s": float(state.gap_max_s) if state.gap_count else None,
+        "gap_count": state.gap_count,
+        "gap_max_s": state.gap_max_s if state.gap_count else None,
         "gap_p95_s": state.gap_p95_s,
         "gap_p99_s": state.gap_p99_s,
-        "backward_timestamp_count": int(state.backward_timestamp_count),
-        "window_drop_count": int(state.window_drop_count),
-        "window_gap_drop_count": int(state.window_gap_drop_count),
-        "window_incomplete_drop_count": int(state.window_incomplete_drop_count),
-        "window_health_drop_count": int(state.window_health_drop_count),
-        "lstm_reset_count": int(state.lstm_reset_count),
+        "backward_timestamp_count": state.backward_timestamp_count,
+        "window_drop_count": state.window_drop_count,
+        "window_gap_drop_count": state.window_gap_drop_count,
+        "window_incomplete_drop_count": state.window_incomplete_drop_count,
+        "window_health_drop_count": state.window_health_drop_count,
+        "lstm_reset_count": state.lstm_reset_count,
         "lstm_reset_log": list(state.lstm_reset_log),
         "ica_enabled_requested": bool(ica_enabled_requested),
         "ica_ran": bool(ica_ran),
@@ -1041,13 +1070,13 @@ def _timebase_report_payload():
         "segment_start_lsl_ts": segment_start_lsl_ts,
         "stream_start_local": local_clock_at_start,
         "clock_offset": clock_offset,
-        "gap_count": int(state.gap_count),
-        "gap_max_s": float(state.gap_max_s) if state.gap_count else None,
+        "gap_count": state.gap_count,
+        "gap_max_s": state.gap_max_s if state.gap_count else None,
         "gap_p95_s": state.gap_p95_s,
         "gap_p99_s": state.gap_p99_s,
-        "backward_timestamp_count": int(state.backward_timestamp_count),
-        "samples_seen": int(state.samples_seen),
-        "samples_written": int(state.samples_written),
+        "backward_timestamp_count": state.backward_timestamp_count,
+        "samples_seen": state.samples_seen,
+        "samples_written": state.samples_written,
         "time_s_clamped_count": int(time_s_clamped_count),
         "max_backwards_jump_s": float(max_backwards_jump_s),
         "event_stamps_count": int(event_stamps_count),
@@ -1238,10 +1267,12 @@ def _reset_segment_state(state: StreamState) -> None:
     state.ica_fit_segment_id = None
     state.ica_transform_segment_id = None
     state.ica_fitted = False
-    if ENABLE_ICA and "ica_scaler" in globals():
+    if ENABLE_ICA:
         ica_scaler = StandardScaler()
-    if ENABLE_ICA and "ica" in globals():
         ica = FastICA(n_components=CHANNELS, random_state=42)
+    else:
+        ica_scaler = None
+        ica = None
 
 
 def _flush_events_for_segment() -> None:
