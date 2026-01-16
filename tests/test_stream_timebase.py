@@ -1,5 +1,3 @@
-import numpy as np
-
 from utils.stream_timebase import clamp_lsl_timestamp, is_gap
 
 

@@ -29,6 +29,7 @@ import shutil
 from datetime import datetime, timezone
 from collections import deque
 from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -161,46 +162,66 @@ IMPORT_ONLY = os.environ.get("STREAM_IMPORT_ONLY") == "1"
 # ===== EARLY GLOBALS INIT =====
 # =========================
 INIT_ONLY = False
-subject_id = SUBJECT_ID_OVERRIDE or "unknown"
-session_id = None
-segment_id = 0
 total_elapsed_s = 0.0
 last_time_s = -1.0
 BLOCK_ID = 0
-experiment_hash = None
 features_path_state = None
 events_path_state = None
 raw_path_state = None
 created_utc = None
 time_s_clamped_count = 0
 event_clamped_count = 0
-gap_durations_s: List[float] = []
-gap_count = 0
-gap_max_s = 0.0
-gap_p95_s = None
-gap_p99_s = None
-backward_timestamp_count = 0
 max_backwards_jump_s = 0.0
-window_drop_count = 0
-window_gap_drop_count = 0
-window_incomplete_drop_count = 0
-window_health_drop_count = 0
-lstm_reset_count = 0
-lstm_reset_log: List[Dict[str, Any]] = []
-samples_seen = 0
-samples_written = 0
-action_pred_buffer: Deque[int] = deque(maxlen=STABILITY_FRAMES)
-sample_time_buffer: Deque[Tuple[float, np.ndarray]] = deque(maxlen=512)
-recent_sample_times: Deque[float] = deque(maxlen=1024)
-nearest_sample_delta_samples: List[Dict[str, Any]] = []
 csv_file = None
 csv_writer = None
 raw_file = None
 raw_writer = None
 predictions_file = None
 predictions_writer = None
-ica_fit_segment_id = None
-ica_transform_segment_id = None
+
+
+@dataclass
+class StreamState:
+    subject_id: Optional[str]
+    session_id: Optional[str]
+    segment_id: int
+    experiment_hash: Optional[str]
+    features_path: Optional[str]
+    events_path: Optional[str]
+    predictions_path: Optional[str]
+    raw_path: Optional[str]
+    timebase_version: str
+    stream_start_lsl_ts: Optional[float]
+    local_clock_at_start: Optional[float]
+    clock_offset: Optional[float]
+    gap_count: int = 0
+    gap_max_s: float = 0.0
+    gap_p95_s: Optional[float] = None
+    gap_p99_s: Optional[float] = None
+    backward_timestamp_count: int = 0
+    window_drop_count: int = 0
+    window_gap_drop_count: int = 0
+    window_incomplete_drop_count: int = 0
+    window_health_drop_count: int = 0
+    lstm_reset_count: int = 0
+    lstm_reset_log: List[Dict[str, Any]] = field(default_factory=list)
+    samples_seen: int = 0
+    samples_written: int = 0
+    action_pred_buffer: Deque[int] = field(
+        default_factory=lambda: deque(maxlen=STABILITY_FRAMES)
+    )
+    sample_time_buffer: Deque[Tuple[float, np.ndarray]] = field(
+        default_factory=lambda: deque(maxlen=512)
+    )
+    recent_sample_times: Deque[float] = field(
+        default_factory=lambda: deque(maxlen=1024)
+    )
+    nearest_sample_delta_samples: List[Dict[str, Any]] = field(default_factory=list)
+    ica_fitted: bool = False
+    ica_fit_future: Any = None
+    ica_transform_future: Any = None
+    ica_fit_segment_id: Optional[int] = None
+    ica_transform_segment_id: Optional[int] = None
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
@@ -254,6 +275,24 @@ INIT_ONLY = bool(args.init_only)
 
 subject_id = (
     SUBJECT_ID_OVERRIDE or ("unknown" if IMPORT_ONLY else get_subject_id(GENDER, AGE))
+)
+session_id = None
+segment_id = 0
+experiment_hash = None
+
+state = StreamState(
+    subject_id=subject_id,
+    session_id=session_id,
+    segment_id=segment_id,
+    experiment_hash=experiment_hash,
+    features_path=None,
+    events_path=None,
+    predictions_path=None,
+    raw_path=None,
+    timebase_version=TIMEBASE_VERSION,
+    stream_start_lsl_ts=None,
+    local_clock_at_start=None,
+    clock_offset=None,
 )
 
 experiment_config = {
@@ -528,11 +567,17 @@ if true_resume:
     )
     raw_path_state = state_raw_path
     created_utc = session_state.get("created_utc") or state_meta.get("created_utc")
+    state.session_id = session_id
+    state.segment_id = segment_id
+    state.experiment_hash = experiment_hash
 
     # Reset per-segment timebase; we intentionally DO NOT reuse old alignment across runs.
     stream_start_lsl_ts = None
     local_clock_at_start = None
     clock_offset = None
+    state.stream_start_lsl_ts = None
+    state.local_clock_at_start = None
+    state.clock_offset = None
     run_start_utc_iso = None
     run_start_local_iso = None
 
@@ -547,6 +592,9 @@ else:
     BLOCK_ID = 0
     segment_id = 0
     created_utc = None
+    state.session_id = session_id
+    state.segment_id = segment_id
+    state.experiment_hash = experiment_hash
 
 # If no prior session_id, start fresh
 if not session_id:
@@ -555,6 +603,9 @@ if not true_resume and SESSION_ID_OVERRIDE:
     session_id = str(SESSION_ID_OVERRIDE)
 if experiment_hash is None:
     experiment_hash = generate_experiment_hash(subject_id, experiment_config)
+state.session_id = session_id
+state.segment_id = segment_id
+state.experiment_hash = experiment_hash
 
 FEATURES_ARCHIVE_DIR = Path("data/processed")
 RAW_ARCHIVE_DIR = Path("data/raw")
@@ -593,6 +644,10 @@ SESSION_META_PATH = (
     FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_session_meta.json"
 )
 ROOT_SESSION_META_PATH = Path("session_meta.json")
+state.features_path = str(FEATURES_ARCHIVE_PATH)
+state.events_path = str(EVENTS_ARCHIVE_PATH)
+state.predictions_path = str(PREDICTIONS_ARCHIVE_PATH)
+state.raw_path = str(RAW_ARCHIVE_PATH)
 
 
 def _build_session_meta_payload(complete: bool):
@@ -645,22 +700,23 @@ def _update_session_meta(complete: bool, label: str):
 
 
 def _build_session_state_payload(
+    state: StreamState,
     total_elapsed_override=None,
     last_time_override=None,
     block_id_override=None,
     segment_id_override=None,
 ):
-    g = globals()
+    segment_id_val = (
+        int(segment_id_override)
+        if segment_id_override is not None
+        else int(state.segment_id)
+    )
     return {
-        "subject_id": g.get("subject_id"),
-        "session_id": g.get("session_id"),
-        "experiment_hash": g.get("experiment_hash"),
-        "block_id": int(
-            block_id_override if block_id_override is not None else g.get("BLOCK_ID", 0)
-        ),
-        "segment_id": int(
-            segment_id_override if segment_id_override is not None else g.get("segment_id", 0)
-        ),
+        "subject_id": state.subject_id,
+        "session_id": state.session_id,
+        "experiment_hash": state.experiment_hash,
+        "block_id": int(block_id_override if block_id_override is not None else BLOCK_ID),
+        "segment_id": segment_id_val,
         # Canonical session-continuous time
         "total_elapsed_s": float(
             total_elapsed_override
@@ -670,46 +726,46 @@ def _build_session_state_payload(
         "last_time_s": float(
             last_time_override if last_time_override is not None else g.get("last_time_s", -1.0)
         ),
-        "features_path": str(g.get("FEATURES_ARCHIVE_PATH")),
-        "events_path": str(g.get("EVENTS_ARCHIVE_PATH")),
-        "predictions_path": str(g.get("PREDICTIONS_ARCHIVE_PATH")),
-        "raw_path": str(g.get("RAW_ARCHIVE_PATH")),
-        "created_utc": g.get("created_utc"),
+        "features_path": state.features_path,
+        "events_path": state.events_path,
+        "predictions_path": state.predictions_path,
+        "raw_path": state.raw_path,
+        "created_utc": created_utc,
         "updated_utc": utc_now_iso_z(),
-        "timebase_version": g.get("TIMEBASE_VERSION"),
-        "timebase": g.get("TIMEBASE_VERSION"),
-        "time_s_clamped_count": int(g.get("time_s_clamped_count", 0)),
-        "event_clamped_count": int(g.get("event_clamped_count", 0)),
-        "stream_start_lsl_ts": g.get("stream_start_lsl_ts"),
-        "local_clock_at_start": g.get("local_clock_at_start"),
-        "clock_offset": g.get("clock_offset"),
-        "gap_count": int(g.get("gap_count", 0)),
-        "gap_max_s": float(g.get("gap_max_s", 0.0)) if g.get("gap_count", 0) else None,
-        "gap_p95_s": g.get("gap_p95_s"),
-        "gap_p99_s": g.get("gap_p99_s"),
-        "backward_timestamp_count": int(g.get("backward_timestamp_count", 0)),
-        "window_drop_count": int(g.get("window_drop_count", 0)),
-        "window_gap_drop_count": int(g.get("window_gap_drop_count", 0)),
-        "window_incomplete_drop_count": int(g.get("window_incomplete_drop_count", 0)),
-        "window_health_drop_count": int(g.get("window_health_drop_count", 0)),
-        "lstm_reset_count": int(g.get("lstm_reset_count", 0)),
-        "lstm_reset_log": list(g.get("lstm_reset_log", [])),
-        "ica_enabled_requested": bool(g.get("ica_enabled_requested", False)),
-        "ica_ran": bool(g.get("ica_ran", False)),
-        "ica_skipped_reason": g.get("ica_skipped_reason"),
-        "ica_failed_exception": g.get("ica_failed_exception"),
-        "selected_channel_indices": g.get("selected_channel_indices"),
-        "selected_channel_variances": g.get("selected_channel_variances"),
-        "data_stream_active": bool(g.get("data_stream_active", False)),
-        "data_stream_last_write_ts": g.get("data_stream_last_write_ts"),
-        "data_stream_stalled_reason": g.get("data_stream_stalled_reason"),
-        "stream_health_measured_fs": g.get("stream_health_measured_fs"),
-        "stream_health_write_rate": float(g.get("stream_health_write_rate", 0.0)),
-        "stream_health_queue_size": int(g.get("stream_health_queue_size", 0)),
-        "stream_health_backwards_count": int(g.get("stream_health_backwards_count", 0)),
-        "stream_health_last_received_lsl_ts": g.get("stream_health_last_received_lsl_ts"),
-        "stream_health_last_written_lsl_ts": g.get("stream_health_last_written_lsl_ts"),
-        "event_marking_allowed": bool(g.get("event_marking_allowed", False)),
+        "timebase_version": state.timebase_version,
+        "timebase": state.timebase_version,
+        "time_s_clamped_count": int(time_s_clamped_count),
+        "event_clamped_count": int(event_clamped_count),
+        "stream_start_lsl_ts": state.stream_start_lsl_ts,
+        "local_clock_at_start": state.local_clock_at_start,
+        "clock_offset": state.clock_offset,
+        "gap_count": int(state.gap_count),
+        "gap_max_s": float(state.gap_max_s) if state.gap_count else None,
+        "gap_p95_s": state.gap_p95_s,
+        "gap_p99_s": state.gap_p99_s,
+        "backward_timestamp_count": int(state.backward_timestamp_count),
+        "window_drop_count": int(state.window_drop_count),
+        "window_gap_drop_count": int(state.window_gap_drop_count),
+        "window_incomplete_drop_count": int(state.window_incomplete_drop_count),
+        "window_health_drop_count": int(state.window_health_drop_count),
+        "lstm_reset_count": int(state.lstm_reset_count),
+        "lstm_reset_log": list(state.lstm_reset_log),
+        "ica_enabled_requested": bool(ica_enabled_requested),
+        "ica_ran": bool(ica_ran),
+        "ica_skipped_reason": ica_skipped_reason,
+        "ica_failed_exception": ica_failed_exception,
+        "selected_channel_indices": selected_channel_indices,
+        "selected_channel_variances": selected_channel_variances,
+        "data_stream_active": bool(data_stream_active),
+        "data_stream_last_write_ts": data_stream_last_write_ts,
+        "data_stream_stalled_reason": data_stream_stalled_reason,
+        "stream_health_measured_fs": stream_health_measured_fs,
+        "stream_health_write_rate": float(stream_health_write_rate),
+        "stream_health_queue_size": int(stream_health_queue_size),
+        "stream_health_backwards_count": int(stream_health_backwards_count),
+        "stream_health_last_received_lsl_ts": stream_health_last_received_lsl_ts,
+        "stream_health_last_written_lsl_ts": stream_health_last_written_lsl_ts,
+        "event_marking_allowed": bool(event_marking_allowed),
         # Legacy/diagnostic
         "segment_start_lsl_ts": g.get("segment_start_lsl_ts"),
     }
@@ -725,6 +781,7 @@ def _write_session_state(
     if INIT_ONLY:
         return
     payload = _build_session_state_payload(
+        state,
         total_elapsed_override=total_elapsed_override,
         last_time_override=last_time_override,
         block_id_override=block_id_override,
@@ -934,14 +991,17 @@ def _event_time_ok(event_time_s: float) -> bool:
 
 
 def _record_nearest_sample_delta(event_time_s: float, label: str):
-    if event_time_s is None or len(nearest_sample_delta_samples) >= NEAREST_SAMPLE_MAX:
+    if (
+        event_time_s is None
+        or len(state.nearest_sample_delta_samples) >= NEAREST_SAMPLE_MAX
+    ):
         return
-    if not recent_sample_times:
+    if not state.recent_sample_times:
         return
-    recent = list(recent_sample_times)
+    recent = list(state.recent_sample_times)
     nearest = min(recent, key=lambda t: abs(t - event_time_s))
     delta = float(event_time_s - nearest)
-    nearest_sample_delta_samples.append(
+    state.nearest_sample_delta_samples.append(
         {
             "label": label,
             "event_time_s": float(event_time_s),
@@ -954,18 +1014,18 @@ def _record_nearest_sample_delta(event_time_s: float, label: str):
 def _timebase_report_payload():
     dt_median_ms = None
     dt_p95_ms = None
-    if len(recent_sample_times) >= 2:
-        diffs = np.diff(np.array(recent_sample_times, dtype=float))
+    if len(state.recent_sample_times) >= 2:
+        diffs = np.diff(np.array(state.recent_sample_times, dtype=float))
         if diffs.size:
             dt_median_ms = float(np.median(diffs) * 1000.0)
             dt_p95_ms = float(np.percentile(diffs, 95) * 1000.0)
 
-    delta_abs = [abs(s["delta_s"]) for s in nearest_sample_delta_samples]
+    delta_abs = [abs(s["delta_s"]) for s in state.nearest_sample_delta_samples]
     delta_abs_max = float(max(delta_abs)) if delta_abs else None
     delta_abs_mean = float(np.mean(delta_abs)) if delta_abs else None
-    event_times = [s["event_time_s"] for s in nearest_sample_delta_samples]
+    event_times = [s["event_time_s"] for s in state.nearest_sample_delta_samples]
     selfcheck = evaluate_timebase_alignment(
-        recent_sample_times,
+        state.recent_sample_times,
         event_times,
         warn_threshold_s=TIMEBASE_SELF_CHECK_WARN_S,
         error_threshold_s=TIMEBASE_SELF_CHECK_ERROR_S,
@@ -981,20 +1041,20 @@ def _timebase_report_payload():
         "segment_start_lsl_ts": segment_start_lsl_ts,
         "stream_start_local": local_clock_at_start,
         "clock_offset": clock_offset,
-        "gap_count": int(gap_count),
-        "gap_max_s": float(gap_max_s) if gap_count else None,
-        "gap_p95_s": gap_p95_s,
-        "gap_p99_s": gap_p99_s,
-        "backward_timestamp_count": int(backward_timestamp_count),
-        "samples_seen": int(samples_seen),
-        "samples_written": int(samples_written),
+        "gap_count": int(state.gap_count),
+        "gap_max_s": float(state.gap_max_s) if state.gap_count else None,
+        "gap_p95_s": state.gap_p95_s,
+        "gap_p99_s": state.gap_p99_s,
+        "backward_timestamp_count": int(state.backward_timestamp_count),
+        "samples_seen": int(state.samples_seen),
+        "samples_written": int(state.samples_written),
         "time_s_clamped_count": int(time_s_clamped_count),
         "max_backwards_jump_s": float(max_backwards_jump_s),
         "event_stamps_count": int(event_stamps_count),
         "event_clamped_count": int(event_clamped_count),
         "nearest_sample_delta_s_abs_max": delta_abs_max,
         "nearest_sample_delta_s_abs_mean": delta_abs_mean,
-        "nearest_sample_delta_s_samples": list(nearest_sample_delta_samples),
+        "nearest_sample_delta_s_samples": list(state.nearest_sample_delta_samples),
         "timebase_selfcheck": {
             "max_abs_delta_s": selfcheck.max_abs_delta_s,
             "mean_abs_delta_s": selfcheck.mean_abs_delta_s,
@@ -1044,15 +1104,15 @@ def _maybe_write_timebase_report(force: bool = False, label: str = "periodic"):
         _write_timebase_report(label)
         _write_session_state(label=f"timebase_report:{label}")
         last_report_time = now
-        last_report_samples_written = samples_written
+        last_report_samples_written = state.samples_written
         return
     if (now - last_report_time) >= 10.0 or (
-        samples_written - last_report_samples_written
+        state.samples_written - last_report_samples_written
     ) >= 2500:
         _write_timebase_report(label)
         _write_session_state(label=f"timebase_report:{label}")
         last_report_time = now
-        last_report_samples_written = samples_written
+        last_report_samples_written = state.samples_written
 
 
 # =========================
@@ -1072,28 +1132,19 @@ clock_offset_estimated = False
 time_s_clamped_count = int(time_s_clamped_count)
 event_clamped_count = int(event_clamped_count)
 event_stamps_count = 0
-samples_seen = 0
-samples_written = 0
 last_sample_time_s: Optional[float] = None
 last_sample_lsl_ts: Optional[float] = None
 last_written_lsl_ts: Optional[float] = None
 last_received_lsl_ts: Optional[float] = None
 last_lsl_ts_mono: Optional[float] = None
 last_lsl_ts_raw: Optional[float] = None
-backward_timestamp_count = 0
 gap_durations_s: List[float] = []
-gap_count = 0
-gap_max_s = 0.0
-gap_p95_s = None
-gap_p99_s = None
 first_time_s: Optional[float] = None
 last_time_s_seen: Optional[float] = None
 first_lsl_ts: Optional[float] = None
 last_lsl_ts: Optional[float] = None
 max_backwards_jump_s = 0.0
-nearest_sample_delta_samples: List[Dict[str, Any]] = []
 NEAREST_SAMPLE_MAX = 10
-recent_sample_times: Deque[float] = deque(maxlen=512)
 last_report_time: Optional[float] = None
 last_report_samples_written = 0
 timebase_report_initialized = False
@@ -1104,15 +1155,8 @@ segment_break_hold_until: Optional[float] = None
 last_health_warning_time = 0.0
 nominal_dt_s = 1.0 / float(SAMPLING_RATE)
 gap_threshold = gap_threshold_s(nominal_dt_s)
-sample_time_buffer: Deque[Tuple[float, np.ndarray]] = deque(maxlen=512)
 next_window_start_s: Optional[float] = None
-window_drop_count = 0
-window_gap_drop_count = 0
-window_incomplete_drop_count = 0
-window_health_drop_count = 0
 lstm_state = None
-lstm_reset_count = 0
-lstm_reset_log: List[Dict[str, Any]] = []
 last_pred_action = -1
 last_pred_finger = -1
 last_action_confidence = 0.0
@@ -1132,68 +1176,68 @@ def _apply_segment_paths(seg_id: int) -> None:
     FEATURES_PATH = FEATURES_ARCHIVE_PATH
     PREDICTIONS_ARCHIVE_PATH = predictions
     RAW_ARCHIVE_PATH = raw
+    state.features_path = str(FEATURES_ARCHIVE_PATH)
+    state.events_path = str(EVENTS_ARCHIVE_PATH)
+    state.predictions_path = str(PREDICTIONS_ARCHIVE_PATH)
+    state.raw_path = str(RAW_ARCHIVE_PATH)
 
 
-def _reset_segment_state() -> None:
+def _reset_segment_state(state: StreamState) -> None:
     global segment_start_lsl_ts, last_written_lsl_ts, last_sample_time_s
     global last_sample_lsl_ts, first_time_s, last_time_s_seen
     global first_lsl_ts, last_lsl_ts, last_report_time
     global stream_start_lsl_ts, local_clock_at_start, clock_offset
-    global last_lsl_ts_mono, last_lsl_ts_raw, backward_timestamp_count
-    global gap_durations_s, gap_count, gap_max_s, gap_p95_s, gap_p99_s
-    global sample_time_buffer, next_window_start_s, window_drop_count
-    global window_gap_drop_count, window_incomplete_drop_count, window_health_drop_count
-    global lstm_state, lstm_reset_count, lstm_reset_log
+    global last_lsl_ts_mono, last_lsl_ts_raw
+    global gap_durations_s, next_window_start_s
+    global lstm_state
     global last_report_samples_written, timebase_report_initialized
-    global ica_fitted, ica_fit_future, ica_transform_future
-    global ica_fit_segment_id, ica_transform_segment_id, ica_scaler, ica
+    global ica_scaler, ica
     segment_start_lsl_ts = None
     stream_start_lsl_ts = None
     local_clock_at_start = None
     clock_offset = None
+    state.stream_start_lsl_ts = None
+    state.local_clock_at_start = None
+    state.clock_offset = None
     last_written_lsl_ts = None
     last_sample_time_s = None
     last_sample_lsl_ts = None
     last_lsl_ts_mono = None
     last_lsl_ts_raw = None
-    backward_timestamp_count = 0
+    state.backward_timestamp_count = 0
     gap_durations_s = []
-    gap_count = 0
-    gap_max_s = 0.0
-    gap_p95_s = None
-    gap_p99_s = None
+    state.gap_count = 0
+    state.gap_max_s = 0.0
+    state.gap_p95_s = None
+    state.gap_p99_s = None
     first_time_s = None
     last_time_s_seen = None
     first_lsl_ts = None
     last_lsl_ts = None
-    if "nearest_sample_delta_samples" in globals():
-        nearest_sample_delta_samples.clear()
-    if "recent_sample_times" in globals():
-        recent_sample_times.clear()
-    if "action_pred_buffer" in globals():
-        action_pred_buffer.clear()
-    if "sample_time_buffer" in globals():
-        sample_time_buffer.clear()
+    state.nearest_sample_delta_samples.clear()
+    state.recent_sample_times.clear()
+    state.action_pred_buffer.clear()
+    state.sample_time_buffer.clear()
     next_window_start_s = None
-    window_drop_count = 0
-    window_gap_drop_count = 0
-    window_incomplete_drop_count = 0
-    window_health_drop_count = 0
+    state.window_drop_count = 0
+    state.window_gap_drop_count = 0
+    state.window_incomplete_drop_count = 0
+    state.window_health_drop_count = 0
     lstm_state = None
-    lstm_reset_count = 0
-    lstm_reset_log = []
+    state.lstm_reset_count = 0
+    state.lstm_reset_log = []
     last_report_time = None
     last_report_samples_written = 0
     timebase_report_initialized = False
-    if "ica_fit_future" in globals() and ica_fit_future is not None:
-        ica_fit_future.cancel()
-        ica_fit_future = None
-    if "ica_transform_future" in globals() and ica_transform_future is not None:
-        ica_transform_future.cancel()
-        ica_transform_future = None
-    ica_fit_segment_id = None
-    ica_transform_segment_id = None
-    ica_fitted = False
+    if state.ica_fit_future is not None:
+        state.ica_fit_future.cancel()
+        state.ica_fit_future = None
+    if state.ica_transform_future is not None:
+        state.ica_transform_future.cancel()
+        state.ica_transform_future = None
+    state.ica_fit_segment_id = None
+    state.ica_transform_segment_id = None
+    state.ica_fitted = False
     if ENABLE_ICA and "ica_scaler" in globals():
         ica_scaler = StandardScaler()
     if ENABLE_ICA and "ica" in globals():
@@ -1224,8 +1268,9 @@ def _start_segment(reason: str) -> None:
 
     _close_segment_files()
     segment_id += 1
+    state.segment_id = segment_id
     _apply_segment_paths(segment_id)
-    _reset_segment_state()
+    _reset_segment_state(state)
     _open_segment_files()
     events = []
     last_event_index = None
@@ -1857,7 +1902,6 @@ if not IMPORT_ONLY:
 # ===== BUFFERS ===========
 # =========================
 buffer_len = int(WINDOW_SEC * SAMPLING_RATE)
-action_pred_buffer: Deque[int] = deque(maxlen=STABILITY_FRAMES)
 
 # =========================
 # ===== CSV OUTPUT ========
@@ -1960,7 +2004,7 @@ def _open_segment_files() -> None:
 
 
 if not IMPORT_ONLY:
-    _reset_segment_state()
+    _reset_segment_state(state)
     _open_segment_files()
 
 
@@ -2020,10 +2064,10 @@ def _ica_transform_worker(window: np.ndarray) -> Dict[str, Any]:
 
 ica = FastICA(n_components=CHANNELS, random_state=42) if ENABLE_ICA else None
 ica_scaler = StandardScaler()
-ica_fitted = False
+state.ica_fitted = False
 ica_executor = ThreadPoolExecutor(max_workers=1) if ENABLE_ICA else None
-ica_fit_future = None
-ica_transform_future = None
+state.ica_fit_future = None
+state.ica_transform_future = None
 ARTIFACT_ATTENUATION = 0.3
 
 # =========================
@@ -2094,15 +2138,15 @@ def _update_stream_health(now_monotonic: float) -> None:
 
 
 def _reset_lstm_state(reason: str, time_s: Optional[float]) -> None:
-    global lstm_state, lstm_reset_count, lstm_reset_log
+    global lstm_state
     lstm_state = None
-    lstm_reset_count += 1
+    state.lstm_reset_count += 1
     entry = {
         "time_s": float(time_s) if time_s is not None else None,
         "reason": str(reason),
         "ts_utc": utc_now_iso_z(),
     }
-    lstm_reset_log.append(entry)
+    state.lstm_reset_log.append(entry)
     print(f"⚠️ LSTM state reset ({reason}) at {entry['time_s']}")
 
 
@@ -2110,10 +2154,10 @@ def _extract_time_window(
     window_start_s: float,
     window_end_s: float,
 ) -> Tuple[Optional[np.ndarray], Optional[float], bool, Optional[float]]:
-    if not sample_time_buffer:
+    if not state.sample_time_buffer:
         return None, None, False, None
-    times = np.array([t for t, _ in sample_time_buffer], dtype=float)
-    values = np.array([v for _, v in sample_time_buffer], dtype=float)
+    times = np.array([t for t, _ in state.sample_time_buffer], dtype=float)
+    values = np.array([v for _, v in state.sample_time_buffer], dtype=float)
     mask = (times >= window_start_s) & (times <= window_end_s)
     if not np.any(mask):
         return None, None, False, None
@@ -2186,7 +2230,7 @@ if not IMPORT_ONLY:
                         non_finite_sample_warned = True
                     continue
 
-                samples_seen += 1
+                state.samples_seen += 1
                 last_received_lsl_ts = float(lsl_ts)
                 sample_monotonic = time.monotonic()
                 health_gate.record_received(float(lsl_ts), sample_monotonic)
@@ -2215,7 +2259,7 @@ if not IMPORT_ONLY:
                 lsl_ts_raw = float(lsl_ts)
                 lsl_ts_mono, clamped = clamp_lsl_timestamp(last_lsl_ts_mono, lsl_ts_raw)
                 if clamped:
-                    backward_timestamp_count += 1
+                    state.backward_timestamp_count += 1
                     time_s_clamped_count += 1
                     if last_lsl_ts_mono is not None:
                         max_backwards_jump_s = max(
@@ -2231,10 +2275,10 @@ if not IMPORT_ONLY:
                     if is_gap(dt_s, nominal_dt_s):
                         gap_durations_s.append(dt_s)
                         summary = summarize_gaps(gap_durations_s)
-                        gap_count = summary.count
-                        gap_max_s = summary.max_gap_s or 0.0
-                        gap_p95_s = summary.p95_gap_s
-                        gap_p99_s = summary.p99_gap_s
+                        state.gap_count = summary.count
+                        state.gap_max_s = summary.max_gap_s or 0.0
+                        state.gap_p95_s = summary.p95_gap_s
+                        state.gap_p99_s = summary.p99_gap_s
                     if dt_s > GAP_BREAK_S:
                         segment_break_reason = "gap"
                         if dt_s > GAP_RESET_THRESHOLD_S:
@@ -2246,9 +2290,12 @@ if not IMPORT_ONLY:
 
                 if stream_start_lsl_ts is None:
                     stream_start_lsl_ts = float(lsl_ts_mono)
+                    state.stream_start_lsl_ts = stream_start_lsl_ts
                     segment_start_lsl_ts = stream_start_lsl_ts
                     local_clock_at_start = float(local_clock())
                     clock_offset = float(stream_start_lsl_ts - local_clock_at_start)
+                    state.local_clock_at_start = local_clock_at_start
+                    state.clock_offset = clock_offset
                     run_start_utc_iso = utc_now_iso_z()
                     run_start_local_iso = local_now_iso()
                     timebase_written = False
@@ -2257,6 +2304,7 @@ if not IMPORT_ONLY:
 
                 if clock_offset is None:
                     clock_offset = float(lsl_ts_raw - local_clock())
+                    state.clock_offset = clock_offset
                     if not clock_offset_estimated:
                         print("⚠️ clock_offset missing; estimating from current sample.")
                         clock_offset_estimated = True
@@ -2278,10 +2326,13 @@ if not IMPORT_ONLY:
                 latency_ms = (local_clock() - lsl_ts_raw) * 1000.0
 
                 sample_arr = np.asarray(sample, dtype=float)
-                sample_time_buffer.append((time_s, sample_arr))
+                state.sample_time_buffer.append((time_s, sample_arr))
                 buffer_min_time = time_s - float(WINDOW_SEC) - 1.0
-                while sample_time_buffer and sample_time_buffer[0][0] < buffer_min_time:
-                    sample_time_buffer.popleft()
+                while (
+                    state.sample_time_buffer
+                    and state.sample_time_buffer[0][0] < buffer_min_time
+                ):
+                    state.sample_time_buffer.popleft()
 
                 if raw_writer:
                     raw_writer.writerow([lsl_ts_raw, lsl_ts_mono, *sample])
@@ -2311,17 +2362,17 @@ if not IMPORT_ONLY:
                         if len(compressed) < CHANNELS:
                             ica_skipped_reason = "compressed_short"
 
-                    if ica_fit_future is not None and ica_fit_future.done():
-                        fit_segment = ica_fit_segment_id
+                    if state.ica_fit_future is not None and state.ica_fit_future.done():
+                        fit_segment = state.ica_fit_segment_id
                         try:
-                            result = ica_fit_future.result()
+                            result = state.ica_fit_future.result()
                             if not _should_accept_ica_result(segment_id, fit_segment):
                                 if LOG_ICA_DIAGNOSTICS:
                                     print(
                                         "⚠️ Discarding ICA fit from previous segment."
                                     )
                             elif result.get("ok"):
-                                ica_fitted = True
+                                state.ica_fitted = True
                                 ica_ran = True
                             else:
                                 ica_skipped_reason = result.get("reason")
@@ -2339,13 +2390,16 @@ if not IMPORT_ONLY:
                                 print(
                                     "⚠️ ICA disabled for session due to repeated failures."
                                 )
-                        ica_fit_future = None
-                        ica_fit_segment_id = None
+                        state.ica_fit_future = None
+                        state.ica_fit_segment_id = None
 
-                    if ica_transform_future is not None and ica_transform_future.done():
-                        transform_segment = ica_transform_segment_id
+                    if (
+                        state.ica_transform_future is not None
+                        and state.ica_transform_future.done()
+                    ):
+                        transform_segment = state.ica_transform_segment_id
                         try:
-                            result = ica_transform_future.result()
+                            result = state.ica_transform_future.result()
                             if not _should_accept_ica_result(
                                 segment_id, transform_segment
                             ):
@@ -2374,33 +2428,35 @@ if not IMPORT_ONLY:
                                 print(
                                     "⚠️ ICA disabled for session due to repeated failures."
                                 )
-                        ica_transform_future = None
-                        ica_transform_segment_id = None
+                        state.ica_transform_future = None
+                        state.ica_transform_segment_id = None
 
                     if (
-                        not ica_fitted
+                        not state.ica_fitted
                         and latest_window is not None
                         and ica_skipped_reason is None
-                        and ica_fit_future is None
+                        and state.ica_fit_future is None
                     ):
-                        warmup_ready = samples_seen >= int(ICA_WARMUP_S * SAMPLING_RATE)
+                        warmup_ready = state.samples_seen >= int(
+                            ICA_WARMUP_S * SAMPLING_RATE
+                        )
                         if not warmup_ready:
                             ica_skipped_reason = "warmup"
                         elif compressed is not None and ica_executor is not None:
-                            ica_fit_segment_id = int(segment_id)
-                            ica_fit_future = ica_executor.submit(
+                            state.ica_fit_segment_id = int(segment_id)
+                            state.ica_fit_future = ica_executor.submit(
                                 _ica_fit_worker, compressed.copy()
                             )
 
                     if (
-                        ica_fitted
+                        state.ica_fitted
                         and latest_window is not None
                         and ica_skipped_reason is None
-                        and ica_transform_future is None
+                        and state.ica_transform_future is None
                         and ica_executor is not None
                     ):
-                        ica_transform_segment_id = int(segment_id)
-                        ica_transform_future = ica_executor.submit(
+                        state.ica_transform_segment_id = int(segment_id)
+                        state.ica_transform_future = ica_executor.submit(
                             _ica_transform_worker, latest_window.copy()
                         )
                 if cleaned is None:
@@ -2439,7 +2495,7 @@ if not IMPORT_ONLY:
                                 // WINDOW_HOP_SEC
                             )
                             if backlog > 0:
-                                window_drop_count += backlog
+                                state.window_drop_count += backlog
                                 next_window_start_s += backlog * WINDOW_HOP_SEC
                             break
 
@@ -2448,7 +2504,7 @@ if not IMPORT_ONLY:
                         window_center_s = float(window_start_s + (WINDOW_SEC / 2.0))
 
                         if not data_stream_active:
-                            window_health_drop_count += 1
+                            state.window_health_drop_count += 1
                             _reset_lstm_state("stream_unhealthy", window_center_s)
                             next_window_start_s += WINDOW_HOP_SEC
                             continue
@@ -2460,11 +2516,11 @@ if not IMPORT_ONLY:
                             max_gap,
                         ) = _extract_time_window(window_start_s, window_end_s)
                         if window_data is None:
-                            window_incomplete_drop_count += 1
+                            state.window_incomplete_drop_count += 1
                             next_window_start_s += WINDOW_HOP_SEC
                             continue
                         if gap_flag:
-                            window_gap_drop_count += 1
+                            state.window_gap_drop_count += 1
                             if max_gap is not None and max_gap > GAP_RESET_THRESHOLD_S:
                                 _reset_lstm_state("gap_reset", window_center_s)
                             next_window_start_s += WINDOW_HOP_SEC
@@ -2510,14 +2566,14 @@ if not IMPORT_ONLY:
                             ),
                         )
 
-                        action_pred_buffer.append(pred_action)
+                        state.action_pred_buffer.append(pred_action)
                         if pred_action != ACTION_REST:
                             velocity = action_confidence * (1.0 - action_uncertainty)
 
                         if ENABLE_ACTUATION and pred_action != ACTION_REST:
                             stable = (
-                                len(action_pred_buffer) == STABILITY_FRAMES
-                                and len(set(action_pred_buffer)) == 1
+                            len(state.action_pred_buffer) == STABILITY_FRAMES
+                            and len(set(state.action_pred_buffer)) == 1
                             )
                             if (
                                 stable
@@ -2645,14 +2701,14 @@ if not IMPORT_ONLY:
                     )  # keep session meta/state current
                     last_sample_time_s = float(time_s)
                     last_sample_lsl_ts = float(lsl_ts_raw)
-                    recent_sample_times.append(last_sample_time_s)
+                    state.recent_sample_times.append(last_sample_time_s)
                     if first_time_s is None:
                         first_time_s = last_sample_time_s
                     last_time_s_seen = last_sample_time_s
                     if first_lsl_ts is None:
                         first_lsl_ts = float(lsl_ts_raw)
                     last_lsl_ts = float(lsl_ts_raw)
-                    samples_written += 1
+                    state.samples_written += 1
                     _maybe_write_timebase_report()
                 else:
                     data_stream_last_write_ts = utc_now_iso_z()

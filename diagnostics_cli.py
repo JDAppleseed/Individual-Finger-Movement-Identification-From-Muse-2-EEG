@@ -106,11 +106,6 @@ def diagnostics(
         if predictions_path
         else []
     )
-    pred_lsl = (
-        _read_float_column(predictions_path, "prediction_lsl_ts")
-        if predictions_path
-        else []
-    )
 
     features_min = float(time_s_arr[0])
     features_max = float(time_s_arr[-1])

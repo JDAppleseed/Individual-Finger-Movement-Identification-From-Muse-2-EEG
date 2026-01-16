@@ -17,7 +17,7 @@ def _load_stream_module():
 
 def test_stream_init_does_not_nameerror():
     module = _load_stream_module()
-    payload = module._build_session_state_payload()
+    payload = module._build_session_state_payload(module.state)
     assert "gap_count" in payload
 
 
@@ -37,11 +37,4 @@ def test_segment_ica_future_discard():
 
 def test_reset_segment_state_safe_before_buffers():
     module = _load_stream_module()
-    for name in (
-        "action_pred_buffer",
-        "sample_time_buffer",
-        "recent_sample_times",
-        "nearest_sample_delta_samples",
-    ):
-        module.__dict__.pop(name, None)
-    module._reset_segment_state()
+    module._reset_segment_state(module.state)
