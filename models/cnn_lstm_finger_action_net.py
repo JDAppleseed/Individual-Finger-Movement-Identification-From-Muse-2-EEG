@@ -64,6 +64,19 @@ class CNNLSTMFingerActionNet(nn.Module):
         action_logits = self.action_head(features)
         return finger_logits, action_logits
 
+    def forward_with_state(self, x, state=None):
+        # x: [B, T, C] -> [B, C, T]
+        x = x.permute(0, 2, 1)
+        x = self.conv(x)
+        # [B, F, T] -> [B, T, F]
+        x = x.permute(0, 2, 1)
+        out, next_state = self.lstm(x, state)
+        features = out[:, -1, :]
+        features = self.head_dropout(features)
+        finger_logits = self.finger_head(features)
+        action_logits = self.action_head(features)
+        return finger_logits, action_logits, next_state
+
     @torch.no_grad()
     def deterministic_forward(self, x):
         self.eval()

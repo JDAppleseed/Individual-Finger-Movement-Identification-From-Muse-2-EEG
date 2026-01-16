@@ -40,7 +40,6 @@ WINDOW_SEC = WINDOW_SEC_DEFAULT
 STEP_SEC = 0.05
 PAD_SEC = 0.05
 
-GAP_THRESHOLD_SEC = 0.10
 DEDUP_POLICY = "keep_last"
 INTERPOLATION_POLICY = "np.interp.linear"
 
@@ -739,6 +738,34 @@ def _uarr_from_list(values: List[str]) -> np.ndarray:
     return np.array(vals, dtype=np.dtype(f"<U{max_len}"))
 
 
+def compute_gap_metrics(
+    times: np.ndarray, gap_threshold_s: float, window_sec: float
+) -> Tuple[int, float, float]:
+    diffs = np.diff(times) if times.size >= 2 else np.array([])
+    max_dt = float(np.max(diffs)) if diffs.size else float("inf")
+    gap_flag = int(max_dt > gap_threshold_s)
+    gap_fraction = (
+        float(np.sum(diffs[diffs > gap_threshold_s])) / float(window_sec)
+        if diffs.size
+        else 0.0
+    )
+    return gap_flag, gap_fraction, max_dt
+
+
+def should_drop_gap(
+    gap_flag: int,
+    max_dt: float,
+    allow_gaps: bool,
+    allow_gap_interp: bool,
+    gap_interp_max_s: float,
+) -> bool:
+    if not gap_flag:
+        return False
+    if not allow_gaps or not allow_gap_interp:
+        return True
+    return float(max_dt) > float(gap_interp_max_s)
+
+
 # =========================
 # ===== MAIN ==============
 # =========================
@@ -767,6 +794,17 @@ def main():
         "--allow-gaps",
         action="store_true",
         help="Keep windows with large gaps and mark them",
+    )
+    parser.add_argument(
+        "--allow-gap-interp",
+        action="store_true",
+        help="Allow interpolation across small gaps (requires --allow-gaps)",
+    )
+    parser.add_argument(
+        "--gap-interp-max-s",
+        type=float,
+        default=0.05,
+        help="Maximum gap (s) to allow when interpolating across gaps",
     )
     parser.add_argument(
         "--ignore-misalignment",
@@ -859,6 +897,9 @@ def main():
         if args.target_fs is not None
         else float(session_meta.get("sampling_rate", TARGET_FS_DEFAULT))
     )
+    source_fs = float(session_meta.get("sampling_rate", SOURCE_FS_DEFAULT))
+    nominal_dt_s = 1.0 / float(source_fs)
+    gap_threshold_s = max(2.5 * nominal_dt_s, 0.25)
     window_sec = (
         float(session_meta.get("window_sec", WINDOW_SEC))
         if session_meta
@@ -887,6 +928,11 @@ def main():
     print(f"Events time shift (s): {events_time_shift_s}")
     print(f"Target window rate: {target_fs} Hz ({window_samples} samples/window)")
     print(f"Interpolation policy: {INTERPOLATION_POLICY}, dedupe: {DEDUP_POLICY}")
+    print(
+        f"Gap threshold: {gap_threshold_s:.4f}s (source_fs={source_fs} Hz, "
+        f"interp={'on' if args.allow_gap_interp else 'off'}, "
+        f"interp_max={args.gap_interp_max_s:.4f}s)"
+    )
     print(f"Timebase version: {timebase_version}")
 
     # ===== LOAD DATA =====
@@ -953,6 +999,7 @@ def main():
     confidence_hints: List[float] = []
     artifact_flags: List[int] = []
     gap_flags: List[int] = []
+    gap_fractions: List[float] = []
 
     # QA/meta arrays
     assigned_event_types: List[str] = []
@@ -1015,11 +1062,16 @@ def main():
             drop_short_segment += 1
             continue
 
-        max_dt = (
-            float(np.max(np.diff(times_pad))) if times_pad.size >= 2 else float("inf")
+        gap_flag, gap_fraction, max_dt = compute_gap_metrics(
+            times_pad, gap_threshold_s, window_sec
         )
-        gap_flag = int(max_dt > GAP_THRESHOLD_SEC)
-        if gap_flag and not args.allow_gaps:
+        if should_drop_gap(
+            gap_flag,
+            max_dt,
+            args.allow_gaps,
+            args.allow_gap_interp,
+            args.gap_interp_max_s,
+        ):
             drop_gap += 1
             continue
 
@@ -1171,6 +1223,7 @@ def main():
         )
         artifact_flags.append(int(artifact_flag))
         gap_flags.append(int(gap_flag))
+        gap_fractions.append(float(gap_fraction))
 
         assigned_event_types.append(str(assigned_type))
         overlap_seconds.append(float(best_ov))
@@ -1204,6 +1257,7 @@ def main():
                 else np.nan,
                 "artifact_flag": int(artifact_flag),
                 "gap_flag": int(gap_flag),
+                "gap_fraction": float(gap_fraction),
                 "assigned_event_type": str(assigned_type),
                 "overlap_s": float(best_ov),
                 "overlap_frac": float(best_ov_frac),
@@ -1252,6 +1306,7 @@ def main():
         confidence_hints = _filter_by_mask(confidence_hints, keep_mask)
         artifact_flags = _filter_by_mask(artifact_flags, keep_mask)
         gap_flags = _filter_by_mask(gap_flags, keep_mask)
+        gap_fractions = _filter_by_mask(gap_fractions, keep_mask)
 
         assigned_event_types = _filter_by_mask(assigned_event_types, keep_mask)
         overlap_seconds = _filter_by_mask(overlap_seconds, keep_mask)
@@ -1286,6 +1341,11 @@ def main():
     if KEEP_BASELINE_REST_EVENTS == 0:
         print("Sanity: KEEP_BASELINE_REST_EVENTS=0 → no REST windows are kept.")
 
+    gap_policy = (
+        "allow_gap_interp"
+        if args.allow_gaps and args.allow_gap_interp
+        else "strict_drop"
+    )
     report_payload = {
         "total_windows": int(total_windows),
         "kept_windows": int(kept_windows),
@@ -1314,6 +1374,10 @@ def main():
         "session_id": str(session_id_value),
         "events_path": str(events_path),
         "features_path": str(features_path),
+        "gap_threshold_s": float(gap_threshold_s),
+        "gap_policy": str(gap_policy),
+        "gap_interp_max_s": float(args.gap_interp_max_s),
+        "allow_gap_interp": bool(args.allow_gap_interp),
     }
     report_path = Path("extraction_report.json")
     report_path.write_text(json.dumps(report_payload, indent=2))
@@ -1326,7 +1390,6 @@ def main():
 
     X = np.stack(sequence_windows).astype(np.float32)
     n_kept = X.shape[0]
-    gap_policy = "allow_gaps" if args.allow_gaps else "strict_drop"
 
     # Contract-critical arrays for Step 2 filtering (NO TRUNCATION)
     print(f"[SANITY] subject_id_value used for NPZ: {subject_id_value!r}")
@@ -1349,11 +1412,13 @@ def main():
             "window_sec": float(window_sec),
             "step_sec": float(STEP_SEC),
             "fs": float(target_fs),
-            "source_fs": int(SOURCE_FS_DEFAULT),
+            "source_fs": float(source_fs),
             "target_fs": float(target_fs),
             "pad_sec": float(PAD_SEC),
-            "gap_threshold_sec": float(GAP_THRESHOLD_SEC),
+            "gap_threshold_sec": float(gap_threshold_s),
             "gap_policy": str(gap_policy),
+            "gap_interp_max_s": float(args.gap_interp_max_s),
+            "allow_gap_interp": bool(args.allow_gap_interp),
             "interpolation_policy": str(INTERPOLATION_POLICY),
             "dedupe_policy": str(DEDUP_POLICY),
             "rest_subsample_prob": float(REST_SUBSAMPLE_PROB),
@@ -1380,6 +1445,7 @@ def main():
         confidence_hint=np.array(confidence_hints, dtype=np.float32),
         artifact_flag=np.array(artifact_flags, dtype=np.int64),
         gap_flag=np.array(gap_flags, dtype=np.int64),
+        gap_fraction=np.array(gap_fractions, dtype=np.float32),
         assigned_event_type=_uarr_from_list(assigned_event_types),
         overlap_s=np.array(overlap_seconds, dtype=np.float32),
         overlap_frac=np.array(overlap_fracs, dtype=np.float32),

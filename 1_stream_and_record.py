@@ -8,8 +8,8 @@ FIXES (this version):
 - Stream-relative absolute_v1 timebase with monotonic clamp:
     time_s = lsl_ts - stream_start_lsl_ts (clamped on backward jumps)
 - Events aligned to the same stream timebase with clamp protection.
-- Per-run timebase fields anchored per run:
-    run_start_lsl_ts, run_start_local, clock_offset (in-memory only)
+- Per-segment timebase fields anchored to EEG start:
+    stream_start_lsl_ts, local_clock_at_start, clock_offset
 - Resume gating retained; no silent overwrites.
 - Session metadata/state sidecars updated to reflect timebase health counters.
 """
@@ -21,6 +21,7 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import csv
 import json
@@ -28,7 +29,7 @@ import shutil
 from datetime import datetime, timezone
 from collections import deque
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -58,6 +59,7 @@ from utils.label_schema import (
     event_type_for,
 )
 from utils.session_timebase import compute_event_lsl_ts
+from utils.stream_timebase import clamp_lsl_timestamp, gap_threshold_s, is_gap, summarize_gaps
 from utils.timebase_selfcheck import evaluate_timebase_alignment
 from utils.ica_guard import guard_ica_fit, validate_ica_input
 from utils.stream_health import RollingStreamHealthGate
@@ -82,6 +84,7 @@ SAVE_RAW = True
 
 SAMPLING_RATE = 256
 WINDOW_SEC = 0.25
+WINDOW_HOP_SEC = 0.05
 CHANNELS = 4
 N_FINGERS = 6
 N_ACTIONS = 3
@@ -135,6 +138,7 @@ LOG_ICA_DIAGNOSTICS = True
 DATA_STREAM_TIMEOUT_S = 5.0
 DATA_STREAM_CHECK_INTERVAL_S = 0.5
 GAP_BREAK_S = 1.0
+GAP_RESET_THRESHOLD_S = 0.5
 STALL_S = 0.25
 HEALTH_WINDOW_S = 2.0
 MIN_WRITE_FRACTION = 0.90
@@ -215,6 +219,10 @@ experiment_config = {
 def utc_now_iso_z() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
+
+def local_now_iso() -> str:
+    return datetime.now().astimezone().isoformat()
+
 # =========================
 # ===== SESSION STATE =====
 # =========================
@@ -266,15 +274,15 @@ stream_health_last_received_lsl_ts = None
 stream_health_last_written_lsl_ts = None
 event_marking_allowed = False
 
-# Legacy/diagnostic fields (kept for compatibility)
+# Canonical timebase fields (absolute_v1, per segment)
 stream_start_lsl_ts = None
 local_clock_at_start = None
-
-# Canonical timebase fields (THIS FIX)
-run_start_lsl_ts = None  # first LSL timestamp observed THIS run
-run_start_local = None  # local_clock() at run start
-clock_offset = None  # run_start_lsl_ts - run_start_local
+clock_offset = None
 segment_start_lsl_ts = None
+run_start_utc_iso = None
+run_end_utc_iso = None
+run_start_local_iso = None
+run_end_local_iso = None
 
 
 def _coerce_float(value, default=None):
@@ -483,12 +491,12 @@ if true_resume:
     raw_path_state = state_raw_path
     created_utc = session_state.get("created_utc") or state_meta.get("created_utc")
 
-    # Load any legacy timebase fields (diagnostics only)
-    stream_start_lsl_ts = _coerce_float(session_state.get("stream_start_lsl_ts"))
-    local_clock_at_start = _coerce_float(session_state.get("local_clock_at_start"))
-
-    # We intentionally DO NOT reuse old per-run alignment across runs.
+    # Reset per-segment timebase; we intentionally DO NOT reuse old alignment across runs.
+    stream_start_lsl_ts = None
+    local_clock_at_start = None
     clock_offset = None
+    run_start_utc_iso = None
+    run_start_local_iso = None
 
 else:
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -525,13 +533,20 @@ def _segment_paths(seg_id: int):
     autosave = (
         FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_{tag}_events_autosave.csv"
     )
+    predictions = (
+        FEATURES_ARCHIVE_DIR / f"{subject_id}_{session_id}_{tag}_predictions.csv"
+    )
     raw = RAW_ARCHIVE_DIR / f"{subject_id}_{session_id}_{tag}_raw.csv"
-    return features, events, autosave, raw
+    return features, events, autosave, predictions, raw
 
 
-FEATURES_ARCHIVE_PATH, EVENTS_ARCHIVE_PATH, EVENTS_AUTOSAVE_PATH_SEG, RAW_ARCHIVE_PATH = (
-    _segment_paths(segment_id)
-)
+(
+    FEATURES_ARCHIVE_PATH,
+    EVENTS_ARCHIVE_PATH,
+    EVENTS_AUTOSAVE_PATH_SEG,
+    PREDICTIONS_ARCHIVE_PATH,
+    RAW_ARCHIVE_PATH,
+) = _segment_paths(segment_id)
 EVENTS_AUTOSAVE_PATH = str(EVENTS_AUTOSAVE_PATH_SEG)
 if EVENTS_CSV_PATH is None:
     EVENTS_CSV_PATH = str(EVENTS_ARCHIVE_PATH)
@@ -553,15 +568,22 @@ def _build_session_meta_payload(complete: bool):
         "channels": CHANNELS,
         "features_path": str(FEATURES_ARCHIVE_PATH),
         "events_path": str(EVENTS_ARCHIVE_PATH),
+        "predictions_path": str(PREDICTIONS_ARCHIVE_PATH),
         "raw_path": str(RAW_ARCHIVE_PATH),
         "timebase_version": TIMEBASE_VERSION,
         "timebase": TIMEBASE_VERSION,
-        # Canonical (session-continuous) bookkeeping
+        # Canonical (segment-relative) bookkeeping
         "total_elapsed_s": float(total_elapsed_s),
         "last_time_s": float(last_time_s),
-        # Legacy/diagnostic (kept)
         "stream_start_lsl_ts": stream_start_lsl_ts,
         "local_clock_at_start": local_clock_at_start,
+        "clock_offset": clock_offset,
+        "run_start_utc_iso": run_start_utc_iso,
+        "run_end_utc_iso": run_end_utc_iso,
+        "run_start_local_iso": run_start_local_iso,
+        "run_end_local_iso": run_end_local_iso,
+        "segment_id": int(segment_id),
+        # Legacy/diagnostic (kept)
         "complete": bool(complete),
         "created_utc": created_utc,
         "updated_utc": utc_now_iso_z(),
@@ -612,6 +634,7 @@ def _build_session_state_payload(
         ),
         "features_path": str(FEATURES_ARCHIVE_PATH),
         "events_path": str(EVENTS_ARCHIVE_PATH),
+        "predictions_path": str(PREDICTIONS_ARCHIVE_PATH),
         "raw_path": str(RAW_ARCHIVE_PATH),
         "created_utc": created_utc,
         "updated_utc": utc_now_iso_z(),
@@ -619,6 +642,20 @@ def _build_session_state_payload(
         "timebase": TIMEBASE_VERSION,
         "time_s_clamped_count": int(time_s_clamped_count),
         "event_clamped_count": int(event_clamped_count),
+        "stream_start_lsl_ts": stream_start_lsl_ts,
+        "local_clock_at_start": local_clock_at_start,
+        "clock_offset": clock_offset,
+        "gap_count": int(gap_count),
+        "gap_max_s": float(gap_max_s) if gap_count else None,
+        "gap_p95_s": gap_p95_s,
+        "gap_p99_s": gap_p99_s,
+        "backward_timestamp_count": int(backward_timestamp_count),
+        "window_drop_count": int(window_drop_count),
+        "window_gap_drop_count": int(window_gap_drop_count),
+        "window_incomplete_drop_count": int(window_incomplete_drop_count),
+        "window_health_drop_count": int(window_health_drop_count),
+        "lstm_reset_count": int(lstm_reset_count),
+        "lstm_reset_log": list(lstm_reset_log),
         "ica_enabled_requested": bool(ica_enabled_requested),
         "ica_ran": bool(ica_ran),
         "ica_skipped_reason": ica_skipped_reason,
@@ -636,8 +673,6 @@ def _build_session_state_payload(
         "stream_health_last_written_lsl_ts": stream_health_last_written_lsl_ts,
         "event_marking_allowed": bool(event_marking_allowed),
         # Legacy/diagnostic
-        "stream_start_lsl_ts": stream_start_lsl_ts,
-        "local_clock_at_start": local_clock_at_start,
         "segment_start_lsl_ts": segment_start_lsl_ts,
     }
 
@@ -701,8 +736,8 @@ print(f"EEG Channels      : {channel_list} ({CHANNELS})")
 print(f"Sampling Rate     : {SAMPLING_RATE} Hz")
 print(f"Window Length     : {WINDOW_SEC} s")
 print(f"Timebase Version  : {TIMEBASE_VERSION}")
-print(f"Run Start LSL     : {_fmt_time_value(run_start_lsl_ts)}")
-print(f"Run Start Local   : {_fmt_time_value(run_start_local)}")
+print(f"Stream Start LSL  : {_fmt_time_value(stream_start_lsl_ts)}")
+print(f"Stream Start Local: {_fmt_time_value(local_clock_at_start)}")
 print(f"Clock Offset      : {_fmt_time_value(clock_offset)}")
 print("")
 print("Modes:")
@@ -715,6 +750,7 @@ print("")
 print("Output Paths:")
 print(f"  Features CSV    : {FEATURES_ARCHIVE_PATH}")
 print(f"  Events CSV      : {EVENTS_ARCHIVE_PATH}")
+print(f"  Predictions CSV : {PREDICTIONS_ARCHIVE_PATH}")
 print(f"  Raw EEG CSV     : {RAW_ARCHIVE_PATH}")
 print(f"  Session State   : {SESSION_STATE_PATH}")
 print("")
@@ -749,6 +785,7 @@ if not true_resume:
     _maybe_backup_path(FEATURES_ARCHIVE_PATH, "Existing features file")
     _maybe_backup_path(EVENTS_ARCHIVE_PATH, "Existing events file")
     _maybe_backup_path(Path(EVENTS_AUTOSAVE_PATH), "Existing autosave events file")
+    _maybe_backup_path(PREDICTIONS_ARCHIVE_PATH, "Existing predictions file")
     _maybe_backup_path(RAW_ARCHIVE_PATH, "Existing raw file")
     _maybe_backup_path(SESSION_META_PATH, "Existing session meta file")
 
@@ -819,9 +856,9 @@ def _lsl_now():
 
 def _time_s_from_lsl(lsl_ts: float):
     """Stream-relative time_s from an LSL timestamp."""
-    if segment_start_lsl_ts is None:
+    if stream_start_lsl_ts is None:
         return None
-    return float(lsl_ts - segment_start_lsl_ts)
+    return float(lsl_ts - stream_start_lsl_ts)
 
 
 def _event_time_ok(event_time_s: float) -> bool:
@@ -884,6 +921,11 @@ def _timebase_report_payload():
         "segment_start_lsl_ts": segment_start_lsl_ts,
         "stream_start_local": local_clock_at_start,
         "clock_offset": clock_offset,
+        "gap_count": int(gap_count),
+        "gap_max_s": float(gap_max_s) if gap_count else None,
+        "gap_p95_s": gap_p95_s,
+        "gap_p99_s": gap_p99_s,
+        "backward_timestamp_count": int(backward_timestamp_count),
         "samples_seen": int(samples_seen),
         "samples_written": int(samples_written),
         "time_s_clamped_count": int(time_s_clamped_count),
@@ -976,6 +1018,14 @@ last_sample_time_s: Optional[float] = None
 last_sample_lsl_ts: Optional[float] = None
 last_written_lsl_ts: Optional[float] = None
 last_received_lsl_ts: Optional[float] = None
+last_lsl_ts_mono: Optional[float] = None
+last_lsl_ts_raw: Optional[float] = None
+backward_timestamp_count = 0
+gap_durations_s: List[float] = []
+gap_count = 0
+gap_max_s = 0.0
+gap_p95_s = None
+gap_p99_s = None
 first_time_s: Optional[float] = None
 last_time_s_seen: Optional[float] = None
 first_lsl_ts: Optional[float] = None
@@ -992,17 +1042,35 @@ sample_queue: Deque[tuple[float, List[float]]] = deque()
 queue_drop_count = 0
 segment_break_hold_until: Optional[float] = None
 last_health_warning_time = 0.0
+nominal_dt_s = 1.0 / float(SAMPLING_RATE)
+gap_threshold = gap_threshold_s(nominal_dt_s)
+sample_time_buffer: Deque[Tuple[float, np.ndarray]] = deque()
+next_window_start_s: Optional[float] = None
+window_drop_count = 0
+window_gap_drop_count = 0
+window_incomplete_drop_count = 0
+window_health_drop_count = 0
+lstm_state = None
+lstm_reset_count = 0
+lstm_reset_log: List[Dict[str, Any]] = []
+last_pred_action = -1
+last_pred_finger = -1
+last_action_confidence = 0.0
+last_action_uncertainty = 0.0
+last_finger_confidence = 0.0
+last_finger_uncertainty = 0.0
 
 
 def _apply_segment_paths(seg_id: int) -> None:
     global FEATURES_ARCHIVE_PATH, EVENTS_ARCHIVE_PATH, EVENTS_AUTOSAVE_PATH
-    global EVENTS_CSV_PATH, FEATURES_PATH, RAW_ARCHIVE_PATH
-    features, events, autosave, raw = _segment_paths(seg_id)
+    global EVENTS_CSV_PATH, FEATURES_PATH, RAW_ARCHIVE_PATH, PREDICTIONS_ARCHIVE_PATH
+    features, events, autosave, predictions, raw = _segment_paths(seg_id)
     FEATURES_ARCHIVE_PATH = features
     EVENTS_ARCHIVE_PATH = events
     EVENTS_AUTOSAVE_PATH = str(autosave)
     EVENTS_CSV_PATH = str(events)
     FEATURES_PATH = FEATURES_ARCHIVE_PATH
+    PREDICTIONS_ARCHIVE_PATH = predictions
     RAW_ARCHIVE_PATH = raw
 
 
@@ -1010,19 +1078,44 @@ def _reset_segment_state() -> None:
     global segment_start_lsl_ts, last_written_lsl_ts, last_sample_time_s
     global last_sample_lsl_ts, first_time_s, last_time_s_seen
     global first_lsl_ts, last_lsl_ts, last_report_time
+    global stream_start_lsl_ts, local_clock_at_start, clock_offset
+    global last_lsl_ts_mono, last_lsl_ts_raw, backward_timestamp_count
+    global gap_durations_s, gap_count, gap_max_s, gap_p95_s, gap_p99_s
+    global sample_time_buffer, next_window_start_s, window_drop_count
+    global window_gap_drop_count, window_incomplete_drop_count, window_health_drop_count
+    global lstm_state, lstm_reset_count, lstm_reset_log
     global last_report_samples_written, timebase_report_initialized
     segment_start_lsl_ts = None
+    stream_start_lsl_ts = None
+    local_clock_at_start = None
+    clock_offset = None
     last_written_lsl_ts = None
     last_sample_time_s = None
     last_sample_lsl_ts = None
+    last_lsl_ts_mono = None
+    last_lsl_ts_raw = None
+    backward_timestamp_count = 0
+    gap_durations_s = []
+    gap_count = 0
+    gap_max_s = 0.0
+    gap_p95_s = None
+    gap_p99_s = None
     first_time_s = None
     last_time_s_seen = None
     first_lsl_ts = None
     last_lsl_ts = None
     nearest_sample_delta_samples.clear()
     recent_sample_times.clear()
-    eeg_buffer.clear()
     action_pred_buffer.clear()
+    sample_time_buffer.clear()
+    next_window_start_s = None
+    window_drop_count = 0
+    window_gap_drop_count = 0
+    window_incomplete_drop_count = 0
+    window_health_drop_count = 0
+    lstm_state = None
+    lstm_reset_count = 0
+    lstm_reset_log = []
     last_report_time = None
     last_report_samples_written = 0
     timebase_report_initialized = False
@@ -1100,6 +1193,8 @@ def _load_existing_events(path: Path):
                 end_s = _f("end_s", np.nan)
                 event_lsl_ts = _f("event_lsl_ts", np.nan)
                 event_time_s = _f("event_time_s", np.nan)
+                if np.isfinite(onset_s):
+                    event_time_s = onset_s
 
                 if duration_s < 0:
                     duration_s = 0.0
@@ -1108,9 +1203,8 @@ def _load_existing_events(path: Path):
                 if np.isfinite(onset_lsl) and not np.isfinite(end_lsl):
                     end_lsl = onset_lsl + duration_s
 
-                # IMPORTANT: In session-continuous mode, we do NOT try to back-compute onset_lsl
-                # from onset_s unless the file already contains onset_lsl. (Because downtime-free
-                # session time can't be inverted without per-run mapping history.)
+                # IMPORTANT: In stream-relative mode, we do NOT try to back-compute onset_lsl
+                # from onset_s unless the file already contains onset_lsl.
                 e["onset_lsl"] = onset_lsl
                 e["onset_s"] = onset_s
                 e["duration_s"] = duration_s
@@ -1128,6 +1222,7 @@ def _load_existing_events(path: Path):
                 e["action_id"] = _i("action_id", 0)
                 e["trial_id"] = _i("trial_id", 0)
                 e["block_id"] = _i("block_id", 0)
+                e["segment_id"] = _i("segment_id", segment_id)
                 e["type"] = str(row.get("type", "")).strip()
                 e["channel"] = str(row.get("channel", "n/a")).strip() or "n/a"
                 e["source"] = str(row.get("source", "manual")).strip() or "manual"
@@ -1175,6 +1270,7 @@ def save_events_csv(path, items):
         "finger_id",
         "action_id",
         "trial_id",
+        "segment_id",
         "block_id",
         "source",
     ]
@@ -1205,6 +1301,7 @@ def save_events_csv(path, items):
             duration_s = _f(item.get("duration_s"), 0.0)
             end_lsl = _f(item.get("end_lsl"), np.nan)
             end_s = _f(item.get("end_s"), np.nan)
+            event_time_s = onset_s if np.isfinite(onset_s) else _f(item.get("event_time_s"), np.nan)
 
             if duration_s < 0:
                 duration_s = 0.0
@@ -1222,9 +1319,7 @@ def save_events_csv(path, items):
                 f"{float(_f(item.get('event_lsl_ts'), np.nan)):.6f}"
                 if np.isfinite(_f(item.get("event_lsl_ts"), np.nan))
                 else "",
-                f"{float(_f(item.get('event_time_s'), np.nan)):.6f}"
-                if np.isfinite(_f(item.get("event_time_s"), np.nan))
-                else "",
+                f"{float(event_time_s):.6f}" if np.isfinite(event_time_s) else "",
                 item.get("type", ""),
                 item.get("channel", "n/a"),
                 item.get("confidence", ""),
@@ -1232,6 +1327,7 @@ def save_events_csv(path, items):
                 int(item.get("finger_id", 0)),
                 int(item.get("action_id", 0)),
                 int(item.get("trial_id", 0)),
+                int(item.get("segment_id", segment_id)),
                 int(item.get("block_id", 0)),
                 item.get("source", "manual"),
             ]
@@ -1260,6 +1356,8 @@ def finalize_event():
 
     onset_lsl = current_event.get("onset_lsl", np.nan)
     onset_s = current_event.get("onset_s", np.nan)
+    if np.isfinite(onset_s):
+        current_event["event_time_s"] = float(onset_s)
 
     if (
         current_event.get("end_lsl") is None
@@ -1281,6 +1379,7 @@ def finalize_event():
     trial_id_counter += 1
     current_event["trial_id"] = int(trial_id_counter)
     current_event["block_id"] = int(BLOCK_ID)
+    current_event["segment_id"] = int(segment_id)
 
     with events_lock:
         events.append(current_event)
@@ -1323,9 +1422,9 @@ def on_key_press(key):
         if not event_marking_allowed:
             return
         if current_event is None:
-            # In this fixed design, we refuse to stamp events until run_start_lsl_ts exists,
-            # because that's the anchor for session-continuous time.
-            if run_start_lsl_ts is None or clock_offset is None:
+            # Refuse to stamp events until stream_start_lsl_ts exists,
+            # because that's the anchor for the stream-relative timebase.
+            if stream_start_lsl_ts is None or clock_offset is None:
                 print(
                     "⚠️ Event ignored: timebase not initialized yet (waiting for first LSL sample)."
                 )
@@ -1336,9 +1435,9 @@ def on_key_press(key):
             if onset_lsl is None:
                 return
 
-            if segment_start_lsl_ts is None:
+            if stream_start_lsl_ts is None:
                 return
-            onset_s = float(onset_lsl - segment_start_lsl_ts)
+            onset_s = float(onset_lsl - stream_start_lsl_ts)
             if onset_s is None or not _event_time_ok(onset_s):
                 return
 
@@ -1357,12 +1456,15 @@ def on_key_press(key):
                 "finger_id": int(FINGER_NONE),
                 "action_id": int(current_action_id),
                 "override_type": current_override,
+                "segment_id": int(segment_id),
                 "source": "manual",
             }
 
             # Debug: local-clock relative to run start (NOT used by Step 1b)
-            if run_start_local is not None:
-                current_event["onset_rel_s"] = float(event_local - run_start_local)
+            if local_clock_at_start is not None:
+                current_event["onset_rel_s"] = float(
+                    event_local - local_clock_at_start
+                )
         return
 
     if key_char is None:
@@ -1423,7 +1525,7 @@ def on_key_release(key):
         if not event_marking_allowed:
             current_event = None
             return
-        if run_start_lsl_ts is None or clock_offset is None:
+        if stream_start_lsl_ts is None or clock_offset is None:
             return
 
         end_local = local_clock()
@@ -1435,9 +1537,9 @@ def on_key_release(key):
         if not np.isfinite(onset_lsl):
             return
 
-        if segment_start_lsl_ts is None:
+        if stream_start_lsl_ts is None:
             return
-        end_s = float(end_lsl - segment_start_lsl_ts)
+        end_s = float(end_lsl - stream_start_lsl_ts)
         if end_s is None or not _event_time_ok(end_s):
             return
 
@@ -1449,8 +1551,8 @@ def on_key_release(key):
         current_event["end_lsl"] = float(end_lsl)
         current_event["end_s"] = float(end_s)
 
-        if run_start_local is not None:
-            current_event["end_rel_s"] = float(end_local - run_start_local)
+        if local_clock_at_start is not None:
+            current_event["end_rel_s"] = float(end_local - local_clock_at_start)
 
         finalize_event()
 
@@ -1678,7 +1780,6 @@ selected_channel_indices = channel_indices
 # ===== BUFFERS ===========
 # =========================
 buffer_len = int(WINDOW_SEC * SAMPLING_RATE)
-eeg_buffer: Deque[List[float]] = deque(maxlen=buffer_len)
 action_pred_buffer: Deque[int] = deque(maxlen=STABILITY_FRAMES)
 
 # =========================
@@ -1688,10 +1789,14 @@ csv_file = None
 csv_writer = None
 raw_file = None
 raw_writer = None
+predictions_file = None
+predictions_writer = None
 
 header = [
     "lsl_timestamp",
+    "lsl_timestamp_mono",
     "time_s",
+    "segment_id",
     "ch1",
     "ch2",
     "ch3",
@@ -1707,7 +1812,7 @@ header = [
 ]
 
 def _close_segment_files() -> None:
-    global csv_file, csv_writer, raw_file, raw_writer
+    global csv_file, csv_writer, raw_file, raw_writer, predictions_file, predictions_writer
     if csv_file:
         csv_file.flush()
         csv_file.close()
@@ -1718,10 +1823,15 @@ def _close_segment_files() -> None:
         raw_file.close()
     raw_file = None
     raw_writer = None
+    if predictions_file:
+        predictions_file.flush()
+        predictions_file.close()
+    predictions_file = None
+    predictions_writer = None
 
 
 def _open_segment_files() -> None:
-    global csv_file, csv_writer, raw_file, raw_writer
+    global csv_file, csv_writer, raw_file, raw_writer, predictions_file, predictions_writer
     if SAVE_TO_DISK:
         FEATURES_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
         features_exists = FEATURES_PATH.exists() and FEATURES_PATH.stat().st_size > 0
@@ -1729,6 +1839,31 @@ def _open_segment_files() -> None:
         csv_writer = csv.writer(csv_file)
         if not features_exists:
             csv_writer.writerow(header)
+        predictions_exists = (
+            PREDICTIONS_ARCHIVE_PATH.exists()
+            and PREDICTIONS_ARCHIVE_PATH.stat().st_size > 0
+        )
+        predictions_file = open(PREDICTIONS_ARCHIVE_PATH, "a", newline="")
+        predictions_writer = csv.writer(predictions_file)
+        if not predictions_exists:
+            predictions_writer.writerow(
+                [
+                    "prediction_time_s",
+                    "prediction_lsl_ts",
+                    "window_start_s",
+                    "window_end_s",
+                    "segment_id",
+                    "pred_action",
+                    "pred_finger",
+                    "action_confidence",
+                    "action_uncertainty",
+                    "finger_confidence",
+                    "finger_uncertainty",
+                    "inference_latency_ms",
+                    "experiment_hash",
+                    "model_version",
+                ]
+            )
     if SAVE_RAW:
         RAW_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
         raw_exists = RAW_ARCHIVE_PATH.exists() and RAW_ARCHIVE_PATH.stat().st_size > 0
@@ -1766,9 +1901,38 @@ def is_artifact(ic_signal, fs):
     return (low > mid * 2.0) or (high > mid * 2.0)
 
 
+def _ica_fit_worker(window_compressed: np.ndarray) -> Dict[str, Any]:
+    result = guard_ica_fit(
+        window_compressed,
+        scaler=ica_scaler,
+        ica=ica,
+        min_samples=int(ICA_MIN_SAMPLES),
+        min_var=float(ICA_MIN_VAR),
+    )
+    return {"ok": bool(result.ok), "reason": result.reason, "diagnostics": result.diagnostics}
+
+
+def _ica_transform_worker(window: np.ndarray) -> Dict[str, Any]:
+    reason, diag = validate_ica_input(window, min_samples=None, min_var=float(ICA_MIN_VAR))
+    if reason is not None:
+        return {"ok": False, "reason": reason, "diagnostics": diag}
+    X_scaled = ica_scaler.transform(window)
+    if not np.isfinite(X_scaled).all():
+        raise ValueError("ICA scaling produced non-finite values.")
+    S = ica.transform(X_scaled)
+    for k in range(S.shape[1]):
+        if is_artifact(S[:, k], fs=SAMPLING_RATE):
+            S[:, k] *= ARTIFACT_ATTENUATION
+    cleaned = ica.inverse_transform(S)
+    return {"ok": True, "cleaned": cleaned}
+
+
 ica = FastICA(n_components=CHANNELS, random_state=42) if ENABLE_ICA else None
 ica_scaler = StandardScaler()
 ica_fitted = False
+ica_executor = ThreadPoolExecutor(max_workers=1) if ENABLE_ICA else None
+ica_fit_future = None
+ica_transform_future = None
 ARTIFACT_ATTENUATION = 0.3
 
 # =========================
@@ -1837,6 +2001,62 @@ def _update_stream_health(now_monotonic: float) -> None:
         if prev_event_allowed:
             _write_session_state(label="event_marking_disabled")
 
+
+def _reset_lstm_state(reason: str, time_s: Optional[float]) -> None:
+    global lstm_state, lstm_reset_count, lstm_reset_log
+    lstm_state = None
+    lstm_reset_count += 1
+    entry = {
+        "time_s": float(time_s) if time_s is not None else None,
+        "reason": str(reason),
+        "ts_utc": utc_now_iso_z(),
+    }
+    lstm_reset_log.append(entry)
+    print(f"⚠️ LSTM state reset ({reason}) at {entry['time_s']}")
+
+
+def _extract_time_window(
+    window_start_s: float,
+    window_end_s: float,
+) -> Tuple[Optional[np.ndarray], Optional[float], bool, Optional[float]]:
+    if not sample_time_buffer:
+        return None, None, False, None
+    times = np.array([t for t, _ in sample_time_buffer], dtype=float)
+    values = np.array([v for _, v in sample_time_buffer], dtype=float)
+    mask = (times >= window_start_s) & (times <= window_end_s)
+    if not np.any(mask):
+        return None, None, False, None
+    times = times[mask]
+    values = values[mask]
+    if times.size < 2:
+        return None, None, False, None
+    if not np.all(np.diff(times) > 0):
+        uniq_times, uniq_idx = np.unique(times, return_index=True)
+        times = uniq_times
+        values = values[uniq_idx]
+    if times.size < 2:
+        return None, None, False, None
+    if times[0] > (window_start_s + nominal_dt_s) or times[-1] < (
+        window_end_s - nominal_dt_s
+    ):
+        return None, None, False, None
+    diffs = np.diff(times)
+    gap_mask = diffs > gap_threshold
+    gap_flag = bool(np.any(gap_mask))
+    gap_fraction = float(np.sum(diffs[gap_mask])) / float(WINDOW_SEC)
+    max_gap = float(np.max(diffs[gap_mask])) if gap_flag else None
+    grid = np.linspace(
+        float(window_start_s),
+        float(window_end_s),
+        int(buffer_len),
+        endpoint=False,
+        dtype=float,
+    )
+    window = np.zeros((grid.size, values.shape[1]), dtype=float)
+    for ch_idx in range(values.shape[1]):
+        window[:, ch_idx] = np.interp(grid, times, values[:, ch_idx])
+    return window, gap_fraction, gap_flag, max_gap
+
 # =========================
 # ===== MAIN LOOP =========
 # =========================
@@ -1896,101 +2116,117 @@ try:
             # =========================
             # ===== TIMEBASE INIT ======
             # =========================
-            # On the FIRST sample of THIS run, anchor run_start_lsl_ts and compute clock_offset.
-            # This makes time_s continuous across resumes without including downtime.
-            if run_start_lsl_ts is None:
-                run_start_lsl_ts = float(lsl_ts)
-                run_start_local = float(local_clock())
-                clock_offset = float(run_start_lsl_ts - run_start_local)
+            lsl_ts_raw = float(lsl_ts)
+            lsl_ts_mono, clamped = clamp_lsl_timestamp(last_lsl_ts_mono, lsl_ts_raw)
+            if clamped:
+                backward_timestamp_count += 1
+                time_s_clamped_count += 1
+                if last_lsl_ts_mono is not None:
+                    max_backwards_jump_s = max(
+                        max_backwards_jump_s, float(last_lsl_ts_mono - lsl_ts_raw)
+                    )
 
-                # Legacy diagnostics: keep stream_start_* set once if absent
-                if stream_start_lsl_ts is None:
-                    stream_start_lsl_ts = run_start_lsl_ts
-                if local_clock_at_start is None:
-                    local_clock_at_start = run_start_local
+            segment_break_reason = None
+            if clamped:
+                segment_break_reason = "backwards"
+                _reset_lstm_state("backwards_timestamp", None)
+            elif last_lsl_ts_mono is not None:
+                dt_s = float(lsl_ts_mono - last_lsl_ts_mono)
+                if is_gap(dt_s, nominal_dt_s):
+                    gap_durations_s.append(dt_s)
+                    summary = summarize_gaps(gap_durations_s)
+                    gap_count = summary.count
+                    gap_max_s = summary.max_gap_s or 0.0
+                    gap_p95_s = summary.p95_gap_s
+                    gap_p99_s = summary.p99_gap_s
+                if dt_s > GAP_BREAK_S:
+                    segment_break_reason = "gap"
+                    if dt_s > GAP_RESET_THRESHOLD_S:
+                        _reset_lstm_state("gap_reset", None)
 
+            if segment_break_reason is not None:
+                _start_segment(segment_break_reason)
+                lsl_ts_mono, _ = clamp_lsl_timestamp(None, lsl_ts_raw)
+
+            if stream_start_lsl_ts is None:
+                stream_start_lsl_ts = float(lsl_ts_mono)
+                segment_start_lsl_ts = stream_start_lsl_ts
+                local_clock_at_start = float(local_clock())
+                clock_offset = float(stream_start_lsl_ts - local_clock_at_start)
+                run_start_utc_iso = utc_now_iso_z()
+                run_start_local_iso = local_now_iso()
                 timebase_written = False
                 timebase_report_initialized = False
+                next_window_start_s = 0.0
 
-            # If clock_offset is missing (shouldn't happen after init), estimate from current sample
             if clock_offset is None:
-                clock_offset = float(lsl_ts - local_clock())
+                clock_offset = float(lsl_ts_raw - local_clock())
                 if not clock_offset_estimated:
                     print("⚠️ clock_offset missing; estimating from current sample.")
                     clock_offset_estimated = True
                 timebase_written = False
 
-            if (
-                not timebase_written
-                and run_start_lsl_ts is not None
-                and clock_offset is not None
-            ):
+            if not timebase_written and stream_start_lsl_ts is not None:
                 _update_session_meta(complete=False, label="timebase")
                 _write_session_state(label="timebase")
                 timebase_written = True
-            if run_start_lsl_ts is not None and not timebase_report_initialized:
+            if stream_start_lsl_ts is not None and not timebase_report_initialized:
                 _write_timebase_report("init")
                 timebase_report_initialized = True
 
             if segment_start_lsl_ts is None:
-                segment_start_lsl_ts = float(lsl_ts)
+                segment_start_lsl_ts = float(lsl_ts_mono)
                 _write_session_state(label="segment_start")
 
-            if last_written_lsl_ts is not None:
-                if lsl_ts <= last_written_lsl_ts:
-                    max_backwards_jump_s = max(
-                        max_backwards_jump_s, float(last_written_lsl_ts - lsl_ts)
-                    )
-                    _start_segment("backwards")
-                    segment_start_lsl_ts = float(lsl_ts)
-                elif (lsl_ts - last_written_lsl_ts) > GAP_BREAK_S:
-                    _start_segment("gap")
-                    segment_start_lsl_ts = float(lsl_ts)
+            time_s = float(lsl_ts_mono - stream_start_lsl_ts)
+            latency_ms = (local_clock() - lsl_ts_raw) * 1000.0
 
-            raw_time_s = float(lsl_ts - segment_start_lsl_ts)
-            latency_ms = (local_clock() - lsl_ts) * 1000.0
-
-            eeg_buffer.append(sample)
+            sample_arr = np.asarray(sample, dtype=float)
+            sample_time_buffer.append((time_s, sample_arr))
+            buffer_min_time = time_s - float(WINDOW_SEC) - 1.0
+            while sample_time_buffer and sample_time_buffer[0][0] < buffer_min_time:
+                sample_time_buffer.popleft()
 
             if raw_writer:
-                raw_writer.writerow([lsl_ts, *sample])
+                raw_writer.writerow([lsl_ts_raw, *sample])
 
-            if len(eeg_buffer) < buffer_len:
-                continue
+            last_lsl_ts_raw = lsl_ts_raw
+            last_lsl_ts_mono = lsl_ts_mono
 
-            window = np.array(eeg_buffer)  # (T, C)
+            # ===== OPTIONAL ICA =====
+            cleaned = None
+            latest_sample = sample_arr
+            latest_window = None
+            if time_s >= WINDOW_SEC:
+                latest_window, _, latest_gap_flag, _ = _extract_time_window(
+                    time_s - WINDOW_SEC, time_s
+                )
+                if latest_window is not None and latest_gap_flag:
+                    latest_window = None
 
-        # ===== Compression =====
-        diff_mask = np.any(np.diff(window, axis=0) != 0, axis=1)
-        compressed = window[1:][diff_mask]
-        if len(compressed) < CHANNELS:
-            continue
-
-        # ===== ICA =====
-        cleaned = window
-        latest_sample = window[-1]
-        if ENABLE_ICA and ica is not None and not ica_disabled_due_to_error:
-            ica_skipped_reason = None
-            if not ica_fitted:
-                warmup_ready = samples_seen >= int(ICA_WARMUP_S * SAMPLING_RATE)
-                if not warmup_ready:
-                    ica_skipped_reason = "warmup"
+            if ENABLE_ICA and ica is not None and not ica_disabled_due_to_error:
+                ica_skipped_reason = None
+                compressed = None
+                if latest_window is None:
+                    ica_skipped_reason = "window_unavailable"
                 else:
+                    diff_mask = np.any(np.diff(latest_window, axis=0) != 0, axis=1)
+                    compressed = latest_window[1:][diff_mask]
+                    if len(compressed) < CHANNELS:
+                        ica_skipped_reason = "compressed_short"
+
+                if ica_fit_future is not None and ica_fit_future.done():
                     try:
-                        result = guard_ica_fit(
-                            compressed,
-                            scaler=ica_scaler,
-                            ica=ica,
-                            min_samples=int(ICA_MIN_SAMPLES),
-                            min_var=float(ICA_MIN_VAR),
-                        )
-                        if result.ok:
+                        result = ica_fit_future.result()
+                        if result.get("ok"):
                             ica_fitted = True
                             ica_ran = True
                         else:
-                            ica_skipped_reason = result.reason
+                            ica_skipped_reason = result.get("reason")
                             if LOG_ICA_DIAGNOSTICS:
-                                print(f"⚠️ ICA skipped: {result.reason} {result.diagnostics}")
+                                print(
+                                    f"⚠️ ICA skipped: {result.get('reason')} {result.get('diagnostics')}"
+                                )
                     except Exception as exc:
                         ica_failed_exception = repr(exc)
                         ica_retries += 1
@@ -1998,27 +2234,25 @@ try:
                         print(f"⚠️ ICA fit failed: {exc}")
                         if ica_retries >= ICA_MAX_RETRIES_PER_SESSION:
                             ica_disabled_due_to_error = True
-                            print("⚠️ ICA disabled for session due to repeated failures.")
-            if ica_fitted:
-                reason, diag = validate_ica_input(
-                    window, min_samples=None, min_var=float(ICA_MIN_VAR)
-                )
-                if reason is not None:
-                    ica_skipped_reason = reason
-                    if LOG_ICA_DIAGNOSTICS:
-                        print(f"⚠️ ICA skipped: {reason} {diag}")
-                else:
+                            print(
+                                "⚠️ ICA disabled for session due to repeated failures."
+                            )
+                    ica_fit_future = None
+
+                if ica_transform_future is not None and ica_transform_future.done():
                     try:
-                        X_scaled = ica_scaler.transform(window)
-                        if not np.isfinite(X_scaled).all():
-                            raise ValueError("ICA scaling produced non-finite values.")
-                        S = ica.transform(X_scaled)
-                        for k in range(S.shape[1]):
-                            if is_artifact(S[:, k], fs=SAMPLING_RATE):
-                                S[:, k] *= ARTIFACT_ATTENUATION
-                        cleaned = ica.inverse_transform(S)
-                        latest_sample = cleaned[-1] if len(cleaned) else window[-1]
-                        ica_ran = True
+                        result = ica_transform_future.result()
+                        if result.get("ok"):
+                            cleaned = result.get("cleaned")
+                            if cleaned is not None and len(cleaned):
+                                latest_sample = cleaned[-1]
+                                ica_ran = True
+                        else:
+                            ica_skipped_reason = result.get("reason")
+                            if LOG_ICA_DIAGNOSTICS:
+                                print(
+                                    f"⚠️ ICA skipped: {result.get('reason')} {result.get('diagnostics')}"
+                                )
                     except Exception as exc:
                         ica_failed_exception = repr(exc)
                         ica_retries += 1
@@ -2026,74 +2260,196 @@ try:
                         print(f"⚠️ ICA transform failed: {exc}")
                         if ica_retries >= ICA_MAX_RETRIES_PER_SESSION:
                             ica_disabled_due_to_error = True
-                            print("⚠️ ICA disabled for session due to repeated failures.")
+                            print(
+                                "⚠️ ICA disabled for session due to repeated failures."
+                            )
+                    ica_transform_future = None
+
+                if (
+                    not ica_fitted
+                    and latest_window is not None
+                    and ica_skipped_reason is None
+                    and ica_fit_future is None
+                ):
+                    warmup_ready = samples_seen >= int(ICA_WARMUP_S * SAMPLING_RATE)
+                    if not warmup_ready:
+                        ica_skipped_reason = "warmup"
+                    elif compressed is not None and ica_executor is not None:
+                        ica_fit_future = ica_executor.submit(
+                            _ica_fit_worker, compressed.copy()
+                        )
+
+                if (
+                    ica_fitted
+                    and latest_window is not None
+                    and ica_skipped_reason is None
+                    and ica_transform_future is None
+                    and ica_executor is not None
+                ):
+                    ica_transform_future = ica_executor.submit(
+                        _ica_transform_worker, latest_window.copy()
+                    )
+            if cleaned is None:
+                cleaned = latest_window if latest_window is not None else None
 
         # ===== DEFAULTS =====
-        pred_action = -1
-        pred_finger = -1
-        action_confidence = 0.0
-        action_uncertainty = 0.0
-        finger_confidence = 0.0
-        finger_uncertainty = 0.0
-        velocity = 0.0
+        pred_action = int(last_pred_action)
+        pred_finger = int(last_pred_finger)
+        action_confidence = float(last_action_confidence)
+        action_uncertainty = float(last_action_uncertainty)
+        finger_confidence = float(last_finger_confidence)
+        finger_uncertainty = float(last_finger_uncertainty)
+        velocity = (
+            action_confidence * (1.0 - action_uncertainty)
+            if pred_action != ACTION_REST
+            else 0.0
+        )
 
         # ===== INFERENCE =====
-        if DEMO_MODE and model is not None:
-            t0 = time.perf_counter()
+        inference_enabled = DEMO_MODE and model is not None and scaler is not None
+        if not inference_enabled and lstm_state is not None:
+            _reset_lstm_state("inference_disabled", time_s)
 
-            window_input = cleaned.astype(np.float32)
-            window_input = standardize_window_TxC(window_input, scaler)
+        if inference_enabled and next_window_start_s is not None:
+            max_windows_per_cycle = 5
+            windows_processed = 0
+            latest_time_s = float(time_s)
 
-            x_BTC = (
-                torch.tensor(window_input, dtype=torch.float32).unsqueeze(0).to(DEVICE)
-            )
-
-            if hasattr(model, "mc_forward"):
-                mc = model.mc_forward(x_BTC, passes=MC_DROPOUT_PASSES)
-            else:
-                mc = mc_dropout_predict(model, x_BTC, passes=MC_DROPOUT_PASSES)
-
-            action_mean = mc["action_mean"].squeeze(0).detach().cpu().numpy()
-            action_std = mc["action_std"].squeeze(0).detach().cpu().numpy()
-            finger_mean = mc["finger_mean"].squeeze(0).detach().cpu().numpy()
-            finger_std = mc["finger_std"].squeeze(0).detach().cpu().numpy()
-
-            pred_action = int(np.argmax(action_mean))
-            action_confidence = float(action_mean[pred_action])
-            action_uncertainty = float(np.mean(action_std))
-
-            pred_finger = int(np.argmax(finger_mean))
-            finger_confidence = float(finger_mean[pred_finger])
-            finger_uncertainty = float(np.mean(finger_std))
-
-            adaptive_thresh = min(
-                0.99,
-                max(
-                    BASE_CONF_THRESH,
-                    BASE_CONF_THRESH + UNCERTAINTY_WEIGHT * action_uncertainty,
-                ),
-            )
-
-            action_pred_buffer.append(pred_action)
-
-            if pred_action != ACTION_REST:
-                velocity = action_confidence * (1.0 - action_uncertainty)
-
-            if ENABLE_ACTUATION and pred_action != ACTION_REST:
-                stable = (
-                    len(action_pred_buffer) == STABILITY_FRAMES
-                    and len(set(action_pred_buffer)) == 1
-                )
-                if (
-                    stable
-                    and calibrator.allow_actuation(
-                        action_confidence, action_uncertainty
+            while (next_window_start_s + WINDOW_SEC) <= latest_time_s:
+                if windows_processed >= max_windows_per_cycle:
+                    backlog = int(
+                        ((latest_time_s - WINDOW_SEC) - next_window_start_s)
+                        // WINDOW_HOP_SEC
                     )
-                    and action_confidence >= adaptive_thresh
-                ):
-                    pass
+                    if backlog > 0:
+                        window_drop_count += backlog
+                        next_window_start_s += backlog * WINDOW_HOP_SEC
+                    break
 
-            latency_dummy = time.perf_counter() - t0
+                window_start_s = float(next_window_start_s)
+                window_end_s = float(window_start_s + WINDOW_SEC)
+                window_center_s = float(window_start_s + (WINDOW_SEC / 2.0))
+
+                if not data_stream_active:
+                    window_health_drop_count += 1
+                    _reset_lstm_state("stream_unhealthy", window_center_s)
+                    next_window_start_s += WINDOW_HOP_SEC
+                    continue
+
+                (
+                    window_data,
+                    gap_fraction,
+                    gap_flag,
+                    max_gap,
+                ) = _extract_time_window(window_start_s, window_end_s)
+                if window_data is None:
+                    window_incomplete_drop_count += 1
+                    next_window_start_s += WINDOW_HOP_SEC
+                    continue
+                if gap_flag:
+                    window_gap_drop_count += 1
+                    if max_gap is not None and max_gap > GAP_RESET_THRESHOLD_S:
+                        _reset_lstm_state("gap_reset", window_center_s)
+                    next_window_start_s += WINDOW_HOP_SEC
+                    continue
+
+                window_input = standardize_window_TxC(
+                    window_data.astype(np.float32), scaler
+                )
+                x_BTC = (
+                    torch.tensor(window_input, dtype=torch.float32)
+                    .unsqueeze(0)
+                    .to(DEVICE)
+                )
+                if hasattr(model, "forward_with_state"):
+                    finger_logits, action_logits, lstm_state = model.forward_with_state(
+                        x_BTC, lstm_state
+                    )
+                else:
+                    finger_logits, action_logits = model(x_BTC)
+                    lstm_state = None
+
+                action_probs = torch.softmax(action_logits, dim=1).squeeze(0)
+                finger_probs = torch.softmax(finger_logits, dim=1).squeeze(0)
+                action_probs_np = action_probs.detach().cpu().numpy()
+                finger_probs_np = finger_probs.detach().cpu().numpy()
+
+                pred_action = int(np.argmax(action_probs_np))
+                action_confidence = float(action_probs_np[pred_action])
+                action_uncertainty = 0.0
+
+                pred_finger = int(np.argmax(finger_probs_np))
+                finger_confidence = float(finger_probs_np[pred_finger])
+                finger_uncertainty = 0.0
+
+                adaptive_thresh = min(
+                    0.99,
+                    max(
+                        BASE_CONF_THRESH,
+                        BASE_CONF_THRESH + UNCERTAINTY_WEIGHT * action_uncertainty,
+                    ),
+                )
+
+                action_pred_buffer.append(pred_action)
+                if pred_action != ACTION_REST:
+                    velocity = action_confidence * (1.0 - action_uncertainty)
+
+                if ENABLE_ACTUATION and pred_action != ACTION_REST:
+                    stable = (
+                        len(action_pred_buffer) == STABILITY_FRAMES
+                        and len(set(action_pred_buffer)) == 1
+                    )
+                    if (
+                        stable
+                        and calibrator.allow_actuation(
+                            action_confidence, action_uncertainty
+                        )
+                        and action_confidence >= adaptive_thresh
+                    ):
+                        pass
+
+                prediction_time_s = window_center_s
+                prediction_lsl_ts = (
+                    float(stream_start_lsl_ts + prediction_time_s)
+                    if stream_start_lsl_ts is not None
+                    else np.nan
+                )
+                if clock_offset is not None and np.isfinite(prediction_lsl_ts):
+                    inference_latency_ms = (
+                        local_clock() - (prediction_lsl_ts - clock_offset)
+                    ) * 1000.0
+                else:
+                    inference_latency_ms = np.nan
+
+                if predictions_writer:
+                    predictions_writer.writerow(
+                        [
+                            prediction_time_s,
+                            prediction_lsl_ts,
+                            window_start_s,
+                            window_end_s,
+                            int(segment_id),
+                            pred_action,
+                            pred_finger,
+                            action_confidence,
+                            action_uncertainty,
+                            finger_confidence,
+                            finger_uncertainty,
+                            inference_latency_ms,
+                            experiment_hash,
+                            MODEL_PATH,
+                        ]
+                    )
+
+                last_pred_action = pred_action
+                last_pred_finger = pred_finger
+                last_action_confidence = action_confidence
+                last_action_uncertainty = action_uncertainty
+                last_finger_confidence = finger_confidence
+                last_finger_uncertainty = finger_uncertainty
+
+                windows_processed += 1
+                next_window_start_s += WINDOW_HOP_SEC
 
         # ===== OPTIONAL ONLINE CALIBRATION FEEDBACK =====
         if DEMO_MODE and TRAINING_MODE:
@@ -2135,13 +2491,14 @@ try:
 
         # ===== SAVE FEATURES =====
         if SAVE_TO_DISK and csv_writer:
-            time_s = raw_time_s
             if time_s is None or not np.isfinite(time_s):
                 continue
 
             row = [
-                lsl_ts,
+                lsl_ts_raw,
+                lsl_ts_mono,
                 time_s,
+                int(segment_id),
                 *latest_sample,
                 pred_action,
                 pred_finger,
@@ -2158,27 +2515,32 @@ try:
                 )
             csv_writer.writerow(row)
             data_stream_last_write_ts = utc_now_iso_z()
-            health_gate.record_written(float(lsl_ts), time.monotonic())
-            last_written_lsl_ts = float(lsl_ts)
+            health_gate.record_written(float(lsl_ts_raw), time.monotonic())
+            last_written_lsl_ts = float(lsl_ts_raw)
             last_written_time_s = float(time_s)
             last_time_s = float(last_written_time_s)  # keep session meta/state current
             last_sample_time_s = float(time_s)
-            last_sample_lsl_ts = float(lsl_ts)
+            last_sample_lsl_ts = float(lsl_ts_raw)
             recent_sample_times.append(last_sample_time_s)
             if first_time_s is None:
                 first_time_s = last_sample_time_s
             last_time_s_seen = last_sample_time_s
             if first_lsl_ts is None:
-                first_lsl_ts = float(lsl_ts)
-            last_lsl_ts = float(lsl_ts)
+                first_lsl_ts = float(lsl_ts_raw)
+            last_lsl_ts = float(lsl_ts_raw)
             samples_written += 1
             _maybe_write_timebase_report()
 
         # ===== PLOT =====
         if ENABLE_PLOT:
+            plot_data = (
+                cleaned
+                if cleaned is not None
+                else np.asarray([latest_sample], dtype=float)
+            )
             for i in range(CHANNELS):
-                lines[i].set_data(range(len(cleaned)), cleaned[:, i])
-            ax.set_xlim(0, len(cleaned))
+                lines[i].set_data(range(len(plot_data)), plot_data[:, i])
+            ax.set_xlim(0, len(plot_data))
             ax.relim()
             ax.autoscale_view()
             ax.set_ylim(-100, 100)
@@ -2210,8 +2572,15 @@ if EVENT_MARKING_ENABLED:
         save_events_csv(EVENTS_CSV_PATH, events)
     print(f"📝 Events saved to {EVENTS_CSV_PATH}")
 
+if ica_executor is not None:
+    ica_executor.shutdown(wait=False)
+
 # Write final timebase report
 _maybe_write_timebase_report(force=True, label="final")
+
+# Final run timestamps
+run_end_utc_iso = utc_now_iso_z()
+run_end_local_iso = local_now_iso()
 
 # Update session-continuous elapsed time at end of run
 last_time_s_updated = float(

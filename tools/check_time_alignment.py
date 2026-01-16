@@ -74,15 +74,22 @@ def _check_alignment(
         print(f"ERROR: Failed to read features file: {features_path} ({exc})")
         return 1
 
-    if (
-        "time_s" not in features_df.columns
-        or "lsl_timestamp" not in features_df.columns
+    if "time_s" not in features_df.columns or (
+        "lsl_timestamp" not in features_df.columns
+        and "lsl_timestamp_mono" not in features_df.columns
     ):
-        print("ERROR: Features file missing required columns: time_s, lsl_timestamp")
+        print(
+            "ERROR: Features file missing required columns: time_s and lsl_timestamp(_mono)"
+        )
         return 1
 
     times = features_df["time_s"].astype(float).to_numpy()
-    lsl_ts = features_df["lsl_timestamp"].astype(float).to_numpy()
+    lsl_col = (
+        "lsl_timestamp_mono"
+        if "lsl_timestamp_mono" in features_df.columns
+        else "lsl_timestamp"
+    )
+    lsl_ts = features_df[lsl_col].astype(float).to_numpy()
     finite_mask = np.isfinite(times)
     times = times[finite_mask]
     lsl_ts = lsl_ts[finite_mask]
