@@ -2416,7 +2416,7 @@ try:
                 )
                 if clock_offset is not None and np.isfinite(prediction_lsl_ts):
                     inference_latency_ms = (
-                        local_clock() - (prediction_lsl_ts + clock_offset)
+                        local_clock() - (prediction_lsl_ts - clock_offset)
                     ) * 1000.0
                 else:
                     inference_latency_ms = np.nan
