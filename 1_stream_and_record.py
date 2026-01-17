@@ -38,7 +38,7 @@ import torch
 import joblib
 from scipy.signal import welch
 
-from pylsl import StreamInlet, resolve_streams, local_clock
+from pylsl import StreamInlet, local_clock
 from sklearn.decomposition import FastICA
 from sklearn.preprocessing import StandardScaler
 
@@ -60,7 +60,23 @@ from utils.label_schema import (
     event_type_for,
 )
 from utils.session_timebase import compute_event_lsl_ts
-from utils.stream_timebase import clamp_lsl_timestamp, gap_threshold_s, is_gap, summarize_gaps
+from utils.lsl_stream_select import (
+    LSLStreamSelectError,
+    MultipleStreamsMatchedError,
+    NoStreamFoundError,
+    NoStreamMatchedError,
+    StreamSelector,
+    log_stream_signature,
+    pick_stream,
+    stream_signature,
+)
+from utils.stream_timebase import (
+    clamp_lsl_timestamp,
+    gap_threshold_s,
+    is_gap,
+    should_segment_break_backwards,
+    summarize_gaps,
+)
 from utils.timebase_selfcheck import evaluate_timebase_alignment
 from utils.ica_guard import guard_ica_fit, validate_ica_input
 from utils.stream_health import RollingStreamHealthGate
@@ -93,6 +109,14 @@ TIMEBASE_VERSION = "absolute_v1"
 
 MODEL_PATH = "finger_action_model.pt"
 SCALER_PATH = "scaler.save"
+
+# =========================
+# ===== TIMEBASE JITTER =====
+# =========================
+SOFT_BACKWARDS_EPS_S = 0.010
+HARD_BACKWARDS_S = 0.200
+SOFT_BACKWARDS_LIMIT = 6
+SOFT_BACKWARDS_WINDOW_S = 1.0
 
 # =========================
 # ===== SAFETY & UNCERTAINTY ======
@@ -170,6 +194,8 @@ events_path_state = None
 raw_path_state = None
 created_utc = None
 time_s_clamped_count = 0
+total_backward_timestamp_count = 0
+total_gap_count = 0
 event_clamped_count = 0
 max_backwards_jump_s = 0.0
 csv_file = None
@@ -180,6 +206,7 @@ predictions_file = None
 predictions_writer = None
 ica = None
 ica_scaler = None
+lsl_stream_signature = None
 
 
 @dataclass
@@ -703,6 +730,7 @@ def _build_session_meta_payload(complete: bool):
         "run_start_local_iso": run_start_local_iso,
         "run_end_local_iso": run_end_local_iso,
         "segment_id": int(segment_id),
+        "lsl_stream": lsl_stream_signature,
         # Legacy/diagnostic (kept)
         "complete": bool(complete),
         "created_utc": created_utc,
@@ -772,6 +800,8 @@ def _build_session_state_payload(
         "gap_p95_s": state.gap_p95_s,
         "gap_p99_s": state.gap_p99_s,
         "backward_timestamp_count": state.backward_timestamp_count,
+        "backward_timestamp_count_total": int(total_backward_timestamp_count),
+        "gap_count_total": int(total_gap_count),
         "window_drop_count": state.window_drop_count,
         "window_gap_drop_count": state.window_gap_drop_count,
         "window_incomplete_drop_count": state.window_incomplete_drop_count,
@@ -1179,6 +1209,7 @@ timebase_report_initialized = False
 non_finite_sample_warned = False
 sample_queue: Deque[tuple[float, List[float]]] = deque()
 queue_drop_count = 0
+backwards_events_monotonic: Deque[float] = deque(maxlen=256)
 segment_break_hold_until: Optional[float] = None
 last_health_warning_time = 0.0
 nominal_dt_s = 1.0 / float(SAMPLING_RATE)
@@ -1217,6 +1248,7 @@ def _reset_segment_state(state: StreamState) -> None:
     global stream_start_lsl_ts, local_clock_at_start, clock_offset
     global last_lsl_ts_mono, last_lsl_ts_raw
     global gap_durations_s, next_window_start_s
+    global backwards_events_monotonic
     global lstm_state
     global last_report_samples_written, timebase_report_initialized
     global ica_scaler, ica
@@ -1234,6 +1266,7 @@ def _reset_segment_state(state: StreamState) -> None:
     last_lsl_ts_raw = None
     state.backward_timestamp_count = 0
     gap_durations_s = []
+    backwards_events_monotonic.clear()
     state.gap_count = 0
     state.gap_max_s = 0.0
     state.gap_p95_s = None
@@ -1816,6 +1849,18 @@ if DEMO_MODE:
 # =========================
 # ===== LSL SETUP =========
 # =========================
+def _drain_inlet(inlet: StreamInlet, drain_s: float = 0.75) -> int:
+    drained = 0
+    start = time.monotonic()
+    while time.monotonic() - start < drain_s:
+        sample, _ = inlet.pull_sample(timeout=0.0)
+        if sample is None:
+            time.sleep(0.005)
+            continue
+        drained += 1
+    return drained
+
+
 def resolve_eeg_channel_indices(info, expected):
     try:
         ch = info.desc().child("channels").child("channel")
@@ -1868,21 +1913,33 @@ if not IMPORT_ONLY:
     print("🔍 Resolving EEG stream...")
     if CSV_OFFLINE_PATH:
         raise RuntimeError("CSV offline mode is not supported in 1_stream_and_record.py.")
-    streams = resolve_streams()
-    if not streams:
-        raise RuntimeError("No LSL streams found.")
     if LSL_STREAM_NAME:
-        target = str(LSL_STREAM_NAME).lower()
-        eeg_streams = [s for s in streams if target in s.name().lower()]
+        selector = StreamSelector(
+            name_contains=LSL_STREAM_NAME, type_equals=None, min_channels=CHANNELS
+        )
+        eeg_stream = pick_stream(selector)
     elif LSL_STREAM_TYPE:
-        target = str(LSL_STREAM_TYPE).lower()
-        eeg_streams = [s for s in streams if s.type().lower() == target]
+        selector = StreamSelector(
+            name_contains=None, type_equals=LSL_STREAM_TYPE, min_channels=CHANNELS
+        )
+        eeg_stream = pick_stream(selector)
     else:
-        eeg_streams = [s for s in streams if "eeg" in s.name().lower()]
-    if not eeg_streams:
-        raise RuntimeError("No matching LSL EEG stream found.")
-    eeg_stream = eeg_streams[0]
-    inlet = StreamInlet(eeg_stream)
+        selector = StreamSelector(
+            name_contains=None, type_equals="EEG", min_channels=CHANNELS
+        )
+        try:
+            eeg_stream = pick_stream(selector)
+        except NoStreamMatchedError:
+            eeg_stream = pick_stream(
+                StreamSelector(
+                    name_contains="eeg", type_equals=None, min_channels=CHANNELS
+                )
+            )
+        except (NoStreamFoundError, MultipleStreamsMatchedError, LSLStreamSelectError):
+            raise
+    inlet = StreamInlet(eeg_stream, max_buflen=5)
+    lsl_stream_signature = stream_signature(eeg_stream)
+    log_stream_signature(lsl_stream_signature)
     info = inlet.info()
     expected_labels = ["TP9", "AF7", "AF8", "TP10"]
     channel_indices = resolve_eeg_channel_indices(info, expected_labels)
@@ -1927,6 +1984,9 @@ if not IMPORT_ONLY:
         f"✅ EEG connected ({info.channel_count()} channels, using indices {channel_indices})"
     )
     selected_channel_indices = channel_indices
+    drained_samples = _drain_inlet(inlet, drain_s=0.75)
+    if drained_samples:
+        print(f"🧹 Drained {drained_samples} stale LSL samples before start.")
 
 # =========================
 # ===== BUFFERS ===========
@@ -2167,7 +2227,9 @@ def _update_stream_health(now_monotonic: float) -> None:
             _write_session_state(label="event_marking_disabled")
 
 
-def _reset_lstm_state(reason: str, time_s: Optional[float]) -> None:
+def _reset_lstm_state(
+    reason: str, time_s: Optional[float], details: Optional[Dict[str, Any]] = None
+) -> None:
     global lstm_state
     lstm_state = None
     state.lstm_reset_count += 1
@@ -2176,6 +2238,8 @@ def _reset_lstm_state(reason: str, time_s: Optional[float]) -> None:
         "reason": str(reason),
         "ts_utc": utc_now_iso_z(),
     }
+    if details:
+        entry.update(details)
     state.lstm_reset_log.append(entry)
     print(f"⚠️ LSTM state reset ({reason}) at {entry['time_s']}")
 
@@ -2287,22 +2351,58 @@ if not IMPORT_ONLY:
                 # ===== TIMEBASE INIT ======
                 # =========================
                 lsl_ts_raw = float(lsl_ts)
-                lsl_ts_mono, clamped = clamp_lsl_timestamp(last_lsl_ts_mono, lsl_ts_raw)
-                if clamped:
-                    state.backward_timestamp_count += 1
-                    time_s_clamped_count += 1
-                    if last_lsl_ts_mono is not None:
-                        max_backwards_jump_s = max(
-                            max_backwards_jump_s, float(last_lsl_ts_mono - lsl_ts_raw)
-                        )
+                clamp_result = clamp_lsl_timestamp(
+                    last_lsl_ts_mono,
+                    lsl_ts_raw,
+                    epsilon_s=SOFT_BACKWARDS_EPS_S,
+                    hard_backwards_s=HARD_BACKWARDS_S,
+                )
+                lsl_ts_mono = clamp_result.mono_ts
+                candidate_time_s = (
+                    float(lsl_ts_mono - stream_start_lsl_ts)
+                    if stream_start_lsl_ts is not None
+                    else 0.0
+                )
 
                 segment_break_reason = None
-                if clamped:
-                    segment_break_reason = "backwards"
-                    _reset_lstm_state("backwards_timestamp", None)
+                if clamp_result.clamped:
+                    state.backward_timestamp_count += 1
+                    total_backward_timestamp_count += 1
+                    time_s_clamped_count += 1
+                    max_backwards_jump_s = max(
+                        max_backwards_jump_s, clamp_result.backwards_delta_s
+                    )
+                    clamp_details = {
+                        "backwards_delta_s": clamp_result.backwards_delta_s,
+                        "lsl_ts_raw": lsl_ts_raw,
+                        "lsl_ts_prev": last_lsl_ts_mono,
+                        "lsl_ts_mono": lsl_ts_mono,
+                    }
+                    if clamp_result.is_hard_backwards:
+                        segment_break_reason = "backwards_hard"
+                        _reset_lstm_state(
+                            "backwards_timestamp",
+                            candidate_time_s,
+                            {**clamp_details, "backwards_kind": "hard"},
+                        )
+                    elif clamp_result.is_soft_backwards:
+                        if should_segment_break_backwards(
+                            backwards_events_monotonic,
+                            now_monotonic,
+                            soft_limit=SOFT_BACKWARDS_LIMIT,
+                            window_s=SOFT_BACKWARDS_WINDOW_S,
+                            hard_backwards=False,
+                        ):
+                            segment_break_reason = "backwards_burst"
+                            _reset_lstm_state(
+                                "backwards_timestamp",
+                                candidate_time_s,
+                                {**clamp_details, "backwards_kind": "burst"},
+                            )
                 elif last_lsl_ts_mono is not None:
                     dt_s = float(lsl_ts_mono - last_lsl_ts_mono)
                     if is_gap(dt_s, nominal_dt_s):
+                        total_gap_count += 1
                         gap_durations_s.append(dt_s)
                         summary = summarize_gaps(gap_durations_s)
                         state.gap_count = summary.count
@@ -2312,11 +2412,21 @@ if not IMPORT_ONLY:
                     if dt_s > GAP_BREAK_S:
                         segment_break_reason = "gap"
                         if dt_s > GAP_RESET_THRESHOLD_S:
-                            _reset_lstm_state("gap_reset", None)
+                            _reset_lstm_state(
+                                "gap_reset",
+                                candidate_time_s,
+                                {"gap_dt_s": dt_s, "lsl_ts_raw": lsl_ts_raw},
+                            )
 
                 if segment_break_reason is not None:
                     _start_segment(segment_break_reason)
-                    lsl_ts_mono, _ = clamp_lsl_timestamp(None, lsl_ts_raw)
+                    drained = _drain_inlet(inlet, drain_s=0.75)
+                    if drained:
+                        print(
+                            f"🧹 Drained {drained} stale LSL samples after segment break."
+                        )
+                    sample_queue.clear()
+                    continue
 
                 if stream_start_lsl_ts is None:
                     stream_start_lsl_ts = float(lsl_ts_mono)

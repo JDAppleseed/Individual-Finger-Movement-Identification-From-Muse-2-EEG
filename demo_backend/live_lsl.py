@@ -1,20 +1,34 @@
 from __future__ import annotations
 
+import os
+import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Optional, Sequence, Tuple, List
+from typing import Deque, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 try:
-    from pylsl import StreamInlet, resolve_streams, local_clock
+    import pylsl
+    from pylsl import StreamInlet, local_clock
 
     LSL_AVAILABLE = True
 except Exception:
+    pylsl = None
     StreamInlet = None
-    resolve_streams = None
     local_clock = None
     LSL_AVAILABLE = False
+
+from utils.lsl_stream_select import (
+    LSLStreamSelectError,
+    MultipleStreamsMatchedError,
+    NoStreamFoundError,
+    NoStreamMatchedError,
+    StreamSelector,
+    log_stream_signature,
+    pick_stream,
+    stream_signature,
+)
 
 
 @dataclass
@@ -42,30 +56,72 @@ class LiveLSLSource:
         self._sample_count = 0
         self._stream_start: Optional[float] = None
 
+    def _drain_inlet(self, drain_s: float = 0.75) -> int:
+        if self.inlet is None:
+            return 0
+        drained = 0
+        start = time.monotonic()
+        while time.monotonic() - start < drain_s:
+            sample, _ = self.inlet.pull_sample(timeout=0.0)
+            if sample is None:
+                time.sleep(0.005)
+                continue
+            drained += 1
+        return drained
+
     def connect(self) -> Tuple[bool, str]:
         if not LSL_AVAILABLE:
             return False, "pylsl not installed"
-        streams = resolve_streams()
-        if not streams:
-            return False, "No LSL streams found"
-        eeg_stream = None
-        for stream in streams:
-            name = stream.name().lower()
-            if "eeg" in name:
-                eeg_stream = stream
-                break
+        name_override = os.environ.get("LSL_STREAM_NAME")
+        type_override = os.environ.get("LSL_STREAM_TYPE")
+        if name_override:
+            selector = StreamSelector(
+                name_contains=name_override, type_equals=None, min_channels=4
+            )
+            try:
+                stream = pick_stream(selector)
+            except Exception as exc:
+                return False, str(exc)
+        elif type_override:
+            selector = StreamSelector(
+                name_contains=None, type_equals=type_override, min_channels=4
+            )
+            try:
+                stream = pick_stream(selector)
+            except Exception as exc:
+                return False, str(exc)
+        else:
+            selector = StreamSelector(
+                name_contains=None, type_equals="EEG", min_channels=4
+            )
+            try:
+                stream = pick_stream(selector)
+            except NoStreamMatchedError:
+                try:
+                    stream = pick_stream(
+                        StreamSelector(
+                            name_contains="eeg", type_equals=None, min_channels=4
+                        )
+                    )
+                except LSLStreamSelectError as exc_fallback:
+                    return False, str(exc_fallback)
+            except (NoStreamFoundError, MultipleStreamsMatchedError, LSLStreamSelectError) as exc:
+                return False, str(exc)
 
-        if eeg_stream is None:
-            return False, "no eeg stream found"
-
-        stream = eeg_stream
         if stream.channel_count() < 4:
             return (
                 False,
                 f"EEG stream has {stream.channel_count()} channels; expected at least 4",
             )
 
-        self.inlet = StreamInlet(stream)
+        flags = 0
+        if pylsl is not None:
+            flags |= getattr(pylsl, "proc_clocksync", 0)
+            flags |= getattr(pylsl, "proc_dejitter", 0)
+        try:
+            self.inlet = StreamInlet(stream, max_buflen=5, processing_flags=flags)
+        except TypeError:
+            self.inlet = StreamInlet(stream, max_buflen=5)
         self.channel_indices = None
 
         channel_note = "channels=first4"
@@ -91,6 +147,12 @@ class LiveLSLSource:
                     channel_note = "channels=TP9,AF7,AF8,TP10"
         except Exception:
             self.channel_indices = None
+
+        signature = stream_signature(stream)
+        log_stream_signature(signature)
+        drained = self._drain_inlet()
+        if drained:
+            print(f"🧹 Drained {drained} stale LSL samples before start.")
 
         self.status_message = (
             f"Connected to LSL stream: {stream.name()} ({channel_note})"
