@@ -7,11 +7,11 @@ def test_clamp_lsl_timestamp_repairs_backwards():
     prev = None
     backwards = 0
     for ts in raw:
-        mono_ts, clamped = clamp_lsl_timestamp(prev, ts)
-        if clamped:
+        result = clamp_lsl_timestamp(prev, ts)
+        if result.clamped:
             backwards += 1
-        mono.append(mono_ts)
-        prev = mono_ts
+        mono.append(result.mono_ts)
+        prev = result.mono_ts
 
     assert mono == [1.0, 1.1, 1.1, 1.2]
     assert backwards == 1
