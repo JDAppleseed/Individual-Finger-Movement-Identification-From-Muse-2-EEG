@@ -309,6 +309,57 @@ def _parse_label_list(value) -> List[str]:
     return [str(value).strip()]
 
 
+def _evaluate_label_check(
+    found_labels: Optional[List[str]], channel_count: int
+) -> Dict[str, Any]:
+    expected_n = int(stream_requirements.expected_channels)
+    raw_required = list(stream_requirements.required_labels)
+    found_labels = [str(x) for x in (found_labels or [])]
+
+    def _norm(label: str) -> str:
+        return str(label).strip().lower()
+
+    invalid_required = [lab for lab in raw_required if _norm(lab) == "aux"]
+    required_labels = [lab for lab in raw_required if _norm(lab) != "aux"]
+    required_norm = [_norm(lab) for lab in required_labels]
+    found_norm = [_norm(lab) for lab in found_labels]
+
+    errors: list[str] = []
+    missing: list[str] = []
+    if invalid_required:
+        errors.append("invalid_required_label_aux")
+
+    if stream_requirements.require_exact_channels:
+        if channel_count != expected_n:
+            errors.append("channel_count_mismatch")
+        if found_norm[:expected_n] != required_norm:
+            errors.append("label_mismatch")
+    else:
+        if channel_count < expected_n:
+            errors.append("channel_count_too_low")
+        missing = [lab for lab in required_norm if lab not in found_norm]
+        if missing:
+            errors.append("missing_labels")
+
+    status: Dict[str, Any] = {
+        "ok": not errors,
+        "reason": "ok" if not errors else ",".join(errors),
+        "expected_labels": required_labels,
+        "found_labels": found_labels[:expected_n]
+        if stream_requirements.require_exact_channels
+        else found_labels,
+        "channel_count": int(channel_count),
+        "expected_channel_count": expected_n,
+        "require_exact_channels": bool(stream_requirements.require_exact_channels),
+        "acknowledged": bool(label_check_acknowledged),
+    }
+    if missing:
+        status["missing_labels"] = missing
+    if invalid_required:
+        status["invalid_required_labels"] = invalid_required
+    return status
+
+
 args, _ = parser.parse_known_args()
 defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
 config_settings = _load_config(args.config) if args.config else {}
@@ -1295,6 +1346,7 @@ NEAREST_SAMPLE_MAX = 10
 last_report_time: Optional[float] = None
 last_report_samples_written = 0
 timebase_report_initialized = False
+last_live_viz_emit = 0.0
 non_finite_sample_warned = False
 sample_queue: Deque[tuple[float, List[float]]] = deque()
 queue_drop_count = 0
@@ -1340,6 +1392,7 @@ def _reset_segment_state(state: StreamState) -> None:
     global backwards_events_monotonic
     global lstm_state
     global last_report_samples_written, timebase_report_initialized
+    global last_live_viz_emit
     global ica_scaler, ica
     segment_start_lsl_ts = None
     stream_start_lsl_ts = None
@@ -1376,10 +1429,11 @@ def _reset_segment_state(state: StreamState) -> None:
     lstm_state = None
     state.lstm_reset_count = 0
     state.lstm_reset_log = []
-last_report_time = None
-last_report_samples_written = 0
-timebase_report_initialized = False
-last_live_viz_emit = 0.0
+    # Reset per-segment reporting/viz gates (must not leak across segments)
+    last_report_time = 0.0
+    last_report_samples_written = 0
+    timebase_report_initialized = False
+    last_live_viz_emit = 0.0
     if state.ica_fit_future is not None:
         state.ica_fit_future.cancel()
         state.ica_fit_future = None
@@ -1397,15 +1451,34 @@ last_live_viz_emit = 0.0
         ica = None
 
 
-def _resolve_events_output_path(now_monotonic: Optional[float]) -> Optional[str]:
-    if data_stream_active:
-        return EVENTS_CSV_PATH
+def _resolve_events_output_path(
+    now_monotonic: Optional[float], decision
+) -> Optional[str]:
     if (
-        health_state.failed_write_until_mono is not None
-        and now_monotonic is not None
-        and now_monotonic <= health_state.failed_write_until_mono
+        not health_state.has_health_decision
+        or decision is None
+        or now_monotonic is None
     ):
-        return str(failed_writers.events_path) if failed_writers.events_path else None
+        return None
+    if (
+        health_state.label_check_status
+        and not health_state.label_check_status.get("ok")
+        and not label_check_acknowledged
+    ):
+        return None
+    if not decision.healthy:
+        if (
+            health_state.failed_write_until_mono is not None
+            and now_monotonic <= health_state.failed_write_until_mono
+        ):
+            return str(failed_writers.events_path) if failed_writers.events_path else None
+        return None
+    if decision.event_allowed:
+        if (
+            health_state.failed_write_until_mono is None
+            or now_monotonic >= health_state.failed_write_until_mono
+        ):
+            return EVENTS_CSV_PATH
     return None
 
 
@@ -1415,7 +1488,7 @@ def _flush_events_for_segment(now_monotonic: Optional[float] = None) -> None:
         current_event = None
     with events_lock:
         if events:
-            output_path = _resolve_events_output_path(now_monotonic)
+            output_path = _resolve_events_output_path(now_monotonic, last_health_decision)
             if output_path:
                 save_events_csv(output_path, events)
                 last_event_index = len(events) - 1
@@ -1438,11 +1511,7 @@ def _start_segment(reason: str) -> None:
     state.segment_id = segment_id
     _apply_segment_paths(segment_id)
     _reset_segment_state(state)
-    if data_stream_active:
-        _open_segment_files()
-    else:
-        failed_writers.close_failed_files()
-        _open_failed_files()
+    failed_writers.close_failed_files()
     events = []
     last_event_index = None
     segment_break_hold_until = time.monotonic() + float(RECOVERY_S)
@@ -2027,38 +2096,27 @@ if not IMPORT_ONLY:
     info = inlet.info()
     found_labels = extract_channel_labels(info)
     lsl_stream_signature["labels"] = found_labels
+    lsl_stream_signature["channel_labels"] = found_labels
     log_stream_signature(lsl_stream_signature)
 
     channel_count = int(info.channel_count())
     expected_labels = list(stream_requirements.required_labels)
     channel_indices = resolve_eeg_channel_indices(info, expected_labels)
 
-    label_check_errors = []
-    if stream_requirements.require_exact_channels and channel_count != CHANNELS:
-        label_check_errors.append(
-            f"channel_count={channel_count} (expected {CHANNELS})"
-        )
-    if channel_count < CHANNELS:
-        raise RuntimeError(
-            f"LSL EEG stream has {channel_count} channels; expected at least {CHANNELS}."
-        )
-    if not found_labels or channel_indices is None:
-        label_check_errors.append("labels_missing_or_mismatched")
+    label_status = _evaluate_label_check(found_labels, channel_count)
+    if channel_indices is None and label_status["ok"]:
+        label_status["ok"] = False
+        label_status["reason"] = "labels_missing_or_mismatched"
+    health_state.label_check_status = label_status
 
-    if label_check_errors:
-        health_state.label_check_status = {
-            "ok": False,
-            "reason": ",".join(label_check_errors),
-            "expected_labels": expected_labels,
-            "found_labels": found_labels,
-            "channel_count": channel_count,
-            "acknowledged": bool(label_check_acknowledged),
-        }
-        report_path = _write_label_check_report(health_state.label_check_status)
+    if not label_status["ok"]:
+        expected_n = int(stream_requirements.expected_channels)
+        report_path = _write_label_check_report(label_status)
         _write_session_state(label="label_check_failed")
         print(
-            "🛑 LABEL CHECK FAILED: expected TP9,AF7,AF8,TP10 (4ch). "
-            f"Found channels={channel_count}, labels={found_labels}. "
+            "🛑 LABEL CHECK FAILED: expected labels "
+            f"{label_status['expected_labels']} ({expected_n}ch). "
+            f"Found channels={channel_count}, labels={label_status['found_labels']}. "
             f"Report={report_path}"
         )
         if not label_check_acknowledged:
@@ -2068,17 +2126,10 @@ if not IMPORT_ONLY:
         else:
             print("⚠️ Label mismatch acknowledged by operator; proceeding with caution.")
     else:
-        health_state.label_check_status = {
-            "ok": True,
-            "reason": "ok",
-            "expected_labels": expected_labels,
-            "found_labels": found_labels,
-            "channel_count": channel_count,
-            "acknowledged": bool(label_check_acknowledged),
-        }
+        health_state.label_check_status = label_status
 
     if channel_indices is None:
-        channel_indices = list(range(CHANNELS))
+        channel_indices = list(range(int(stream_requirements.expected_channels)))
     print(
         f"✅ EEG connected ({info.channel_count()} channels, using indices {channel_indices})"
     )
@@ -2313,32 +2364,19 @@ if ENABLE_PLOT:
     ax.set_title("Cleaned EEG + Confidence Info")
 
 
-def _current_write_mode(now_monotonic: float, decision) -> str:
-    label_blocked = bool(
+def _label_check_blocked() -> bool:
+    return bool(
         health_state.label_check_status
         and not health_state.label_check_status.get("ok")
         and not label_check_acknowledged
     )
-    if label_blocked:
-        return "none"
-    if decision.healthy and decision.event_allowed:
-        if (
-            health_state.failed_write_until_mono is None
-            or now_monotonic > health_state.failed_write_until_mono
-        ):
-            return "clean"
-        return "none"
-    if (
-        health_state.failed_write_until_mono is not None
-        and now_monotonic <= health_state.failed_write_until_mono
-    ):
-        return "failed"
-    return "none"
 
 
 def _write_hard_stop_report_and_exit(
     reason: str, now_monotonic: float, decision
 ) -> None:
+    if health_state.hard_stop_triggered:
+        raise SystemExit(hard_stop_policy.hard_stop_exit_code)
     report_dir = Path("logs")
     report_dir.mkdir(parents=True, exist_ok=True)
     stamp = _report_stamp()
@@ -2400,46 +2438,84 @@ def _write_hard_stop_report_and_exit(
     raise SystemExit(hard_stop_policy.hard_stop_exit_code)
 
 
-def _route_writers_for_health(
-    now_mono: float, decision, state: HealthStopState, failed: FailedWriters
-) -> tuple[bool, str]:
-    label_blocked = bool(
-        state.label_check_status
-        and not state.label_check_status.get("ok")
-        and not label_check_acknowledged
-    )
-    if label_blocked:
-        state.unhealthy_since_mono = None
-        state.failed_write_until_mono = None
-        if failed.is_open():
-            failed.close_failed_files()
-        return False, "label_check_unacknowledged"
+def _route_writers_for_health(now_mono: float, decision) -> None:
+    if not health_state.has_health_decision:
+        return
+    if _label_check_blocked():
+        health_state.unhealthy_since_mono = None
+        health_state.failed_write_until_mono = None
+        if failed_writers.is_open():
+            failed_writers.close_failed_files()
+        return
 
     if not decision.healthy:
-        if state.unhealthy_since_mono is None:
-            state.unhealthy_since_mono = now_mono
-        until = now_mono + float(hard_stop_policy.failed_write_window_s)
-        if state.failed_write_until_mono is None:
-            state.failed_write_until_mono = until
-        else:
-            state.failed_write_until_mono = max(state.failed_write_until_mono, until)
-        if not failed.is_open():
+        if health_state.unhealthy_since_mono is None:
+            health_state.unhealthy_since_mono = now_mono
+        health_state.failed_write_until_mono = max(
+            health_state.failed_write_until_mono or 0.0,
+            now_mono + float(hard_stop_policy.failed_write_window_s),
+        )
+        if not failed_writers.is_open():
             _open_failed_files()
         if (
-            state.unhealthy_since_mono is not None
-            and (now_mono - state.unhealthy_since_mono)
+            (now_mono - health_state.unhealthy_since_mono)
             >= float(hard_stop_policy.hard_stop_after_unhealthy_s)
         ):
-            return True, decision.reason or "unhealthy"
-        return False, decision.reason or "unhealthy"
+            _write_hard_stop_report_and_exit(decision.reason or "unhealthy", now_mono, decision)
+        return
 
-    state.unhealthy_since_mono = None
-    if state.failed_write_until_mono is not None and now_mono > state.failed_write_until_mono:
-        state.failed_write_until_mono = None
-    if decision.event_allowed and state.failed_write_until_mono is None:
-        if failed.is_open():
-            failed.close_failed_files()
-    return False, "healthy"
+    health_state.unhealthy_since_mono = None
+    if (
+        decision.event_allowed
+        and health_state.failed_write_until_mono is not None
+        and now_mono >= health_state.failed_write_until_mono
+    ):
+        health_state.failed_write_until_mono = None
+    if decision.event_allowed and health_state.failed_write_until_mono is None:
+        if failed_writers.is_open():
+            failed_writers.close_failed_files()
+        if SAVE_TO_DISK and (csv_writer is None or predictions_writer is None):
+            _open_segment_files()
+        if SAVE_RAW and raw_writer is None:
+            _open_segment_files()
+
+
+def _active_writer_for_mode(
+    now_mono: float, clean_writer, failed_writer
+) -> Optional[Any]:
+    decision = last_health_decision
+    if not health_state.has_health_decision or decision is None:
+        return None
+    if _label_check_blocked():
+        return None
+    if not decision.healthy:
+        if (
+            health_state.failed_write_until_mono is not None
+            and now_mono <= health_state.failed_write_until_mono
+        ):
+            return failed_writer
+        return None
+    if decision.event_allowed:
+        if (
+            health_state.failed_write_until_mono is None
+            or now_mono >= health_state.failed_write_until_mono
+        ):
+            return clean_writer
+    return None
+
+
+def _active_feature_writer(now_mono: float) -> Optional[Any]:
+    return _active_writer_for_mode(now_mono, csv_writer, failed_writers.features_writer)
+
+
+def _active_raw_writer(now_mono: float) -> Optional[Any]:
+    return _active_writer_for_mode(now_mono, raw_writer, failed_writers.raw_writer)
+
+
+def _active_predictions_writer(now_mono: float) -> Optional[Any]:
+    return _active_writer_for_mode(
+        now_mono, predictions_writer, failed_writers.preds_writer
+    )
 
 
 def _update_stream_health(now_monotonic: float) -> None:
@@ -2454,6 +2530,8 @@ def _update_stream_health(now_monotonic: float) -> None:
     prev_active = data_stream_active
     prev_event_allowed = event_marking_allowed
     decision = health_gate.evaluate(now_monotonic)
+    health_state.has_health_decision = True
+    health_state.last_health_reason = decision.reason
     last_health_decision = decision
     stream_health_measured_fs = decision.measured_fs
     stream_health_write_rate = decision.write_rate
@@ -2463,11 +2541,7 @@ def _update_stream_health(now_monotonic: float) -> None:
     stream_health_last_written_lsl_ts = decision.last_written_lsl_ts
 
     data_stream_stalled_reason = decision.reason
-    label_blocked = bool(
-        health_state.label_check_status
-        and not health_state.label_check_status.get("ok")
-        and not label_check_acknowledged
-    )
+    label_blocked = _label_check_blocked()
     if label_blocked:
         data_stream_stalled_reason = "label_check_unacknowledged"
     data_stream_active = decision.healthy and not label_blocked
@@ -2476,11 +2550,7 @@ def _update_stream_health(now_monotonic: float) -> None:
     if segment_break_hold_until is not None and now_monotonic < segment_break_hold_until:
         event_allowed = False
 
-    should_stop, reason = _route_writers_for_health(
-        now_monotonic, decision, health_state, failed_writers
-    )
-    if should_stop:
-        _write_hard_stop_report_and_exit(reason, now_monotonic, decision)
+    _route_writers_for_health(now_monotonic, decision)
 
     if not data_stream_active:
         if (now_monotonic - last_health_warning_time) >= 2.0:
@@ -2497,13 +2567,6 @@ def _update_stream_health(now_monotonic: float) -> None:
         if prev_active or prev_event_allowed:
             _write_session_state(label="stream_unhealthy")
         return
-
-    if not prev_active:
-        health_state.unhealthy_since_mono = None
-        health_state.failed_write_until_mono = None
-        failed_writers.close_failed_files()
-        if csv_writer is None and raw_writer is None and predictions_writer is None:
-            _open_segment_files()
 
     if event_allowed and not event_marking_allowed:
         event_marking_allowed = True
@@ -2621,14 +2684,6 @@ if not IMPORT_ONLY:
                 last_received_lsl_ts = float(lsl_ts)
                 sample_monotonic = time.monotonic()
                 health_gate.record_received(float(lsl_ts), sample_monotonic)
-                if not data_stream_active and health_state.failed_write_until_mono is None:
-                    health_state.unhealthy_since_mono = sample_monotonic
-                    health_state.failed_write_until_mono = (
-                        sample_monotonic + float(hard_stop_policy.failed_write_window_s)
-                    )
-                    _close_segment_files()
-                    _open_failed_files()
-
                 if len(sample_queue) >= MAX_QUEUE:
                     queue_drop_count += 1
                     health_gate.set_queue_size(len(sample_queue) + 1)
@@ -2646,6 +2701,7 @@ if not IMPORT_ONLY:
             while sample_queue and not stop_event.is_set():
                 lsl_ts, sample = sample_queue.popleft()
                 health_gate.set_queue_size(len(sample_queue))
+                now_mono = time.monotonic()
 
                 # =========================
                 # ===== TIMEBASE INIT ======
@@ -2774,15 +2830,7 @@ if not IMPORT_ONLY:
                 ):
                     state.sample_time_buffer.popleft()
 
-                decision = last_health_decision or health_gate.evaluate(sample_monotonic)
-                write_mode = _current_write_mode(sample_monotonic, decision)
-                raw_target = (
-                    raw_writer
-                    if write_mode == "clean"
-                    else failed_writers.raw_writer
-                    if write_mode == "failed"
-                    else None
-                )
+                raw_target = _active_raw_writer(now_mono)
                 if raw_target is not None:
                     raw_target.writerow([lsl_ts_raw, lsl_ts_mono, *sample])
 
@@ -3046,13 +3094,7 @@ if not IMPORT_ONLY:
                         else:
                             inference_latency_ms = np.nan
 
-                        predictions_target = (
-                            predictions_writer
-                            if write_mode == "clean"
-                            else failed_writers.preds_writer
-                            if write_mode == "failed"
-                            else None
-                        )
+                        predictions_target = _active_predictions_writer(now_mono)
                         if predictions_target is not None:
                             predictions_target.writerow(
                                 [
@@ -3144,13 +3186,7 @@ if not IMPORT_ONLY:
                         pass
 
                 # ===== SAVE FEATURES =====
-                feature_target = (
-                    csv_writer
-                    if write_mode == "clean"
-                    else failed_writers.features_writer
-                    if write_mode == "failed"
-                    else None
-                )
+                feature_target = _active_feature_writer(now_mono)
                 if feature_target is not None:
                     if time_s is None or not np.isfinite(time_s):
                         continue
@@ -3173,10 +3209,10 @@ if not IMPORT_ONLY:
                     if len(row) != len(header):
                         raise RuntimeError(
                             f"Feature row length {len(row)} does not match header length {len(header)}"
-                        )
+                    )
                     feature_target.writerow(row)
 
-                if write_mode != "none":
+                if feature_target is not None:
                     data_stream_last_write_ts = utc_now_iso_z()
                     health_gate.record_written(float(lsl_ts_raw), time.monotonic())
                     last_written_lsl_ts = float(lsl_ts_raw)
@@ -3236,7 +3272,7 @@ if not IMPORT_ONLY:
         if listener:
             listener.stop()
         with events_lock:
-            output_path = _resolve_events_output_path(time.monotonic())
+            output_path = _resolve_events_output_path(time.monotonic(), last_health_decision)
             if output_path:
                 save_events_csv(output_path, events)
                 print(f"📝 Events saved to {output_path}")

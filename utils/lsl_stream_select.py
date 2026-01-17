@@ -63,6 +63,7 @@ def stream_signature(info: StreamInfo) -> Dict[str, Any]:
         "nominal_srate": float(info.nominal_srate()),
         "source_id": source_id,
         "uid": uid,
+        "channel_labels": labels,
         "labels": labels,
     }
 

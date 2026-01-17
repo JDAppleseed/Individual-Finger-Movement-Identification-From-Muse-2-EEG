@@ -90,3 +90,5 @@ class HealthStopState:
     hard_stop_triggered: bool = False
     hard_stop_report_path: Optional[Path] = None
     label_check_status: Optional[dict] = None
+    has_health_decision: bool = False
+    last_health_reason: Optional[str] = None
