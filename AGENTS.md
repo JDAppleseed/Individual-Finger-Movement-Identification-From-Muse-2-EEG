@@ -1,10 +1,10 @@
 # AGENTS.md
 
-This repo uses subject IDs like "1-F35". For future requests, use this note to
+This repo uses subject IDs like "8-M16". For future requests, use this note to
 update defaults consistently and safely.
 
-## What changed for the 1-F35 update
-- Set the default subject ID strings from "1-F40" to "1-F35" in these files:
+## What changed for the 8-M16 update
+- Set the default subject ID strings from "1-F35" to "8-M16" in these files:
   - 1_stream_and_record.py
   - 1b_extract_windows.py
   - 2_train_model.py
@@ -14,8 +14,8 @@ update defaults consistently and safely.
   - app/config_model.py
   - demo_backend/schemas.py
   - demo_app/src/types/schema.test.ts
-- Updated the default demographic fields to match "1-F35":
-  - 1_stream_and_record.py: set GENDER = "F", AGE = 35
+- Updated the default demographic fields to match "8-M16":
+  - 1_stream_and_record.py: set GENDER = "M", AGE = 16
 
 ## Paths to check next time
 Use these paths when updating the subject default again.
@@ -41,7 +41,7 @@ Use these paths when updating the subject default again.
   - sample tick test payload subject_id.
 
 ## How to update for a new subject
-1) Replace all default subject IDs (currently "1-F35") with the new subject ID
+1) Replace all default subject IDs (currently "8-M16") with the new subject ID
    in the paths listed above.
 2) If the subject ID encodes demographics (e.g., "F35"), update GENDER and AGE
    in 1_stream_and_record.py to match.

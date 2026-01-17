@@ -300,7 +300,7 @@ def main():
     parser.add_argument(
         "--subject-id",
         type=str,
-        default="1-F35",
+        default="8-M16",
         help="Subject ID to select latest session files",
     )
     parser.add_argument(

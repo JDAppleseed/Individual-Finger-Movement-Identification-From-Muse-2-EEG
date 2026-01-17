@@ -16,7 +16,7 @@ from utils.experiment_logger import LOG_DIR
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--subject-id", type=str, default="1-F35", help="Subject ID to report"
+        "--subject-id", type=str, default="8-M16", help="Subject ID to report"
     )
     parser.add_argument(
         "--exp-hash", type=str, default=None, help="Override experiment hash"

@@ -60,7 +60,7 @@ RAW_FILE = "eeg_features.csv"
 EVENT_FILE = "events.csv"
 OUT_FILE = "eeg_windows.csv"
 OUT_NPZ = "eeg_windows.npz"
-DEFAULT_SUBJECT_ID = "1-F35"
+DEFAULT_SUBJECT_ID = "8-M16"
 ROOT_DIR = Path(__file__).resolve().parent
 
 
@@ -169,7 +169,7 @@ def _features_prefix_from_events(events_path: Path) -> Optional[str]:
 
 def _select_events_for_prefix(prefix: str, base_dir: Path) -> Optional[Path]:
     """
-    prefix example: "1-F35_20260103_153353"
+    prefix example: "8-M16_20260103_153353"
     Preference order:
       1) shifted (highest name sort)
       2) exact "{prefix}_events.csv"
@@ -204,8 +204,8 @@ def infer_subject_session_from_features_path(path: Path):
       <subject_id>_<YYYYMMDD>_<HHMMSS>_eeg_features.csv
 
     Example:
-      1-F35_20260103_153353_eeg_features.csv
-      subject_id = "1-F35"
+      8-M16_20260103_153353_eeg_features.csv
+      subject_id = "8-M16"
       session_id = "20260103_153353"
     """
     if not path:
