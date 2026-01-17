@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import (
+    QColor,
     QFontMetrics,
     QPainter,
     QPainterPath,
@@ -38,6 +40,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QPlainTextEdit,
     QProxyStyle,
+    QGraphicsDropShadowEffect,
     QScrollArea,
     QSpinBox,
     QDoubleSpinBox,
@@ -50,6 +53,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QWidgetAction,
+    QSizePolicy,
     QStyle,
     QStyleOptionFrame,
     QStyleOptionViewItem,
@@ -165,90 +169,71 @@ TOOLTIPS: Dict[str, str] = {
 }
 
 EEGLAB_STYLE = """
-QMainWindow {
-    background: #b7c7e6;
-}
-QMenuBar {
-    background: #e4e8f2;
-    color: white;
-    padding: 4px;
-    font-weight: 600;
-}
-QMenuBar::item:selected {
-    background: #6c86c7;
-    color: white;
-}
-QMenu {
-    background: #f2f4fb;
-    color: white;
-    border: 1px solid #7a8fb8;
-}
-QMenu::item:selected {
-    background: #6c86c7;
-    color: white;
-}
-QDockWidget {
-    titlebar-close-icon: url(none);
-    titlebar-normal-icon: url(none);
-    font-weight: 600;
-}
-QDockWidget::title {
-    color: white;
-    background: #dbe3f4;
-    padding: 4px;
-}
+QMainWindow { background: rgb(220, 225, 235); }
+QMenuBar { background: rgb(80, 100, 130); color: white; padding: 4px; font-weight: 600; }
+QMenuBar::item:selected { background: rgb(110, 130, 170); }
+QMenu { background: rgb(80, 100, 130); color: white; border: 1px solid #7a8fb8; }
+QMenu::item:selected { background: rgb(110, 130, 170); }
+
+QDockWidget::title { color: white; background: rgb(70, 90, 120); padding: 6px 8px; font-weight: 700; }
+QDockWidget { font-weight: 600; }
+
+QWidget#Sidebar { background-color: rgb(80, 100, 130); }
+QWidget#CentralWorkspace { background-color: rgb(220, 225, 235); }
+QWidget#BottomBar { background-color: rgb(45, 45, 45); }
+
+QScrollArea { border: none; }
+QScrollArea#Sidebar { background-color: rgb(80, 100, 130); }
+QScrollArea#CentralWorkspace { background-color: rgb(220, 225, 235); }
+QScrollArea#BottomBar { background-color: rgb(45, 45, 45); }
+QScrollArea::viewport { background: transparent; }
+
 QGroupBox {
-    background: #e6edf9;
-    border: 1px solid #8ba0c7;
-    border-radius: 6px;
-    margin-top: 12px;
+  background: rgb(95, 110, 135);
+  border: 1px solid #8ba0c7;
+  border-radius: 6px;
+  margin-top: 12px;
 }
 QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 8px;
-    top: -8px;
-    padding: 0 4px;
-    color: white;
+  subcontrol-origin: margin;
+  left: 8px;
+  top: -8px;
+  padding: 0 4px;
+  color: white;
+  font-weight: 700;
 }
+
 QPushButton {
-    background: #6c86c7;
-    color: white;
-    border-radius: 4px;
-    padding: 4px 10px;
+  background: rgb(110, 130, 170);
+  color: white;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-weight: 600;
 }
-QPushButton:disabled {
-    background: #9fb0d8;
-}
+QPushButton:hover { background: rgb(130, 150, 190); }
+QPushButton:disabled { background: rgb(105, 120, 150); color: rgba(255,255,255,180); }
+
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {
-    background: white;
-    border: 1px solid #7a8fb8;
-    border-radius: 4px;
-    padding: 2px 4px;
+  background: rgb(65, 80, 105);
+  color: white;
+  border: 1px solid #7a8fb8;
+  border-radius: 6px;
+  padding: 4px 6px;
 }
-QListWidget {
-    background: #f7f9ff;
-    border: 1px solid #7a8fb8;
+QAbstractItemView, QListWidget {
+  background: rgb(65, 80, 105);
+  color: white;
+  border: 1px solid #7a8fb8;
 }
-QLabel {
-    color: white;
-}
-QToolButton {
-    background: #6c86c7;
-    color: white;
-    border-radius: 4px;
-    padding: 4px 10px;
-}
-QToolTip {
-    background-color: #f2f4fb;
-    color: white;
-    border: 1px solid #7a8fb8;
-}
-QFrame#StatusBarFrame {
-    background: #e4e8f2;
-    border: 1px solid #7a8fb8;
-    border-radius: 6px;
-}
+
+QLabel { color: white; font-weight: 600; }
+QCheckBox, QRadioButton { color: white; font-weight: 600; }
+QToolTip { background-color: rgb(80, 100, 130); color: white; border: 1px solid #7a8fb8; }
+QTabBar::tab { background: rgb(80, 100, 130); color: white; padding: 6px 10px; }
+QTabBar::tab:selected { background: rgb(110, 130, 170); }
 """
+
+_BATT_RE = re.compile(r"(?:BATTERY|Battery)\s*[:=]\s*(\d{1,3})\s*%?", re.IGNORECASE)
 
 
 class OutlineStyle(QProxyStyle):
@@ -467,6 +452,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("EEGLAB Wrapper UI")
         self.resize(1200, 780)
+        self.setMinimumSize(1400, 900)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setStyleSheet(EEGLAB_STYLE)
 
         self.repo_root = Path(__file__).resolve().parent
@@ -533,6 +520,13 @@ class MainWindow(QMainWindow):
 
         self.workflow_list = QListWidget()
         self.workflow_list.setItemDelegate(OutlineItemDelegate(self.workflow_list))
+        self.workflow_list.setObjectName("Sidebar")
+        self.workflow_list.setMinimumWidth(220)
+        self.workflow_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.workflow_list.setStyleSheet(
+            "QListWidget { background: rgb(80, 100, 130); color: white; font-weight: 700; } "
+            "QListWidget::item:selected { background: rgb(110,130,170); }"
+        )
         for item in [
             "Project",
             "Subject",
@@ -549,22 +543,23 @@ class MainWindow(QMainWindow):
         self.workflow_list.currentRowChanged.connect(self._switch_page)
 
         self.stack = QStackedWidget()
-        self.stack.addWidget(self._wrap_scroll(self._build_project_page()))
-        self.stack.addWidget(self._wrap_scroll(self._build_subject_page()))
-        self.stack.addWidget(self._wrap_scroll(self._build_stream_page()))
-        self.stack.addWidget(self._wrap_scroll(self._build_step1_page()))
-        self.stack.addWidget(self._wrap_scroll(self._build_event_page()))
-        self.stack.addWidget(self._wrap_scroll(self._build_step1b_page()))
-        self.stack.addWidget(self._wrap_scroll(self._build_train_page()))
-        self.stack.addWidget(self._wrap_scroll(self._build_infer_page()))
-        self.stack.addWidget(self._wrap_scroll(self._build_export_page()))
-        self.stack.addWidget(self._wrap_scroll(self._build_logs_page()))
+        self.stack.addWidget(self._wrap_scroll(self._build_project_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_subject_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_stream_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_step1_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_event_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_step1b_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_train_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_infer_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_export_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_logs_page(), "CentralWorkspace"))
+        self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         splitter.addWidget(self.workflow_list)
         splitter.addWidget(self.stack)
         splitter.setSizes([200, 900])
 
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(splitter, 1)
         self.setCentralWidget(main)
 
         self._build_log_dock()
@@ -635,12 +630,38 @@ class MainWindow(QMainWindow):
             ],
         }
 
-    def _wrap_scroll(self, widget: QWidget) -> QWidget:
+    def _wrap_scroll(self, widget: QWidget, object_name: Optional[str] = None) -> QWidget:
         area = QScrollArea()
         area.setWidgetResizable(True)
         area.setFrameShape(QFrame.NoFrame)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        if object_name:
+            area.setObjectName(object_name)
+            area.viewport().setObjectName(object_name)
+            widget.setObjectName(object_name)
         area.setWidget(widget)
         return area
+
+    def _apply_text_outline_effect(
+        self, widget: QWidget, *, radius: float = 1.5, dx: int = 1, dy: int = 1
+    ) -> None:
+        effect = QGraphicsDropShadowEffect(widget)
+        effect.setBlurRadius(radius)
+        effect.setOffset(dx, dy)
+        effect.setColor(QColor(0, 0, 0, 230))
+        widget.setGraphicsEffect(effect)
+
+    def _set_status_semantic(self, label: QLabel, state: str, text: str) -> None:
+        label.setText(text)
+        if state == "green":
+            label.setStyleSheet("color: rgb(130, 255, 130); font-weight: 800;")
+        elif state == "yellow":
+            label.setStyleSheet("color: rgb(255, 230, 120); font-weight: 800;")
+        elif state == "red":
+            label.setStyleSheet("color: rgb(255, 120, 120); font-weight: 900;")
+        else:
+            label.setStyleSheet("color: white; font-weight: 700;")
 
     def _build_dropdown_button(self, title: str, panel: QWidget) -> QToolButton:
         button = QToolButton()
@@ -652,6 +673,8 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setMinimumWidth(340)
         scroll.setMinimumHeight(260)
         scroll.setWidget(panel)
@@ -708,6 +731,7 @@ class MainWindow(QMainWindow):
         self.stream_state_label = QLabel("Stream: idle")
         self.ica_state_label = QLabel("ICA: off")
         self.events_state_label = QLabel("Events: off")
+        self.battery_label = QLabel("Battery: N/A")
         for label in (
             self.project_label,
             self.subject_label,
@@ -715,9 +739,11 @@ class MainWindow(QMainWindow):
             self.stream_state_label,
             self.ica_state_label,
             self.events_state_label,
+            self.battery_label,
         ):
             label.setMinimumWidth(140)
             label.setWordWrap(False)
+            self._apply_text_outline_effect(label)
 
         layout.addWidget(self.project_label)
         layout.addWidget(self.subject_label)
@@ -726,6 +752,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.ica_state_label)
         layout.addWidget(self.events_state_label)
         layout.addStretch(1)
+        layout.addWidget(self.battery_label)
+        self._set_status_semantic(self.battery_label, "neutral", "Battery: N/A")
 
         return bar
 
@@ -734,6 +762,7 @@ class MainWindow(QMainWindow):
         self.log_console.setReadOnly(True)
         self.log_console.setMaximumBlockCount(10000)
         container = QWidget()
+        container.setObjectName("BottomBar")
         layout = QVBoxLayout(container)
         layout.setContentsMargins(4, 4, 4, 4)
         self.hard_stop_banner = QLabel("HARD STOP — Stream Unhealthy")
@@ -744,17 +773,23 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.hard_stop_banner)
         layout.addWidget(self.log_console)
         dock = QDockWidget("Log Console", self)
-        dock.setWidget(container)
+        dock.setWidget(self._wrap_scroll(container, "BottomBar"))
         self.addDockWidget(Qt.BottomDockWidgetArea, dock)
 
     def _build_control_docks(self) -> None:
         self.stream_status_dock = QLabel("Stream status: idle")
         stream_widget = QWidget()
+        stream_widget.setObjectName("Sidebar")
+        stream_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         stream_layout = QVBoxLayout(stream_widget)
         stream_layout.addWidget(self.stream_status_dock)
         self.health_indicator = QLabel("Health: unknown")
         stream_layout.addWidget(self.health_indicator)
-        stream_layout.addWidget(QLabel("Quick Actions"))
+        quick_actions = QLabel("Quick Actions")
+        self._apply_text_outline_effect(quick_actions)
+        stream_layout.addWidget(quick_actions)
+        self._apply_text_outline_effect(self.stream_status_dock)
+        self._apply_text_outline_effect(self.health_indicator)
         detect_btn = QPushButton("Detect LSL Streams")
         detect_btn.clicked.connect(self._detect_lsl_streams)
         test_btn = QPushButton("Test Connection")
@@ -766,12 +801,20 @@ class MainWindow(QMainWindow):
         stream_layout.addWidget(open_stream_btn)
         stream_layout.addStretch(1)
         stream_dock = QDockWidget("Stream Control", self)
-        stream_dock.setWidget(stream_widget)
+        stream_dock.setWidget(self._wrap_scroll(stream_widget, "Sidebar"))
+        stream_dock.setFeatures(
+            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
+        )
+        stream_dock.setMinimumWidth(260)
         self.addDockWidget(Qt.LeftDockWidgetArea, stream_dock)
 
         pipeline_widget = QWidget()
+        pipeline_widget.setObjectName("Sidebar")
+        pipeline_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         pipeline_layout = QVBoxLayout(pipeline_widget)
-        pipeline_layout.addWidget(QLabel("Pipeline Controls"))
+        pipeline_header = QLabel("Pipeline Controls")
+        self._apply_text_outline_effect(pipeline_header)
+        pipeline_layout.addWidget(pipeline_header)
         run_step1_btn = QPushButton("Run Step 1")
         run_step1_btn.clicked.connect(lambda: self._run_step("step1", "step1"))
         pipeline_layout.addWidget(run_step1_btn)
@@ -799,12 +842,20 @@ class MainWindow(QMainWindow):
         pipeline_layout.addWidget(stop_btn)
         pipeline_layout.addStretch(1)
         pipeline_dock = QDockWidget("Pipeline", self)
-        pipeline_dock.setWidget(pipeline_widget)
+        pipeline_dock.setWidget(self._wrap_scroll(pipeline_widget, "Sidebar"))
+        pipeline_dock.setFeatures(
+            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
+        )
+        pipeline_dock.setMinimumWidth(260)
         self.addDockWidget(Qt.LeftDockWidgetArea, pipeline_dock)
 
         event_widget = QWidget()
+        event_widget.setObjectName("Sidebar")
+        event_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         event_layout = QVBoxLayout(event_widget)
-        event_layout.addWidget(QLabel("Event Marking"))
+        event_header = QLabel("Event Marking")
+        self._apply_text_outline_effect(event_header)
+        event_layout.addWidget(event_header)
         self.event_toggle_dock = QCheckBox("Enable event marking")
         self._bind_checkbox(self.event_toggle_dock, "step1", "EVENT_MARKING_ENABLED")
         event_layout.addWidget(self.event_toggle_dock)
@@ -819,12 +870,20 @@ class MainWindow(QMainWindow):
         event_layout.addWidget(open_event_btn)
         event_layout.addStretch(1)
         event_dock = QDockWidget("Events", self)
-        event_dock.setWidget(event_widget)
+        event_dock.setWidget(self._wrap_scroll(event_widget, "Sidebar"))
+        event_dock.setFeatures(
+            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
+        )
+        event_dock.setMinimumWidth(260)
         self.addDockWidget(Qt.RightDockWidgetArea, event_dock)
 
         model_widget = QWidget()
+        model_widget.setObjectName("Sidebar")
+        model_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         model_layout = QVBoxLayout(model_widget)
-        model_layout.addWidget(QLabel("Model & Preprocess"))
+        model_header = QLabel("Model & Preprocess")
+        self._apply_text_outline_effect(model_header)
+        model_layout.addWidget(model_header)
         self.ica_toggle_dock = QCheckBox("Enable ICA")
         self._bind_checkbox(self.ica_toggle_dock, "step1", "ENABLE_ICA")
         model_layout.addWidget(self.ica_toggle_dock)
@@ -842,12 +901,20 @@ class MainWindow(QMainWindow):
         model_layout.addWidget(open_infer_btn)
         model_layout.addStretch(1)
         model_dock = QDockWidget("Model", self)
-        model_dock.setWidget(model_widget)
+        model_dock.setWidget(self._wrap_scroll(model_widget, "Sidebar"))
+        model_dock.setFeatures(
+            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
+        )
+        model_dock.setMinimumWidth(260)
         self.addDockWidget(Qt.RightDockWidgetArea, model_dock)
 
         session_widget = QWidget()
+        session_widget.setObjectName("Sidebar")
+        session_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         session_layout = QVBoxLayout(session_widget)
-        session_layout.addWidget(QLabel("Session Overview"))
+        session_header = QLabel("Session Overview")
+        self._apply_text_outline_effect(session_header)
+        session_layout.addWidget(session_header)
         self.project_label_dock = QLabel("Project: -")
         self.subject_label_dock = QLabel("Subject: -")
         self.session_label_dock = QLabel("Session: -")
@@ -857,6 +924,7 @@ class MainWindow(QMainWindow):
             self.session_label_dock,
         ):
             label.setWordWrap(False)
+            self._apply_text_outline_effect(label)
         session_layout.addWidget(self.project_label_dock)
         session_layout.addWidget(self.subject_label_dock)
         session_layout.addWidget(self.session_label_dock)
@@ -868,18 +936,35 @@ class MainWindow(QMainWindow):
         session_layout.addWidget(subject_btn)
         session_layout.addStretch(1)
         session_dock = QDockWidget("Session", self)
-        session_dock.setWidget(session_widget)
+        session_dock.setWidget(self._wrap_scroll(session_widget, "Sidebar"))
+        session_dock.setFeatures(
+            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
+        )
+        session_dock.setMinimumWidth(260)
         self.addDockWidget(Qt.RightDockWidgetArea, session_dock)
 
         self._build_model_views_dock()
+        self.resizeDocks(
+            [event_dock, model_dock, session_dock],
+            [320, 320, 320],
+            Qt.Horizontal,
+        )
 
     def _build_model_views_dock(self) -> None:
         dock = QDockWidget("Model Views", self)
         widget = QWidget()
+        widget.setObjectName("Sidebar")
+        widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         layout = QVBoxLayout(widget)
 
+        model_views_header = QLabel("Model Views")
+        self._apply_text_outline_effect(model_views_header)
+        layout.addWidget(model_views_header)
+
         mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Mode"))
+        mode_label = QLabel("Mode")
+        self._apply_text_outline_effect(mode_label)
+        mode_row.addWidget(mode_label)
         self.model_view_mode = QComboBox()
         self.model_view_mode.addItems(["Off", "Replay", "Live"])
         self.model_view_mode.currentTextChanged.connect(self._toggle_model_views)
@@ -893,16 +978,22 @@ class MainWindow(QMainWindow):
         self.live_viz_fps_spin.setRange(1, 10)
         self.live_viz_fps_spin.setValue(2)
         fps_row = QHBoxLayout()
-        fps_row.addWidget(QLabel("Live viz FPS"))
+        fps_label = QLabel("Live viz FPS")
+        self._apply_text_outline_effect(fps_label)
+        fps_row.addWidget(fps_label)
         fps_row.addWidget(self.live_viz_fps_spin)
         fps_row.addStretch(1)
         layout.addLayout(fps_row)
 
         if not PYQTGRAPH_AVAILABLE:
-            layout.addWidget(
-                QLabel("pyqtgraph not available; model visualizations disabled.")
+            pg_note = QLabel("pyqtgraph not available; model visualizations disabled.")
+            self._apply_text_outline_effect(pg_note)
+            layout.addWidget(pg_note)
+            dock.setWidget(self._wrap_scroll(widget, "Sidebar"))
+            dock.setFeatures(
+                QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
             )
-            dock.setWidget(widget)
+            dock.setMinimumWidth(260)
             self.addDockWidget(Qt.RightDockWidgetArea, dock)
             return
 
@@ -957,7 +1048,9 @@ class MainWindow(QMainWindow):
         self.model_view_tabs.addTab(live_tab, "Live")
         layout.addWidget(self.model_view_tabs)
 
-        dock.setWidget(widget)
+        dock.setWidget(self._wrap_scroll(widget, "Sidebar"))
+        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        dock.setMinimumWidth(260)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
 
         self._bind_checkbox(self.live_viz_checkbox, "infer", "LIVE_VIZ_ENABLED")
@@ -1055,7 +1148,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_status_summary(self) -> None:
         stream_label = self.input_source.currentText()
-        self.stream_state_label.setText(f"Stream: {stream_label}")
+        self._set_status_semantic(self.stream_state_label, "neutral", f"Stream: {stream_label}")
         ica_enabled = False
         event_enabled = False
         for step_id in ("step1", "infer"):
@@ -1067,7 +1160,11 @@ class MainWindow(QMainWindow):
                 self.fields.get(step_id, {}).get("EVENT_MARKING_ENABLED"), QCheckBox
             ) and self.fields[step_id]["EVENT_MARKING_ENABLED"].isChecked():
                 event_enabled = True
-        self.ica_state_label.setText(f"ICA: {'on' if ica_enabled else 'off'}")
+        self._set_status_semantic(
+            self.ica_state_label,
+            "green" if ica_enabled else "yellow",
+            f"ICA: {'on' if ica_enabled else 'off'}",
+        )
         runtime_note = ""
         if self.current_subject:
             state_path = (
@@ -1083,8 +1180,10 @@ class MainWindow(QMainWindow):
                         )
                 except Exception:
                     runtime_note = ""
-        self.events_state_label.setText(
-            f"Events: {'on' if event_enabled else 'off'}{runtime_note}"
+        self._set_status_semantic(
+            self.events_state_label,
+            "green" if event_enabled else "yellow",
+            f"Events: {'on' if event_enabled else 'off'}{runtime_note}",
         )
 
     def _refresh_health_indicator(self) -> None:
@@ -1092,22 +1191,18 @@ class MainWindow(QMainWindow):
             return
         payload = self._read_session_state_payload()
         if not payload:
-            self.health_indicator.setText("Health: unknown")
+            self._set_status_semantic(self.health_indicator, "yellow", "Health: unknown")
             return
         if payload.get("hard_stop_triggered"):
-            self.health_indicator.setText("Health: HARD STOP")
-            self.health_indicator.setStyleSheet("color: red; font-weight: 700;")
+            self._set_status_semantic(self.health_indicator, "red", "Health: HARD STOP")
             return
         active = payload.get("data_stream_active")
         if active is True:
-            self.health_indicator.setText("Health: healthy")
-            self.health_indicator.setStyleSheet("color: white;")
+            self._set_status_semantic(self.health_indicator, "green", "Health: healthy")
         elif active is False:
-            self.health_indicator.setText("Health: unhealthy")
-            self.health_indicator.setStyleSheet("color: orange;")
+            self._set_status_semantic(self.health_indicator, "red", "Health: unhealthy")
         else:
-            self.health_indicator.setText("Health: unknown")
-            self.health_indicator.setStyleSheet("color: white;")
+            self._set_status_semantic(self.health_indicator, "yellow", "Health: unknown")
 
     def _build_project_page(self) -> QWidget:
         page = QWidget()
@@ -1332,6 +1427,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(note)
 
         self.live_status_label = QLabel("Live status: idle")
+        self._apply_text_outline_effect(self.live_status_label)
         layout.addWidget(self.live_status_label)
 
         btn_row = QHBoxLayout()
@@ -3151,6 +3247,8 @@ class MainWindow(QMainWindow):
         if exit_code != 0:
             self._update_live_status("Live status: streamer stopped")
             self.live_stream_ready = False
+        if hasattr(self, "battery_label") and self.battery_label is not None:
+            self._set_status_semantic(self.battery_label, "neutral", "Battery: N/A")
         self._set_live_buttons_state()
 
     def _set_live_buttons_state(self) -> None:
@@ -3252,6 +3350,11 @@ class MainWindow(QMainWindow):
             if payload and self.live_hidden_plot:
                 self.live_hidden_plot.update(payload)
             return
+        match = _BATT_RE.search(line)
+        if match and hasattr(self, "battery_label") and self.battery_label is not None:
+            pct = max(0, min(100, int(match.group(1))))
+            state = "green" if pct >= 30 else "yellow" if pct >= 15 else "red"
+            self._set_status_semantic(self.battery_label, state, f"Battery: {pct}%")
         self.log_console.appendPlainText(line)
         if line.startswith("🛑 HARD STOP"):
             self._handle_hard_stop_detected()
