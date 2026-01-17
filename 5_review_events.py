@@ -16,9 +16,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
 from utils.events_audit import log_event_edit
 from utils.label_schema import (
