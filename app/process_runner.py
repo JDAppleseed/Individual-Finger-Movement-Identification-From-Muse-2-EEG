@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
+import os
+import signal
+
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
 
 
@@ -51,9 +54,39 @@ class ProcessRunner(QObject):
         self._process.terminate()
         QTimer.singleShot(timeout_ms, self._kill_if_running)
 
+    def stop_hard(
+        self, sigint_timeout_ms: int = 1500, terminate_timeout_ms: int = 1500
+    ) -> None:
+        if not self.is_running():
+            return
+        pid = int(self._process.processId() or 0)
+        sent_sigint = False
+        if os.name != "nt" and pid:
+            try:
+                os.kill(pid, signal.SIGINT)
+                sent_sigint = True
+                self.line_ready.emit(f"⚠️ Sent SIGINT to PID {pid} (hard stop).")
+            except Exception as exc:
+                self.line_ready.emit(
+                    f"⚠️ Failed to send SIGINT to PID {pid}: {exc}. Falling back to terminate()."
+                )
+        if not sent_sigint:
+            self._process.terminate()
+            self.line_ready.emit("⚠️ Terminate requested (hard stop).")
+        QTimer.singleShot(
+            sigint_timeout_ms,
+            lambda: self._terminate_if_running(terminate_timeout_ms),
+        )
+
     def _kill_if_running(self) -> None:
         if self.is_running():
             self._process.kill()
+
+    def _terminate_if_running(self, terminate_timeout_ms: int) -> None:
+        if self.is_running():
+            self._process.terminate()
+            self.line_ready.emit("⚠️ Terminate requested after SIGINT timeout.")
+            QTimer.singleShot(terminate_timeout_ms, self._kill_if_running)
 
     def _read_stdout(self) -> None:
         data = bytes(self._process.readAllStandardOutput()).decode(errors="replace")

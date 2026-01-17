@@ -55,6 +55,7 @@ def stream_signature(info: StreamInfo) -> Dict[str, Any]:
         source_id = _safe_attr(info.source_id)
     if hasattr(info, "uid"):
         uid = _safe_attr(info.uid)
+    labels = extract_channel_labels(info)
     return {
         "name": str(info.name()),
         "type": str(info.type()),
@@ -62,7 +63,26 @@ def stream_signature(info: StreamInfo) -> Dict[str, Any]:
         "nominal_srate": float(info.nominal_srate()),
         "source_id": source_id,
         "uid": uid,
+        "channel_labels": labels,
+        "labels": labels,
     }
+
+
+def extract_channel_labels(info: StreamInfo) -> List[str]:
+    labels: List[str] = []
+    try:
+        ch = info.desc().child("channels").child("channel")
+    except Exception:
+        ch = None
+    if ch is None:
+        return labels
+    for _ in range(info.channel_count()):
+        try:
+            labels.append(ch.child_value("label"))
+            ch = ch.next_sibling()
+        except Exception:
+            break
+    return [label for label in labels if label]
 
 
 def list_streams() -> List[Dict[str, Any]]:
@@ -164,6 +184,9 @@ def log_stream_signature(signature: Dict[str, Any]) -> None:
         f"channels={signature.get('channel_count')}",
         f"nominal_srate={signature.get('nominal_srate')}",
     ]
+    labels = signature.get("labels")
+    if labels:
+        parts.append(f"labels={labels}")
     source_id = signature.get("source_id")
     uid = signature.get("uid")
     if source_id:

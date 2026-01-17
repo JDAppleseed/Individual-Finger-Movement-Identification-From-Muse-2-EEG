@@ -40,6 +40,22 @@ python 4_generate_reports.py
 
 You can also use `run_all.py` to orchestrate the full pipeline.
 
+## Live Streaming (Desktop UI)
+
+Launch the desktop UI and use the new live workflow (production path):
+
+1) Open the desktop UI:
+```
+python eeglab_wrapper_ui.py
+```
+2) Click **Connect Muse 2** to start the internal BLE → LSL streamer and run a healthcheck.
+3) If prompted about label/channel mismatches, review the warning and click **I understand** to proceed.
+4) Click **Start Recording** to launch `1_stream_and_record.py` for live capture/inference.
+5) If a hard stop triggers, a blocking modal will appear. Review the diagnostics and click **I understand**.
+   The hard stop report is written under `logs/hard_stop_<subject>_<session>_<timestamp>.json`.
+
+The UI gates Start Recording until the LSL stream is healthy (or operator-acknowledged).
+
 ## Event Labeling (live)
 
 Event marking happens inside `1_stream_and_record.py` via keyboard:
@@ -122,50 +138,11 @@ Resampled extraction (fixed shape windows):
 python 1b_extract_windows.py --target-fs 256
 ```
 
-## Live Sliding-Window Inference (demo_backend)
+## Demo backend (deprecated)
 
-The demo backend consumes LSL samples into fixed windows (default `window_sec=0.25`) and advances
-by hop (`step_sec`, default `0.05`). Inference runs on every hop as soon as samples arrive.
-
-Publishing and actuation are decoupled:
-- `publish_hz` throttles websocket tick updates.
-- `actuation_hz` throttles palm-controller packets.
-
-Timebases:
-- Stream timebase (`absolute_v1`) comes from LSL timestamps and is used for `window_start_s`, `window_end_s`, and actuation packet timestamps.
-- Perf time (`time.perf_counter`) is used only for pacing/profiling and never for dataset time or actuation timing.
-
-Backlog handling:
-- `backlog_strategy="all"` processes every window in order.
-- `backlog_strategy="latest"` drops intermediate windows to reduce latency.
-
-Example control payload (partial):
-```json
-{
-  "mode": "live",
-  "publish_hz": 20,
-  "actuation_hz": 20,
-  "backlog_strategy": "latest",
-  "fast_mode": false,
-  "enable_actuation": true,
-  "link_type": "udp",
-  "udp_host": "127.0.0.1",
-  "udp_port": 9010,
-  "speed_gamma": 1.0,
-  "hold_ms": 150,
-  "watchdog_ms": 500
-}
-```
-
-Actuation links:
-- `link_type="null"` (default): no-op
-- `link_type="udp"`: UDP sim link (2.4GHz radio stand-in)
-- `link_type="serial"`: UART link (`serial_port`, `serial_baud`)
-
-Find the best available evaluation run:
-```
-python tools/find_best_eval_run.py
-```
+The `demo_backend/` FastAPI + Vite flow is deprecated and no longer in the run path.
+It remains in the repo for reference only and will be removed once the desktop live flow
+is fully validated. See `demo_backend/DEPRECATED.md`.
 
 ## Notes
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import (
     QFontMetrics,
     QPainter,
@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSplitter,
     QStackedWidget,
+    QTabWidget,
     QToolButton,
     QTextEdit,
     QVBoxLayout,
@@ -83,6 +84,9 @@ from app.paths import (
 )
 from app.process_runner import ProcessRunner
 from app.repo_probe import discover_scripts
+from muse_streaming.healthcheck import run_healthcheck
+from visualization.live_viz import LiveHiddenMagnitudePlot, parse_viz_line
+from visualization.replay_viz import ReplayVisualizer
 
 try:
     import pylsl
@@ -91,6 +95,14 @@ try:
 except Exception:
     pylsl = None
     LSL_AVAILABLE = False
+
+try:
+    import pyqtgraph as pg
+
+    PYQTGRAPH_AVAILABLE = True
+except Exception:
+    pg = None
+    PYQTGRAPH_AVAILABLE = False
 
 
 @dataclass
@@ -139,6 +151,17 @@ TOOLTIPS: Dict[str, str] = {
     "EVENTS_CSV_PATH": "Events CSV output path.",
     "EVENTS_AUTOSAVE_PATH": "Autosave events CSV path.",
     "EVENTS_CHANNEL": "Event channel label.",
+    "HARD_STOP_AFTER_UNHEALTHY_S": "Seconds of continuous unhealthy stream before hard stop.",
+    "FAILED_WRITE_WINDOW_S": "Seconds to write failed debug files during unhealthy window.",
+    "FAILED_DIR": "Directory for failed debug writes.",
+    "REQUIRED_LSL_LABELS": "Required LSL channel labels (case-insensitive).",
+    "REQUIRE_EXACTLY_4_CHANNELS": "Require exactly 4 EEG channels from LSL.",
+    "LIVE_VIZ_ENABLED": "Enable lightweight live visualization output.",
+    "LIVE_VIZ_FPS": "Live visualization update rate (Hz).",
+    "STREAMER_INTERNAL": "Internal streamer enabled.",
+    "STREAMER_STREAM_NAME": "Internal streamer LSL name.",
+    "STREAMER_STREAM_TYPE": "Internal streamer LSL type.",
+    "LABEL_CHECK_ACKNOWLEDGED": "Operator acknowledged label mismatch.",
 }
 
 EEGLAB_STYLE = """
@@ -471,6 +494,28 @@ class MainWindow(QMainWindow):
         self.runner.failed.connect(self._append_log)
         self.active_step: Optional[str] = None
 
+        self.streamer_runner = ProcessRunner(self)
+        self.streamer_runner.line_ready.connect(
+            lambda line: self._append_log(f"[streamer] {line}")
+        )
+        self.streamer_runner.started.connect(
+            lambda: self._append_log("[streamer] process started")
+        )
+        self.streamer_runner.finished.connect(self._on_streamer_finished)
+        self.streamer_runner.failed.connect(
+            lambda msg: self._append_log(f"[streamer] {msg}")
+        )
+
+        self.live_stream_ready = False
+        self.live_label_acknowledged = False
+        self.live_label_details: Dict[str, Any] = {}
+        self.live_stream_name = "Muse2-EEG"
+        self.live_stream_type = "EEG"
+        self.hard_stop_locked = False
+
+        self.live_hidden_plot: Optional[LiveHiddenMagnitudePlot] = None
+        self.replay_viz: Optional[ReplayVisualizer] = None
+
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -526,6 +571,10 @@ class MainWindow(QMainWindow):
         self._build_control_docks()
         self._wire_status_updates()
         self._refresh_status_summary()
+        self.health_timer = QTimer(self)
+        self.health_timer.timeout.connect(self._refresh_health_indicator)
+        self.health_timer.start(1000)
+        self._set_live_buttons_state()
         self.workflow_list.setCurrentRow(0)
 
     def _build_step_arg_specs(self) -> Dict[str, list[ArgSpec]]:
@@ -684,8 +733,18 @@ class MainWindow(QMainWindow):
         self.log_console = OutlinePlainTextEdit()
         self.log_console.setReadOnly(True)
         self.log_console.setMaximumBlockCount(10000)
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(4, 4, 4, 4)
+        self.hard_stop_banner = QLabel("HARD STOP — Stream Unhealthy")
+        self.hard_stop_banner.setStyleSheet(
+            "background-color: #b71c1c; color: white; font-weight: 700; padding: 6px;"
+        )
+        self.hard_stop_banner.setVisible(False)
+        layout.addWidget(self.hard_stop_banner)
+        layout.addWidget(self.log_console)
         dock = QDockWidget("Log Console", self)
-        dock.setWidget(self.log_console)
+        dock.setWidget(container)
         self.addDockWidget(Qt.BottomDockWidgetArea, dock)
 
     def _build_control_docks(self) -> None:
@@ -693,6 +752,8 @@ class MainWindow(QMainWindow):
         stream_widget = QWidget()
         stream_layout = QVBoxLayout(stream_widget)
         stream_layout.addWidget(self.stream_status_dock)
+        self.health_indicator = QLabel("Health: unknown")
+        stream_layout.addWidget(self.health_indicator)
         stream_layout.addWidget(QLabel("Quick Actions"))
         detect_btn = QPushButton("Detect LSL Streams")
         detect_btn.clicked.connect(self._detect_lsl_streams)
@@ -723,6 +784,16 @@ class MainWindow(QMainWindow):
         run_infer_btn = QPushButton("Run Inference")
         run_infer_btn.clicked.connect(lambda: self._run_step("infer", "step1"))
         pipeline_layout.addWidget(run_infer_btn)
+        self.live_connect_btn = QPushButton("Connect Muse 2")
+        self.live_connect_btn.clicked.connect(self._connect_muse)
+        pipeline_layout.addWidget(self.live_connect_btn)
+        self.live_start_btn = QPushButton("Start Recording")
+        self.live_start_btn.clicked.connect(self._start_live_recording)
+        self.live_start_btn.setEnabled(False)
+        pipeline_layout.addWidget(self.live_start_btn)
+        self.live_stop_btn = QPushButton("Stop Live (Hard Stop)")
+        self.live_stop_btn.clicked.connect(self._stop_live_hard)
+        pipeline_layout.addWidget(self.live_stop_btn)
         stop_btn = QPushButton("Stop Active Run")
         stop_btn.clicked.connect(self._stop_process)
         pipeline_layout.addWidget(stop_btn)
@@ -800,6 +871,147 @@ class MainWindow(QMainWindow):
         session_dock.setWidget(session_widget)
         self.addDockWidget(Qt.RightDockWidgetArea, session_dock)
 
+        self._build_model_views_dock()
+
+    def _build_model_views_dock(self) -> None:
+        dock = QDockWidget("Model Views", self)
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Mode"))
+        self.model_view_mode = QComboBox()
+        self.model_view_mode.addItems(["Off", "Replay", "Live"])
+        self.model_view_mode.currentTextChanged.connect(self._toggle_model_views)
+        mode_row.addWidget(self.model_view_mode)
+        mode_row.addStretch(1)
+        layout.addLayout(mode_row)
+
+        self.live_viz_checkbox = QCheckBox("Enable live visualization")
+        layout.addWidget(self.live_viz_checkbox)
+        self.live_viz_fps_spin = QSpinBox()
+        self.live_viz_fps_spin.setRange(1, 10)
+        self.live_viz_fps_spin.setValue(2)
+        fps_row = QHBoxLayout()
+        fps_row.addWidget(QLabel("Live viz FPS"))
+        fps_row.addWidget(self.live_viz_fps_spin)
+        fps_row.addStretch(1)
+        layout.addLayout(fps_row)
+
+        if not PYQTGRAPH_AVAILABLE:
+            layout.addWidget(
+                QLabel("pyqtgraph not available; model visualizations disabled.")
+            )
+            dock.setWidget(widget)
+            self.addDockWidget(Qt.RightDockWidgetArea, dock)
+            return
+
+        self.model_view_tabs = QTabWidget()
+
+        replay_tab = QWidget()
+        replay_layout = QVBoxLayout(replay_tab)
+        replay_form = QFormLayout()
+        self.replay_npz_path = OutlineLineEdit()
+        self.replay_model_path = OutlineLineEdit()
+        self.replay_scaler_path = OutlineLineEdit()
+        replay_form.addRow("Windows NPZ", self.replay_npz_path)
+        replay_form.addRow("Model Path", self.replay_model_path)
+        replay_form.addRow("Scaler Path", self.replay_scaler_path)
+        replay_layout.addLayout(replay_form)
+        self.replay_window_index = QSpinBox()
+        self.replay_window_index.setRange(0, 1000000)
+        self.replay_layer_index = QSpinBox()
+        self.replay_layer_index.setRange(0, 10)
+        replay_controls = QHBoxLayout()
+        replay_controls.addWidget(QLabel("Window idx"))
+        replay_controls.addWidget(self.replay_window_index)
+        replay_controls.addWidget(QLabel("Conv layer idx"))
+        replay_controls.addWidget(self.replay_layer_index)
+        replay_controls.addStretch(1)
+        replay_layout.addLayout(replay_controls)
+        replay_btn_row = QHBoxLayout()
+        load_btn = QPushButton("Load Replay Data")
+        load_btn.clicked.connect(self._load_replay_data)
+        refresh_btn = QPushButton("Refresh Views")
+        refresh_btn.clicked.connect(self._refresh_replay_views)
+        replay_btn_row.addWidget(load_btn)
+        replay_btn_row.addWidget(refresh_btn)
+        replay_btn_row.addStretch(1)
+        replay_layout.addLayout(replay_btn_row)
+        self.replay_feature_view = pg.ImageView()
+        self.replay_hidden_plot = pg.PlotWidget()
+        self.replay_saliency_view = pg.ImageView()
+        replay_layout.addWidget(QLabel("Feature Maps"))
+        replay_layout.addWidget(self.replay_feature_view)
+        replay_layout.addWidget(QLabel("Hidden Magnitude"))
+        replay_layout.addWidget(self.replay_hidden_plot)
+        replay_layout.addWidget(QLabel("Saliency"))
+        replay_layout.addWidget(self.replay_saliency_view)
+
+        live_tab = QWidget()
+        live_layout = QVBoxLayout(live_tab)
+        self.live_hidden_plot = LiveHiddenMagnitudePlot()
+        live_layout.addWidget(self.live_hidden_plot.widget)
+
+        self.model_view_tabs.addTab(replay_tab, "Replay")
+        self.model_view_tabs.addTab(live_tab, "Live")
+        layout.addWidget(self.model_view_tabs)
+
+        dock.setWidget(widget)
+        self.addDockWidget(Qt.RightDockWidgetArea, dock)
+
+        self._bind_checkbox(self.live_viz_checkbox, "infer", "LIVE_VIZ_ENABLED")
+        field = self.fields.get("infer", {}).get("LIVE_VIZ_FPS")
+        if isinstance(field, QSpinBox):
+            self.live_viz_fps_spin.setValue(field.value())
+            self.live_viz_fps_spin.valueChanged.connect(field.setValue)
+            field.valueChanged.connect(self.live_viz_fps_spin.setValue)
+        self._toggle_model_views("Off")
+
+    def _toggle_model_views(self, mode: str) -> None:
+        if not PYQTGRAPH_AVAILABLE:
+            return
+        enabled = mode != "Off"
+        if hasattr(self, "model_view_tabs"):
+            self.model_view_tabs.setEnabled(enabled)
+        self.live_viz_checkbox.setEnabled(mode == "Live")
+        self.live_viz_fps_spin.setEnabled(mode == "Live")
+
+    def _load_replay_data(self) -> None:
+        if not PYQTGRAPH_AVAILABLE:
+            return
+        npz_path = self.replay_npz_path.text().strip()
+        model_path = self.replay_model_path.text().strip() or "finger_action_model.pt"
+        scaler_path = self.replay_scaler_path.text().strip() or "scaler.save"
+        try:
+            self.replay_viz = ReplayVisualizer(
+                npz_path=npz_path, model_path=model_path, scaler_path=scaler_path
+            )
+            self.replay_window_index.setMaximum(max(0, self.replay_viz.window_count - 1))
+            self._refresh_replay_views()
+            self._append_log("✅ Replay data loaded for model views.")
+        except Exception as exc:
+            self._append_log(f"⚠️ Failed to load replay data: {exc}")
+
+    def _refresh_replay_views(self) -> None:
+        if not PYQTGRAPH_AVAILABLE or not self.replay_viz:
+            return
+        idx = int(self.replay_window_index.value())
+        layer_idx = int(self.replay_layer_index.value())
+        try:
+            feature_map = self.replay_viz.feature_map(idx, layer_idx)
+            hidden_mag = self.replay_viz.hidden_magnitude(idx)
+            saliency = self.replay_viz.saliency(idx)
+            if feature_map is not None:
+                self.replay_feature_view.setImage(feature_map, autoLevels=True)
+            if hidden_mag is not None:
+                self.replay_hidden_plot.clear()
+                self.replay_hidden_plot.plot(hidden_mag)
+            if saliency is not None:
+                self.replay_saliency_view.setImage(saliency, autoLevels=True)
+        except Exception as exc:
+            self._append_log(f"⚠️ Replay view refresh failed: {exc}")
+
     def _bind_checkbox(self, dock_cb: QCheckBox, step_id: str, key: str) -> None:
         field_cb = self.fields.get(step_id, {}).get(key)
         if not isinstance(field_cb, QCheckBox):
@@ -874,6 +1086,28 @@ class MainWindow(QMainWindow):
         self.events_state_label.setText(
             f"Events: {'on' if event_enabled else 'off'}{runtime_note}"
         )
+
+    def _refresh_health_indicator(self) -> None:
+        if not hasattr(self, "health_indicator") or self.health_indicator is None:
+            return
+        payload = self._read_session_state_payload()
+        if not payload:
+            self.health_indicator.setText("Health: unknown")
+            return
+        if payload.get("hard_stop_triggered"):
+            self.health_indicator.setText("Health: HARD STOP")
+            self.health_indicator.setStyleSheet("color: red; font-weight: 700;")
+            return
+        active = payload.get("data_stream_active")
+        if active is True:
+            self.health_indicator.setText("Health: healthy")
+            self.health_indicator.setStyleSheet("color: white;")
+        elif active is False:
+            self.health_indicator.setText("Health: unhealthy")
+            self.health_indicator.setStyleSheet("color: orange;")
+        else:
+            self.health_indicator.setText("Health: unknown")
+            self.health_indicator.setStyleSheet("color: white;")
 
     def _build_project_page(self) -> QWidget:
         page = QWidget()
@@ -1076,13 +1310,44 @@ class MainWindow(QMainWindow):
         )
 
     def _build_infer_page(self) -> QWidget:
+        live_controls = self._build_live_controls()
         return self._build_step_page(
             step_id="infer",
             title="Step 4: Live Inference",
             defaults=default_infer_settings(),
             script_key="step1",
             include_event_tools=False,
+            include_run_controls=False,
+            custom_controls=live_controls,
         )
+
+    def _build_live_controls(self) -> QWidget:
+        box = QGroupBox("Live Controls")
+        layout = QVBoxLayout(box)
+        note = QLabel(
+            "Live streaming uses the internal Muse 2 BLE → LSL streamer. "
+            "Connect first, verify health, then start recording."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        self.live_status_label = QLabel("Live status: idle")
+        layout.addWidget(self.live_status_label)
+
+        btn_row = QHBoxLayout()
+        self.live_connect_btn_page = QPushButton("Connect Muse 2")
+        self.live_connect_btn_page.clicked.connect(self._connect_muse)
+        self.live_start_btn_page = QPushButton("Start Recording")
+        self.live_start_btn_page.clicked.connect(self._start_live_recording)
+        self.live_start_btn_page.setEnabled(False)
+        self.live_stop_btn_page = QPushButton("Stop Live (Hard Stop)")
+        self.live_stop_btn_page.clicked.connect(self._stop_live_hard)
+        btn_row.addWidget(self.live_connect_btn_page)
+        btn_row.addWidget(self.live_start_btn_page)
+        btn_row.addWidget(self.live_stop_btn_page)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+        return box
 
     def _build_export_page(self) -> QWidget:
         page = QWidget()
@@ -1152,6 +1417,8 @@ class MainWindow(QMainWindow):
         defaults: Dict[str, Any],
         script_key: str,
         include_event_tools: bool,
+        include_run_controls: bool = True,
+        custom_controls: Optional[QWidget] = None,
     ) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1221,21 +1488,24 @@ class MainWindow(QMainWindow):
         dropdown_row.addStretch(1)
         layout.addLayout(dropdown_row)
 
-        buttons = QHBoxLayout()
-        run_btn = QPushButton("Run")
-        stop_btn = QPushButton("Stop")
-        reset_btn = QPushButton("Reset to defaults")
-        run_btn.clicked.connect(lambda: self._run_step(step_id, script_key))
-        stop_btn.clicked.connect(self._stop_process)
-        reset_btn.clicked.connect(lambda: self._reset_step(step_id))
-        buttons.addWidget(run_btn)
-        buttons.addWidget(stop_btn)
-        buttons.addWidget(reset_btn)
-        layout.addLayout(buttons)
+        if include_run_controls:
+            buttons = QHBoxLayout()
+            run_btn = QPushButton("Run")
+            stop_btn = QPushButton("Stop")
+            reset_btn = QPushButton("Reset to defaults")
+            run_btn.clicked.connect(lambda: self._run_step(step_id, script_key))
+            stop_btn.clicked.connect(self._stop_process)
+            reset_btn.clicked.connect(lambda: self._reset_step(step_id))
+            buttons.addWidget(run_btn)
+            buttons.addWidget(stop_btn)
+            buttons.addWidget(reset_btn)
+            layout.addLayout(buttons)
 
-        if script_key not in self.scripts:
-            run_btn.setEnabled(False)
-            status_label.setText("Status: Missing script")
+            if script_key not in self.scripts:
+                run_btn.setEnabled(False)
+                status_label.setText("Status: Missing script")
+        elif custom_controls is not None:
+            layout.addWidget(custom_controls)
 
         self._build_checklist(step_id, layout)
 
@@ -1672,6 +1942,63 @@ class MainWindow(QMainWindow):
                 0,
                 10,
                 is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "HARD_STOP_AFTER_UNHEALTHY_S",
+                "Hard stop after unhealthy (s)",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "FAILED_WRITE_WINDOW_S",
+                "Failed write window (s)",
+                defaults,
+                0,
+                30,
+                is_float=True,
+            )
+            self._add_text(
+                step_id,
+                form,
+                "FAILED_DIR",
+                "Failed output dir",
+                defaults,
+            )
+            self._add_text(
+                step_id,
+                form,
+                "REQUIRED_LSL_LABELS",
+                "Required labels (CSV)",
+                defaults,
+            )
+            self._add_checkbox(
+                step_id,
+                form,
+                "REQUIRE_EXACTLY_4_CHANNELS",
+                "Require exactly 4 channels",
+                defaults,
+            )
+            self._add_checkbox(
+                step_id,
+                form,
+                "LIVE_VIZ_ENABLED",
+                "Live viz enabled",
+                defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "LIVE_VIZ_FPS",
+                "Live viz FPS",
+                defaults,
+                1,
+                10,
             )
             self._add_int_dropdown(
                 step_id,
@@ -2434,6 +2761,12 @@ class MainWindow(QMainWindow):
             widget.setText(path)
 
     def _run_step(self, step_id: str, script_key: str) -> None:
+        if self.hard_stop_locked:
+            self._show_blocking_notice(
+                "HARD STOP — Acknowledgement Required",
+                "You must acknowledge the last hard stop report before restarting steps.",
+            )
+            return
         if not self.current_project or not self.current_subject:
             QMessageBox.warning(
                 self, "Project/Subject Required", "Select a project and subject first."
@@ -2454,6 +2787,15 @@ class MainWindow(QMainWindow):
 
         settings = self._collect_settings(step_id)
         settings["TIMEBASE_VERSION"] = TIMEBASE_VERSION
+        if step_id == "infer":
+            settings["STREAMER_INTERNAL"] = self.streamer_runner.is_running()
+            settings["STREAMER_STREAM_NAME"] = self.live_stream_name
+            settings["STREAMER_STREAM_TYPE"] = self.live_stream_type
+            settings["LSL_STREAM_NAME"] = self.live_stream_name
+            settings["LSL_STREAM_TYPE"] = self.live_stream_type
+            settings["LABEL_CHECK_ACKNOWLEDGED"] = self.live_label_acknowledged
+            settings["LABEL_CHECK_FOUND_LABELS"] = self.live_label_details.get("labels")
+            settings["LABEL_CHECK_EXPECTED_LABELS"] = settings.get("REQUIRED_LSL_LABELS")
         if (
             step_id in {"step1", "infer"}
             and self.input_source.currentText() == "CSV Offline"
@@ -2579,6 +2921,10 @@ class MainWindow(QMainWindow):
         fields = self.fields.get(step_id, {})
         for key, widget in fields.items():
             defaults[key] = self._widget_value(widget)
+        if "REQUIRED_LSL_LABELS" in defaults:
+            defaults["REQUIRED_LSL_LABELS"] = self._parse_label_field(
+                defaults.get("REQUIRED_LSL_LABELS")
+            )
         if self.input_source.currentText() == "CSV Offline":
             defaults["LSL_STREAM_NAME"] = None
             defaults["LSL_STREAM_TYPE"] = None
@@ -2645,6 +2991,19 @@ class MainWindow(QMainWindow):
             return text
         return None
 
+    def _parse_label_field(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if str(v).strip()]
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned.startswith("[") and cleaned.endswith("]"):
+                cleaned = cleaned[1:-1]
+            parts = [p.strip() for p in cleaned.split(",")]
+            return [p for p in parts if p]
+        return [str(value).strip()]
+
     def _reset_step(self, step_id: str) -> None:
         defaults = self.defaults.get(step_id, {})
         for key, widget in self.fields.get(step_id, {}).items():
@@ -2670,13 +3029,199 @@ class MainWindow(QMainWindow):
     def _stop_process(self) -> None:
         if self.runner.is_running():
             self._append_log("Stopping process...")
-            self.runner.stop()
+            if self.active_step in {"step1", "infer"}:
+                self.runner.stop_hard()
+            else:
+                self.runner.stop()
+
+    def _stop_live_hard(self) -> None:
+        if self.runner.is_running():
+            self._append_log("⚠️ Hard stop requested for live recording...")
+            self.runner.stop_hard()
+        self._set_live_buttons_state()
+
+    def _connect_muse(self) -> None:
+        if self.hard_stop_locked:
+            self._show_blocking_notice(
+                "HARD STOP — Acknowledgement Required",
+                "You must acknowledge the last hard stop report before restarting live steps.",
+            )
+            return
+        if self.streamer_runner.is_running():
+            self._append_log("Streamer already running.")
+            return
+        self.live_stream_ready = False
+        self.live_label_acknowledged = False
+        self.live_label_details = {}
+        self._update_live_status("Connecting to Muse 2...")
+        labels, rate, _ = self._current_live_config()
+        args = [
+            "-m",
+            "muse_streaming.cli",
+            "--name",
+            self.live_stream_name,
+            "--type",
+            self.live_stream_type,
+            "--rate",
+            str(rate),
+            "--labels",
+            ",".join(labels),
+        ]
+        self.streamer_runner.start(sys.executable, args, cwd=str(self.repo_root))
+        QTimer.singleShot(1500, self._run_stream_healthcheck)
+        self._set_live_buttons_state()
+
+    def _run_stream_healthcheck(self) -> None:
+        if self.hard_stop_locked:
+            return
+        labels, _rate, require_exact = self._current_live_config()
+        try:
+            result = run_healthcheck(
+                name=self.live_stream_name,
+                stype=self.live_stream_type,
+                required_labels=labels,
+                require_exact_channels=require_exact,
+            )
+        except Exception as exc:
+            self._append_log(f"⚠️ Healthcheck failed: {exc}")
+            self._show_blocking_notice(
+                "Healthcheck Failed",
+                f"Unable to run LSL healthcheck: {exc}",
+            )
+            self._update_live_status("Live status: healthcheck failed")
+            self._set_live_buttons_state()
+            return
+
+        if result.ok:
+            self.live_stream_ready = True
+            self.live_label_details = result.to_dict()
+            self._append_log("✅ LSL healthcheck passed.")
+            self._update_live_status("Live status: healthy")
+            self._set_live_buttons_state()
+            return
+
+        if result.reason in {"label_mismatch", "channel_count_mismatch"}:
+            message = (
+                f"Expected labels: {labels} ({'exact' if require_exact else 'min'}).\n"
+                f"Found: channels={result.channel_count}, labels={result.labels}.\n"
+                "Proceeding may cause incorrect labeling."
+            )
+            acknowledged = self._show_blocking_ack(
+                "Label/Channel Mismatch", message, result.to_dict()
+            )
+            if acknowledged:
+                self.live_stream_ready = True
+                self.live_label_acknowledged = True
+                self.live_label_details = result.to_dict()
+                self._append_log(
+                    "⚠️ Label mismatch acknowledged; enabling Start Recording."
+                )
+                self._update_live_status("Live status: acknowledged mismatch")
+            else:
+                self._update_live_status("Live status: mismatch not acknowledged")
+            self._set_live_buttons_state()
+            return
+
+        self._append_log(f"⚠️ Healthcheck failed: {result.reason}")
+        self._show_blocking_notice(
+            "Healthcheck Failed",
+            f"No valid samples received ({result.reason}). "
+            "Fix the stream before starting recording.",
+        )
+        self._update_live_status("Live status: unhealthy")
+        self._set_live_buttons_state()
+
+    def _start_live_recording(self) -> None:
+        if self.hard_stop_locked:
+            self._show_blocking_notice(
+                "HARD STOP — Acknowledgement Required",
+                "You must acknowledge the last hard stop report before restarting live steps.",
+            )
+            return
+        if not self.live_stream_ready:
+            self._show_blocking_notice(
+                "Stream Not Ready",
+                "Connect to Muse 2 and complete the healthcheck first.",
+            )
+            return
+        self._run_step("infer", "step1")
+
+    def _on_streamer_finished(self, exit_code: int, _exit_status: int) -> None:
+        self._append_log(f"[streamer] process finished with code {exit_code}")
+        if exit_code != 0:
+            self._update_live_status("Live status: streamer stopped")
+            self.live_stream_ready = False
+        self._set_live_buttons_state()
+
+    def _set_live_buttons_state(self) -> None:
+        connect_enabled = not self.hard_stop_locked and not self.streamer_runner.is_running()
+        start_enabled = (
+            not self.hard_stop_locked and self.live_stream_ready and not self.runner.is_running()
+        )
+        stop_enabled = self.runner.is_running()
+        for btn in (
+            getattr(self, "live_connect_btn", None),
+            getattr(self, "live_connect_btn_page", None),
+        ):
+            if isinstance(btn, QPushButton):
+                btn.setEnabled(connect_enabled)
+        for btn in (
+            getattr(self, "live_start_btn", None),
+            getattr(self, "live_start_btn_page", None),
+        ):
+            if isinstance(btn, QPushButton):
+                btn.setEnabled(start_enabled)
+        for btn in (
+            getattr(self, "live_stop_btn", None),
+            getattr(self, "live_stop_btn_page", None),
+        ):
+            if isinstance(btn, QPushButton):
+                btn.setEnabled(stop_enabled)
+
+    def _current_live_config(self) -> tuple[list[str], int, bool]:
+        settings = self._collect_settings("infer")
+        labels = self._parse_label_field(settings.get("REQUIRED_LSL_LABELS"))
+        rate = int(settings.get("SAMPLING_RATE") or 256)
+        require_exact = bool(settings.get("REQUIRE_EXACTLY_4_CHANNELS", True))
+        return labels, rate, require_exact
+
+    def _update_live_status(self, text: str) -> None:
+        if hasattr(self, "live_status_label") and self.live_status_label is not None:
+            self.live_status_label.setText(text)
+
+    def _show_blocking_notice(self, title: str, message: str) -> None:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle(title)
+        dialog.setText(message)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setStandardButtons(QMessageBox.Ok)
+        dialog.exec()
+
+    def _show_blocking_ack(
+        self, title: str, message: str, details: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        layout = QVBoxLayout(dialog)
+        summary = QLabel(message)
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        detail_view = QTextEdit()
+        detail_view.setReadOnly(True)
+        if details:
+            detail_view.setPlainText(json.dumps(details, indent=2))
+        layout.addWidget(detail_view)
+        btn = QPushButton("I understand")
+        btn.clicked.connect(dialog.accept)
+        layout.addWidget(btn)
+        return dialog.exec() == QDialog.Accepted
 
     def _on_process_started(self) -> None:
         if self.active_step:
             self._set_step_status(self.active_step, "Running")
         if self.active_step == "step1":
             self.stream_state_label.setText("Stream: running")
+        self._set_live_buttons_state()
 
     def _on_process_finished(self, exit_code: int, _exit_status: int) -> None:
         step = self.active_step
@@ -2685,6 +3230,8 @@ class MainWindow(QMainWindow):
         status = "Success" if exit_code == 0 else f"Failed ({exit_code})"
         self._set_step_status(step, status)
         self._append_log(f"Process finished with code {exit_code}")
+        if exit_code == 73:
+            self._handle_hard_stop_detected()
         if exit_code == 0:
             self._sync_outputs(step)
         self._update_checklist(step)
@@ -2692,6 +3239,7 @@ class MainWindow(QMainWindow):
             self._update_resume_ui()
             self._refresh_status_summary()
         self.active_step = None
+        self._set_live_buttons_state()
 
     def _set_step_status(self, step_id: str, text: str) -> None:
         label = self.step_status.get(step_id)
@@ -2699,7 +3247,63 @@ class MainWindow(QMainWindow):
             label.setText(f"Status: {text}")
 
     def _append_log(self, line: str) -> None:
+        if line.startswith("VIZ "):
+            payload = parse_viz_line(line)
+            if payload and self.live_hidden_plot:
+                self.live_hidden_plot.update(payload)
+            return
         self.log_console.appendPlainText(line)
+        if line.startswith("🛑 HARD STOP"):
+            self._handle_hard_stop_detected()
+
+    def _handle_hard_stop_detected(self) -> None:
+        if self.hard_stop_locked:
+            return
+        self.hard_stop_locked = True
+        QApplication.beep()
+        if hasattr(self, "hard_stop_banner"):
+            self.hard_stop_banner.setVisible(True)
+        self._set_live_buttons_state()
+        report_path = self._find_latest_hard_stop_report()
+        self._show_hard_stop_modal(report_path)
+        self.hard_stop_locked = False
+        if hasattr(self, "hard_stop_banner"):
+            self.hard_stop_banner.setVisible(False)
+        self._set_live_buttons_state()
+
+    def _find_latest_hard_stop_report(self) -> Optional[Path]:
+        report_dir = self.repo_root / "logs"
+        candidates = sorted(report_dir.glob("hard_stop_*.json"))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return candidates[0]
+
+    def _show_hard_stop_modal(self, report_path: Optional[Path]) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("HARD STOP — Stream Unhealthy")
+        layout = QVBoxLayout(dialog)
+        summary = QLabel(
+            "The live stream stopped due to an unhealthy signal. "
+            "Review the diagnostics below before restarting."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        detail_view = QTextEdit()
+        detail_view.setReadOnly(True)
+        if report_path and report_path.exists():
+            try:
+                payload = json.loads(report_path.read_text())
+                detail_view.setPlainText(json.dumps(payload, indent=2))
+            except Exception as exc:
+                detail_view.setPlainText(f"Failed to read report: {exc}")
+        else:
+            detail_view.setPlainText("Hard stop report not found.")
+        layout.addWidget(detail_view)
+        btn = QPushButton("I understand")
+        btn.clicked.connect(dialog.accept)
+        layout.addWidget(btn)
+        dialog.exec()
 
     def _safe_copy(
         self, src: Path, dest: Path, allow_overwrite: bool
@@ -2903,6 +3507,19 @@ class MainWindow(QMainWindow):
         try:
             data = json.loads(state_path.read_text())
             return data.get("session_id")
+        except Exception:
+            return None
+
+    def _read_session_state_payload(self) -> Optional[Dict[str, Any]]:
+        if not self.current_subject:
+            return None
+        state_path = (
+            self.repo_root / "logs" / f"session_state_{self.current_subject}.json"
+        )
+        if not state_path.exists():
+            return None
+        try:
+            return json.loads(state_path.read_text())
         except Exception:
             return None
 
