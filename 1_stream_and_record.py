@@ -153,9 +153,9 @@ EVENT_MAX_LEAD_S = 0.5
 # =========================
 # ===== SUBJECT INFO ======
 # =========================
-GENDER = "F"
-AGE = 35
-SUBJECT_ID_OVERRIDE = "1-F35"  # Set to None to use auto-increment registry
+GENDER = "M"
+AGE = 16
+SUBJECT_ID_OVERRIDE = "8-M16"  # Set to None to use auto-increment registry
 IMPORT_ONLY = os.environ.get("STREAM_IMPORT_ONLY") == "1"
 
 # =========================

@@ -2,8 +2,8 @@
 import json
 from pathlib import Path
 
-def load(path):
-    with open(path, "r", encoding="utf-8") as f:
+def load_json(path: Path):
+    with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 def main():
@@ -12,31 +12,42 @@ def main():
     except Exception as e:
         raise SystemExit("matplotlib required for figure generation") from e
 
-    root = Path(__file__).resolve().parent
-    out = root
-    out.mkdir(parents=True, exist_ok=True)
+    repo_root = Path(__file__).resolve().parent
 
-    # --- Fig: timebase effect (ex04) ---
-    p = Path("exercises/out/ex04_timebase_break_and_measure.json")
+    # Where LaTeX expects PDFs to live
+    figs_dir = repo_root / "figs"
+    figs_dir.mkdir(parents=True, exist_ok=True)
+
+    out_dir = repo_root / "exercises" / "out"
+
+    wrote = []
+
+    # --- Fig: timebase effect (ex04) -> figs/timebase_alignment_effect.pdf ---
+    p = out_dir / "ex04_timebase_break_and_measure.json"
     if p.exists():
-        d = load(p)
-        labels = ["aligned_kept","offset_kept","aligned_only","offset_only"]
-        vals = [d.get(k,0) for k in labels]
+        d = load_json(p)
+        labels = ["aligned_kept", "offset_kept", "aligned_only", "offset_only"]
+        vals = [float(d.get(k, 0) or 0) for k in labels]
+
         plt.figure()
         plt.bar(labels, vals)
         plt.xticks(rotation=20, ha="right")
         plt.ylabel("count")
         plt.title(f"Timebase misalignment impact (offset={d.get('offset_s')})")
         plt.tight_layout()
-        plt.savefig(out / "timebase_alignment_effect.pdf")
-        plt.close()
 
-    # --- Fig: stability gate (ex09) ---
-    p = Path("exercises/out/ex09_stability_gate_demo.json")
+        out_path = figs_dir / "timebase_alignment_effect.pdf"
+        plt.savefig(out_path)
+        plt.close()
+        wrote.append(out_path)
+
+    # --- Fig: stability gate (ex09) -> figs/stability_gate_timeline.pdf ---
+    p = out_dir / "ex09_stability_gate_demo.json"
     if p.exists():
-        d = load(p)
-        events = d.get("events", [])
-        allow = [1 if e.get("allow") else 0 for e in events]
+        d = load_json(p)
+        events = d.get("events", []) or []
+        allow = [1 if (e.get("allow") is True) else 0 for e in events]
+
         plt.figure()
         plt.plot(allow)
         plt.ylim(-0.1, 1.1)
@@ -44,10 +55,19 @@ def main():
         plt.ylabel("allow (0/1)")
         plt.title("Stability gate allow/deny over time")
         plt.tight_layout()
-        plt.savefig(out / "stability_gate_timeline.pdf")
-        plt.close()
 
-    print("wrote figures into figs/")
+        out_path = figs_dir / "stability_gate_timeline.pdf"
+        plt.savefig(out_path)
+        plt.close()
+        wrote.append(out_path)
+
+    if wrote:
+        print("Wrote:")
+        for p in wrote:
+            print(" ", p)
+    else:
+        print("No figures written (missing exercises/out JSON outputs).")
+
     return 0
 
 if __name__ == "__main__":
