@@ -8,6 +8,8 @@ from typing import Optional
 from pylsl import StreamInlet, StreamInfo
 
 from utils.lsl_stream_select import (
+    LSLStreamSelectError,
+    NoStreamMatchedError,
     StreamSelector,
     log_stream_signature,
     pick_stream,
@@ -53,10 +55,10 @@ def _default_stream_selector(
                 name_contains=None, type_equals="EEG", min_channels=min_channels
             )
         )
-    except Exception as exc:
-        message = str(exc)
-        if "No LSL streams matched" not in message:
-            raise
+    except NoStreamMatchedError:
+        pass
+    except LSLStreamSelectError:
+        raise
     return pick_stream(
         StreamSelector(name_contains="eeg", type_equals=None, min_channels=min_channels)
     )

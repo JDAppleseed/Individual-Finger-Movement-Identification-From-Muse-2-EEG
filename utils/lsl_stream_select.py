@@ -3,6 +3,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+
+class LSLStreamSelectError(RuntimeError):
+    pass
+
+
+class NoStreamFoundError(LSLStreamSelectError):
+    pass
+
+
+class NoStreamMatchedError(LSLStreamSelectError):
+    pass
+
+
+class MultipleStreamsMatchedError(LSLStreamSelectError):
+    pass
+
 try:
     from pylsl import StreamInfo, resolve_streams
 
@@ -107,9 +123,9 @@ def select_stream_candidate(
 
     if not filtered:
         if not candidates:
-            raise ValueError("No LSL streams found.")
+            raise NoStreamFoundError("No LSL streams found.")
         candidate_list = _format_candidates(candidates)
-        raise ValueError(
+        raise NoStreamMatchedError(
             "No LSL streams matched the selector. "
             "Set LSL_STREAM_NAME or LSL_STREAM_TYPE to disambiguate. "
             f"Selector={normalized}.\nStreams found:\n{candidate_list}"
@@ -117,7 +133,7 @@ def select_stream_candidate(
 
     if normalized.require_unique and len(filtered) > 1:
         candidate_list = _format_candidates(filtered)
-        raise ValueError(
+        raise MultipleStreamsMatchedError(
             "Multiple LSL streams matched the selector. "
             "Set LSL_STREAM_NAME or LSL_STREAM_TYPE to disambiguate. "
             f"Selector={normalized}.\nMatches:\n{candidate_list}"

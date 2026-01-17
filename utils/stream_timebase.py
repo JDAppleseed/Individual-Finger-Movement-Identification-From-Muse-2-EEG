@@ -20,6 +20,7 @@ class ClampResult:
     clamped: bool
     backwards_delta_s: float
     is_hard_backwards: bool
+    is_soft_backwards: bool
 
 
 def clamp_lsl_timestamp(
@@ -35,20 +36,25 @@ def clamp_lsl_timestamp(
             clamped=False,
             backwards_delta_s=0.0,
             is_hard_backwards=False,
+            is_soft_backwards=False,
         )
     if raw_lsl_ts < prev_mono:
         backwards_delta = float(prev_mono - raw_lsl_ts)
+        is_hard = backwards_delta >= float(hard_backwards_s)
+        is_soft = backwards_delta > float(epsilon_s) and not is_hard
         return ClampResult(
             mono_ts=float(prev_mono),
             clamped=True,
             backwards_delta_s=backwards_delta,
-            is_hard_backwards=backwards_delta >= float(hard_backwards_s),
+            is_hard_backwards=is_hard,
+            is_soft_backwards=is_soft,
         )
     return ClampResult(
         mono_ts=float(raw_lsl_ts),
         clamped=False,
         backwards_delta_s=0.0,
         is_hard_backwards=False,
+        is_soft_backwards=False,
     )
 
 

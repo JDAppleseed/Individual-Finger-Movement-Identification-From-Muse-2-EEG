@@ -20,6 +20,10 @@ except Exception:
     LSL_AVAILABLE = False
 
 from utils.lsl_stream_select import (
+    LSLStreamSelectError,
+    MultipleStreamsMatchedError,
+    NoStreamFoundError,
+    NoStreamMatchedError,
     StreamSelector,
     log_stream_signature,
     pick_stream,
@@ -92,19 +96,17 @@ class LiveLSLSource:
             )
             try:
                 stream = pick_stream(selector)
-            except Exception as exc:
-                message = str(exc)
-                if "No LSL streams matched" in message:
-                    try:
-                        stream = pick_stream(
-                            StreamSelector(
-                                name_contains="eeg", type_equals=None, min_channels=4
-                            )
+            except NoStreamMatchedError:
+                try:
+                    stream = pick_stream(
+                        StreamSelector(
+                            name_contains="eeg", type_equals=None, min_channels=4
                         )
-                    except Exception as exc_fallback:
-                        return False, str(exc_fallback)
-                else:
-                    return False, message
+                    )
+                except LSLStreamSelectError as exc_fallback:
+                    return False, str(exc_fallback)
+            except (NoStreamFoundError, MultipleStreamsMatchedError, LSLStreamSelectError) as exc:
+                return False, str(exc)
 
         if stream.channel_count() < 4:
             return (

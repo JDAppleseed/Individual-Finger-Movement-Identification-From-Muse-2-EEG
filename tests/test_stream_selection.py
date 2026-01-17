@@ -1,6 +1,11 @@
 import pytest
 
-from utils.lsl_stream_select import StreamSelector, select_stream_candidate
+from utils.lsl_stream_select import (
+    MultipleStreamsMatchedError,
+    NoStreamMatchedError,
+    StreamSelector,
+    select_stream_candidate,
+)
 
 
 def test_select_stream_by_name_contains():
@@ -43,7 +48,7 @@ def test_select_stream_rejects_ambiguous():
         },
     ]
     selector = StreamSelector(name_contains=None, type_equals="EEG", min_channels=4)
-    with pytest.raises(ValueError, match="Multiple LSL streams matched"):
+    with pytest.raises(MultipleStreamsMatchedError, match="Multiple LSL streams matched"):
         select_stream_candidate(candidates, selector)
 
 
@@ -58,5 +63,5 @@ def test_select_stream_no_match():
         }
     ]
     selector = StreamSelector(name_contains=None, type_equals="EEG", min_channels=4)
-    with pytest.raises(ValueError, match="No LSL streams matched"):
+    with pytest.raises(NoStreamMatchedError, match="No LSL streams matched"):
         select_stream_candidate(candidates, selector)

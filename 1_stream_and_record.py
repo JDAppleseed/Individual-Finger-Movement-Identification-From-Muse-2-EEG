@@ -61,6 +61,10 @@ from utils.label_schema import (
 )
 from utils.session_timebase import compute_event_lsl_ts
 from utils.lsl_stream_select import (
+    LSLStreamSelectError,
+    MultipleStreamsMatchedError,
+    NoStreamFoundError,
+    NoStreamMatchedError,
     StreamSelector,
     log_stream_signature,
     pick_stream,
@@ -1925,16 +1929,14 @@ if not IMPORT_ONLY:
         )
         try:
             eeg_stream = pick_stream(selector)
-        except Exception as exc:
-            message = str(exc)
-            if "No LSL streams matched" in message:
-                eeg_stream = pick_stream(
-                    StreamSelector(
-                        name_contains="eeg", type_equals=None, min_channels=CHANNELS
-                    )
+        except NoStreamMatchedError:
+            eeg_stream = pick_stream(
+                StreamSelector(
+                    name_contains="eeg", type_equals=None, min_channels=CHANNELS
                 )
-            else:
-                raise
+            )
+        except (NoStreamFoundError, MultipleStreamsMatchedError, LSLStreamSelectError):
+            raise
     inlet = StreamInlet(eeg_stream, max_buflen=5)
     lsl_stream_signature = stream_signature(eeg_stream)
     log_stream_signature(lsl_stream_signature)
@@ -2383,7 +2385,7 @@ if not IMPORT_ONLY:
                             candidate_time_s,
                             {**clamp_details, "backwards_kind": "hard"},
                         )
-                    elif clamp_result.backwards_delta_s > SOFT_BACKWARDS_EPS_S:
+                    elif clamp_result.is_soft_backwards:
                         if should_segment_break_backwards(
                             backwards_events_monotonic,
                             now_monotonic,
