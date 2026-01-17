@@ -39,17 +39,7 @@
 % =====================================================
 \usepackage{listings}
 \usepackage{xcolor}
-
-% =====================================================
-% Shell escape (OPTIONAL) to auto-create exercises/ dirs
-% =====================================================
 \usepackage{shellesc}
-\ShellEscape{mkdir -p exercises exercises/out figs}
-
-% ====================================================
-% Compile with:
-%   pdflatex -interaction=nonstopmode --shell-escape eeg_hand_lessons.tex
-% =====================================================
 
 \definecolor{codebg}{rgb}{0.96,0.96,0.96}
 \definecolor{codekw}{rgb}{0.15,0.15,0.6}
@@ -102,81 +92,81 @@
 \newcommand{\todofig}[2]{%
 \begin{figure}[H]
 \centering
-\fbox{\parbox{0.9\textwidth}{\vspace{0.6em}\textbf{Figure placeholder:} #1\$begin:math:display$0\.25em\]
-\\textbf\{Insert file\:\} \\texttt\{\\detokenize\{\#2\}\}\\\\\[0\.25em\]
-\\vspace\{0\.6em\}\}\}
-\\caption\{\#1\}
-\\end\{figure\}
-\}
+\fbox{\parbox{0.9\textwidth}{\vspace{0.6em}\textbf{Figure placeholder:} #1\\[0.25em]
+\textbf{Insert file:} \texttt{\detokenize{#2}}\\[0.25em]
+\vspace{0.6em}}}
+\caption{#1}
+\end{figure}
+}
 
-\\newcommand\{\\exercise\}\[2\]\{\%
-\\section\*\{Exercise \#1\}
-\#2
-\}
+\newcommand{\exercise}[2]{%
+\section*{Exercise #1}
+#2
+}
 
-\\newcommand\{\\solution\}\[1\]\{\%
-\\subsection\*\{Solution\}
-\#1
-\}
+\newcommand{\solution}[1]{%
+\subsection*{Solution}
+#1
+}
 
-\% \=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=
-\% Title
-\% \=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=
-\\title\{
-\\textbf\{End\-to\-End EEG\-Based Prosthetic Finger Control\}\\\\
-\\vspace\{0\.5em\}
-\\large From Neural Signals to Real\-Time Actuation
-\}
-\\author\{Jonathan Davanzo\}
-\\date\{\\today\}
+% =====================================================
+% Title
+% =====================================================
+\title{
+\textbf{End-to-End EEG-Based Prosthetic Finger Control}\\
+\vspace{0.5em}
+\large From Neural Signals to Real-Time Actuation
+}
+\author{Jonathan Davanzo}
+\date{\today}
+\ShellEscape{mkdir -p exercises exercises/out figs}
 
-\\begin\{document\}
+\begin{document}
 
-\% \=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=
-\% Generated exercise scripts \(written at compile time\)
-\% \=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=
-
-\\begin\{filecontents\*\}\{exercises\/ex00\_run\_all\_sanity\.py\}
-\#\!\/usr\/bin\/env python3
+% =====================================================
+% Generated exercise scripts (written at compile time)
+% =====================================================
+\begin{filecontents*}{exercises/ex00_run_all_sanity.py}
+#!/usr/bin/env python3
 import subprocess
 import sys
 from pathlib import Path
 
 
-def main\(\)\:
-    root \= Path\(\_\_file\_\_\)\.resolve\(\)\.parent
-    scripts \= \[
-        \"ex03\_artifact\_probe\.py\"\,
-        \"ex04\_timebase\_break\_and\_measure\.py\"\,
-        \"ex05\_guard\_band\_sweep\.py\"\,
-        \"ex06\_gap\_policy\_sim\.py\"\,
-        \"ex08\_cache\_validator\_extension\.py\"\,
-        \"ex09\_stability\_gate\_demo\.py\"\,
-        \"ex10\_lsl\_sanity\_probe\.py\"\,
-        \"ex11\_backwards\_debounce\_sim\.py\"\,
-        \"ex12\_stream\_selector\_demo\.py\"\,
-    \]
-    failures \= 0
-    for script in scripts\:
-        path \= root \/ script
-        result \= subprocess\.run\(
-            \[sys\.executable\, str\(path\)\, \"\-\-synthetic\"\]\,
-            check\=False\,
-        \)
-        if result\.returncode \!\= 0\:
-            failures \+\= 1
-            print\(f\"FAILED\: \{script\}\"\)
-        else\:
-            print\(f\"OK\: \{script\}\"\)
+def main():
+    root = Path(__file__).resolve().parent
+    scripts = [
+        "ex03_artifact_probe.py",
+        "ex04_timebase_break_and_measure.py",
+        "ex05_guard_band_sweep.py",
+        "ex06_gap_policy_sim.py",
+        "ex08_cache_validator_extension.py",
+        "ex09_stability_gate_demo.py",
+        "ex10_lsl_sanity_probe.py",
+        "ex11_backwards_debounce_sim.py",
+        "ex12_stream_selector_demo.py",
+    ]
+    failures = 0
+    for script in scripts:
+        path = root / script
+        result = subprocess.run(
+            [sys.executable, str(path), "--synthetic"],
+            check=False,
+        )
+        if result.returncode != 0:
+            failures += 1
+            print(f"FAILED: {script}")
+        else:
+            print(f"OK: {script}")
     return 1 if failures else 0
 
 
-if \_\_name\_\_ \=\= \"\_\_main\_\_\"\:
-    raise SystemExit\(main\(\)\)
-\\end\{filecontents\*\}
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{filecontents*}
 
-\\begin\{filecontents\*\}\{exercises\/ex03\_artifact\_probe\.py\}
-\#\!\/usr\/bin\/env python3
+\begin{filecontents*}{exercises/ex03_artifact_probe.py}
+#!/usr/bin/env python3
 import argparse
 import csv
 import json
@@ -185,1017 +175,1029 @@ import random
 from pathlib import Path
 
 
-def load\_csv\(path\)\:
-    rows \= \[\]
-    with open\(path\, newline\=\"\"\) as handle\:
-        reader \= csv\.reader\(handle\)
-        for row in reader\:
-            if not row\:
+def load_csv(path):
+    rows = []
+    with open(path, newline="") as handle:
+        reader = csv.reader(handle)
+        for row in reader:
+            if not row:
                 continue
-            try\:
-                values \= \[float\(x\) for x in row\]
-            except ValueError\:
+            try:
+                values = [float(x) for x in row]
+            except ValueError:
                 continue
-            rows\.append\(values\)
-    if not rows\:
-        raise ValueError\(\"No numeric rows found in CSV\.\"\)
-    width \= min\(len\(r\) for r in rows\)
-    return \[r\[\:width\] for r in rows\]
+            rows.append(values)
+    if not rows:
+        raise ValueError("No numeric rows found in CSV.")
+    width = min(len(r) for r in rows)
+    return [r[:width] for r in rows]
 
 
-def synthesize\(channels\, samples\, seed\)\:
-    random\.seed\(seed\)
-    data \= \[\]
-    for \_ in range\(samples\)\:
-        data\.append\(\[random\.gauss\(0\.0\, 1\.0\) for \_ in range\(channels\)\]\)
-    start \= int\(0\.4 \* samples\)
-    end \= int\(0\.5 \* samples\)
-    for i in range\(start\, end\)\:
-        for c in range\(channels\)\:
-            data\[i\]\[c\] \+\= 8\.0
+def synthesize(channels, samples, seed):
+    random.seed(seed)
+    data = []
+    for _ in range(samples):
+        data.append([random.gauss(0.0, 1.0) for _ in range(channels)])
+    start = int(0.4 * samples)
+    end = int(0.5 * samples)
+    for i in range(start, end):
+        for c in range(channels):
+            data[i][c] += 8.0
     return data
 
 
-def sliding\_rms\_flags\(data\, fs\, window\_s\, step\_s\, threshold\)\:
-    window \= max\(1\, int\(round\(window\_s \* fs\)\)\)
-    step \= max\(1\, int\(round\(step\_s \* fs\)\)\)
-    flags \= \[\]
-    for start in range\(0\, len\(data\) \- window \+ 1\, step\)\:
-        end \= start \+ window
-        max\_rms \= 0\.0
-        for ch in range\(len\(data\[0\]\)\)\:
-            acc \= 0\.0
-            for idx in range\(start\, end\)\:
-                value \= data\[idx\]\[ch\]
-                acc \+\= value \* value
-            rms \= math\.sqrt\(acc \/ window\)
-            if rms \> max\_rms\:
-                max\_rms \= rms
-        flags\.append\(
-            \{
-                \"start\_s\"\: start \/ fs\,
-                \"end\_s\"\: end \/ fs\,
-                \"rms\"\: max\_rms\,
-                \"flag\"\: max\_rms \>\= threshold\,
-            \}
-        \)
+def sliding_rms_flags(data, fs, window_s, step_s, threshold):
+    window = max(1, int(round(window_s * fs)))
+    step = max(1, int(round(step_s * fs)))
+    flags = []
+    for start in range(0, len(data) - window + 1, step):
+        end = start + window
+        max_rms = 0.0
+        for ch in range(len(data[0])):
+            acc = 0.0
+            for idx in range(start, end):
+                value = data[idx][ch]
+                acc += value * value
+            rms = math.sqrt(acc / window)
+            if rms > max_rms:
+                max_rms = rms
+        flags.append(
+            {
+                "start_s": start / fs,
+                "end_s": end / fs,
+                "rms": max_rms,
+                "flag": max_rms >= threshold,
+            }
+        )
     return flags
 
 
-def main\(\)\:
-    parser \= argparse\.ArgumentParser\(
-        description\=\"Sliding RMS artifact probe with a simple threshold\.\"
-    \)
-    parser\.add\_argument\(\"\-\-csv\"\, help\=\"CSV with one row per sample and channels as columns\.\"\)
-    parser\.add\_argument\(\"\-\-fs\"\, type\=float\, default\=256\.0\, help\=\"Sample rate in Hz\.\"\)
-    parser\.add\_argument\(\"\-\-window\-s\"\, type\=float\, default\=0\.25\, help\=\"RMS window in seconds\.\"\)
-    parser\.add\_argument\(\"\-\-step\-s\"\, type\=float\, default\=0\.05\, help\=\"Step in seconds\.\"\)
-    parser\.add\_argument\(\"\-\-threshold\"\, type\=float\, default\=3\.0\, help\=\"RMS threshold\.\"\)
-    parser\.add\_argument\(\"\-\-channels\"\, type\=int\, default\=4\, help\=\"Synthetic channel count\.\"\)
-    parser\.add\_argument\(\"\-\-duration\-s\"\, type\=float\, default\=10\.0\, help\=\"Synthetic duration\.\"\)
-    parser\.add\_argument\(\"\-\-synthetic\"\, action\=\"store\_true\"\, help\=\"Force synthetic data\.\"\)
-    parser\.add\_argument\(\"\-\-out\-dir\"\, default\=\"exercises\/out\"\, help\=\"Output directory\.\"\)
-    args \= parser\.parse\_args\(\)
+def main():
+    parser = argparse.ArgumentParser(
+        description="Sliding RMS artifact probe with a simple threshold."
+    )
+    parser.add_argument("--csv", help="CSV with one row per sample and channels as columns.")
+    parser.add_argument("--fs", type=float, default=256.0, help="Sample rate in Hz.")
+    parser.add_argument("--window-s", type=float, default=0.25, help="RMS window in seconds.")
+    parser.add_argument("--step-s", type=float, default=0.05, help="Step in seconds.")
+    parser.add_argument("--threshold", type=float, default=3.0, help="RMS threshold.")
+    parser.add_argument("--channels", type=int, default=4, help="Synthetic channel count.")
+    parser.add_argument("--duration-s", type=float, default=10.0, help="Synthetic duration.")
+    parser.add_argument("--synthetic", action="store_true", help="Force synthetic data.")
+    parser.add_argument("--out-dir", default="exercises/out", help="Output directory.")
+    args = parser.parse_args()
 
-    if args\.csv and not args\.synthetic\:
-        data \= load\_csv\(args\.csv\)
-    else\:
-        samples \= max\(1\, int\(args\.duration\_s \* args\.fs\)\)
-        data \= synthesize\(args\.channels\, samples\, seed\=0\)
+    if args.csv and not args.synthetic:
+        data = load_csv(args.csv)
+    else:
+        samples = max(1, int(args.duration_s * args.fs))
+        data = synthesize(args.channels, samples, seed=0)
 
-    flags \= sliding\_rms\_flags\(
-        data\=data\,
-        fs\=args\.fs\,
-        window\_s\=args\.window\_s\,
-        step\_s\=args\.step\_s\,
-        threshold\=args\.threshold\,
-    \)
-    flagged \= \[f for f in flags if f\[\"flag\"\]\]
+    flags = sliding_rms_flags(
+        data=data,
+        fs=args.fs,
+        window_s=args.window_s,
+        step_s=args.step_s,
+        threshold=args.threshold,
+    )
+    flagged = [f for f in flags if f["flag"]]
 
-    out\_dir \= Path\(args\.out\_dir\)
-    out\_dir\.mkdir\(parents\=True\, exist\_ok\=True\)
-    out\_path \= out\_dir \/ \"ex03\_artifact\_probe\_intervals\.json\"
-    with out\_path\.open\(\"w\"\, encoding\=\"utf\-8\"\) as handle\:
-        json\.dump\(\{\"flags\"\: flags\, \"flagged\_count\"\: len\(flagged\)\}\, handle\, indent\=2\)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "ex03_artifact_probe_intervals.json"
+    with out_path.open("w", encoding="utf-8") as handle:
+        json.dump({"flags": flags, "flagged_count": len(flagged)}, handle, indent=2)
 
-    print\(f\"windows\=\{len\(flags\)\} flagged\=\{len\(flagged\)\} out\=\{out\_path\}\"\)
+    print(f"windows={len(flags)} flagged={len(flagged)} out={out_path}")
     return 0
 
 
-if \_\_name\_\_ \=\= \"\_\_main\_\_\"\:
-    raise SystemExit\(main\(\)\)
-\\end\{filecontents\*\}
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{filecontents*}
 
-\\begin\{filecontents\*\}\{exercises\/ex04\_timebase\_break\_and\_measure\.py\}
-\#\!\/usr\/bin\/env python3
+\begin{filecontents*}{exercises/ex04_timebase_break_and_measure.py}
+#!/usr/bin/env python3
 import argparse
 import json
 from pathlib import Path
 
 
-def build\_events\(duration\_s\, event\_count\, event\_len\_s\)\:
-    if event\_count \<\= 0\:
-        return \[\]
-    gap \= max\(0\.0\, \(duration\_s \- event\_count \* event\_len\_s\) \/ \(event\_count \+ 1\)\)
-    events \= \[\]
-    t \= gap
-    for \_ in range\(event\_count\)\:
-        events\.append\(\(t\, t \+ event\_len\_s\)\)
-        t \+\= event\_len\_s \+ gap
+def build_events(duration_s, event_count, event_len_s):
+    if event_count <= 0:
+        return []
+    gap = max(0.0, (duration_s - event_count * event_len_s) / (event_count + 1))
+    events = []
+    t = gap
+    for _ in range(event_count):
+        events.append((t, t + event_len_s))
+        t += event_len_s + gap
     return events
 
 
-def overlap\_s\(a0\, a1\, b0\, b1\)\:
-    return max\(0\.0\, min\(a1\, b1\) \- max\(a0\, b0\)\)
+def overlap_s(a0, a1, b0, b1):
+    return max(0.0, min(a1, b1) - max(a0, b0))
 
 
-def window\_kept\_indices\(events\, duration\_s\, window\_s\, step\_s\, min\_overlap\_s\)\:
-    total \= 0
-    kept \= set\(\)
-    start \= 0\.0
-    index \= 0
-    while start \+ window\_s \<\= duration\_s \+ 1e\-9\:
-        total \+\= 1
-        end \= start \+ window\_s
-        for e0\, e1 in events\:
-            if overlap\_s\(start\, end\, e0\, e1\) \>\= min\_overlap\_s\:
-                kept\.add\(index\)
+def window_kept_indices(events, duration_s, window_s, step_s, min_overlap_s):
+    total = 0
+    kept = set()
+    start = 0.0
+    index = 0
+    while start + window_s <= duration_s + 1e-9:
+        total += 1
+        end = start + window_s
+        for e0, e1 in events:
+            if overlap_s(start, end, e0, e1) >= min_overlap_s:
+                kept.add(index)
                 break
-        start \+\= step\_s
-        index \+\= 1
-    return total\, kept
+        start += step_s
+        index += 1
+    return total, kept
 
 
-def main\(\)\:
-    parser \= argparse\.ArgumentParser\(
-        description\=\"Simulate timebase misalignment and measure overlap drops\.\"
-    \)
-    parser\.add\_argument\(\"\-\-duration\-s\"\, type\=float\, default\=20\.0\)
-    parser\.add\_argument\(\"\-\-event\-count\"\, type\=int\, default\=5\)
-    parser\.add\_argument\(\"\-\-event\-len\-s\"\, type\=float\, default\=1\.0\)
-    parser\.add\_argument\(\"\-\-window\-s\"\, type\=float\, default\=1\.0\)
-    parser\.add\_argument\(\"\-\-step\-s\"\, type\=float\, default\=0\.2\)
-    parser\.add\_argument\(\"\-\-min\-overlap\-frac\"\, type\=float\, default\=0\.25\)
-    parser\.add\_argument\(\"\-\-offset\-s\"\, type\=float\, default\=0\.2\)
-    parser\.add\_argument\(\"\-\-synthetic\"\, action\=\"store\_true\"\, help\=\"Synthetic\-only simulation\.\"\)
-    parser\.add\_argument\(\"\-\-out\-dir\"\, default\=\"exercises\/out\"\)
-    args \= parser\.parse\_args\(\)
+def main():
+    parser = argparse.ArgumentParser(
+        description="Simulate timebase misalignment and measure overlap drops."
+    )
+    parser.add_argument("--duration-s", type=float, default=20.0)
+    parser.add_argument("--event-count", type=int, default=5)
+    parser.add_argument("--event-len-s", type=float, default=1.0)
+    parser.add_argument("--window-s", type=float, default=1.0)
+    parser.add_argument("--step-s", type=float, default=0.2)
+    parser.add_argument("--min-overlap-frac", type=float, default=0.25)
+    parser.add_argument("--offset-s", type=float, default=0.2)
+    parser.add_argument("--synthetic", action="store_true", help="Synthetic-only simulation.")
+    parser.add_argument("--out-dir", default="exercises/out")
+    args = parser.parse_args()
 
-    events \= build\_events\(args\.duration\_s\, args\.event\_count\, args\.event\_len\_s\)
-    min\_overlap\_s \= args\.min\_overlap\_frac \* args\.window\_s
+    events = build_events(args.duration_s, args.event_count, args.event_len_s)
+    min_overlap_s = args.min_overlap_frac * args.window_s
 
-    aligned\_total\, aligned\_set \= window\_kept\_indices\(
-        events\, args\.duration\_s\, args\.window\_s\, args\.step\_s\, min\_overlap\_s
-    \)
-    offset\_events \= \[\(s \+ args\.offset\_s\, e \+ args\.offset\_s\) for s\, e in events\]
-    \_offset\_total\, offset\_set \= window\_kept\_indices\(
-        offset\_events\, args\.duration\_s\, args\.window\_s\, args\.step\_s\, min\_overlap\_s
-    \)
+    aligned_total, aligned_set = window_kept_indices(
+        events, args.duration_s, args.window_s, args.step_s, min_overlap_s
+    )
+    offset_events = [(s + args.offset_s, e + args.offset_s) for s, e in events]
+    offset_total, offset_set = window_kept_indices(
+        offset_events, args.duration_s, args.window_s, args.step_s, min_overlap_s
+    )
 
-    aligned\_kept \= len\(aligned\_set\)
-    offset\_kept \= len\(offset\_set\)
-    aligned\_only \= len\(aligned\_set \- offset\_set\)
-    offset\_only \= len\(offset\_set \- aligned\_set\)
-    summary \= \{
-        \"aligned\_kept\"\: aligned\_kept\,
-        \"offset\_kept\"\: offset\_kept\,
-        \"total\_windows\"\: aligned\_total\,
-        \"aligned\_only\"\: aligned\_only\,
-        \"offset\_only\"\: offset\_only\,
-        \"offset\_s\"\: args\.offset\_s\,
-    \}
+    aligned_kept = len(aligned_set)
+    offset_kept = len(offset_set)
+    aligned_only = len(aligned_set - offset_set)
+    offset_only = len(offset_set - aligned_set)
+    summary = {
+        "aligned_kept": aligned_kept,
+        "offset_kept": offset_kept,
+        "total_windows": aligned_total,
+        "aligned_only": aligned_only,
+        "offset_only": offset_only,
+        "offset_s": args.offset_s,
+    }
 
-    out\_dir \= Path\(args\.out\_dir\)
-    out\_dir\.mkdir\(parents\=True\, exist\_ok\=True\)
-    out\_path \= out\_dir \/ \"ex04\_timebase\_break\_and\_measure\.json\"
-    with out\_path\.open\(\"w\"\, encoding\=\"utf\-8\"\) as handle\:
-        json\.dump\(summary\, handle\, indent\=2\)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "ex04_timebase_break_and_measure.json"
+    with out_path.open("w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2)
 
-    print\(
-        \"aligned\_kept\=\{aligned\_kept\} offset\_kept\=\{offset\_kept\} \"
-        \"aligned\_only\=\{aligned\_only\} offset\_only\=\{offset\_only\} out\=\{out\}\"\.format\(
-            out\=out\_path\, \*\*summary
-        \)
-    \)
+    print(
+        "aligned_kept={aligned_kept} offset_kept={offset_kept} "
+        "aligned_only={aligned_only} offset_only={offset_only} out={out}".format(
+            out=out_path, **summary
+        )
+    )
     return 0
 
 
-if \_\_name\_\_ \=\= \"\_\_main\_\_\"\:
-    raise SystemExit\(main\(\)\)
-\\end\{filecontents\*\}
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{filecontents*}
 
-\\begin\{filecontents\*\}\{exercises\/ex05\_guard\_band\_sweep\.py\}
-\#\!\/usr\/bin\/env python3
+\begin{filecontents*}{exercises/ex05_guard_band_sweep.py}
+#!/usr/bin/env python3
 import argparse
 import json
 from pathlib import Path
 
 
-def parse\_list\(text\)\:
-    return \[float\(x\.strip\(\)\) for x in text\.split\(\"\,\"\) if x\.strip\(\)\]
+def parse_list(text):
+    return [float(x.strip()) for x in text.split(",") if x.strip()]
 
 
-def build\_events\(duration\_s\, event\_count\, event\_len\_s\)\:
-    if event\_count \<\= 0\:
-        return \[\]
-    gap \= max\(0\.0\, \(duration\_s \- event\_count \* event\_len\_s\) \/ \(event\_count \+ 1\)\)
-    events \= \[\]
-    t \= gap
-    for \_ in range\(event\_count\)\:
-        events\.append\(\(t\, t \+ event\_len\_s\)\)
-        t \+\= event\_len\_s \+ gap
+def build_events(duration_s, event_count, event_len_s):
+    if event_count <= 0:
+        return []
+    gap = max(0.0, (duration_s - event_count * event_len_s) / (event_count + 1))
+    events = []
+    t = gap
+    for _ in range(event_count):
+        events.append((t, t + event_len_s))
+        t += event_len_s + gap
     return events
 
 
-def overlap\_s\(a0\, a1\, b0\, b1\)\:
-    return max\(0\.0\, min\(a1\, b1\) \- max\(a0\, b0\)\)
+def overlap_s(a0, a1, b0, b1):
+    return max(0.0, min(a1, b1) - max(a0, b0))
 
 
-def sweep\(events\, duration\_s\, window\_s\, step\_s\, min\_overlap\_s\, guard\_s\)\:
-    counts \= \{\"total\"\: 0\, \"kept\"\: 0\, \"drop\_no\_overlap\"\: 0\, \"drop\_guard\"\: 0\}
-    start \= 0\.0
-    while start \+ window\_s \<\= duration\_s \+ 1e\-9\:
-        counts\[\"total\"\] \+\= 1
-        end \= start \+ window\_s
-        kept \= False
-        guard\_drop \= False
-        for e0\, e1 in events\:
-            if overlap\_s\(start\, end\, e0\, e1\) \>\= min\_overlap\_s\:
-                if guard\_s \> 0\.0 and \(start \< e0 \+ guard\_s or end \> e1 \- guard\_s\)\:
-                    guard\_drop \= True
-                else\:
-                    kept \= True
+def sweep(events, duration_s, window_s, step_s, min_overlap_s, guard_s):
+    counts = {"total": 0, "kept": 0, "drop_no_overlap": 0, "drop_guard": 0}
+    start = 0.0
+    while start + window_s <= duration_s + 1e-9:
+        counts["total"] += 1
+        end = start + window_s
+        kept = False
+        guard_drop = False
+        for e0, e1 in events:
+            if overlap_s(start, end, e0, e1) >= min_overlap_s:
+                if guard_s > 0.0 and (start < e0 + guard_s or end > e1 - guard_s):
+                    guard_drop = True
+                else:
+                    kept = True
                     break
-        if kept\:
-            counts\[\"kept\"\] \+\= 1
-        elif guard\_drop\:
-            counts\[\"drop\_guard\"\] \+\= 1
-        else\:
-            counts\[\"drop\_no\_overlap\"\] \+\= 1
-        start \+\= step\_s
+        if kept:
+            counts["kept"] += 1
+        elif guard_drop:
+            counts["drop_guard"] += 1
+        else:
+            counts["drop_no_overlap"] += 1
+        start += step_s
     return counts
 
 
-def main\(\)\:
-    parser \= argparse\.ArgumentParser\(
-        description\=\"Sweep guard bands and minimum overlap on synthetic events\.\"
-    \)
-    parser\.add\_argument\(\"\-\-duration\-s\"\, type\=float\, default\=20\.0\)
-    parser\.add\_argument\(\"\-\-event\-count\"\, type\=int\, default\=5\)
-    parser\.add\_argument\(\"\-\-event\-len\-s\"\, type\=float\, default\=1\.0\)
-    parser\.add\_argument\(\"\-\-window\-s\"\, type\=float\, default\=1\.0\)
-    parser\.add\_argument\(\"\-\-step\-s\"\, type\=float\, default\=0\.2\)
-    parser\.add\_argument\(\"\-\-guard\-s\"\, default\=\"0\.0\,0\.05\,0\.1\"\)
-    parser\.add\_argument\(\"\-\-min\-overlap\-frac\"\, default\=\"0\.1\,0\.25\,0\.4\"\)
-    parser\.add\_argument\(\"\-\-synthetic\"\, action\=\"store\_true\"\, help\=\"Synthetic\-only simulation\.\"\)
-    parser\.add\_argument\(\"\-\-out\-dir\"\, default\=\"exercises\/out\"\)
-    args \= parser\.parse\_args\(\)
+def main():
+    parser = argparse.ArgumentParser(
+        description="Sweep guard bands and minimum overlap on synthetic events."
+    )
+    parser.add_argument("--duration-s", type=float, default=20.0)
+    parser.add_argument("--event-count", type=int, default=5)
+    parser.add_argument("--event-len-s", type=float, default=1.0)
+    parser.add_argument("--window-s", type=float, default=1.0)
+    parser.add_argument("--step-s", type=float, default=0.2)
+    parser.add_argument("--guard-s", default="0.0,0.05,0.1")
+    parser.add_argument("--min-overlap-frac", default="0.1,0.25,0.4")
+    parser.add_argument("--synthetic", action="store_true", help="Synthetic-only simulation.")
+    parser.add_argument("--out-dir", default="exercises/out")
+    args = parser.parse_args()
 
-    guard\_values \= parse\_list\(args\.guard\_s\)
-    overlap\_values \= parse\_list\(args\.min\_overlap\_frac\)
-    events \= build\_events\(args\.duration\_s\, args\.event\_count\, args\.event\_len\_s\)
+    guard_values = parse_list(args.guard_s)
+    overlap_values = parse_list(args.min_overlap_frac)
+    events = build_events(args.duration_s, args.event_count, args.event_len_s)
 
-    results \= \[\]
-    for guard\_s in guard\_values\:
-        for overlap in overlap\_values\:
-            counts \= sweep\(
-                events\,
-                args\.duration\_s\,
-                args\.window\_s\,
-                args\.step\_s\,
-                overlap \* args\.window\_s\,
-                guard\_s\,
-            \)
-            entry \= \{\"guard\_s\"\: guard\_s\, \"min\_overlap\_frac\"\: overlap\, \*\*counts\}
-            results\.append\(entry\)
-            print\(
-                \"guard\_s\=\{guard\_s\:\.3f\} min\_overlap\=\{min\_overlap\_frac\:\.2f\} \"
-                \"kept\=\{kept\} drop\_guard\=\{drop\_guard\} drop\_no\_overlap\=\{drop\_no\_overlap\}\"\.format\(
-                    \*\*entry
-                \)
-            \)
+    results = []
+    for guard_s in guard_values:
+        for overlap in overlap_values:
+            counts = sweep(
+                events,
+                args.duration_s,
+                args.window_s,
+                args.step_s,
+                overlap * args.window_s,
+                guard_s,
+            )
+            entry = {"guard_s": guard_s, "min_overlap_frac": overlap, **counts}
+            results.append(entry)
+            print(
+                "guard_s={guard_s:.3f} min_overlap={min_overlap_frac:.2f} "
+                "kept={kept} drop_guard={drop_guard} drop_no_overlap={drop_no_overlap}".format(
+                    **entry
+                )
+            )
 
-    out\_dir \= Path\(args\.out\_dir\)
-    out\_dir\.mkdir\(parents\=True\, exist\_ok\=True\)
-    out\_path \= out\_dir \/ \"ex05\_guard\_band\_sweep\.json\"
-    with out\_path\.open\(\"w\"\, encoding\=\"utf\-8\"\) as handle\:
-        json\.dump\(\{\"results\"\: results\}\, handle\, indent\=2\)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "ex05_guard_band_sweep.json"
+    with out_path.open("w", encoding="utf-8") as handle:
+        json.dump({"results": results}, handle, indent=2)
 
     return 0
 
 
-if \_\_name\_\_ \=\= \"\_\_main\_\_\"\:
-    raise SystemExit\(main\(\)\)
-\\end\{filecontents\*\}
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{filecontents*}
 
-\\begin\{filecontents\*\}\{exercises\/ex06\_gap\_policy\_sim\.py\}
-\#\!\/usr\/bin\/env python3
+\begin{filecontents*}{exercises/ex06_gap_policy_sim.py}
+#!/usr/bin/env python3
 import argparse
 import json
 from pathlib import Path
 
 
-def build\_times\(duration\_s\, fs\, gap\_starts\, gap\_s\)\:
-    dt \= 1\.0 \/ fs
-    count \= max\(1\, int\(duration\_s \* fs\)\)
-    times \= \[i \* dt for i in range\(count\)\]
-    for gap\_start in sorted\(gap\_starts\)\:
-        for i\, t in enumerate\(times\)\:
-            if t \>\= gap\_start\:
-                times\[i\] \= t \+ gap\_s
+def build_times(duration_s, fs, gap_starts, gap_s):
+    dt = 1.0 / fs
+    count = max(1, int(duration_s * fs))
+    times = [i * dt for i in range(count)]
+    for gap_start in sorted(gap_starts):
+        for i, t in enumerate(times):
+            if t >= gap_start:
+                times[i] = t + gap_s
     return times
 
 
-def window\_gap\_flags\(times\, fs\, window\_s\, step\_s\, gap\_threshold\_s\)\:
-    window \= max\(2\, int\(round\(window\_s \* fs\)\)\)
-    step \= max\(1\, int\(round\(step\_s \* fs\)\)\)
-    flags \= \[\]
-    for start in range\(0\, len\(times\) \- window \+ 1\, step\)\:
-        window\_times \= times\[start \: start \+ window\]
-        max\_dt \= max\(b \- a for a\, b in zip\(window\_times\[\:\-1\]\, window\_times\[1\:\]\)\)
-        flags\.append\(\{\"index\"\: start\, \"gap\"\: max\_dt \> gap\_threshold\_s\}\)
+def window_gap_flags(times, fs, window_s, step_s, gap_threshold_s):
+    window = max(2, int(round(window_s * fs)))
+    step = max(1, int(round(step_s * fs)))
+    flags = []
+    for start in range(0, len(times) - window + 1, step):
+        window_times = times[start : start + window]
+        max_dt = max(
+            b - a for a, b in zip(window_times[:-1], window_times[1:])
+        )
+        flags.append({"index": start, "gap": max_dt > gap_threshold_s})
     return flags
 
 
-def main\(\)\:
-    parser \= argparse\.ArgumentParser\(
-        description\=\"Simulate gaps in timestamps and apply a gap policy\.\"
-    \)
-    parser\.add\_argument\(\"\-\-duration\-s\"\, type\=float\, default\=20\.0\)
-    parser\.add\_argument\(\"\-\-fs\"\, type\=float\, default\=128\.0\)
-    parser\.add\_argument\(\"\-\-window\-s\"\, type\=float\, default\=1\.0\)
-    parser\.add\_argument\(\"\-\-step\-s\"\, type\=float\, default\=0\.25\)
-    parser\.add\_argument\(\"\-\-gap\-s\"\, type\=float\, default\=0\.3\)
-    parser\.add\_argument\(\"\-\-gap\-threshold\-s\"\, type\=float\, default\=0\.1\)
-    parser\.add\_argument\(\"\-\-gap\-starts\"\, default\=\"5\,12\"\)
-    parser\.add\_argument\(\"\-\-synthetic\"\, action\=\"store\_true\"\, help\=\"Synthetic\-only simulation\.\"\)
-    parser\.add\_argument\(\"\-\-out\-dir\"\, default\=\"exercises\/out\"\)
-    args \= parser\.parse\_args\(\)
+def main():
+    parser = argparse.ArgumentParser(
+        description="Simulate gaps in timestamps and apply a gap policy."
+    )
+    parser.add_argument("--duration-s", type=float, default=20.0)
+    parser.add_argument("--fs", type=float, default=128.0)
+    parser.add_argument("--window-s", type=float, default=1.0)
+    parser.add_argument("--step-s", type=float, default=0.25)
+    parser.add_argument("--gap-s", type=float, default=0.3)
+    parser.add_argument("--gap-threshold-s", type=float, default=0.1)
+    parser.add_argument("--gap-starts", default="5,12")
+    parser.add_argument("--synthetic", action="store_true", help="Synthetic-only simulation.")
+    parser.add_argument("--out-dir", default="exercises/out")
+    args = parser.parse_args()
 
-    gap\_starts \= \[float\(x\.strip\(\)\) for x in args\.gap\_starts\.split\(\"\,\"\) if x\.strip\(\)\]
-    times \= build\_times\(args\.duration\_s\, args\.fs\, gap\_starts\, args\.gap\_s\)
-    flags \= window\_gap\_flags\(
-        times\, args\.fs\, args\.window\_s\, args\.step\_s\, args\.gap\_threshold\_s
-    \)
+    gap_starts = [float(x.strip()) for x in args.gap_starts.split(",") if x.strip()]
+    times = build_times(args.duration_s, args.fs, gap_starts, args.gap_s)
+    flags = window_gap_flags(
+        times, args.fs, args.window_s, args.step_s, args.gap_threshold_s
+    )
 
-    total \= len\(flags\)
-    gap\_count \= sum\(1 for f in flags if f\[\"gap\"\]\)
-    summary \= \{
-        \"total\_windows\"\: total\,
-        \"gap\_windows\"\: gap\_count\,
-        \"gap\_threshold\_s\"\: args\.gap\_threshold\_s\,
-    \}
+    total = len(flags)
+    gap_count = sum(1 for f in flags if f["gap"])
+    summary = {
+        "total_windows": total,
+        "gap_windows": gap_count,
+        "gap_threshold_s": args.gap_threshold_s,
+    }
 
-    out\_dir \= Path\(args\.out\_dir\)
-    out\_dir\.mkdir\(parents\=True\, exist\_ok\=True\)
-    out\_path \= out\_dir \/ \"ex06\_gap\_policy\_sim\.json\"
-    with out\_path\.open\(\"w\"\, encoding\=\"utf\-8\"\) as handle\:
-        json\.dump\(\{\"summary\"\: summary\, \"flags\"\: flags\}\, handle\, indent\=2\)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "ex06_gap_policy_sim.json"
+    with out_path.open("w", encoding="utf-8") as handle:
+        json.dump({"summary": summary, "flags": flags}, handle, indent=2)
 
-    print\(f\"total\_windows\=\{total\} gap\_windows\=\{gap\_count\} out\=\{out\_path\}\"\)
+    print(f"total_windows={total} gap_windows={gap_count} out={out_path}")
     return 0
 
 
-if \_\_name\_\_ \=\= \"\_\_main\_\_\"\:
-    raise SystemExit\(main\(\)\)
-\\end\{filecontents\*\}
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{filecontents*}
 
-\\begin\{filecontents\*\}\{exercises\/ex08\_cache\_validator\_extension\.py\}
-\#\!\/usr\/bin\/env python3
+\begin{filecontents*}{exercises/ex08_cache_validator_extension.py}
+#!/usr/bin/env python3
 import argparse
 import json
 from pathlib import Path
 
 
-def load\_dataset\_info\_from\_npz\(path\)\:
-    try\:
+def load_dataset_info_from_npz(path):
+    try:
         import numpy as np
-    except ImportError as exc\:
-        raise RuntimeError\(\"numpy is required to load \.npz files\"\) from exc
+    except ImportError as exc:
+        raise RuntimeError("numpy is required to load .npz files") from exc
 
-    with np\.load\(path\, allow\_pickle\=True\) as data\:
-        if \"dataset\_info\" not in data\.files\:
-            raise ValueError\(\"dataset\_info not found in npz\"\)
-        raw \= data\[\"dataset\_info\"\]
-        if hasattr\(raw\, \"tolist\"\)\:
-            raw \= raw\.tolist\(\)
-        if isinstance\(raw\, list\)\:
-            raw \= raw\[0\] if raw else \"\"
-        if isinstance\(raw\, \(bytes\, bytearray\)\)\:
-            raw \= raw\.decode\(\"utf\-8\"\)
-        if not isinstance\(raw\, str\)\:
-            raw \= str\(raw\)
-        return json\.loads\(raw\)
-
-
-def load\_json\(path\)\:
-    with open\(path\, \"r\"\, encoding\=\"utf\-8\"\) as handle\:
-        return json\.load\(handle\)
+    with np.load(path, allow_pickle=True) as data:
+        if "dataset_info" not in data.files:
+            raise ValueError("dataset_info not found in npz")
+        raw = data["dataset_info"]
+        if hasattr(raw, "tolist"):
+            raw = raw.tolist()
+        if isinstance(raw, list):
+            raw = raw[0] if raw else ""
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8")
+        if not isinstance(raw, str):
+            raw = str(raw)
+        return json.loads(raw)
 
 
-def extra\_checks\(cache\_info\, current\_info\)\:
-    reasons \= \[\]
-    for key in \(\"timebase\_version\"\, \"target\_fs\"\)\:
-        if key not in cache\_info or key not in current\_info\:
-            reasons\.append\(f\"missing\_\{key\}\"\)
-        elif str\(cache\_info\.get\(key\)\) \!\= str\(current\_info\.get\(key\)\)\:
-            reasons\.append\(f\"\{key\}\_mismatch\"\)
+def load_json(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def extra_checks(cache_info, current_info):
+    reasons = []
+    for key in ("timebase_version", "target_fs"):
+        if key not in cache_info or key not in current_info:
+            reasons.append(f"missing_{key}")
+        elif str(cache_info.get(key)) != str(current_info.get(key)):
+            reasons.append(f"{key}_mismatch")
     return reasons
 
 
-def synthetic\_infos\(mismatch\)\:
-    cache \= \{\"timebase\_version\"\: \"v1\"\, \"target\_fs\"\: 256\.0\, \"note\"\: \"cache\"\}
-    current \= \{\"timebase\_version\"\: \"v1\"\, \"target\_fs\"\: 256\.0\, \"note\"\: \"current\"\}
-    if mismatch\:
-        current\[\"target\_fs\"\] \= 128\.0
-    return cache\, current
+def synthetic_infos(mismatch):
+    cache = {"timebase_version": "v1", "target_fs": 256.0, "note": "cache"}
+    current = {"timebase_version": "v1", "target_fs": 256.0, "note": "current"}
+    if mismatch:
+        current["target_fs"] = 128.0
+    return cache, current
 
 
-def main\(\)\:
-    parser \= argparse\.ArgumentParser\(
-        description\=\"Validate cached predictions with an extra dataset\_info check\.\"
-    \)
-    parser\.add\_argument\(\"\-\-pred\-npz\"\, help\=\"Path to cached prediction npz\"\)
-    parser\.add\_argument\(\"\-\-dataset\-info\"\, help\=\"JSON file for current dataset\_info\"\)
-    parser\.add\_argument\(\"\-\-synthetic\"\, action\=\"store\_true\"\, help\=\"Force synthetic mode\"\)
-    parser\.add\_argument\(\"\-\-mismatch\"\, action\=\"store\_true\"\, help\=\"Force a synthetic mismatch\"\)
-    parser\.add\_argument\(\"\-\-out\-dir\"\, default\=\"exercises\/out\"\)
-    args \= parser\.parse\_args\(\)
+def main():
+    parser = argparse.ArgumentParser(
+        description="Validate cached predictions with an extra dataset_info check."
+    )
+    parser.add_argument("--pred-npz", help="Path to cached prediction npz")
+    parser.add_argument("--dataset-info", help="JSON file for current dataset_info")
+    parser.add_argument("--synthetic", action="store_true", help="Force synthetic mode")
+    parser.add_argument("--mismatch", action="store_true", help="Force a synthetic mismatch")
+    parser.add_argument("--out-dir", default="exercises/out")
+    args = parser.parse_args()
 
-    cache\_info \= None
-    current\_info \= None
-    if args\.pred\_npz and not args\.synthetic\:
-        cache\_info \= load\_dataset\_info\_from\_npz\(args\.pred\_npz\)
-    if args\.dataset\_info and not args\.synthetic\:
-        current\_info \= load\_json\(args\.dataset\_info\)
+    cache_info = None
+    current_info = None
+    if args.pred_npz and not args.synthetic:
+        cache_info = load_dataset_info_from_npz(args.pred_npz)
+    if args.dataset_info and not args.synthetic:
+        current_info = load_json(args.dataset_info)
 
-    if cache\_info is None or current\_info is None\:
-        cache\_info\, current\_info \= synthetic\_infos\(args\.mismatch\)
+    if cache_info is None or current_info is None:
+        cache_info, current_info = synthetic_infos(args.mismatch)
 
-    reasons \= extra\_checks\(cache\_info\, current\_info\)
-    status \= \"pass\" if not reasons else \"fail\"
+    reasons = extra_checks(cache_info, current_info)
+    status = "pass" if not reasons else "fail"
 
-    out\_dir \= Path\(args\.out\_dir\)
-    out\_dir\.mkdir\(parents\=True\, exist\_ok\=True\)
-    out\_path \= out\_dir \/ \"ex08\_cache\_validator\_extension\.json\"
-    with out\_path\.open\(\"w\"\, encoding\=\"utf\-8\"\) as handle\:
-        json\.dump\(
-            \{
-                \"status\"\: status\,
-                \"reasons\"\: reasons\,
-                \"cache\_info\"\: cache\_info\,
-                \"current\_info\"\: current\_info\,
-            \}\,
-            handle\,
-            indent\=2\,
-        \)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "ex08_cache_validator_extension.json"
+    with out_path.open("w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "status": status,
+                "reasons": reasons,
+                "cache_info": cache_info,
+                "current_info": current_info,
+            },
+            handle,
+            indent=2,
+        )
 
-    print\(f\"status\=\{status\} reasons\=\{reasons\} out\=\{out\_path\}\"\)
-    return 0 if status \=\= \"pass\" else 2
+    print(f"status={status} reasons={reasons} out={out_path}")
+    return 0 if status == "pass" else 2
 
 
-if \_\_name\_\_ \=\= \"\_\_main\_\_\"\:
-    raise SystemExit\(main\(\)\)
-\\end\{filecontents\*\}
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{filecontents*}
 
-\\begin\{filecontents\*\}\{exercises\/ex09\_stability\_gate\_demo\.py\}
-\#\!\/usr\/bin\/env python3
+\begin{filecontents*}{exercises/ex09_stability_gate_demo.py}
+#!/usr/bin/env python3
 import argparse
 import json
 import random
 from pathlib import Path
 
 
-def random\_probs\(classes\)\:
-    values \= \[random\.random\(\) for \_ in range\(classes\)\]
-    total \= sum\(values\)
-    return \[v \/ total for v in values\]
+def random_probs(classes):
+    values = [random.random() for _ in range(classes)]
+    total = sum(values)
+    return [v / total for v in values]
 
 
-def main\(\)\:
-    parser \= argparse\.ArgumentParser\(
-        description\=\"Simulate probabilities and apply a stability gate\.\"
-    \)
-    parser\.add\_argument\(\"\-\-frames\"\, type\=int\, default\=50\)
-    parser\.add\_argument\(\"\-\-classes\"\, type\=int\, default\=3\)
-    parser\.add\_argument\(\"\-\-confidence\"\, type\=float\, default\=0\.7\)
-    parser\.add\_argument\(\"\-\-stability\-frames\"\, type\=int\, default\=3\)
-    parser\.add\_argument\(\"\-\-seed\"\, type\=int\, default\=0\)
-    parser\.add\_argument\(\"\-\-synthetic\"\, action\=\"store\_true\"\, help\=\"Synthetic\-only simulation\.\"\)
-    parser\.add\_argument\(\"\-\-out\-dir\"\, default\=\"exercises\/out\"\)
-    args \= parser\.parse\_args\(\)
+def main():
+    parser = argparse.ArgumentParser(
+        description="Simulate probabilities and apply a stability gate."
+    )
+    parser.add_argument("--frames", type=int, default=50)
+    parser.add_argument("--classes", type=int, default=3)
+    parser.add_argument("--confidence", type=float, default=0.7)
+    parser.add_argument("--stability-frames", type=int, default=3)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--synthetic", action="store_true", help="Synthetic-only simulation.")
+    parser.add_argument("--out-dir", default="exercises/out")
+    args = parser.parse_args()
 
-    random\.seed\(args\.seed\)
-    history \= \[\]
-    allowed \= \[\]
+    random.seed(args.seed)
+    history = []
+    allowed = []
 
-    for frame in range\(args\.frames\)\:
-        probs \= random\_probs\(args\.classes\)
-        top \= max\(range\(args\.classes\)\, key\=lambda i\: probs\[i\]\)
-        conf \= probs\[top\]
-        history\.append\(top\)
-        if len\(history\) \> args\.stability\_frames\:
-            history\.pop\(0\)
-        stability\_ok \= \(
-            len\(history\) \=\= args\.stability\_frames and len\(set\(history\)\) \=\= 1
-        \)
-        allow \= stability\_ok and conf \>\= args\.confidence
-        allowed\.append\(
-            \{\"frame\"\: frame\, \"action\"\: top\, \"confidence\"\: conf\, \"allow\"\: allow\}
-        \)
+    for frame in range(args.frames):
+        probs = random_probs(args.classes)
+        top = max(range(args.classes), key=lambda i: probs[i])
+        conf = probs[top]
+        history.append(top)
+        if len(history) > args.stability_frames:
+            history.pop(0)
+        stability_ok = (
+            len(history) == args.stability_frames and len(set(history)) == 1
+        )
+        allow = stability_ok and conf >= args.confidence
+        allowed.append({"frame": frame, "action": top, "confidence": conf, "allow": allow})
 
-    allow\_count \= sum\(1 for entry in allowed if entry\[\"allow\"\]\)
-    summary \= \{
-        \"frames\"\: args\.frames\,
-        \"allow\_count\"\: allow\_count\,
-        \"confidence\"\: args\.confidence\,
-        \"stability\_frames\"\: args\.stability\_frames\,
-    \}
+    allow_count = sum(1 for entry in allowed if entry["allow"])
+    summary = {
+        "frames": args.frames,
+        "allow_count": allow_count,
+        "confidence": args.confidence,
+        "stability_frames": args.stability_frames,
+    }
 
-    out\_dir \= Path\(args\.out\_dir\)
-    out\_dir\.mkdir\(parents\=True\, exist\_ok\=True\)
-    out\_path \= out\_dir \/ \"ex09\_stability\_gate\_demo\.json\"
-    with out\_path\.open\(\"w\"\, encoding\=\"utf\-8\"\) as handle\:
-        json\.dump\(\{\"summary\"\: summary\, \"events\"\: allowed\}\, handle\, indent\=2\)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "ex09_stability_gate_demo.json"
+    with out_path.open("w", encoding="utf-8") as handle:
+        json.dump({"summary": summary, "events": allowed}, handle, indent=2)
 
-    print\(f\"allow\_count\=\{allow\_count\} out\=\{out\_path\}\"\)
+    print(f"allow_count={allow_count} out={out_path}")
     return 0
 
 
-if \_\_name\_\_ \=\= \"\_\_main\_\_\"\:
-    raise SystemExit\(main\(\)\)
-\\end\{filecontents\*\}
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{filecontents*}
 
-\\begin\{filecontents\*\}\{exercises\/ex10\_lsl\_sanity\_probe\.py\}
-\#\!\/usr\/bin\/env python3
+\begin{filecontents*}{exercises/ex10_lsl_sanity_probe.py}
+#!/usr/bin/env python3
 import argparse
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 
-\@dataclass
-class ProbeStats\:
-    samples\: int \= 0
-    backwards\_soft\: int \= 0
-    backwards\_hard\: int \= 0
-    max\_backwards\_delta\_s\: float \= 0\.0
-    gaps\: int \= 0
-    max\_gap\_s\: float \= 0\.0
-    median\_dt\_s\: Optional\[float\] \= None
+@dataclass
+class ProbeStats:
+    samples: int = 0
+    backwards_soft: int = 0
+    backwards_hard: int = 0
+    max_backwards_delta_s: float = 0.0
+    gaps: int = 0
+    max_gap_s: float = 0.0
+    median_dt_s: Optional[float] = None
 
 
-def median\(values\)\:
-    values \= sorted\(values\)
-    if not values\:
+def median(values):
+    values = sorted(values)
+    if not values:
         return None
-    mid \= len\(values\) \/\/ 2
-    if len\(values\) \% 2 \=\= 1\:
-        return float\(values\[mid\]\)
-    return 0\.5 \* \(float\(values\[mid \- 1\]\) \+ float\(values\[mid\]\)\)
+    mid = len(values) // 2
+    if len(values) % 2 == 1:
+        return float(values[mid])
+    return 0.5 * (float(values[mid - 1]) + float(values[mid]))
 
 
-def main\(\)\:
-    parser \= argparse\.ArgumentParser\(description\=\"Probe an LSL stream for timing issues\.\"\)
-    parser\.add\_argument\(\"\-\-seconds\"\, type\=float\, default\=15\.0\)
-    parser\.add\_argument\(\"\-\-epsilon\-s\"\, type\=float\, default\=0\.010\, help\=\"Soft backwards band\.\"\)
-    parser\.add\_argument\(\"\-\-hard\-backwards\-s\"\, type\=float\, default\=0\.200\, help\=\"Hard backwards threshold\.\"\)
-    parser\.add\_argument\(\"\-\-gap\-threshold\-s\"\, type\=float\, default\=0\.250\, help\=\"Gap threshold\.\"\)
-    parser\.add\_argument\(\"\-\-synthetic\"\, action\=\"store\_true\"\, help\=\"No pylsl required\.\"\)
-    args \= parser\.parse\_args\(\)
+def main():
+    parser = argparse.ArgumentParser(description="Probe an LSL stream for timing issues.")
+    parser.add_argument("--seconds", type=float, default=15.0)
+    parser.add_argument("--epsilon-s", type=float, default=0.010, help="Soft backwards band.")
+    parser.add_argument("--hard-backwards-s", type=float, default=0.200, help="Hard backwards threshold.")
+    parser.add_argument("--gap-threshold-s", type=float, default=0.250, help="Gap threshold.")
+    parser.add_argument("--synthetic", action="store_true", help="No pylsl required.")
+    args = parser.parse_args()
 
-    stats \= ProbeStats\(\)
-    dts \= \[\]
-    prev \= None
+    stats = ProbeStats()
+    dts = []
+    prev = None
 
-    if args\.synthetic\:
-        ts\_series \= \[\]
-        x \= 0\.0
-        for \_ in range\(int\(args\.seconds \* 256\)\)\:
-            x \+\= 1\.0 \/ 256\.0
-            ts\_series\.append\(x\)
-        if len\(ts\_series\) \> 200\:
-            ts\_series\[100\] \= ts\_series\[99\] \- 0\.005  \# soft backwards
-            ts\_series\[160\] \= ts\_series\[159\] \- 0\.6   \# hard backwards
+    if args.synthetic:
+        ts_series = []
+        x = 0.0
+        for _ in range(int(args.seconds * 256)):
+            x += 1.0 / 256.0
+            ts_series.append(x)
+        if len(ts_series) > 200:
+            ts_series[100] = ts_series[99] - 0.005  # soft backwards
+            ts_series[160] = ts_series[159] - 0.6  # hard backwards
 
-        for ts in ts\_series\:
-            if prev is not None\:
-                dt \= ts \- prev
-                dts\.append\(dt\)
-                if dt \> args\.gap\_threshold\_s\:
-                    stats\.gaps \+\= 1
-                    stats\.max\_gap\_s \= max\(stats\.max\_gap\_s\, dt\)
-                if ts \< prev\:
-                    delta \= prev \- ts
-                    stats\.max\_backwards\_delta\_s \= max\(stats\.max\_backwards\_delta\_s\, delta\)
-                    if delta \>\= args\.hard\_backwards\_s\:
-                        stats\.backwards\_hard \+\= 1
-                    elif delta \<\= args\.epsilon\_s\:
-                        stats\.backwards\_soft \+\= 1
-            prev \= ts
-            stats\.samples \+\= 1
-    else\:
-        try\:
-            from pylsl import StreamInlet\, resolve\_streams
-        except Exception as exc\:
-            raise SystemExit\(\"pylsl not available\. Install pylsl or run with \-\-synthetic\.\"\) from exc
+        for ts in ts_series:
+            if prev is not None:
+                dt = ts - prev
+                dts.append(dt)
+                if dt > args.gap_threshold_s:
+                    stats.gaps += 1
+                    stats.max_gap_s = max(stats.max_gap_s, dt)
+                if ts < prev:
+                    delta = prev - ts
+                    stats.max_backwards_delta_s = max(stats.max_backwards_delta_s, delta)
+                    if delta >= args.hard_backwards_s:
+                        stats.backwards_hard += 1
+                    elif delta <= args.epsilon_s:
+                        stats.backwards_soft += 1
+            prev = ts
+            stats.samples += 1
+    else:
+        try:
+            from pylsl import StreamInlet, resolve_streams
+        except Exception as exc:
+            raise SystemExit("pylsl not available. Install pylsl or run with --synthetic.") from exc
 
-        streams \= resolve\_streams\(\)
-        if not streams\:
-            raise SystemExit\(\"No LSL streams found\.\"\)
+        streams = resolve_streams()
+        if not streams:
+            raise SystemExit("No LSL streams found.")
 
-        chosen \= None
-        for s in streams\:
-            name \= \(s\.name\(\) or \"\"\)\.lower\(\)
-            typ \= \(s\.type\(\) or \"\"\)\.lower\(\)
-            if \"eeg\" in name or typ \=\= \"eeg\"\:
-                chosen \= s
+        chosen = None
+        for s in streams:
+            name = (s.name() or "").lower()
+            typ = (s.type() or "").lower()
+            if "eeg" in name or typ == "eeg":
+                chosen = s
                 break
-        if chosen is None\:
-            chosen \= streams\[0\]
+        if chosen is None:
+            chosen = streams[0]
 
-        inlet \= StreamInlet\(chosen\)
+        inlet = StreamInlet(chosen)
 
-        drain\_end \= time\.time\(\) \+ 0\.75
-        while time\.time\(\) \< drain\_end\:
-            inlet\.pull\_sample\(timeout\=0\.0\)
+        drain_end = time.time() + 0.75
+        while time.time() < drain_end:
+            inlet.pull_sample(timeout=0.0)
 
-        end\_time \= time\.time\(\) \+ args\.seconds
-        while time\.time\(\) \< end\_time\:
-            \_sample\, ts \= inlet\.pull\_sample\(timeout\=0\.5\)
-            if ts is None\:
+        end_time = time.time() + args.seconds
+        while time.time() < end_time:
+            _sample, ts = inlet.pull_sample(timeout=0.5)
+            if ts is None:
                 continue
-            if prev is not None\:
-                dt \= ts \- prev
-                dts\.append\(dt\)
-                if dt \> args\.gap\_threshold\_s\:
-                    stats\.gaps \+\= 1
-                    stats\.max\_gap\_s \= max\(stats\.max\_gap\_s\, dt\)
-                if ts \< prev\:
-                    delta \= prev \- ts
-                    stats\.max\_backwards\_delta\_s \= max\(stats\.max\_backwards\_delta\_s\, delta\)
-                    if delta \>\= args\.hard\_backwards\_s\:
-                        stats\.backwards\_hard \+\= 1
-                    elif delta \<\= args\.epsilon\_s\:
-                        stats\.backwards\_soft \+\= 1
-            prev \= ts
-            stats\.samples \+\= 1
+            if prev is not None:
+                dt = ts - prev
+                dts.append(dt)
+                if dt > args.gap_threshold_s:
+                    stats.gaps += 1
+                    stats.max_gap_s = max(stats.max_gap_s, dt)
+                if ts < prev:
+                    delta = prev - ts
+                    stats.max_backwards_delta_s = max(stats.max_backwards_delta_s, delta)
+                    if delta >= args.hard_backwards_s:
+                        stats.backwards_hard += 1
+                    elif delta <= args.epsilon_s:
+                        stats.backwards_soft += 1
+            prev = ts
+            stats.samples += 1
 
-    stats\.median\_dt\_s \= median\(\[dt for dt in dts if dt \> 0\]\)
-    approx\_fs \= \(1\.0 \/ stats\.median\_dt\_s\) if stats\.median\_dt\_s else None
+    stats.median_dt_s = median([dt for dt in dts if dt > 0])
+    approx_fs = (1.0 / stats.median_dt_s) if stats.median_dt_s else None
 
-    print\(\"\-\-\-\- LSL SANITY PROBE \-\-\-\-\"\)
-    print\(f\"samples\=\{stats\.samples\} median\_dt\_s\=\{stats\.median\_dt\_s\} approx\_fs\=\{approx\_fs\}\"\)
-    print\(
-        f\"backwards\_soft\=\{stats\.backwards\_soft\} backwards\_hard\=\{stats\.backwards\_hard\} \"
-        f\"max\_backwards\_delta\_s\=\{stats\.max\_backwards\_delta\_s\}\"
-    \)
-    print\(f\"gaps\=\{stats\.gaps\} max\_gap\_s\=\{stats\.max\_gap\_s\}\"\)
+    print("---- LSL SANITY PROBE ----")
+    print(f"samples={stats.samples} median_dt_s={stats.median_dt_s} approx_fs={approx_fs}")
+    print(
+        f"backwards_soft={stats.backwards_soft} backwards_hard={stats.backwards_hard} "
+        f"max_backwards_delta_s={stats.max_backwards_delta_s}"
+    )
+    print(f"gaps={stats.gaps} max_gap_s={stats.max_gap_s}")
     return 0
 
 
-if \_\_name\_\_ \=\= \"\_\_main\_\_\"\:
-    raise SystemExit\(main\(\)\)
-\\end\{filecontents\*\}
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{filecontents*}
 
-\\begin\{filecontents\*\}\{exercises\/ex11\_backwards\_debounce\_sim\.py\}
-\#\!\/usr\/bin\/env python3
+\begin{filecontents*}{exercises/ex11_backwards_debounce_sim.py}
+#!/usr/bin/env python3
 import argparse
 import random
 import time
 from collections import deque
 
 
-def clamp\_result\(prev\_mono\, raw\, hard\_backwards\_s\)\:
-    if prev\_mono is None\:
-        return raw\, False\, 0\.0\, False
-    if raw \>\= prev\_mono\:
-        return raw\, False\, 0\.0\, False
-    delta \= prev\_mono \- raw
-    hard \= delta \>\= hard\_backwards\_s
-    return prev\_mono\, True\, delta\, hard
+def clamp_result(prev_mono, raw, hard_backwards_s):
+    if prev_mono is None:
+        return raw, False, 0.0, False
+    if raw >= prev_mono:
+        return raw, False, 0.0, False
+    delta = prev_mono - raw
+    hard = delta >= hard_backwards_s
+    return prev_mono, True, delta, hard
 
 
-def should\_break\(backwards\_events\, now\_mono\, \*\, hard\_backwards\, soft\_limit\, window\_s\)\:
-    if hard\_backwards\:
+def should_break(backwards_events, now_mono, *, hard_backwards, soft_limit, window_s):
+    if hard_backwards:
         return True
-    backwards\_events\.append\(now\_mono\)
-    while backwards\_events and \(now\_mono \- backwards\_events\[0\]\) \> window\_s\:
-        backwards\_events\.popleft\(\)
-    return len\(backwards\_events\) \>\= soft\_limit
+    backwards_events.append(now_mono)
+    while backwards_events and (now_mono - backwards_events[0]) > window_s:
+        backwards_events.popleft()
+    return len(backwards_events) >= soft_limit
 
 
-def main\(\)\:
-    parser \= argparse\.ArgumentParser\(description\=\"Simulate debounced backwards policy\.\"\)
-    parser\.add\_argument\(\"\-\-steps\"\, type\=int\, default\=500\)
-    parser\.add\_argument\(\"\-\-fs\"\, type\=float\, default\=256\.0\)
-    parser\.add\_argument\(\"\-\-hard\-backwards\-s\"\, type\=float\, default\=0\.200\)
-    parser\.add\_argument\(\"\-\-soft\-limit\"\, type\=int\, default\=6\)
-    parser\.add\_argument\(\"\-\-window\-s\"\, type\=float\, default\=1\.0\)
-    parser\.add\_argument\(\"\-\-p\-soft\"\, type\=float\, default\=0\.03\)
-    parser\.add\_argument\(\"\-\-p\-hard\"\, type\=float\, default\=0\.002\)
-    parser\.add\_argument\(\"\-\-seed\"\, type\=int\, default\=0\)
-    parser\.add\_argument\(\"\-\-synthetic\"\, action\=\"store\_true\"\)
-    args \= parser\.parse\_args\(\)
+def main():
+    parser = argparse.ArgumentParser(description="Simulate debounced backwards policy.")
+    parser.add_argument("--steps", type=int, default=500)
+    parser.add_argument("--fs", type=float, default=256.0)
+    parser.add_argument("--hard-backwards-s", type=float, default=0.200)
+    parser.add_argument("--soft-limit", type=int, default=6)
+    parser.add_argument("--window-s", type=float, default=1.0)
+    parser.add_argument("--p-soft", type=float, default=0.03)
+    parser.add_argument("--p-hard", type=float, default=0.002)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--synthetic", action="store_true")
+    args = parser.parse_args()
 
-    random\.seed\(args\.seed\)
+    random.seed(args.seed)
 
-    raw \= 0\.0
-    prev\_mono \= None
-    backwards\_events \= deque\(maxlen\=256\)
-    segment \= 0
+    raw = 0.0
+    prev_mono = None
+    backwards_events = deque(maxlen=256)
+    segment = 0
 
-    soft\_count \= 0
-    hard\_count \= 0
-    breaks \= 0
+    soft_count = 0
+    hard_count = 0
+    breaks = 0
 
-    for i in range\(args\.steps\)\:
-        dt \= 1\.0 \/ args\.fs
-        raw \+\= dt
+    for i in range(args.steps):
+        dt = 1.0 / args.fs
+        raw += dt
 
-        r \= random\.random\(\)
-        if r \< args\.p\_hard\:
-            raw \-\= 0\.6
-        elif r \< args\.p\_hard \+ args\.p\_soft\:
-            raw \-\= 0\.005
+        r = random.random()
+        if r < args.p_hard:
+            raw -= 0.6
+        elif r < args.p_hard + args.p_soft:
+            raw -= 0.005
 
-        mono\, clamped\, delta\, hard \= clamp\_result\(prev\_mono\, raw\, args\.hard\_backwards\_s\)
-        if clamped\:
-            if hard\:
-                hard\_count \+\= 1
-            else\:
-                soft\_count \+\= 1
+        mono, clamped, delta, hard = clamp_result(prev_mono, raw, args.hard_backwards_s)
+        if clamped:
+            if hard:
+                hard_count += 1
+            else:
+                soft_count += 1
 
-        now\_mono \= time\.monotonic\(\)
-        do\_break \= should\_break\(
-            backwards\_events\,
-            now\_mono\,
-            hard\_backwards\=hard\,
-            soft\_limit\=args\.soft\_limit\,
-            window\_s\=args\.window\_s\,
-        \)
-        if do\_break\:
-            breaks \+\= 1
-            segment \+\= 1
-            backwards\_events\.clear\(\)
-            prev\_mono \= None
-            print\(f\"\[break\] step\=\{i\} reason\=\{\'hard\' if hard else \'burst\'\} delta\=\{delta\:\.3f\} seg\=\{segment\}\"\)
+        now_mono = time.monotonic()
+        do_break = should_break(
+            backwards_events,
+            now_mono,
+            hard_backwards=hard,
+            soft_limit=args.soft_limit,
+            window_s=args.window_s,
+        )
+        if do_break:
+            breaks += 1
+            segment += 1
+            backwards_events.clear()
+            prev_mono = None
+            print(f"[break] step={i} reason={'hard' if hard else 'burst'} delta={delta:.3f} seg={segment}")
             continue
 
-        prev\_mono \= mono
+        prev_mono = mono
 
-    print\(\"\-\-\-\- DEBOUNCE SUMMARY \-\-\-\-\"\)
-    print\(f\"soft\_clamps\=\{soft\_count\} hard\_clamps\=\{hard\_count\} segment\_breaks\=\{breaks\}\"\)
+    print("---- DEBOUNCE SUMMARY ----")
+    print(f"soft_clamps={soft_count} hard_clamps={hard_count} segment_breaks={breaks}")
     return 0
 
 
-if \_\_name\_\_ \=\= \"\_\_main\_\_\"\:
-    raise SystemExit\(main\(\)\)
-\\end\{filecontents\*\}
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{filecontents*}
 
-\\begin\{filecontents\*\}\{exercises\/ex12\_stream\_selector\_demo\.py\}
-\#\!\/usr\/bin\/env python3
+\begin{filecontents*}{exercises/ex12_stream_selector_demo.py}
+#!/usr/bin/env python3
 import argparse
 
 
-def pick\_candidate\(candidates\, \*\, name\_contains\=None\, type\_equals\=None\, min\_channels\=4\, require\_unique\=True\)\:
-    filtered \= \[\]
-    for c in candidates\:
-        if type\_equals is not None and str\(c\.get\(\"type\"\, \"\"\)\)\.lower\(\) \!\= str\(type\_equals\)\.lower\(\)\:
+def pick_candidate(candidates, *, name_contains=None, type_equals=None, min_channels=4, require_unique=True):
+    filtered = []
+    for c in candidates:
+        if type_equals is not None and str(c.get("type", "")).lower() != str(type_equals).lower():
             continue
-        if name\_contains is not None and str\(name\_contains\)\.lower\(\) not in str\(c\.get\(\"name\"\, \"\"\)\)\.lower\(\)\:
+        if name_contains is not None and str(name_contains).lower() not in str(c.get("name", "")).lower():
             continue
-        if int\(c\.get\(\"channels\"\, 0\)\) \< int\(min\_channels\)\:
+        if int(c.get("channels", 0)) < int(min_channels):
             continue
-        filtered\.append\(c\)
+        filtered.append(c)
 
-    if not filtered\:
-        raise RuntimeError\(f\"No streams match selector\. All candidates\=\{candidates\}\"\)
+    if not filtered:
+        raise RuntimeError(f"No streams match selector. All candidates={candidates}")
 
-    if require\_unique and len\(filtered\) \!\= 1\:
-        raise RuntimeError\(
-            \"Ambiguous stream selection\. Candidates matched selector\:\\n\"
-            \+ \"\\n\"\.join\(\[f\"  \- \{x\}\" for x in filtered\]\)
-            \+ \"\\nFix by providing a stricter selector \(name\_contains or type\_equals\)\.\"
-        \)
-    return filtered\[0\]
+    if require_unique and len(filtered) != 1:
+        raise RuntimeError(
+            "Ambiguous stream selection. Candidates matched selector:\n"
+            + "\n".join([f"  - {x}" for x in filtered])
+            + "\nFix by providing a stricter selector (name_contains or type_equals)."
+        )
+    return filtered[0]
 
 
-def main\(\)\:
-    parser \= argparse\.ArgumentParser\(description\=\"Pure stream selection demo\.\"\)
-    parser\.add\_argument\(\"\-\-synthetic\"\, action\=\"store\_true\"\)
-    \_ \= parser\.parse\_args\(\)
+def main():
+    parser = argparse.ArgumentParser(description="Pure stream selection demo.")
+    parser.add_argument("--synthetic", action="store_true")
+    _ = parser.parse_args()
 
-    candidates \= \[
-        \{\"name\"\: \"MuseS\-EEG\"\, \"type\"\: \"EEG\"\, \"channels\"\: 5\, \"uid\"\: \"AAA\"\}\,
-        \{\"name\"\: \"SimEEG\"\, \"type\"\: \"EEG\"\, \"channels\"\: 8\, \"uid\"\: \"BBB\"\}\,
-        \{\"name\"\: \"MarkerStream\"\, \"type\"\: \"Markers\"\, \"channels\"\: 1\, \"uid\"\: \"CCC\"\}\,
-    \]
+    candidates = [
+        {"name": "MuseS-EEG", "type": "EEG", "channels": 5, "uid": "AAA"},
+        {"name": "SimEEG", "type": "EEG", "channels": 8, "uid": "BBB"},
+        {"name": "MarkerStream", "type": "Markers", "channels": 1, "uid": "CCC"},
+    ]
 
-    print\(\"All candidates\:\"\)
-    for c in candidates\:
-        print\(\" \"\, c\)
+    print("All candidates:")
+    for c in candidates:
+        print(" ", c)
 
-    try\:
-        chosen \= pick\_candidate\(
-            candidates\,
-            type\_equals\=\"EEG\"\,
-            min\_channels\=4\,
-            require\_unique\=True\,
-        \)
-        print\(\"chosen\:\"\, chosen\)
-    except RuntimeError as e\:
-        print\(\"EXPECTED ambiguity error\:\"\)
-        print\(e\)
+    try:
+        chosen = pick_candidate(
+            candidates,
+            type_equals="EEG",
+            min_channels=4,
+            require_unique=True,
+        )
+        print("chosen:", chosen)
+    except RuntimeError as e:
+        print("EXPECTED ambiguity error:")
+        print(e)
 
-    chosen \= pick\_candidate\(
-        candidates\,
-        name\_contains\=\"Muse\"\,
-        type\_equals\=\"EEG\"\,
-        min\_channels\=4\,
-        require\_unique\=True\,
-    \)
-    print\(\"chosen after disambiguation\:\"\, chosen\)
+    chosen = pick_candidate(
+        candidates,
+        name_contains="Muse",
+        type_equals="EEG",
+        min_channels=4,
+        require_unique=True,
+    )
+    print("chosen after disambiguation:", chosen)
     return 0
 
 
-if \_\_name\_\_ \=\= \"\_\_main\_\_\"\:
-    raise SystemExit\(main\(\)\)
-\\end\{filecontents\*\}
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{filecontents*}
 
-\\begin\{filecontents\*\}\{make\_figs\.py\}
-\#\!\/usr\/bin\/env python3
+\begin{filecontents*}{make_figs.py}
+#!/usr/bin/env python3
 import json
 from pathlib import Path
 
+def load_json(path: Path):
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
 
-def load\(path\)\:
-    with open\(path\, \"r\"\, encoding\=\"utf\-8\"\) as f\:
-        return json\.load\(f\)
+def main():
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        raise SystemExit("matplotlib required for figure generation") from e
 
+    repo_root = Path(__file__).resolve().parent
 
-def main\(\)\:
-    try\:
-        import matplotlib\.pyplot as plt
-    except Exception as e\:
-        raise SystemExit\(\"matplotlib required for figure generation\"\) from e
+    # Where LaTeX expects PDFs to live
+    figs_dir = repo_root / "figs"
+    figs_dir.mkdir(parents=True, exist_ok=True)
 
-    root \= Path\(\_\_file\_\_\)\.resolve\(\)\.parent
-    out \= root
-    out\.mkdir\(parents\=True\, exist\_ok\=True\)
+    out_dir = repo_root / "exercises" / "out"
 
-    \# \-\-\- Fig\: timebase effect \(ex04\) \-\-\-
-    p \= Path\(\"exercises\/out\/ex04\_timebase\_break\_and\_measure\.json\"\)
-    if p\.exists\(\)\:
-        d \= load\(p\)
-        labels \= \[\"aligned\_kept\"\, \"offset\_kept\"\, \"aligned\_only\"\, \"offset\_only\"\]
-        vals \= \[d\.get\(k\, 0\) for k in labels\]
-        plt\.figure\(\)
-        plt\.bar\(labels\, vals\)
-        plt\.xticks\(rotation\=20\, ha\=\"right\"\)
-        plt\.ylabel\(\"count\"\)
-        plt\.title\(f\"Timebase misalignment impact \(offset\=\{d\.get\(\'offset\_s\'\)\}\)\"\)
-        plt\.tight\_layout\(\)
-        plt\.savefig\(out \/ \"timebase\_alignment\_effect\.pdf\"\)
-        plt\.close\(\)
+    wrote = []
 
-    \# \-\-\- Fig\: stability gate \(ex09\) \-\-\-
-    p \= Path\(\"exercises\/out\/ex09\_stability\_gate\_demo\.json\"\)
-    if p\.exists\(\)\:
-        d \= load\(p\)
-        events \= d\.get\(\"events\"\, \[\]\)
-        allow \= \[1 if e\.get\(\"allow\"\) else 0 for e in events\]
-        plt\.figure\(\)
-        plt\.plot\(allow\)
-        plt\.ylim\(\-0\.1\, 1\.1\)
-        plt\.xlabel\(\"frame\"\)
-        plt\.ylabel\(\"allow \(0\/1\)\"\)
-        plt\.title\(\"Stability gate allow\/deny over time\"\)
-        plt\.tight\_layout\(\)
-        plt\.savefig\(out \/ \"stability\_gate\_timeline\.pdf\"\)
-        plt\.close\(\)
+    # --- Fig: timebase effect (ex04) ---
+    p = out_dir / "ex04_timebase_break_and_measure.json"
+    if p.exists():
+        d = load_json(p)
+        labels = ["aligned_kept", "offset_kept", "aligned_only", "offset_only"]
+        vals = [float(d.get(k, 0) or 0) for k in labels]
+        plt.figure()
+        plt.bar(labels, vals)
+        plt.xticks(rotation=20, ha="right")
+        plt.ylabel("count")
+        plt.title(f"Timebase misalignment impact (offset={d.get('offset_s')})")
+        plt.tight_layout()
+        out_path = figs_dir / "timebase_alignment_effect.pdf"
+        plt.savefig(out_path)
+        plt.close()
+        wrote.append(out_path)
 
-    print\(\"wrote figures into figs\/\"\)
+    # --- Fig: stability gate (ex09) ---
+    p = out_dir / "ex09_stability_gate_demo.json"
+    if p.exists():
+        d = load_json(p)
+        events = d.get("events", []) or []
+        allow = [1 if (e.get("allow") is True) else 0 for e in events]
+        plt.figure()
+        plt.plot(allow)
+        plt.ylim(-0.1, 1.1)
+        plt.xlabel("frame")
+        plt.ylabel("allow (0/1)")
+        plt.title("Stability gate allow/deny over time")
+        plt.tight_layout()
+        out_path = figs_dir / "stability_gate_timeline.pdf"
+        plt.savefig(out_path)
+        plt.close()
+        wrote.append(out_path)
+
+    if wrote:
+        print("Wrote:")
+        for p in wrote:
+            print(" ", p)
+    else:
+        print("No figures written (missing exercises/out JSON outputs).")
     return 0
 
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{filecontents*}
 
-if \_\_name\_\_ \=\= \"\_\_main\_\_\"\:
-    raise SystemExit\(main\(\)\)
-\\end\{filecontents\*\}
+\maketitle
+\tableofcontents
+\clearpage
 
-\\maketitle
-\\tableofcontents
-\\clearpage
+\chapter*{How to Use This Course}
+\addcontentsline{toc}{chapter}{How to Use This Course}
 
-\\chapter\*\{How to Use This Course\}
-\\addcontentsline\{toc\}\{chapter\}\{How to Use This Course\}
+This is a self-paced, upper-undergraduate to graduate course on end-to-end
+EEG-based finger control. Each coding exercise has a minimal standalone script
+that is emitted when you compile this document. The scripts are written to
+\texttt{\detokenize{exercises/}} via \texttt{\detokenize{filecontents*}} blocks in the LaTeX source.
 
-This is a self\-paced\, upper\-undergraduate to graduate course on end\-to\-end
-EEG\-based finger control\. Each coding exercise has a minimal standalone script
-that is emitted when you compile this document\. The scripts are written to
-\\texttt\{\\detokenize\{exercises\/\}\} via \\texttt\{\\detokenize\{filecontents\*\}\} blocks in the LaTeX source\.
+Compile the document (this writes the scripts):
+\begin{lstlisting}
+pdflatex -interaction=nonstopmode eeg_hand_lessons.tex
+\end{lstlisting}
 
-Compile the document \(this writes the scripts\)\:
-\\begin\{lstlisting\}
-pdflatex \-interaction\=nonstopmode \-\-shell\-escape eeg\_hand\_lessons\.tex
-\\end\{lstlisting\}
+Run the full sanity sweep or a single exercise script:
+\begin{lstlisting}
+python exercises/ex00_run_all_sanity.py
+python exercises/ex03_artifact_probe.py --synthetic
+\end{lstlisting}
 
-Run the full sanity sweep or a single exercise script\:
-\\begin\{lstlisting\}
-python exercises\/ex00\_run\_all\_sanity\.py
-python exercises\/ex03\_artifact\_probe\.py \-\-synthetic
-\\end\{lstlisting\}
+Generate figures from exercise outputs:
+\begin{lstlisting}
+python make_figs.py
+\end{lstlisting}
 
-Generate figures from exercise outputs\:
-\\begin\{lstlisting\}
-python make\_figs\.py
-\\end\{lstlisting\}
+By default, each script writes outputs to \texttt{\detokenize{exercises/out/}} and accepts
+CLI flags to point at real data when you have it.
 
-By default\, each script writes outputs to \\texttt\{\\detokenize\{exercises\/out\/\}\} and accepts
-CLI flags to point at real data when you have it\.
+% =====================================================
+\part{Foundations}
+% =====================================================
 
-\% \=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=
-\\part\{Foundations\}
-\% \=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=
+\chapter{Lesson 1: What Are We Building and Why?}
 
-\\chapter\{Lesson 1\: What Are We Building and Why\?\}
+\section{The Goal}
 
-\\section\{The Goal\}
+The objective of this project is to infer \emph{individual finger movements}
+from non-invasive EEG signals in real time, with sufficient reliability to
+control a physical prosthetic hand.
 
-The objective of this project is to infer \\emph\{individual finger movements\}
-from non\-invasive EEG signals in real time\, with sufficient reliability to
-control a physical prosthetic hand\.
+This is a \textbf{real-time neuroengineering system}, not a static
+classification task. Success requires both:
+\begin{itemize}
+  \item \textbf{signal integrity} (time alignment, label correctness, drift control),
+  \item \textbf{decision integrity} (uncertainty-aware inference, safe actuation).
+\end{itemize}
 
-This is a \\textbf\{real\-time neuroengineering system\}\, not a static
-classification task\. Success requires both\:
-\\begin\{itemize\}
-  \\item \\textbf\{signal integrity\} \(time alignment\, label correctness\, drift control\)\,
-  \\item \\textbf\{decision integrity\} \(uncertainty\-aware inference\, safe actuation\)\.
-\\end\{itemize\}
+\section{System Contract (What Must Always Be True)}
 
-\\section\{System Contract \(What Must Always Be True\)\}
+We define a few invariants that the system must maintain:
+\begin{itemize}
+  \item \textbf{Timebase invariant:} samples and events must be expressed in the same clock domain.
+  \item \textbf{Label invariant:} the extracted windows must overlap the intended event with a defined policy.
+  \item \textbf{Evaluation invariant:} train/test splits and cached predictions must not mix samples across incompatible datasets.
+  \item \textbf{Safety invariant:} actuation is gated by confidence \emph{and} stability over time.
+\end{itemize}
 
-We define a few invariants that the system must maintain\:
-\\begin\{itemize\}
-  \\item \\textbf\{Timebase invariant\:\} samples and events must be expressed in the same clock domain\.
-  \\item \\textbf\{Label invariant\:\} the extracted windows must overlap the intended event with a defined policy\.
-  \\item \\textbf\{Evaluation invariant\:\} train\/test splits and cached predictions must not mix samples across incompatible datasets\.
-  \\item \\textbf\{Safety invariant\:\} actuation is gated by confidence \\emph\{and\} stability over time\.
-\\end\{itemize\}
+\todofig{End-to-end pipeline overview (data acquisition $\rightarrow$ features $\rightarrow$ windows $\rightarrow$ train $\rightarrow$ eval $\rightarrow$ realtime).}{figs/pipeline_overview.pdf}
 
-\\todofig\{End\-to\-end pipeline overview \(data acquisition \$\\rightarrow\$ features \$\\rightarrow\$ windows \$\\rightarrow\$ train \$\\rightarrow\$ eval \$\\rightarrow\$ realtime\)\.\}\{figs\/pipeline\_overview\.pdf\}
+\section{Exercises}
 
-\\section\{Exercises\}
+\exercise{1 (Conceptual)}{
+Why might a model report high accuracy yet be useless for real-time prosthetic control?
+List at least three \emph{concrete} failure mechanisms tied to the system contract above.
+}
 
-\\exercise\{1 \(Conceptual\)\}\{
-Why might a model report high accuracy yet be useless for real\-time prosthetic control\?
-List at least three \\emph\{concrete\} failure mechanisms tied to the system contract above\.
-\}
+% =====================================================
 
-\% \=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=
+\chapter{Lesson 2: Neurophysiology for Engineers}
 
-\\chapter\{Lesson 2\: Neurophysiology for Engineers\}
+\section{Motor Control: What EEG Can Realistically Encode}
 
-\\section\{Motor Control\: What EEG Can Realistically Encode\}
+Voluntary finger movement is primarily initiated in the \textbf{primary motor cortex (M1)}.
+The cortical representation is somatotopic, but fingers overlap.
 
-Voluntary finger movement is primarily initiated in the \\textbf\{primary motor cortex \(M1\)\}\.
-The cortical representation is somatotopic\, but fingers overlap\.
+EEG is limited by volume conduction: each electrode measures a weighted sum of many sources.
+So separability comes from \textbf{temporal structure} (planning $\rightarrow$ execution),
+not purely spatial structure.
 
-EEG is limited by volume conduction\: each electrode measures a weighted sum of many sources\.
-So separability comes from \\textbf\{temporal structure\} \(planning \$\\rightarrow\$ execution\)\,
-not purely spatial structure\.
+\todofig{Somatotopy schematic and electrode montage for Muse-class devices.}{figs/montage_somatotopy.pdf}
 
-\\todofig\{Somatotopy schematic and electrode montage for Muse\-class devices\.\}\{figs\/montage\_somatotopy\.pdf\}
+\section{Motor Rhythms and Movement-Related Signals}
 
-\\section\{Motor Rhythms and Movement\-Related Signals\}
+Two commonly exploited phenomena:
+\begin{itemize}
+\item \textbf{Mu rhythm} (roughly 8--13 Hz): tends to desynchronize around movement planning/execution.
+\item \textbf{Beta rhythm} (roughly 13--30 Hz): also modulates with movement and post-movement rebound.
+\end{itemize}
 
-Two commonly exploited phenomena\:
-\\begin\{itemize\}
-\\item \\textbf\{Mu rhythm\} \(roughly 8\-\-13 Hz\)\: tends to desynchronize around movement planning\/execution\.
-\\item \\textbf\{Beta rhythm\} \(roughly 13\-\-30 Hz\)\: also modulates with movement and post\-movement rebound\.
-\\end\{itemize\}
+In consumer EEG, you rarely get clean cortical rhythms. The system must be robust to contamination.
 
-In consumer EEG\, you rarely get clean cortical rhythms\. The system must be robust to contamination\.
+\section{Exercises}
 
-\\section\{Exercises\}
+\exercise{2 (Conceptual)}{
+Explain why finger classification is more plausible in a \emph{time window around movement onset}
+than at a single instant.
+}
 
-\\exercise\{2 \(Conceptual\)\}\{
-Explain why finger classification is more plausible in a \\emph\{time window around movement onset\}
-than at a single instant\.
-\}
+% =====================================================
+\part{Signals, Time, and Labels}
+% =====================================================
 
-\% \=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=
-\\part\{Signals\, Time\, and Labels\}
-\% \=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=
+\chapter{Lesson 3: EEG Signal Acquisition and Digitization}
 
-\\chapter\{Lesson 3\: EEG Signal Acquisition and Digitization\}
+\section{Sampling}
 
-\\section\{Sampling\}
-
-Let \$x\(t\)\$ be a continuous EEG signal sampled at frequency \$f\_s\$\:
-\\\[
-x\[n\] \= x\\left\(\\frac\{n\}\{f\_s\}\\right\)\.
-$end:math:display$
+Let $x(t)$ be a continuous EEG signal sampled at frequency $f_s$:
+\[
+x[n] = x\left(\frac{n}{f_s}\right).
+\]
 The Nyquist limit is $f_s/2$, but practical issues (noise, drift, artifacts) dominate.
 
 \section{Artifacts That Matter in This Project}
@@ -1238,22 +1240,22 @@ We must map events into the LSL domain (or map samples into the local domain), t
 \section{Stream-Relative Timebase}
 
 Define stream-relative seconds:
-$begin:math:display$
-t\_\{\\mathrm\{stream\}\} \= t\_\{\\mathrm\{LSL\}\} \- t\_\{\\mathrm\{LSL\\\,start\}\}\.
-$end:math:display$
+\[
+t_{\mathrm{stream}} = t_{\mathrm{LSL}} - t_{\mathrm{LSL\,start}}.
+\]
 
 At session start, measure both clocks and compute a constant offset:
-$begin:math:display$
-\\Delta \= t\_\{\\mathrm\{LSL\\\,start\}\} \- t\_\{\\mathrm\{local\\\,start\}\}\.
-$end:math:display$
+\[
+\Delta = t_{\mathrm{LSL\,start}} - t_{\mathrm{local\,start}}.
+\]
 Then any local event timestamp $t_{\mathrm{local}}$ maps to the LSL domain:
-$begin:math:display$
-t\_\{\\mathrm\{event\\\,LSL\}\} \= t\_\{\\mathrm\{local\}\} \+ \\Delta\.
-$end:math:display$
+\[
+t_{\mathrm{event\,LSL}} = t_{\mathrm{local}} + \Delta.
+\]
 And finally to stream-relative seconds:
-$begin:math:display$
-t\_\{\\mathrm\{event\\\,stream\}\} \= t\_\{\\mathrm\{event\\\,LSL\}\} \- t\_\{\\mathrm\{LSL\\\,start\}\}\.
-$end:math:display$
+\[
+t_{\mathrm{event\,stream}} = t_{\mathrm{event\,LSL}} - t_{\mathrm{LSL\,start}}.
+\]
 
 \todofig{Timebase alignment diagram: local clock and LSL clock mapped by an offset.}{figs/timebase_alignment.pdf}
 
@@ -1269,48 +1271,71 @@ For real systems, misalignment is not “noise”—it is \emph{systematic label
 
 \todofig{Timebase misalignment impact generated from Exercise 4 output.}{figs/timebase_alignment_effect.pdf}
 
-\section{Code Excerpts: Debounced Monotonic Clamp and Self-Check}
+\section{Code Excerpts: Monotonic Clamping and Self-Check}
 
-\begin{lstlisting}[language=PythonSafe,caption={Debounced monotonic clamp (soft vs hard backwards)}]
-from dataclasses import dataclass
-from typing import Optional
-
-@dataclass
-class ClampResult:
-    mono_ts: float
-    clamped: bool
-    backwards_delta_s: float
-    is_hard_backwards: bool
-
-def clamp_lsl_timestamp(
-    prev_mono: Optional[float],
-    raw_lsl_ts: float,
-    *,
-    hard_backwards_s: float = 0.200,
-) -> ClampResult:
-    if prev_mono is None:
-        return ClampResult(raw_lsl_ts, False, 0.0, False)
-    if raw_lsl_ts >= prev_mono:
-        return ClampResult(raw_lsl_ts, False, 0.0, False)
-
-    delta = prev_mono - raw_lsl_ts
-    return ClampResult(
-        mono_ts=prev_mono,
-        clamped=True,
-        backwards_delta_s=delta,
-        is_hard_backwards=(delta >= hard_backwards_s),
-    )
+\begin{lstlisting}[language=PythonSafe,caption={Excerpt from \texttt{\detokenize{utils/timebase.py}} L6--L17}]
+def clamp_monotonic_time(
+    prev_s: Optional[float],
+    current_s: Optional[float],
+    epsilon_s: float = 1e-6,
+) -> Tuple[Optional[float], bool]:
+    if current_s is None:
+        return None, False
+    if prev_s is None:
+        return current_s, False
+    if current_s + epsilon_s < prev_s:
+        return prev_s, True
+    return current_s, False
 \end{lstlisting}
 
-Soft backwards jitter is repaired by clamping, but the system does not necessarily start a new segment.
-Instead, segment breaks are \emph{debounced}: a single small backwards event is tolerated, while a large
-(backwards) jump or a burst of many backwards events in a short window triggers a segment break and state reset.
+\begin{lstlisting}[language=PythonSafe,caption={Excerpt from \texttt{\detokenize{utils/timebase_selfcheck.py}} L19--L65}]
+def evaluate_timebase_alignment(
+    recent_sample_times: Sequence[float],
+    event_times: Iterable[float],
+    warn_threshold_s: float = 0.05,
+    error_threshold_s: float = 0.2,
+) -> TimebaseSelfCheck:
+    sample_times = np.asarray(recent_sample_times, dtype=float)
+    event_times_arr = np.asarray(list(event_times), dtype=float)
+    if sample_times.size == 0 or event_times_arr.size == 0:
+        return TimebaseSelfCheck(
+            max_abs_delta_s=None,
+            mean_abs_delta_s=None,
+            warn_threshold_s=warn_threshold_s,
+            error_threshold_s=error_threshold_s,
+            warn=False,
+            error=False,
+        )
 
-\begin{lstlisting}[language=PythonSafe,caption={Excerpt from \texttt{\detokenize{utils/timebase_selfcheck.py}} (illustrative)}]
-def evaluate_timebase_alignment(recent_sample_times, event_times, warn_threshold_s=0.05, error_threshold_s=0.2):
-    # Computes nearest-sample deltas for recent events and flags warn/error.
-    # The exact implementation is repo-specific; the concept is invariant.
-    pass
+    deltas = []
+    for event_time in event_times_arr:
+        nearest = sample_times[np.argmin(np.abs(sample_times - event_time))]
+        deltas.append(float(event_time - nearest))
+    deltas_arr = np.abs(np.asarray(deltas, dtype=float))
+    max_abs = float(np.max(deltas_arr)) if deltas_arr.size else None
+    mean_abs = float(np.mean(deltas_arr)) if deltas_arr.size else None
+    warn = (
+        (max_abs is not None and max_abs >= warn_threshold_s)
+        or (mean_abs is not None and mean_abs >= warn_threshold_s)
+    )
+    error = (
+        (max_abs is not None and max_abs >= error_threshold_s)
+        or (mean_abs is not None and mean_abs >= error_threshold_s)
+        or (
+            max_abs is not None
+            and mean_abs is not None
+            and max_abs >= warn_threshold_s
+            and mean_abs >= warn_threshold_s
+        )
+    )
+    return TimebaseSelfCheck(
+        max_abs_delta_s=max_abs,
+        mean_abs_delta_s=mean_abs,
+        warn_threshold_s=warn_threshold_s,
+        error_threshold_s=error_threshold_s,
+        warn=warn,
+        error=error,
+    )
 \end{lstlisting}
 
 \section{Exercises}
@@ -1354,13 +1379,37 @@ A simple, defensible extraction policy:
 
 \section{Code Excerpt: Gap and Overlap Policy}
 
-\begin{lstlisting}[language=PythonSafe,caption={Excerpt from \texttt{\detokenize{1b_extract_windows.py}} (illustrative)}]
-# gap_flag = int(max_dt > GAP_THRESHOLD_SEC)
-# if gap_flag and not args.allow_gaps:
-#     drop_gap += 1
-#     continue
-#
-# then overlap_s(...) against events, with artifact handling and guard bands.
+\begin{lstlisting}[language=PythonSafe,caption={Excerpt from \texttt{\detokenize{1b_extract_windows.py}} L1018--L1047}]
+        max_dt = (
+            float(np.max(np.diff(times_pad))) if times_pad.size >= 2 else float("inf")
+        )
+        gap_flag = int(max_dt > GAP_THRESHOLD_SEC)
+        if gap_flag and not args.allow_gaps:
+            drop_gap += 1
+            continue
+
+        # Overlaps with events
+        overlapping = []
+        any_artifact_flag = 0
+
+        for e in events:
+            ov = overlap_s(
+                window_start, window_end, float(e["onset_s"]), float(e["end_s"])
+            )
+            if ov <= 0:
+                continue
+
+            ov_frac = ov / float(window_sec)
+
+            if e.get("type") == "artifact" and ov_frac >= ARTIFACT_MIN_OVERLAP_FRAC:
+                any_artifact_flag = 1
+                break
+
+            overlapping.append((ov, ov_frac, e))
+
+        if any_artifact_flag:
+            drop_artifact += 1
+            continue
 \end{lstlisting}
 
 \section{Exercises}
@@ -1385,4 +1434,641 @@ Run: \texttt{\detokenize{python exercises/ex05_guard_band_sweep.py --synthetic}}
 
 \section{Why Windowing Is More Than Preprocessing}
 
-Window extraction is \textbf
+Window extraction is \textbf{dataset design}. It defines what the model is allowed to learn.
+Two common pitfalls:
+\begin{itemize}
+\item \textbf{row-based windows} when sample rate is variable (breaks time meaning),
+\item \textbf{label leakage} from future samples if alignment is wrong.
+\end{itemize}
+
+\section{Time-based Resampling}
+
+If the logging rate drifts, resample onto a fixed time grid and interpolate.
+This preserves fixed-duration windows.
+
+\todofig{Resampling schematic: irregular timestamps $\rightarrow$ uniform grid $\rightarrow$ fixed windows.}{figs/resampling_grid.pdf}
+
+\section{Code Excerpt: Resampling to a Fixed Grid}
+
+\begin{lstlisting}[language=PythonSafe,caption={Excerpt from \texttt{\detokenize{1b_extract_windows.py}} L1150--L1159}]
+        if not is_valid_action_finger(action_id, finger_id):
+            drop_invalid_label += 1
+            continue
+
+        # Resample to fixed window_samples
+        grid = np.linspace(window_start, window_end, window_samples, endpoint=False)
+        segment = np.empty((window_samples, signal.shape[1]), dtype=float)
+        for ch_idx in range(signal.shape[1]):
+            segment[:, ch_idx] = np.interp(grid, times_pad, signal_pad[:, ch_idx])
+\end{lstlisting}
+
+\section{Exercises}
+
+\exercise{6 (Debugging)}{
+Intentionally introduce a gap in timestamps (simulate missing samples).
+Show how interpolation and gap policy prevent invalid windows from entering training.
+
+Run: \texttt{\detokenize{python exercises/ex06_gap_policy_sim.py --synthetic}}
+}
+
+% ============================================================
+
+\chapter{Lesson 7: Model Architecture and Objectives}
+
+\section{Two-Head Prediction: Action + Finger}
+
+We predict:
+\begin{itemize}
+  \item \textbf{action} $\in \{\mathrm{REST},\mathrm{OPEN},\mathrm{CLOSE}\}$,
+  \item \textbf{finger} $\in \{\mathrm{NONE},\mathrm{THUMB},\dots,\mathrm{PINKY}\}$,
+\end{itemize}
+often evaluating finger on non-REST samples only.
+
+\section{Why Temporal Models Help}
+
+If per-window inputs contain sequences (e.g., 64 samples $\times$ 4 channels), the model must learn dynamics.
+A simple structure: temporal conv layers + recurrent layer (or transformer-lite) feeding two classifiers.
+
+\todofig{Architecture diagram: feature extractor backbone with two output heads.}{figs/model_architecture.pdf}
+
+\section{Exercises}
+
+\exercise{7 (Conceptual)}{
+Why can joint training improve finger prediction compared to training finger-only?
+}
+
+% ============================================================
+
+\chapter{Lesson X: PyTorch Methods for Neuroengineering Models}
+
+\section{Tensor Shapes Are the Real Interface}
+In this project, your model interface is a contract on \emph{shape}, \emph{dtype}, and \emph{time meaning}.
+A typical input window is shaped as:
+\[
+\texttt{x} \in \mathbb{R}^{B \times T \times C},
+\]
+where $B$ is batch size, $T$ samples per window, and $C$ channels.
+If you reorder dimensions (e.g., $B \times C \times T$), do it intentionally and document it.
+
+\section{Dataset and DataLoader}
+Use \texttt{\detokenize{torch.utils.data.Dataset}} to define exactly what a “sample” is:
+a window tensor + action label + finger label + metadata (subject, session, timebase version).
+Then DataLoader handles batching, shuffling, and determinism.
+
+\section{Two-Head Loss: Action + Finger}
+Let $f_\theta(x)$ output logits for both heads:
+\[
+(\ell_f, \ell_a) = f_\theta(x)
+\]
+where $\ell_f \in \mathbb{R}^{B\times N_f}$ and $\ell_a \in \mathbb{R}^{B\times N_a}$.
+Use cross-entropy per head and combine:
+\[
+\mathcal{L} = \lambda_a \,\mathrm{CE}(\ell_a, y_a) + \lambda_f \,\mathrm{CE}(\ell_f, y_f).
+\]
+Tune $(\lambda_a,\lambda_f)$ to prevent trivial REST solutions.
+
+\section{Train/Eval Mode Is Not Optional}
+\texttt{\detokenize{model.train()}} enables dropout and batchnorm updates.
+\texttt{\detokenize{model.eval()}} freezes them.
+Incorrect mode usage silently corrupts calibration and uncertainty estimates.
+
+\section{Reproducibility Controls}
+At minimum: seed Python, NumPy, and PyTorch; log versions; log dataset hashes/filters.
+Reproducibility is part of safety: you must be able to explain a behavior regression.
+
+% ============================================================
+
+\chapter{Lesson 8: Evaluation Without Self-Deception}
+
+\section{Why Accuracy Is a Trap}
+
+Accuracy can look good even if:
+\begin{itemize}
+  \item the model always predicts REST,
+  \item the model is miscalibrated (probabilities meaningless),
+  \item cached predictions are mismatched to the current dataset.
+\end{itemize}
+
+\section{Decision-Theoretic View of Actuation}
+You are not maximizing accuracy; you are minimizing expected harm.
+A safe controller triggers only when expected utility is positive:
+\begin{itemize}
+\item confidence high,
+\item uncertainty low,
+\item stability satisfied,
+\item context constraints satisfied (e.g., not in an artifact interval).
+\end{itemize}
+Calibration matters because it links reported probability to real-world correctness.
+
+\section{Reliability Diagrams and ECE}
+A reliability diagram bins predictions by confidence and plots empirical accuracy per bin.
+ECE summarizes the gap between confidence and accuracy across bins.
+If you threshold at 0.8 confidence but your 0.8 bin is only 0.55 accurate, your gate is unsafe.
+
+\section{Calibration: Expected Calibration Error (ECE)}
+
+ECE summarizes whether predicted probabilities match empirical correctness.
+If you gate actuation on confidence, miscalibration is a safety issue.
+
+\todofig{Reliability diagram: confidence bins vs accuracy (ECE).}{figs/reliability_diagram.pdf}
+
+\section{Cache Validation and Dataset Identity}
+
+Cached prediction reuse is only safe if the cache corresponds to the same dataset identity:
+\begin{itemize}
+\item same NPZ identity (hash/size/path policy),
+\item same filters (subject id, max samples),
+\item same test indices (global indices preferred),
+\item spot-check labels against current data.
+\end{itemize}
+
+\section{Code Excerpts: Cache Validation}
+
+\begin{lstlisting}[language=PythonSafe,caption={Excerpt from \texttt{\detokenize{utils/eval_utils.py}} L54--L113}]
+def validate_cached_predictions_with_dataset_info(
+    *,
+    action_probs: np.ndarray,
+    finger_probs: np.ndarray,
+    y_action_test: np.ndarray,
+    y_finger_test: np.ndarray,
+    test_idx: np.ndarray,
+    n_actions: int,
+    n_fingers: int,
+    n_samples_current: int,
+    dataset_info_cache: Optional[Dict[str, Any]],
+    dataset_info_current: Dict[str, Any],
+    y_action_current: np.ndarray,
+    y_finger_current: np.ndarray,
+    spotcheck_k: int = 10,
+    rng_seed: int = 0,
+) -> Tuple[bool, List[str]]:
+    reasons: List[str] = []
+    cache_ok = validate_cached_predictions(
+        action_probs=action_probs,
+        finger_probs=finger_probs,
+        y_action_test=y_action_test,
+        y_finger_test=y_finger_test,
+        test_idx=test_idx,
+        n_actions=n_actions,
+        n_fingers=n_fingers,
+        n_samples=n_samples_current,
+    )
+    if not cache_ok:
+        reasons.append("cache_shape_invalid")
+        return False, reasons
+
+    if dataset_info_cache is None:
+        return False, ["legacy_cache_missing_dataset_info"]
+
+    cache_filters = dataset_info_cache.get("filters", {}) or {}
+    current_filters = dataset_info_current.get("filters", {}) or {}
+
+    cache_subject_id = (
+        ""
+        if cache_filters.get("subject_id") is None
+        else str(cache_filters.get("subject_id"))
+    )
+    current_subject_id = (
+        ""
+        if current_filters.get("subject_id") is None
+        else str(current_filters.get("subject_id"))
+    )
+    if cache_subject_id != current_subject_id:
+        reasons.append("filter_subject_id_mismatch")
+
+    cache_max_samples = cache_filters.get("max_samples")
+    current_max_samples = current_filters.get("max_samples")
+    if cache_max_samples != current_max_samples:
+        reasons.append("filter_max_samples_mismatch")
+
+    if dataset_info_cache.get("experiment_hash") != dataset_info_current.get(
+        "experiment_hash"
+    ):
+        reasons.append("experiment_hash_mismatch")
+\end{lstlisting}
+
+\begin{lstlisting}[language=PythonSafe,caption={Excerpt from \texttt{\detokenize{utils/eval_utils.py}} L139--L150}]
+    if spotcheck_k > 0 and len(test_idx) > 0:
+        rng = np.random.default_rng(rng_seed)
+        sample_count = min(int(spotcheck_k), len(test_idx))
+        positions = rng.choice(len(test_idx), size=sample_count, replace=False)
+        for pos in positions:
+            idx = int(test_idx[pos])
+            if (
+                y_action_test[pos] != y_action_current[idx]
+                or y_finger_test[pos] != y_finger_current[idx]
+            ):
+                reasons.append("spotcheck_label_mismatch")
+                break
+\end{lstlisting}
+
+\begin{lstlisting}[language=PythonSafe,caption={Excerpt from \texttt{\detokenize{3_evaluate_model.py}} L773--L813}]
+    cached = _load_predictions_if_present(pred_npz_path)
+    cache_rejected_reasons: Optional[List[str]] = None
+
+    cached_used = False
+    split_attempts = 0
+    if cached is not None:
+        action_probs = np.asarray(cached["action_probs"])
+        finger_probs = np.asarray(cached["finger_probs"])
+        y_action_test = np.asarray(cached["y_action"])
+        y_finger_test = np.asarray(cached["y_finger"])
+        test_idx = resolve_cached_test_indices(cached)
+        if test_idx is None:
+            cache_rejected_reasons = ["missing_test_indices"]
+            cached = None
+        else:
+            test_idx = np.asarray(test_idx).astype(np.int64)
+
+        if cached is not None:
+            all_idx = np.arange(len(y_action), dtype=np.int64)
+            test_mask = np.zeros(len(y_action), dtype=bool)
+            test_mask[test_idx] = True
+            train_idx = all_idx[~test_mask]
+
+            dataset_info_cache = _parse_dataset_info(cached)
+            cache_ok, reject_reasons = validate_cached_predictions_with_dataset_info(
+                action_probs=action_probs,
+                finger_probs=finger_probs,
+                y_action_test=y_action_test,
+                y_finger_test=y_finger_test,
+                test_idx=test_idx,
+                n_actions=n_actions,
+                n_fingers=n_fingers,
+                n_samples_current=len(y_action),
+                dataset_info_cache=dataset_info_cache,
+                dataset_info_current=dataset_info_current,
+                y_action_current=y_action,
+                y_finger_current=y_finger,
+                spotcheck_k=10,
+                rng_seed=0,
+            )
+
+\end{lstlisting}
+
+\section{Exercises}
+
+\exercise{8 (Coding)}{
+Add one additional validator check that would catch a subtle mismatch.
+Examples:
+\begin{itemize}
+\item verify class label maps match,
+\item verify number of channels and sampling rate match,
+\item verify timebase version matches.
+\end{itemize}
+Implement and explain why it matters.
+
+Run: \texttt{\detokenize{python exercises/ex08_cache_validator_extension.py --synthetic}}
+}
+
+% ============================================================
+\part{Real-Time Systems and Safety}
+% ============================================================
+
+\chapter{Lesson 9: Real-Time Inference and Stability}
+
+\section{Latency vs Accuracy}
+
+Smaller windows and faster step sizes reduce latency but increase variance.
+Stability controls (hysteresis, consecutive-frame agreement) convert noisy per-window outputs into safe decisions.
+
+\todofig{Latency vs accuracy curve with chosen operating point highlighted.}{figs/latency_accuracy_tradeoff.pdf}
+
+\section{Uncertainty (MC Dropout) and Safe Actuation}
+
+Epistemic uncertainty can be estimated by sampling predictions under dropout.
+A safe policy:
+\begin{itemize}
+\item require mean confidence above threshold,
+\item require uncertainty below threshold,
+\item require stability across $k$ windows.
+\end{itemize}
+
+\section{PyTorch Primitives for Realtime Inference}
+PyTorch primitives used in realtime inference:
+\begin{itemize}
+\item \texttt{\detokenize{torch.no_grad()}}
+\item \texttt{\detokenize{model.eval()}} / \texttt{\detokenize{model.train()}}
+\item \texttt{\detokenize{torch.softmax}}
+\item batching
+\item device placement
+\item latency measurement
+\end{itemize}
+
+\todofig{Stability gate allow/deny timeline generated from Exercise 9 output.}{figs/stability_gate_timeline.pdf}
+
+\section{Code Excerpts: MC Dropout and Safety Gating}
+
+\begin{lstlisting}[language=PythonSafe,caption={Excerpt from \texttt{\detokenize{utils/mc_dropout.py}} L6--L32}]
+def mc_dropout_predict(model, x, mc_samples=30):
+    """
+    Monte Carlo Dropout inference
+    """
+
+    model.train()  # IMPORTANT: enable dropout
+
+    finger_probs = []
+    action_probs = []
+
+    with torch.no_grad():
+        for _ in range(mc_samples):
+            f_logits, a_logits = model(x)
+            finger_probs.append(torch.softmax(f_logits, dim=1))
+            action_probs.append(torch.softmax(a_logits, dim=1))
+
+    model.eval()
+
+    finger_probs = torch.stack(finger_probs)
+    action_probs = torch.stack(action_probs)
+
+    return {
+        "finger_mean": finger_probs.mean(0),
+        "finger_std": finger_probs.std(0),
+        "action_mean": action_probs.mean(0),
+        "action_std": action_probs.std(0),
+    }
+\end{lstlisting}
+
+\begin{lstlisting}[language=PythonSafe,caption={Excerpt from \texttt{\detokenize{demo_backend/inference.py}} L221--L258}]
+        adaptive = min(
+            0.99,
+            max(
+                self.config.base_threshold,
+                self.config.base_threshold
+                + self.config.uncertainty_weight * action_uncertainty,
+            ),
+        )
+
+        self._stability.append(action_id)
+        stability_ok = (
+            len(self._stability) == self.config.stability_frames
+            and len(set(self._stability)) == 1
+        )
+
+        velocity = 0.0
+        if action_id != 0:
+            velocity = action_confidence * (1.0 - action_uncertainty)
+
+        prediction = {
+            "action_id": action_id,
+            "action_name": self.action_names.get(action_id, "UNKNOWN"),
+            "finger_id": finger_id,
+            "finger_name": self.finger_names.get(finger_id, "UNKNOWN"),
+            "action_confidence": action_confidence,
+            "action_uncertainty": action_uncertainty,
+            "finger_confidence": finger_confidence,
+            "finger_uncertainty": finger_uncertainty,
+        }
+
+        safety = {
+            "base_threshold": self.config.base_threshold,
+            "adaptive_threshold": adaptive,
+            "allow_actuation": action_confidence >= adaptive and stability_ok,
+            "stability_frames": self.config.stability_frames,
+            "stability_ok": stability_ok,
+            "velocity": velocity,
+        }
+\end{lstlisting}
+
+\section{Exercises}
+
+\exercise{9 (Coding)}{
+Implement a stability gate: an action is emitted only if the top class is unchanged
+for $k$ consecutive windows and mean confidence exceeds $\tau$.
+Tune $(k,\tau)$ for your demo.
+
+Run: \texttt{\detokenize{python exercises/ex09_stability_gate_demo.py --synthetic}}
+}
+
+% ============================================================
+
+\chapter{Lesson 10: System Hardening, Testing, and Ethics}
+
+\section{Hardening Checklist}
+
+\begin{itemize}
+\item reproducible environments and dependency pinning,
+\item lint + format + unit tests,
+\item timebase self-check as a runtime assertion,
+\item cache validation and dataset identity enforcement,
+\item safe-failure defaults (disable actuation on uncertainty).
+\end{itemize}
+
+\section{Ethics}
+
+A prosthetic controller must preserve user agency:
+\begin{itemize}
+\item do not actuate confidently when uncertain,
+\item provide transparent feedback when gated,
+\item log failures for improvement.
+\end{itemize}
+
+\section{Exercises}
+
+\exercise{10 (Reflection)}{
+Write a one-page safety case: list hazards, mitigations, and verification steps for each mitigation.
+}
+
+% ============================================================
+
+\appendix
+
+\chapter{Solutions Manual}
+
+\section{Exercise 1 (Conceptual)}
+\solution{
+\textbf{Explanation:} High accuracy can hide fundamental violations of the system contract.
+\begin{itemize}
+\item \textbf{Label-time misalignment:} labels are placed on the wrong samples due to clock drift/offset.
+\item \textbf{Class imbalance deception:} REST dominates, so always predicting REST looks good but is useless.
+\item \textbf{Evaluation leakage/cache mismatch:} cached predictions from a filtered dataset get reused on a different dataset.
+\end{itemize}
+
+\textbf{Expected output:} A list of at least three concrete failure mechanisms tied to timebase, label overlap, and evaluation integrity.
+
+\textbf{Debugging notes:}
+\begin{itemize}
+\item Confirm timebase alignment with a self-check before training.
+\item Inspect class balance, especially non-REST counts.
+\item Verify cached prediction metadata against the current dataset filters.
+\end{itemize}
+}
+
+\section{Exercise 2 (Conceptual)}
+\solution{
+\textbf{Explanation:} Movement intent has a temporal signature (preparation, execution, release) that is weak at any single instant.
+A window integrates evidence and improves effective signal-to-noise ratio.
+
+\textbf{Expected output:} A short explanation that mentions temporal structure and the benefit of integration over time.
+
+\textbf{Debugging notes:}
+\begin{itemize}
+\item If your answer focuses only on spatial electrodes, revisit motor planning timing.
+\item Tie the argument to real-time windowing instead of static snapshots.
+\end{itemize}
+}
+
+\section{Exercise 3 (Coding)}
+\solution{
+\textbf{Explanation:} RMS energy is a coarse but fast proxy for high-amplitude artifacts.
+
+\textbf{Expected output:}
+\begin{itemize}
+\item Standard output includes \texttt{\detokenize{windows=... flagged=...}} and an output JSON path.
+\item In synthetic mode, at least one cluster of windows should be flagged.
+\item Output file: \texttt{\detokenize{exercises/out/ex03_artifact_probe_intervals.json}}.
+\end{itemize}
+
+\textbf{Debugging notes:}
+\begin{itemize}
+\item If nothing is flagged, lower \texttt{\detokenize{--threshold}} or check \texttt{\detokenize{--fs}} and \texttt{\detokenize{--window-s}}.
+\item If CSV parsing fails, confirm numeric columns and remove headers.
+\end{itemize}
+}
+
+\section{Exercise 4 (Debugging)}
+\solution{
+\textbf{Explanation:} When events are shifted relative to samples, windows fail overlap tests and labels drift toward REST.
+
+\textbf{Expected output:}
+\begin{itemize}
+\item \texttt{\detokenize{aligned_only}} should be greater than zero when the offset is large enough.
+\item Output file: \texttt{\detokenize{exercises/out/ex04_timebase_break_and_measure.json}}.
+\end{itemize}
+
+\textbf{Debugging notes:}
+\begin{itemize}
+\item Ensure the offset is applied to events, not windows.
+\item If counts do not change, increase \texttt{\detokenize{--offset-s}} or \texttt{\detokenize{--min-overlap-frac}}.
+\end{itemize}
+}
+
+\section{Exercise 5 (Coding)}
+\solution{
+\textbf{Explanation:} Larger guard bands reduce ambiguous boundary windows but shrink the dataset.
+
+\textbf{Expected output:}
+\begin{itemize}
+\item A table of guard/min-overlap settings with kept and dropped counts.
+\item Output file: \texttt{\detokenize{exercises/out/ex05_guard_band_sweep.json}}.
+\end{itemize}
+
+\textbf{Debugging notes:}
+\begin{itemize}
+\item If everything drops, guard bands may exceed event length.
+\item If everything keeps, minimum overlap may be too permissive.
+\end{itemize}
+}
+
+\section{Exercise 6 (Debugging)}
+\solution{
+\textbf{Explanation:} Gap detection prevents windows with missing data from contaminating training.
+
+\textbf{Expected output:}
+\begin{itemize}
+\item \texttt{\detokenize{gap_windows}} should be greater than zero when gaps are injected.
+\item Output file: \texttt{\detokenize{exercises/out/ex06_gap_policy_sim.json}}.
+\end{itemize}
+
+\textbf{Debugging notes:}
+\begin{itemize}
+\item Ensure \texttt{\detokenize{--gap-s}} exceeds \texttt{\detokenize{--gap-threshold-s}}.
+\item Increase \texttt{\detokenize{--gap-starts}} or \texttt{\detokenize{--duration-s}} if you do not see gaps.
+\end{itemize}
+}
+
+\section{Exercise 7 (Conceptual)}
+\solution{
+\textbf{Explanation:} Joint action+finger supervision encourages a shared representation that encodes movement vs rest,
+reducing spurious correlations that can dominate finger-only training.
+
+\textbf{Expected output:} A brief explanation covering shared representation, regularization, and non-REST focus.
+
+\textbf{Debugging notes:}
+\begin{itemize}
+\item If the answer ignores action labels, restate the multi-task benefit.
+\item Mention evaluation on non-REST samples for finger accuracy.
+\end{itemize}
+}
+
+\section{Exercise 8 (Coding)}
+\solution{
+\textbf{Explanation:} Adding a check for \texttt{\detokenize{timebase_version}} and \texttt{\detokenize{target_fs}} prevents reuse across incompatible windowing policies.
+
+\textbf{Expected output:}
+\begin{itemize}
+\item Output includes \texttt{\detokenize{status=pass}} in synthetic mode and a JSON summary.
+\item Output file: \texttt{\detokenize{exercises/out/ex08_cache_validator_extension.json}}.
+\end{itemize}
+
+\textbf{Debugging notes:}
+\begin{itemize}
+\item If JSON parsing fails, ensure \texttt{\detokenize{dataset_info}} is present in the npz.
+\item When testing real data, pass \texttt{\detokenize{--dataset-info}} for the current dataset metadata.
+\end{itemize}
+}
+
+\section{Exercise 9 (Coding)}
+\solution{
+\textbf{Explanation:} Stability gates add a discrete-time low-pass filter: only sustained, confident predictions trigger actuation.
+
+\textbf{Expected output:}
+\begin{itemize}
+\item Output includes \texttt{\detokenize{allow_count=...}} and a JSON summary.
+\item Output file: \texttt{\detokenize{exercises/out/ex09_stability_gate_demo.json}}.
+\end{itemize}
+
+\textbf{Debugging notes:}
+\begin{itemize}
+\item If nothing is allowed, lower \texttt{\detokenize{--confidence}} or \texttt{\detokenize{--stability-frames}}.
+\item If too much is allowed, raise the threshold or stability frames.
+\end{itemize}
+}
+
+\section{Exercise 10 (Reflection)}
+\solution{
+\textbf{Explanation:} A safety case links each hazard to a mitigation and a verification artifact.
+
+\textbf{Expected output:} A one-page document that enumerates hazards, mitigations, and verification steps.
+
+\textbf{Debugging notes:}
+\begin{itemize}
+\item Every mitigation should reference a concrete test, log, or checklist item.
+\item Include both false trigger and missed trigger hazards.
+\end{itemize}
+}
+
+\chapter{Figures}
+
+\begin{itemize}
+\item \textbf{Pipeline overview} (\texttt{\detokenize{figs/pipeline_overview.pdf}}): flow diagram from acquisition to real-time actuation.
+\item \textbf{Somatotopy + montage} (\texttt{\detokenize{figs/montage_somatotopy.pdf}}): schematic of finger representation and electrode positions.
+\item \textbf{Raw signal with events} (\texttt{\detokenize{figs/raw_with_events.pdf}}): EEG trace with blink artifact and movement interval overlay.
+\item \textbf{Timebase alignment} (\texttt{\detokenize{figs/timebase_alignment.pdf}}): local clock and LSL clock with offset mapping.
+\item \textbf{Window overlap policy} (\texttt{\detokenize{figs/window_overlap_policy.pdf}}): window, event, overlap fraction, and guard band geometry.
+\item \textbf{Resampling grid} (\texttt{\detokenize{figs/resampling_grid.pdf}}): irregular timestamps mapped to uniform grid.
+\item \textbf{Timebase misalignment impact} (\texttt{\detokenize{figs/timebase_alignment_effect.pdf}}): bar chart aligned vs offset window retention from Exercise 4.
+\item \textbf{Model architecture} (\texttt{\detokenize{figs/model_architecture.pdf}}): shared backbone with action and finger heads.
+\item \textbf{Reliability diagram} (\texttt{\detokenize{figs/reliability_diagram.pdf}}): confidence bins vs accuracy with ECE.
+\item \textbf{Latency vs accuracy} (\texttt{\detokenize{figs/latency_accuracy_tradeoff.pdf}}): tradeoff curve with chosen operating point.
+\item \textbf{Stability gate timeline} (\texttt{\detokenize{figs/stability_gate_timeline.pdf}}): allow/deny trace over frames from Exercise 9.
+\end{itemize}
+
+\chapter{Reference Links}
+
+\begin{itemize}
+\item Lab Streaming Layer docs/repo for clock functions and timing model. \url{https://labstreaminglayer.org/} \url{https://github.com/sccn/labstreaminglayer}
+\item ERD/ERS foundational review for mu/beta movement modulation. \url{https://doi.org/10.1016/S1388-2457(99)00185-5}
+\item Calibration + reliability diagrams (ECE). \url{https://arxiv.org/abs/1706.04599}
+\item MC Dropout uncertainty. \url{https://arxiv.org/abs/1506.02142}
+\item Consumer EEG constraints + sampling rate context (Muse-class). \url{https://doi.org/10.3389/fnins.2017.00109}
+\item PyTorch documentation for model building and training utilities used in the pipeline. \url{https://docs.pytorch.org/docs/stable/index.html}
+\end{itemize}
+
+\chapter*{Final Reflection}
+
+\begin{quote}
+Correctness, discipline, and humility matter more than model complexity.
+\end{quote}
+
+\end{document}
