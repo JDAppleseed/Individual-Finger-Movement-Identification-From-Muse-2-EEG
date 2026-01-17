@@ -1943,6 +1943,63 @@ class MainWindow(QMainWindow):
                 10,
                 is_float=True,
             )
+            self._add_spin(
+                step_id,
+                form,
+                "HARD_STOP_AFTER_UNHEALTHY_S",
+                "Hard stop after unhealthy (s)",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "FAILED_WRITE_WINDOW_S",
+                "Failed write window (s)",
+                defaults,
+                0,
+                30,
+                is_float=True,
+            )
+            self._add_text(
+                step_id,
+                form,
+                "FAILED_DIR",
+                "Failed output dir",
+                defaults,
+            )
+            self._add_text(
+                step_id,
+                form,
+                "REQUIRED_LSL_LABELS",
+                "Required labels (CSV)",
+                defaults,
+            )
+            self._add_checkbox(
+                step_id,
+                form,
+                "REQUIRE_EXACTLY_4_CHANNELS",
+                "Require exactly 4 channels",
+                defaults,
+            )
+            self._add_checkbox(
+                step_id,
+                form,
+                "LIVE_VIZ_ENABLED",
+                "Live viz enabled",
+                defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "LIVE_VIZ_FPS",
+                "Live viz FPS",
+                defaults,
+                1,
+                10,
+            )
             self._add_int_dropdown(
                 step_id,
                 form,
@@ -2736,19 +2793,9 @@ class MainWindow(QMainWindow):
             settings["STREAMER_STREAM_TYPE"] = self.live_stream_type
             settings["LSL_STREAM_NAME"] = self.live_stream_name
             settings["LSL_STREAM_TYPE"] = self.live_stream_type
-            settings["REQUIRED_LSL_LABELS"] = ["TP9", "AF7", "AF8", "TP10"]
-            settings["REQUIRE_EXACTLY_4_CHANNELS"] = True
             settings["LABEL_CHECK_ACKNOWLEDGED"] = self.live_label_acknowledged
             settings["LABEL_CHECK_FOUND_LABELS"] = self.live_label_details.get("labels")
-            settings["LABEL_CHECK_EXPECTED_LABELS"] = ["TP9", "AF7", "AF8", "TP10"]
-            settings["LIVE_VIZ_ENABLED"] = (
-                self.live_viz_checkbox.isChecked() if hasattr(self, "live_viz_checkbox") else False
-            )
-            settings["LIVE_VIZ_FPS"] = (
-                int(self.live_viz_fps_spin.value())
-                if hasattr(self, "live_viz_fps_spin")
-                else 2
-            )
+            settings["LABEL_CHECK_EXPECTED_LABELS"] = settings.get("REQUIRED_LSL_LABELS")
         if (
             step_id in {"step1", "infer"}
             and self.input_source.currentText() == "CSV Offline"
@@ -2874,6 +2921,10 @@ class MainWindow(QMainWindow):
         fields = self.fields.get(step_id, {})
         for key, widget in fields.items():
             defaults[key] = self._widget_value(widget)
+        if "REQUIRED_LSL_LABELS" in defaults:
+            defaults["REQUIRED_LSL_LABELS"] = self._parse_label_field(
+                defaults.get("REQUIRED_LSL_LABELS")
+            )
         if self.input_source.currentText() == "CSV Offline":
             defaults["LSL_STREAM_NAME"] = None
             defaults["LSL_STREAM_TYPE"] = None
@@ -2940,6 +2991,19 @@ class MainWindow(QMainWindow):
             return text
         return None
 
+    def _parse_label_field(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if str(v).strip()]
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned.startswith("[") and cleaned.endswith("]"):
+                cleaned = cleaned[1:-1]
+            parts = [p.strip() for p in cleaned.split(",")]
+            return [p for p in parts if p]
+        return [str(value).strip()]
+
     def _reset_step(self, step_id: str) -> None:
         defaults = self.defaults.get(step_id, {})
         for key, widget in self.fields.get(step_id, {}).items():
@@ -2965,7 +3029,10 @@ class MainWindow(QMainWindow):
     def _stop_process(self) -> None:
         if self.runner.is_running():
             self._append_log("Stopping process...")
-            self.runner.stop()
+            if self.active_step in {"step1", "infer"}:
+                self.runner.stop_hard()
+            else:
+                self.runner.stop()
 
     def _stop_live_hard(self) -> None:
         if self.runner.is_running():
@@ -2987,6 +3054,7 @@ class MainWindow(QMainWindow):
         self.live_label_acknowledged = False
         self.live_label_details = {}
         self._update_live_status("Connecting to Muse 2...")
+        labels, rate, _ = self._current_live_config()
         args = [
             "-m",
             "muse_streaming.cli",
@@ -2995,9 +3063,9 @@ class MainWindow(QMainWindow):
             "--type",
             self.live_stream_type,
             "--rate",
-            "256",
+            str(rate),
             "--labels",
-            "TP9,AF7,AF8,TP10",
+            ",".join(labels),
         ]
         self.streamer_runner.start(sys.executable, args, cwd=str(self.repo_root))
         QTimer.singleShot(1500, self._run_stream_healthcheck)
@@ -3006,12 +3074,13 @@ class MainWindow(QMainWindow):
     def _run_stream_healthcheck(self) -> None:
         if self.hard_stop_locked:
             return
+        labels, _rate, require_exact = self._current_live_config()
         try:
             result = run_healthcheck(
                 name=self.live_stream_name,
                 stype=self.live_stream_type,
-                required_labels=["TP9", "AF7", "AF8", "TP10"],
-                require_exact_channels=True,
+                required_labels=labels,
+                require_exact_channels=require_exact,
             )
         except Exception as exc:
             self._append_log(f"⚠️ Healthcheck failed: {exc}")
@@ -3033,7 +3102,7 @@ class MainWindow(QMainWindow):
 
         if result.reason in {"label_mismatch", "channel_count_mismatch"}:
             message = (
-                "Expected 4 channels with labels TP9, AF7, AF8, TP10.\n"
+                f"Expected labels: {labels} ({'exact' if require_exact else 'min'}).\n"
                 f"Found: channels={result.channel_count}, labels={result.labels}.\n"
                 "Proceeding may cause incorrect labeling."
             )
@@ -3109,6 +3178,13 @@ class MainWindow(QMainWindow):
             if isinstance(btn, QPushButton):
                 btn.setEnabled(stop_enabled)
 
+    def _current_live_config(self) -> tuple[list[str], int, bool]:
+        settings = self._collect_settings("infer")
+        labels = self._parse_label_field(settings.get("REQUIRED_LSL_LABELS"))
+        rate = int(settings.get("SAMPLING_RATE") or 256)
+        require_exact = bool(settings.get("REQUIRE_EXACTLY_4_CHANNELS", True))
+        return labels, rate, require_exact
+
     def _update_live_status(self, text: str) -> None:
         if hasattr(self, "live_status_label") and self.live_status_label is not None:
             self.live_status_label.setText(text)
@@ -3171,7 +3247,7 @@ class MainWindow(QMainWindow):
             label.setText(f"Status: {text}")
 
     def _append_log(self, line: str) -> None:
-        if line.startswith("[viz] "):
+        if line.startswith("VIZ "):
             payload = parse_viz_line(line)
             if payload and self.live_hidden_plot:
                 self.live_hidden_plot.update(payload)

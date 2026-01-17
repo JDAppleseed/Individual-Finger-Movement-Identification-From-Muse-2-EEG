@@ -55,13 +55,13 @@ class ProcessRunner(QObject):
         QTimer.singleShot(timeout_ms, self._kill_if_running)
 
     def stop_hard(
-        self, sigint_timeout_ms: int = 3000, terminate_timeout_ms: int = 2000
+        self, sigint_timeout_ms: int = 1500, terminate_timeout_ms: int = 1500
     ) -> None:
         if not self.is_running():
             return
         pid = int(self._process.processId() or 0)
         sent_sigint = False
-        if pid:
+        if os.name != "nt" and pid:
             try:
                 os.kill(pid, signal.SIGINT)
                 sent_sigint = True
