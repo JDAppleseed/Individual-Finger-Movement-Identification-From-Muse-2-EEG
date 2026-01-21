@@ -49,12 +49,17 @@ Use the new CLI to run the lightweight Muse → LSL → recorder pipeline (suppo
 python -m cli start-streamer --sim
 ```
 
-2) Run a healthcheck:
+2) List available streams:
 ```
-python -m cli healthcheck --sim --check-timebase
+python -m cli list-streams
 ```
 
-3) Record data:
+3) Run a healthcheck:
+```
+python -m cli healthcheck --stream-name Muse2-EEG --sim --check-timebase
+```
+
+4) Record data:
 ```
 python -m cli record --sim --output-dir data/muse_streaming --subject-id 8-M16
 ```
@@ -123,6 +128,22 @@ During training, finger loss is masked when action == REST.
 - `logs/experiments/*.json` experiment logs
 - `logs/calibration/*` calibration traces
 - `reports/subjects/*` HTML + figures
+
+### Processed/Raw Output Resolution (Step 1)
+
+`1_stream_and_record.py` determines `processed_dir` and `raw_dir` in this order:
+1) CLI flags `--processed-dir` / `--raw-dir`
+2) Config JSON keys `processed_dir` / `processed_path` / `output_dir` (processed) and `raw_dir` (raw)
+3) If the config includes `project_name`, `subject_id`, and `session_id`, defaults to:
+   - `Projects/<project>/subjects/<subject>/sessions/<session>/processed`
+   - `Projects/<project>/subjects/<subject>/sessions/<session>/raw`
+4) Final fallback: `data/processed/<subject>/<session_id>` and `data/raw/<subject>/<session_id>`
+
+Example:
+```
+python 1_stream_and_record.py --config Projects/Test1/subjects/Har/config/step1.json
+python 1_stream_and_record.py --config Projects/Test1/subjects/Har/config/step1.json --processed-dir data/processed
+```
 
 ## Timebase & Latency (absolute_v1)
 

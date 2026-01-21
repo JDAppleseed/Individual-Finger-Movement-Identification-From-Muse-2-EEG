@@ -16,6 +16,31 @@
   - Documented the CLI quickstart, timebase invariants, resume semantics, and artifact schemas.
   - Noted legacy output directory overrides via flags/environment.
 
+## 2026-01-20
+
+- muse_streaming/healthcheck.py
+  - Added backward-compatible healthcheck parameters (`stream_name` + legacy `name`) with deprecation warnings.
+  - Updated the standalone healthcheck CLI to expose `--stream-name` as the canonical flag.
+- muse_streaming/cli.py
+  - Added `--stream-name` alias support, auto-detect handling for unnamed healthchecks, and quote-stripping for list-streams output.
+- eeglab_wrapper_ui.py
+  - Switched the streamer launcher to `python -m cli start-streamer` with `--stream-name` and aligned defaults to shared config.
+- scripts/smoke_live_pipeline.py
+  - Updated healthcheck invocation to use `stream_name`.
+- tests/test_muse_streaming_cli_healthcheck.py
+  - Added CLI parsing, healthcheck compatibility, and list-streams formatting coverage.
+- README.md
+  - Documented canonical `list-streams` and `healthcheck --stream-name` usage.
+- 1_stream_and_record.py
+  - Added safe processed/raw directory resolution with resume-aware overrides and deterministic session seeds.
+  - Wrapped the streaming loop with cleanup-on-error and streamer process teardown hooks.
+- utils/output_paths.py, tests/test_output_paths.py
+  - Centralized output directory resolution and added regression coverage for precedence rules.
+- eeglab_wrapper_ui.py
+  - Synced Step 1 output copy to use session_state paths when available.
+- README.md
+  - Documented processed/raw directory resolution rules and examples.
+
 ## 2025-12-29
 
 - utils/report_generator.py:1-292
