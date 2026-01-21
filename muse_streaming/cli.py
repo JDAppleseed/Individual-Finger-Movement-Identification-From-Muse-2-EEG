@@ -149,7 +149,15 @@ def main() -> int:
         if args.command == "healthcheck":
             if args.sim:
                 sim_streamer = _start_sim_streamer(stream, logger)
-                time.sleep(0.2)
+            # Wait for the simulator stream to become available
+            stream_resolved = False
+            start_wait = time.monotonic()
+            while time.monotonic() - start_wait < 5.0:  # 5s timeout
+                if any(s.name() == stream.name for s in resolve_streams(timeout=0.1)):
+                    stream_resolved = True
+                    break
+            if not stream_resolved:
+                raise RuntimeError(f"Simulator stream '{stream.name}' failed to start in time.")
             result = run_healthcheck(
                 stream=stream,
                 require_exact_channels=args.exact,
