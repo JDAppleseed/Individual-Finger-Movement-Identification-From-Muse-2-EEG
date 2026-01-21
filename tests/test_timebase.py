@@ -1,33 +1,82 @@
-from demo_backend.timebase import StreamClock, clamp_monotonic_window
+from __future__ import annotations
+
+import logging
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
+from console_utils import install_console_logging, get_console_tail
+from timebase import TimebaseMapper, TimebaseSnapshot, map_lsl_to_mono_snapshot
 
 
-def test_clamp_monotonic_window():
-    start_s, end_s, clamped = clamp_monotonic_window(
-        prev_end_s=1.0,
-        start_s=0.9,
-        end_s=0.95,
-        eps=1e-6,
-    )
-    assert clamped is True
-    assert end_s >= 1.0
-    assert abs((end_s - start_s) - (0.95 - 0.9)) < 1e-6
+def test_monotonic_mapping() -> None:
+    mapper = TimebaseMapper()
+    now = 100.0
+    prev = None
+    for lsl_raw in [10.0, 10.01, 10.02, 10.03]:
+        now += 0.01
+        continuous, mapped, discontinuity, clamped = mapper.map(lsl_raw, now)
+        assert discontinuity is False
+        assert clamped is False
+        if prev is not None:
+            assert continuous > prev
+        prev = continuous
+        assert continuous >= mapped
 
 
-def test_no_clamp_when_forward():
-    start_s, end_s, clamped = clamp_monotonic_window(
-        prev_end_s=1.0,
-        start_s=1.1,
-        end_s=1.2,
-        eps=1e-6,
-    )
-    assert clamped is False
-    assert start_s == 1.1
-    assert end_s == 1.2
+def test_backward_jump() -> None:
+    mapper = TimebaseMapper()
+    now = 200.0
+    discontinuities = []
+    continuous_values = []
+    for lsl_raw in [10.0, 10.01, 9.50, 9.51]:
+        now += 0.01
+        continuous, _, discontinuity, _ = mapper.map(lsl_raw, now)
+        discontinuities.append(discontinuity)
+        continuous_values.append(continuous)
+    assert discontinuities[2] is True
+    assert all(b > a for a, b in zip(continuous_values, continuous_values[1:]))
 
 
-def test_stream_clock_extrapolation_non_negative():
-    clock = StreamClock()
-    assert clock.estimate_stream_ms_now(perf_s=10.0) is None
-    assert clock.update_from_window_end_s(1.25, perf_s=100.0) == 1250
-    assert clock.estimate_stream_ms_now(perf_s=100.5) == 1750
-    assert clock.estimate_stream_ms_now(perf_s=99.0) == 1250
+def test_forward_jump() -> None:
+    mapper = TimebaseMapper()
+    now = 300.0
+    discontinuities = []
+    for lsl_raw in [10.0, 10.01, 15.0]:
+        now += 0.01
+        _, _, discontinuity, _ = mapper.map(lsl_raw, now)
+        discontinuities.append(discontinuity)
+    assert discontinuities[2] is True
+
+
+def test_console_cap_warning() -> None:
+    logger = install_console_logging(200, ring_chars=5000, level=logging.INFO)
+    for _ in range(100):
+        logger.info("x" * 10)
+    tail = get_console_tail(5000)
+    warning_line = "[console] output capped; further console output suppressed"
+    assert tail.count(warning_line) == 1
+
+
+def test_snapshot_mapping_requires_anchor() -> None:
+    snapshot = TimebaseSnapshot()
+    assert map_lsl_to_mono_snapshot(snapshot, 10.0) is None
+    snapshot.has_anchor = True
+    snapshot.offset = 5.0
+    snapshot.prev_continuous_mono = 20.0
+    snapshot.eps = 1e-6
+    first = map_lsl_to_mono_snapshot(snapshot, 10.0)
+    assert first is not None
+    second = map_lsl_to_mono_snapshot(snapshot, 10.001)
+    assert second is not None
+    assert second >= first
+
+
+if __name__ == "__main__":
+    test_monotonic_mapping()
+    test_backward_jump()
+    test_forward_jump()
+    test_console_cap_warning()
+    test_snapshot_mapping_requires_anchor()
+    print("OK")
