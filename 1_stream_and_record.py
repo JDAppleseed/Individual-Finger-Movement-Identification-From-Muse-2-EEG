@@ -60,7 +60,6 @@ from utils.label_schema import (
     FINGER_NAMES,
     event_type_for,
 )
-from utils.session_timebase import compute_event_lsl_ts
 from utils.lsl_stream_select import (
     LSLStreamSelectError,
     MultipleStreamsMatchedError,
@@ -580,6 +579,31 @@ def _infer_session_id_from_path(path: Path, subject: str):
     return None
 
 
+def _session_has_existing_outputs(session: str, subject: str) -> bool:
+    processed = Path("data/processed")
+    raw = Path("data/raw")
+    patterns = [
+        processed.glob(f"{subject}_{session}_*.csv"),
+        raw.glob(f"{subject}_{session}_*.csv"),
+        processed.glob(f"{subject}_{session}_*.json"),
+    ]
+    return any(any(pat) for pat in patterns)
+
+
+def _unique_session_id(session: str, subject: str) -> str:
+    if not _session_has_existing_outputs(session, subject):
+        return session
+    suffix = 1
+    while True:
+        candidate = f"{session}_{suffix:02d}"
+        if not _session_has_existing_outputs(candidate, subject):
+            print(
+                f"⚠️ Session ID collision for {session}; using {candidate} to avoid overwrite."
+            )
+            return candidate
+        suffix += 1
+
+
 def _resolve_events_path(state_events_path, state_features_path, subject, session):
     if state_events_path:
         return Path(state_events_path)
@@ -791,6 +815,8 @@ if not session_id:
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 if not true_resume and SESSION_ID_OVERRIDE:
     session_id = str(SESSION_ID_OVERRIDE)
+if not true_resume and session_id:
+    session_id = _unique_session_id(session_id, subject_id)
 if experiment_hash is None:
     experiment_hash = generate_experiment_hash(subject_id, experiment_config)
 state.session_id = session_id
@@ -1220,10 +1246,10 @@ if not IMPORT_ONLY:
 # ===== TIMEBASE HELPERS ===
 # =========================
 def _lsl_now():
-    """LSL-domain timestamp for 'now' using local_clock and current clock_offset."""
-    if clock_offset is None:
+    """LSL-domain timestamp for 'now' using pylsl local_clock (already in LSL domain)."""
+    if local_clock is None:
         return None
-    return compute_event_lsl_ts(local_clock(), clock_offset)
+    return float(local_clock())
 
 
 def _time_s_from_lsl(lsl_ts: float):
@@ -3400,9 +3426,9 @@ if not IMPORT_ONLY:
                             if stream_start_lsl_ts is not None
                             else np.nan
                         )
-                        if clock_offset is not None and np.isfinite(prediction_lsl_ts):
+                        if np.isfinite(prediction_lsl_ts):
                             inference_latency_ms = (
-                                local_clock() - (prediction_lsl_ts - clock_offset)
+                                local_clock() - prediction_lsl_ts
                             ) * 1000.0
                         else:
                             inference_latency_ms = np.nan

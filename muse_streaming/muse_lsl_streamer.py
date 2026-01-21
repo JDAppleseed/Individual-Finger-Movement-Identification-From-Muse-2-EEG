@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import logging
 import signal
 import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional
+
+from muse_streaming.config import DEFAULT_LABELS
 
 import numpy as np
 from bitstring import Bits
@@ -37,8 +40,6 @@ MUSE_GATT_ATTR_TP9 = "273e0003-4c4d-454d-96be-f03bac821358"
 MUSE_GATT_ATTR_AF7 = "273e0004-4c4d-454d-96be-f03bac821358"
 MUSE_GATT_ATTR_AF8 = "273e0005-4c4d-454d-96be-f03bac821358"
 MUSE_GATT_ATTR_TP10 = "273e0006-4c4d-454d-96be-f03bac821358"
-
-DEFAULT_LABELS = ["TP9", "AF7", "AF8", "TP10"]
 
 HARD_ERR_S = 0.25
 MAX_FORWARD_SNAP_S = 0.05
@@ -80,6 +81,9 @@ class MuseLslStreamer:
         device_name: Optional[str] = None,
         mac_address: Optional[str] = None,
         log_fn: Optional[Callable[[str], None]] = None,
+        logger: Optional[logging.Logger] = None,
+        simulate: bool = False,
+        max_pending_packets: int = 128,
     ) -> None:
         self.config = StreamConfig(
             name=name,
@@ -90,12 +94,16 @@ class MuseLslStreamer:
         self.device_name = device_name
         self.mac_address = mac_address
         self.log_fn = log_fn or (lambda msg: print(msg, flush=True))
+        self.logger = logger
+        self.simulate = simulate
 
         self._client: Optional[BleakClient] = None
         self._outlet: Optional[StreamOutlet] = None
         self._packet_buffer: Dict[int, Dict[str, np.ndarray]] = {}
         self._stop_requested = asyncio.Event()
         self._last_packet_index: Optional[int] = None
+        self._max_pending_packets = max(16, int(max_pending_packets))
+        self._packets_dropped_overflow = 0
 
         # Normalized label list used everywhere after startup.
         self._labels_clean: List[str] = []
@@ -138,10 +146,15 @@ class MuseLslStreamer:
         self._stop_requested.set()
 
     def _log(self, message: str) -> None:
-        if self.log_fn:
+        if self.logger:
+            self.logger.info(message)
+        elif self.log_fn:
             self.log_fn(message)
 
     async def run(self) -> None:
+        if self.simulate:
+            await self._run_simulated()
+            return
         if not BLEAK_AVAILABLE:
             raise RuntimeError("Bleak is required for Muse 2 BLE streaming.")
         if not LSL_AVAILABLE:
@@ -169,6 +182,36 @@ class MuseLslStreamer:
         self._monitor_task = asyncio.create_task(self._monitor_loop())
         await self._wait_until_stop()
         await self._shutdown()
+
+    async def _run_simulated(self) -> None:
+        if not LSL_AVAILABLE:
+            raise RuntimeError("pylsl is required for simulated streaming.")
+
+        self._normalize_labels()
+        self._outlet = self._build_outlet(self.config)
+        self._log(
+            f"🧪 Simulated LSL outlet started: name={self.config.name}, type={self.config.stype}, "
+            f"ch={len(self.config.labels)}, rate={self.config.rate}"
+        )
+
+        sample_dt = 1.0 / float(self.config.rate)
+        rng = np.random.default_rng(7)
+        last_ts: Optional[float] = None
+
+        try:
+            while not self._stop_requested.is_set():
+                now = float(local_clock()) if local_clock is not None else time.time()
+                if last_ts is None:
+                    last_ts = now
+                ts = [last_ts + (i + 1) * sample_dt for i in range(12)]
+                last_ts = ts[-1]
+                chunk = rng.normal(0, 1, size=(12, len(self.config.labels))).astype(
+                    np.float32
+                )
+                self._outlet.push_chunk(chunk.tolist(), ts)
+                await asyncio.sleep(sample_dt * 12)
+        finally:
+            self._log("ℹ️ Simulated Muse 2 streamer stopped")
 
     async def _wait_until_stop(self) -> None:
         while not self._stop_requested.is_set():
@@ -360,6 +403,16 @@ class MuseLslStreamer:
         if packet_index not in self._packet_first_seen:
             now = float(local_clock()) if local_clock is not None else time.time()
             self._packet_first_seen[packet_index] = now
+
+        if len(self._packet_buffer) > self._max_pending_packets:
+            oldest = sorted(self._packet_buffer.keys())[:1]
+            for idx in oldest:
+                self._packet_buffer.pop(idx, None)
+                self._packet_first_seen.pop(idx, None)
+                self._packets_dropped_overflow += 1
+            self._log(
+                f"⚠️ [streamer] packet buffer overflow; dropped={self._packets_dropped_overflow}"
+            )
 
         # Wait until we have all channels for this packet index.
         if len(slot) < len(self.config.labels):
@@ -555,6 +608,7 @@ class MuseLslStreamer:
             f"packets={self._packets_seen_total} "
             f"partial={self._packets_flushed_partial} "
             f"clamps={self._monotonic_clamps_total} "
+            f"dropped={self._packets_dropped_overflow} "
             f"last_ts={last_ts if last_ts is not None else 'n/a'} "
             f"dt_min_ms={dt_min_ms if dt_min_ms is not None else 'n/a'} "
             f"dt_max_ms={dt_max_ms if dt_max_ms is not None else 'n/a'} "
@@ -563,19 +617,6 @@ class MuseLslStreamer:
         if no_push_for is not None and no_push_for > self._heartbeat_interval_s:
             msg += f" no_push_for={no_push_for:.2f}s"
         self._log(msg)
-
-        # Muse packets contain 12 samples per channel.
-        n = int(samples.shape[0])
-        ordered = []
-        for i in range(n):
-            ordered.append([slot[ch][i] for ch in self.config.labels])
-
-        now = float(local_clock()) if local_clock is not None else time.time()
-        ts = [now - (len(ordered) - 1 - i) / self.config.rate for i in range(len(ordered))]
-        self._outlet.push_chunk(ordered, ts)
-
-        self._packet_buffer.pop(packet_index, None)
-        self._last_packet_index = packet_index
 
     # -----------------------------
     # LSL outlet

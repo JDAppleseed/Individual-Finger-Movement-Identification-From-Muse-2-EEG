@@ -40,6 +40,25 @@ python 4_generate_reports.py
 
 You can also use `run_all.py` to orchestrate the full pipeline.
 
+## Muse Streaming CLI Quickstart
+
+Use the new CLI to run the lightweight Muse → LSL → recorder pipeline (supports simulator mode):
+
+1) Start the LSL streamer (BLE or simulator):
+```
+python -m cli start-streamer --sim
+```
+
+2) Run a healthcheck:
+```
+python -m cli healthcheck --sim --check-timebase
+```
+
+3) Record data:
+```
+python -m cli record --sim --output-dir data/muse_streaming --subject-id 8-M16
+```
+
 ## Live Streaming (Desktop UI)
 
 Launch the desktop UI and use the new live workflow (production path):
@@ -101,7 +120,7 @@ During training, finger loss is masked when action == REST.
 - `logs/calibration/*` calibration traces
 - `reports/subjects/*` HTML + figures
 
-## absolute_v1 timebase
+## Timebase & Latency (absolute_v1)
 
 All sessions use a single LSL-aligned timebase (`absolute_v1`).
 
@@ -117,6 +136,37 @@ Events CSV:
 
 A per-session metadata JSON is written to `data/processed/*_session_meta.json` with:
 `timebase_version`, `stream_start_lsl_ts`, `local_clock_at_start`, `clock_offset`, and output paths.
+
+### Timebase invariants
+
+The pipeline enforces these invariants at runtime (warnings emitted on violation):
+
+- **Single clock domain:** all comparisons and subtraction use LSL timestamps only.
+- **absolute_v1:** `time_s := lsl_ts - stream_start_lsl_ts` for samples, features, and events.
+- **Monotonic samples:** LSL timestamps are clamped on backward jumps.
+- **Gap detection:** large gaps are flagged so windows/features can be skipped safely.
+- **Latency definition:** `latency_ms := (lsl_now - lsl_ts) * 1000` (single LSL domain).
+
+## Resume semantics (streaming CLI)
+
+Resume is allowed **only** when required artifacts exist and are non-empty (features file at minimum).
+If resume is requested but artifacts are missing/empty/corrupt:
+
+- A **new session_id** and **new output paths** are created.
+- Counters are reset.
+- Existing event paths are **not** reused.
+- If any output file already exists for a new session, a new unique session_id is generated.
+
+## Muse streaming artifacts (CLI)
+
+The CLI recorder writes under the output directory:
+
+- `*_raw.csv`: raw samples
+  - `time_s`, `lsl_ts`, `latency_ms`, `TP9`, `AF7`, `AF8`, `TP10`
+- `*_features.csv`: fixed-size window features
+  - `time_s` (window center), `lsl_ts`, `window_start_s`, `window_end_s`, `latency_ms`
+  - `mean_*`, `std_*` per channel
+- `*_events.csv`: session_start/session_end markers
 
 Resume gating:
 - Resume is allowed only if the subject matches and the existing features file has data rows.
