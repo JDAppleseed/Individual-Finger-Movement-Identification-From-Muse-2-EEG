@@ -51,7 +51,7 @@ def _write_csv_header(writer: csv.writer, fields: Iterable[str]) -> None:
     writer.writerow(list(fields))
 
 
-def _open_writer(path: Path) -> csv.writer:
+def _open_writer(path: Path) -> tuple[csv.writer, object]:
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = path.open("a", newline="")
     return csv.writer(handle), handle
