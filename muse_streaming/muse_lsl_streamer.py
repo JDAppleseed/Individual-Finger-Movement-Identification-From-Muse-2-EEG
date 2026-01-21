@@ -405,14 +405,16 @@ class MuseLslStreamer:
             self._packet_first_seen[packet_index] = now
 
         if len(self._packet_buffer) > self._max_pending_packets:
-            oldest = sorted(self._packet_buffer.keys())[:1]
-            for idx in oldest:
-                self._packet_buffer.pop(idx, None)
-                self._packet_first_seen.pop(idx, None)
-                self._packets_dropped_overflow += 1
-            self._log(
-                f"⚠️ [streamer] packet buffer overflow; dropped={self._packets_dropped_overflow}"
-            )
+            if self._packet_arrival_order:
+                idx_to_drop = self._packet_arrival_order.popleft()
+                # Packet might have been flushed already, so check for existence.
+                if idx_to_drop in self._packet_buffer:
+                    self._packet_buffer.pop(idx_to_drop)
+                    self._packet_first_seen.pop(idx_to_drop, None)
+                    self._packets_dropped_overflow += 1
+                    self._log(
+                        f"⚠️ [streamer] packet buffer overflow; dropped packet {idx_to_drop}, total dropped={self._packets_dropped_overflow}"
+                    )
 
         # Wait until we have all channels for this packet index.
         if len(slot) < len(self.config.labels):
