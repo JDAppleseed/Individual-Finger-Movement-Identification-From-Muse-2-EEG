@@ -43,7 +43,7 @@ def main() -> int:
     producer.start()
 
     result = run_healthcheck(
-        name="Muse2-EEG",
+        stream_name="Muse2-EEG",
         stype="EEG",
         required_labels=["TP9", "AF7", "AF8", "TP10"],
         require_exact_channels=True,

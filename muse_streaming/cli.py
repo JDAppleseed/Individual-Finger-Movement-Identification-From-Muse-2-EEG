@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 from muse_streaming.config import (
     DEFAULT_LABELS,
@@ -53,15 +54,57 @@ def _start_sim_streamer(stream: StreamSettings, logger) -> MuseLslStreamer:
     return streamer
 
 
+def _clean_stream_value(value: str) -> str:
+    s = str(value).strip()
+    while len(s) >= 2 and ((s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")):
+        s = s[1:-1].strip()
+    return s
+
+
 def format_stream_info(info) -> str:
+    name = _clean_stream_value(info.name())
+    stype = _clean_stream_value(info.type())
     return (
-        f"{info.name()} | {info.type()} | ch={info.channel_count()} | "
+        f"{name} | {stype} | ch={info.channel_count()} | "
         f"rate={info.nominal_srate()}"
     )
 
 
-def _parse_common_stream_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--name", type=str, default=DEFAULT_STREAM_NAME)
+def _resolve_healthcheck_stream_name(
+    stream_name: Optional[str],
+    stream_type: Optional[str],
+) -> Optional[str]:
+    if stream_name:
+        return stream_name
+    if not LSL_AVAILABLE or resolve_streams is None:
+        raise RuntimeError("pylsl not available")
+    candidates = [
+        info
+        for info in resolve_streams()
+        if (not stream_type or info.type() == stream_type)
+    ]
+    if len(candidates) > 1:
+        names = sorted({_clean_stream_value(info.name()) for info in candidates})
+        hint = f" Candidates: {', '.join(names)}" if names else ""
+        raise RuntimeError(
+            "Multiple LSL streams found. Use --stream-name to disambiguate." + hint
+        )
+    if len(candidates) == 1:
+        return candidates[0].name()
+    return None
+
+
+def _parse_common_stream_args(
+    parser: argparse.ArgumentParser, *, default_name: Optional[str] = DEFAULT_STREAM_NAME
+) -> None:
+    parser.add_argument(
+        "--stream-name",
+        "--name",
+        dest="stream_name",
+        type=str,
+        default=default_name,
+        help="LSL stream name (deprecated alias: --name)",
+    )
     parser.add_argument("--type", type=str, default=DEFAULT_STREAM_TYPE)
     parser.add_argument("--rate", type=float, default=DEFAULT_NOMINAL_SRATE)
     parser.add_argument(
@@ -73,7 +116,7 @@ def _parse_common_stream_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--log-level", type=str, default="INFO")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Muse 2 streaming CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -97,7 +140,7 @@ def parse_args() -> argparse.Namespace:
     record_parser.add_argument("--sim", action="store_true", help="Use simulator")
 
     health_parser = sub.add_parser("healthcheck", help="Validate LSL stream")
-    _parse_common_stream_args(health_parser)
+    _parse_common_stream_args(health_parser, default_name=None)
     health_parser.add_argument("--exact", action="store_true")
     health_parser.add_argument("--check-timebase", action="store_true")
     health_parser.add_argument("--sim", action="store_true", help="Use simulator")
@@ -105,7 +148,7 @@ def parse_args() -> argparse.Namespace:
     list_parser = sub.add_parser("list-streams", help="List available LSL streams")
     list_parser.add_argument("--log-level", type=str, default="INFO")
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> int:
@@ -113,7 +156,7 @@ def main() -> int:
     logger = configure_logging(LoggingSettings(log_level=args.log_level))
 
     if args.command == "list-streams":
-        if not LSL_AVAILABLE:
+        if not LSL_AVAILABLE or resolve_streams is None:
             print("❌ pylsl not available", file=sys.stderr)
             return 2
         streams = resolve_streams()
@@ -121,17 +164,16 @@ def main() -> int:
             print(format_stream_info(info))
         return 0
 
-    stream = StreamSettings(
-        name=args.name,
-        stype=args.type,
-        nominal_srate=args.rate,
-        labels=parse_labels(args.labels),
-    )
-
     sim_streamer = None
 
     try:
         if args.command == "start-streamer":
+            stream = StreamSettings(
+                name=args.stream_name,
+                stype=args.type,
+                nominal_srate=args.rate,
+                labels=parse_labels(args.labels),
+            )
             streamer = MuseLslStreamer(
                 name=stream.name,
                 stype=stream.stype,
@@ -147,17 +189,37 @@ def main() -> int:
             return 0
 
         if args.command == "healthcheck":
+            stream_name = args.stream_name
+            if stream_name is None:
+                if args.sim:
+                    stream_name = DEFAULT_STREAM_NAME
+                else:
+                    try:
+                        stream_name = _resolve_healthcheck_stream_name(stream_name, args.type)
+                    except RuntimeError as exc:
+                        print(f"❌ {exc}", file=sys.stderr)
+                        return 2
+            stream = StreamSettings(
+                name=stream_name,
+                stype=args.type,
+                nominal_srate=args.rate,
+                labels=parse_labels(args.labels),
+            )
             if args.sim:
                 sim_streamer = _start_sim_streamer(stream, logger)
-            # Wait for the simulator stream to become available
-            stream_resolved = False
-            start_wait = time.monotonic()
-            while time.monotonic() - start_wait < 5.0:  # 5s timeout
-                if any(s.name() == stream.name for s in resolve_streams(timeout=0.1)):
-                    stream_resolved = True
-                    break
-            if not stream_resolved:
-                raise RuntimeError(f"Simulator stream '{stream.name}' failed to start in time.")
+                # Wait for the simulator stream to become available
+                if not LSL_AVAILABLE or resolve_streams is None:
+                    raise RuntimeError("pylsl not available")
+                stream_resolved = False
+                start_wait = time.monotonic()
+                while time.monotonic() - start_wait < 5.0:  # 5s timeout
+                    if any(s.name() == stream.name for s in resolve_streams(timeout=0.1)):
+                        stream_resolved = True
+                        break
+                if not stream_resolved:
+                    raise RuntimeError(
+                        f"Simulator stream '{stream.name}' failed to start in time."
+                    )
             result = run_healthcheck(
                 stream=stream,
                 require_exact_channels=args.exact,
@@ -167,6 +229,12 @@ def main() -> int:
             return 0 if result.ok else 2
 
         if args.command == "record":
+            stream = StreamSettings(
+                name=args.stream_name,
+                stype=args.type,
+                nominal_srate=args.rate,
+                labels=parse_labels(args.labels),
+            )
             if args.sim:
                 sim_streamer = _start_sim_streamer(stream, logger)
                 time.sleep(0.2)

@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import json
 import time
+import warnings
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
-from muse_streaming.config import StreamSettings
+from muse_streaming.config import (
+    DEFAULT_LABELS,
+    DEFAULT_NOMINAL_SRATE,
+    DEFAULT_STREAM_NAME,
+    DEFAULT_STREAM_TYPE,
+    StreamSettings,
+)
 from muse_streaming.timebase import check_timebase_invariants
 
 try:
@@ -72,13 +79,72 @@ def _match_labels(found: Iterable[str], required: Iterable[str]) -> bool:
 
 def run_healthcheck(
     *,
-    stream: StreamSettings,
+    stream: Optional[StreamSettings] = None,
+    stream_name: Optional[str] = None,
+    name: Optional[str] = None,
+    stype: Optional[str] = None,
+    required_labels: Optional[Iterable[str]] = None,
+    labels: Optional[Iterable[str]] = None,
+    nominal_srate: Optional[float] = None,
     require_exact_channels: bool = True,
     min_sample_window_s: float = 0.5,
     timeout_s: float = 3.0,
     check_timebase: bool = True,
     nominal_srate_tolerance: float = 1.0,
+    **kwargs,
 ) -> HealthcheckResult:
+    if name is not None:
+        warnings.warn(
+            "`name` is deprecated; use stream_name or stream=StreamSettings(...)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if stream_name is None:
+            stream_name = name
+
+    if "stream_type" in kwargs:
+        if stype is None:
+            stype = kwargs.pop("stream_type")
+        else:
+            kwargs.pop("stream_type")
+    if "type" in kwargs:
+        if stype is None:
+            stype = kwargs.pop("type")
+        else:
+            kwargs.pop("type")
+    if kwargs:
+        unexpected = ", ".join(sorted(kwargs))
+        raise TypeError(f"run_healthcheck() got unexpected keyword argument(s): {unexpected}")
+
+    if stream is not None:
+        legacy_args = (stream_name, name, stype, required_labels, labels, nominal_srate)
+        if any(value is not None for value in legacy_args):
+            raise TypeError(
+                "run_healthcheck() got both stream and legacy stream parameters."
+            )
+    else:
+        if (
+            stream_name is None
+            and name is None
+            and stype is None
+            and required_labels is None
+            and labels is None
+            and nominal_srate is None
+        ):
+            stream = StreamSettings()
+        else:
+            label_source = required_labels if required_labels is not None else labels
+            stream = StreamSettings(
+                name=stream_name,
+                stype=stype or DEFAULT_STREAM_TYPE,
+                nominal_srate=(
+                    float(nominal_srate)
+                    if nominal_srate is not None
+                    else DEFAULT_NOMINAL_SRATE
+                ),
+                labels=list(label_source) if label_source is not None else list(DEFAULT_LABELS),
+            )
+
     if not LSL_AVAILABLE or resolve_streams is None:
         raise RuntimeError("pylsl is required for health checks.")
 
@@ -170,11 +236,11 @@ def run_healthcheck(
 
     ok = samples >= max(1, target_samples)
     timebase_ok = True
-    warnings: List[str] = []
+    timebase_warnings: List[str] = []
     if check_timebase and len(timestamps) >= 2:
         check = check_timebase_invariants(timestamps, max_gap_s=1.0)
         timebase_ok = check.ok
-        warnings = check.warnings
+        timebase_warnings = check.warnings
     return HealthcheckResult(
         ok=ok,
         reason="ok" if ok else "no_samples",
@@ -185,7 +251,7 @@ def run_healthcheck(
         samples_received=samples,
         nominal_srate=nominal_srate,
         timebase_ok=timebase_ok,
-        timebase_warnings=warnings,
+        timebase_warnings=timebase_warnings,
     )
 
 
@@ -193,16 +259,23 @@ def main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description="Muse 2 LSL healthcheck")
-    parser.add_argument("--name", type=str, default="Muse2-EEG")
-    parser.add_argument("--type", type=str, default="EEG")
-    parser.add_argument("--labels", type=str, default="TP9,AF7,AF8,TP10")
+    parser.add_argument(
+        "--stream-name",
+        "--name",
+        dest="stream_name",
+        type=str,
+        default=DEFAULT_STREAM_NAME,
+        help="LSL stream name (deprecated alias: --name)",
+    )
+    parser.add_argument("--type", type=str, default=DEFAULT_STREAM_TYPE)
+    parser.add_argument("--labels", type=str, default=",".join(DEFAULT_LABELS))
     parser.add_argument("--exact", action="store_true", help="Require exact channel count")
     parser.add_argument("--check-timebase", action="store_true", help="Validate timestamps")
     parser.add_argument("--srate-tol", type=float, default=1.0, help="Nominal srate tolerance")
     args = parser.parse_args()
 
     labels = [label.strip() for label in args.labels.split(",") if label.strip()]
-    stream = StreamSettings(name=args.name, stype=args.type, labels=labels)
+    stream = StreamSettings(name=args.stream_name, stype=args.type, labels=labels)
     result = run_healthcheck(
         stream=stream,
         require_exact_channels=args.exact,

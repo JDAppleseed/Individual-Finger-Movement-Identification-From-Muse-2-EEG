@@ -22,6 +22,8 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 import argparse
 import sys
 import threading
+import subprocess
+import queue
 from concurrent.futures import ThreadPoolExecutor
 import time
 import csv
@@ -85,6 +87,7 @@ from utils.stream_runtime import (
     HealthStopState,
     StreamRequirements,
 )
+from utils.output_paths import resolve_output_dir
 from muse_streaming.io_paths import default_processed_dir, default_raw_dir
 
 try:
@@ -161,6 +164,22 @@ LSL_STREAM_TYPE = None
 CSV_OFFLINE_PATH = None
 SESSION_ID_OVERRIDE = None
 
+streamer_proc = None
+
+
+def _stop_streamer_process(proc) -> None:
+    if proc is None or not hasattr(proc, "poll"):
+        return
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    except (OSError, AttributeError) as exc:
+        print(f"⚠️ Failed to stop streamer process: {exc}", file=sys.stderr)
+
 # =========================
 # ===== ICA SAFETY ========
 # =========================
@@ -196,6 +215,19 @@ UNHEALTHY_WARN_S = 2.0
 UNHEALTHY_SOFT_STOP_S = 10.0
 UNHEALTHY_HARD_STOP_S = 20.0
 DEBUG_SAMPLE_DECIMATE = 4
+ACQ_MAX_BUFLEN_S = 60.0
+ACQ_MAX_CHUNKLEN = 1024
+ACQ_PULL_TIMEOUT_S = 0.05
+RAW_QUEUE_MAXSIZE = 20000
+PROCESSING_QUEUE_MAXSIZE = 20000
+RAW_WRITE_BUFFER_BYTES = 1024 * 1024
+RAW_WRITE_BATCH_MAX = 2000
+BACKLOG_SECONDS_THRESHOLD = 2.0
+BACKLOG_GRACE_S = 2.0
+HEALTH_GAP_THRESHOLD_MULT = 1.5
+HEALTH_GAP_MAX_EVENTS = 3
+HEALTH_GAP_WINDOW_S = 2.0
+INTEGRITY_GAP_TOLERANCE_MULT = 1.5
 
 # =========================
 # ===== SUBJECT INFO ======
@@ -277,6 +309,22 @@ class StreamState:
     ica_transform_segment_id: Optional[int] = None
     soft_stop_triggered: bool = False
 
+
+RAW_FLAG_NONFINITE = 1
+
+
+@dataclass(frozen=True)
+class SamplePacket:
+    lsl_ts_raw: float
+    lsl_ts_mono: float
+    local_ts: float
+    sample: List[float]
+    flags: int
+    segment_id: int
+    raw_path: Path
+    clamped: bool
+    segment_break_reason: Optional[str] = None
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
 parser.add_argument(
@@ -295,24 +343,29 @@ parser.add_argument(
 parser.add_argument(
     "--processed-dir",
     type=str,
-    default=str(DEFAULT_PROCESSED_DIR),
+    default=None,
     help="Directory for processed outputs (features/events)",
 )
 parser.add_argument(
     "--raw-dir",
     type=str,
-    default=str(DEFAULT_RAW_DIR),
+    default=None,
     help="Directory for raw EEG outputs",
 )
 
 
-def _load_config(path: str):
+def _load_config_payload(path: str):
     if not path:
         return {}
     try:
         payload = json.loads(Path(path).read_text())
     except Exception:
         return {}
+    return payload
+
+
+def _load_config_settings(path: str):
+    payload = _load_config_payload(path)
     return payload.get("settings", payload)
 
 
@@ -416,20 +469,50 @@ def _evaluate_label_check(
 
 args, _ = parser.parse_known_args()
 defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
-config_settings = _load_config(args.config) if args.config else {}
+config_payload = _load_config_payload(args.config) if args.config else {}
+config_settings = config_payload.get("settings", config_payload)
 _apply_config(config_settings)
 _apply_config_to_args(args, config_settings, defaults)
 
 if args.subject_id:
     SUBJECT_ID_OVERRIDE = args.subject_id
 
-PROCESSED_DIR = Path(args.processed_dir).expanduser()
-RAW_DIR = Path(args.raw_dir).expanduser()
-
 INIT_ONLY = bool(args.init_only)
 
 subject_id = (
     SUBJECT_ID_OVERRIDE or ("unknown" if IMPORT_ONLY else get_subject_id(GENDER, AGE))
+)
+SESSION_ID_SEED = datetime.now().strftime("%Y%m%d_%H%M%S")
+repo_root = Path(__file__).resolve().parent
+session_id_hint = (
+    config_settings.get("SESSION_ID_OVERRIDE")
+    or config_payload.get("session_id")
+    or config_settings.get("session_id")
+)
+session_id_hint = str(session_id_hint) if session_id_hint is not None else None
+PROCESSED_DIR = resolve_output_dir(
+    kind="processed",
+    cli_value=args.processed_dir,
+    config_settings=config_settings,
+    config_payload=config_payload,
+    config_path=Path(args.config).resolve() if args.config else None,
+    repo_root=repo_root,
+    subject_id=subject_id,
+    session_id_hint=session_id_hint,
+    default_base=DEFAULT_PROCESSED_DIR,
+    session_id_seed=SESSION_ID_SEED,
+)
+RAW_DIR = resolve_output_dir(
+    kind="raw",
+    cli_value=args.raw_dir,
+    config_settings=config_settings,
+    config_payload=config_payload,
+    config_path=Path(args.config).resolve() if args.config else None,
+    repo_root=repo_root,
+    subject_id=subject_id,
+    session_id_hint=session_id_hint,
+    default_base=DEFAULT_RAW_DIR,
+    session_id_seed=SESSION_ID_SEED,
 )
 session_id = None
 segment_id = 0
@@ -818,7 +901,7 @@ if true_resume:
     run_start_local_iso = None
 
 else:
-    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_id = SESSION_ID_SEED
     experiment_hash = generate_experiment_hash(subject_id, experiment_config)
     features_path_state = None
     events_path_state = None
@@ -834,7 +917,7 @@ else:
 
 # If no prior session_id, start fresh
 if not session_id:
-    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_id = SESSION_ID_SEED
 if not true_resume and SESSION_ID_OVERRIDE:
     session_id = str(SESSION_ID_OVERRIDE)
 if not true_resume and session_id:
@@ -844,6 +927,25 @@ if experiment_hash is None:
 state.session_id = session_id
 state.segment_id = segment_id
 state.experiment_hash = experiment_hash
+
+if true_resume and state_features_path:
+    resume_processed_dir = Path(state_features_path).expanduser().resolve().parent
+    if resume_processed_dir != PROCESSED_DIR:
+        print(
+            "⚠️ Resume override: using existing processed_dir "
+            f"{resume_processed_dir} (requested {PROCESSED_DIR})"
+        )
+    PROCESSED_DIR = resume_processed_dir
+if true_resume and state_raw_path:
+    resume_raw_dir = Path(state_raw_path).expanduser().resolve().parent
+    if resume_raw_dir != RAW_DIR:
+        print(
+            "⚠️ Resume override: using existing raw_dir "
+            f"{resume_raw_dir} (requested {RAW_DIR})"
+        )
+    RAW_DIR = resume_raw_dir
+PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+RAW_DIR.mkdir(parents=True, exist_ok=True)
 
 FEATURES_ARCHIVE_DIR = PROCESSED_DIR
 RAW_ARCHIVE_DIR = RAW_DIR
@@ -1166,6 +1268,8 @@ if not IMPORT_ONLY:
     print(f"  ICA             : {'ENABLED' if ENABLE_ICA else 'DISABLED'}")
     print("")
     print("Output Paths:")
+    print(f"  Processed Dir   : {PROCESSED_DIR}")
+    print(f"  Raw Dir         : {RAW_DIR}")
     print(f"  Features CSV    : {FEATURES_ARCHIVE_PATH}")
     print(f"  Events CSV      : {EVENTS_ARCHIVE_PATH}")
     print(f"  Predictions CSV : {PREDICTIONS_ARCHIVE_PATH}")
@@ -1303,6 +1407,83 @@ def validate_timestamp_sequence(
         "monotonic_violations": violations,
         "clamp_count": clamp_count,
         "fs_estimate": fs_estimate,
+    }
+
+
+def _raw_header(channel_count: int) -> List[str]:
+    return [
+        "lsl_timestamp_raw",
+        "lsl_timestamp_mono",
+        "local_timestamp",
+        *[f"ch{idx + 1}" for idx in range(channel_count)],
+        "flags",
+    ]
+
+
+def _raw_flags_for_sample(sample: Iterable[float]) -> int:
+    try:
+        if not np.all(np.isfinite(sample)):
+            return RAW_FLAG_NONFINITE
+    except Exception:
+        return RAW_FLAG_NONFINITE
+    return 0
+
+
+def _build_raw_row(
+    lsl_ts_raw: float,
+    lsl_ts_mono: float,
+    local_ts: float,
+    sample: Iterable[float],
+    flags: int,
+) -> List[Any]:
+    return [lsl_ts_raw, lsl_ts_mono, local_ts, *sample, int(flags)]
+
+
+def _gap_tolerance_s(nominal_dt_s: float) -> float:
+    return float(nominal_dt_s) * float(INTEGRITY_GAP_TOLERANCE_MULT)
+
+
+def _estimate_missing_samples(
+    dt_s: float, nominal_dt_s: float, gap_tolerance_s: float
+) -> int:
+    if nominal_dt_s <= 0 or dt_s <= gap_tolerance_s:
+        return 0
+    return max(0, int(round(float(dt_s) / float(nominal_dt_s))) - 1)
+
+
+def analyze_lsl_timestamp_gaps(
+    timestamps: Iterable[float], nominal_fs: float
+) -> Dict[str, Any]:
+    finite_ts = [float(ts) for ts in timestamps if ts is not None and np.isfinite(ts)]
+    if len(finite_ts) < 2 or nominal_fs <= 0:
+        return {
+            "duration_s": 0.0,
+            "expected_samples": 0,
+            "gap_count": 0,
+            "estimated_missing": 0,
+            "max_gap_s": None,
+        }
+    nominal_dt = 1.0 / float(nominal_fs)
+    tolerance = _gap_tolerance_s(nominal_dt)
+    gap_count = 0
+    missing_total = 0
+    max_gap_s = 0.0
+    prev = finite_ts[0]
+    for ts in finite_ts[1:]:
+        dt = float(ts - prev)
+        if dt > tolerance:
+            gap_count += 1
+            missing_total += _estimate_missing_samples(dt, nominal_dt, tolerance)
+            max_gap_s = max(max_gap_s, dt)
+        prev = ts
+    duration_s = float(finite_ts[-1] - finite_ts[0])
+    expected_samples = int(round(float(nominal_fs) * duration_s))
+    return {
+        "duration_s": duration_s,
+        "expected_samples": expected_samples,
+        "gap_count": gap_count,
+        "estimated_missing": missing_total,
+        "max_gap_s": max_gap_s if gap_count else None,
     }
 
 
@@ -1528,6 +1709,66 @@ def _write_debug_timebase_dump(reason: str, now_monotonic: float, decision) -> N
     }
     report_path.write_text(json.dumps(_to_jsonable(payload), indent=2))
 
+
+def _raw_integrity_payload() -> Dict[str, Any]:
+    duration_s = 0.0
+    expected_samples = 0
+    if first_received_lsl_ts is not None and last_received_lsl_ts is not None:
+        duration_s = float(last_received_lsl_ts - first_received_lsl_ts)
+        if duration_s < 0:
+            duration_s = 0.0
+        expected_samples = int(round(float(SAMPLING_RATE) * duration_s))
+    return {
+        "subject_id": subject_id,
+        "session_id": session_id,
+        "segment_id": int(segment_id),
+        "timestamp_utc": utc_now_iso_z(),
+        "nominal_fs": float(SAMPLING_RATE),
+        "duration_s": duration_s,
+        "expected_samples": expected_samples,
+        "samples_received": int(state.samples_seen),
+        "samples_written": int(state.samples_written),
+        "gap_count": int(integrity_gap_count),
+        "estimated_missing": int(integrity_missing_estimate),
+        "max_gap_s": float(integrity_gap_max_s) if integrity_gap_count else None,
+        "nonfinite_count": int(raw_nonfinite_count),
+        "nonfinite_written": int(raw_written_nonfinite_count),
+        "queue_overflow_count": int(
+            raw_queue_overflow_count + processing_queue_overflow_count
+        ),
+        "raw_queue_overflow_count": int(raw_queue_overflow_count),
+        "processing_queue_overflow_count": int(processing_queue_overflow_count),
+        "max_queue_size_observed": int(max_queue_size_observed),
+        "max_raw_queue_size_observed": int(max_raw_queue_size_observed),
+        "max_processing_queue_size_observed": int(max_processing_queue_size_observed),
+        "first_received_lsl_ts": first_received_lsl_ts,
+        "last_received_lsl_ts": last_received_lsl_ts,
+        "first_written_lsl_ts": first_written_lsl_ts,
+        "last_written_lsl_ts": last_written_lsl_ts,
+    }
+
+
+def _write_raw_integrity_report() -> Optional[Path]:
+    report_dir = Path("logs")
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / (
+        f"raw_integrity_{subject_id}_{session_id or 'UNKNOWN'}_seg{segment_id:02d}.json"
+    )
+    payload = _raw_integrity_payload()
+    report_path.write_text(json.dumps(_to_jsonable(payload), indent=2))
+    summary = (
+        f"raw integrity: duration={payload['duration_s']:.2f}s "
+        f"expected≈{payload['expected_samples']} "
+        f"received={payload['samples_received']} "
+        f"written={payload['samples_written']} "
+        f"gaps={payload['gap_count']} "
+        f"missing≈{payload['estimated_missing']} "
+        f"nonfinite={payload['nonfinite_count']} "
+        f"queue_overflows={payload['queue_overflow_count']}"
+    )
+    print(f"ℹ️ {summary} (report={report_path})")
+    return report_path
+
 # =========================
 # ===== EVENT MARKING =====
 # =========================
@@ -1563,8 +1804,26 @@ last_report_samples_written = 0
 timebase_report_initialized = False
 last_live_viz_emit = 0.0
 non_finite_sample_warned = False
-sample_queue: Deque[tuple[float, List[float]]] = deque()
-queue_drop_count = 0
+stats_lock = threading.Lock()
+health_gate_lock = threading.Lock()
+failed_writers_lock = threading.Lock()
+processing_queue: queue.Queue = queue.Queue(maxsize=int(PROCESSING_QUEUE_MAXSIZE))
+raw_queue: queue.Queue = queue.Queue(maxsize=int(RAW_QUEUE_MAXSIZE))
+processing_queue_overflow_count = 0
+raw_queue_overflow_count = 0
+max_processing_queue_size_observed = 0
+max_raw_queue_size_observed = 0
+max_queue_size_observed = 0
+raw_nonfinite_count = 0
+raw_written_count = 0
+raw_written_nonfinite_count = 0
+integrity_gap_count = 0
+integrity_missing_estimate = 0
+integrity_gap_max_s = 0.0
+first_received_lsl_ts: Optional[float] = None
+first_written_lsl_ts: Optional[float] = None
+raw_writer_thread_error: Optional[Exception] = None
+acquisition_thread_error: Optional[Exception] = None
 backwards_events_monotonic: Deque[float] = deque(maxlen=256)
 segment_break_hold_until: Optional[float] = None
 last_health_warning_time = 0.0
@@ -1732,7 +1991,7 @@ def _flush_events_for_segment(now_monotonic: Optional[float] = None) -> None:
                 last_event_index = len(events) - 1
 
 
-def _start_segment(reason: str) -> None:
+def _start_segment(reason: str, *, segment_id_override: Optional[int] = None) -> None:
     global segment_id, events, last_event_index
     global last_written_time_s, last_time_s, total_elapsed_s
     global segment_break_hold_until
@@ -1745,7 +2004,10 @@ def _start_segment(reason: str) -> None:
     last_time_s = -1.0
 
     _close_segment_files()
-    segment_id += 1
+    if segment_id_override is not None:
+        segment_id = int(segment_id_override)
+    else:
+        segment_id += 1
     state.segment_id = segment_id
     _apply_segment_paths(segment_id)
     _reset_segment_state(state)
@@ -2366,7 +2628,11 @@ if not IMPORT_ONLY:
         )
     except (NoStreamFoundError, MultipleStreamsMatchedError, LSLStreamSelectError):
         raise
-    inlet = StreamInlet(eeg_stream, max_buflen=5)
+    inlet = StreamInlet(
+        eeg_stream,
+        max_buflen=int(ACQ_MAX_BUFLEN_S),
+        max_chunklen=int(ACQ_MAX_CHUNKLEN),
+    )
     lsl_stream_signature = stream_signature(eeg_stream)
     info = inlet.info()
     found_labels = extract_channel_labels(info)
@@ -2494,14 +2760,7 @@ def _open_failed_files() -> None:
             "experiment_hash",
             "model_version",
         ],
-        raw_header=[
-            "lsl_timestamp_raw",
-            "lsl_timestamp_mono",
-            "ch1",
-            "ch2",
-            "ch3",
-            "ch4",
-        ],
+        raw_header=_raw_header(CHANNELS),
     )
 
 
@@ -2539,22 +2798,6 @@ def _open_segment_files() -> None:
                     "model_version",
                 ]
             )
-    if SAVE_RAW:
-        RAW_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-        raw_exists = RAW_ARCHIVE_PATH.exists() and RAW_ARCHIVE_PATH.stat().st_size > 0
-        raw_file = open(RAW_ARCHIVE_PATH, "a", newline="")
-        raw_writer = csv.writer(raw_file)
-        if not raw_exists:
-            raw_writer.writerow(
-                [
-                    "lsl_timestamp_raw",
-                    "lsl_timestamp_mono",
-                    "ch1",
-                    "ch2",
-                    "ch3",
-                    "ch4",
-                ]
-            )
 
 
 if not IMPORT_ONLY:
@@ -2562,15 +2805,20 @@ if not IMPORT_ONLY:
     _open_segment_files()
 
 
+backlog_queue_samples = max(1, int(float(BACKLOG_SECONDS_THRESHOLD) * SAMPLING_RATE))
+health_gap_threshold_s = float(HEALTH_GAP_THRESHOLD_MULT) / float(SAMPLING_RATE)
 health_gate = RollingStreamHealthGate(
     expected_fs=float(SAMPLING_RATE),
     health_window_s=float(HEALTH_WINDOW_S),
     stall_s=float(STALL_INPUT_S),
-    min_write_fraction=float(MIN_WRITE_FRACTION),
-    max_queue=int(MAX_QUEUE),
+    max_queue=int(backlog_queue_samples),
+    backlog_grace_s=float(BACKLOG_GRACE_S),
     recovery_s=float(RECOVERY_S),
     backwards_threshold=int(BACKWARDS_LIMIT),
     backwards_window_s=float(BACKWARDS_WINDOW_S),
+    gap_threshold_s=float(health_gap_threshold_s),
+    gap_count_threshold=int(HEALTH_GAP_MAX_EVENTS),
+    gap_window_s=float(HEALTH_GAP_WINDOW_S),
 )
 last_stream_check = time.monotonic()
 
@@ -2673,12 +2921,22 @@ def _write_hard_stop_report_and_exit(
         "write_rate": float(decision.write_rate),
         "queue_size": int(decision.queue_size),
         "backwards_count": int(decision.backwards_count),
+        "raw_queue_overflow_count": int(raw_queue_overflow_count),
+        "processing_queue_overflow_count": int(processing_queue_overflow_count),
+        "max_queue_size_observed": int(max_queue_size_observed),
+        "nonfinite_count": int(raw_nonfinite_count),
+        "integrity_gap_count": int(integrity_gap_count),
+        "integrity_missing_estimate": int(integrity_missing_estimate),
         "last_received_lsl_ts": decision.last_received_lsl_ts,
         "last_written_lsl_ts": decision.last_written_lsl_ts,
         "lsl_stream": lsl_stream_signature,
         "label_check_status": health_state.label_check_status,
         "samples_received": int(state.samples_seen),
         "samples_written": int(state.samples_written),
+        "first_received_lsl_ts": first_received_lsl_ts,
+        "last_received_lsl_ts": last_received_lsl_ts,
+        "first_written_lsl_ts": first_written_lsl_ts,
+        "last_written_lsl_ts": last_written_lsl_ts,
         "windows_processed": int(state.windows_processed),
         "unhealthy_duration_s": float(
             now_monotonic - health_state.unhealthy_since_mono
@@ -2738,12 +2996,22 @@ def _write_soft_stop_report(reason: str, now_monotonic: float, decision) -> None
         "write_rate": float(stream_health_write_rate),
         "queue_size": int(stream_health_queue_size),
         "backwards_count": int(stream_health_backwards_count),
+        "raw_queue_overflow_count": int(raw_queue_overflow_count),
+        "processing_queue_overflow_count": int(processing_queue_overflow_count),
+        "max_queue_size_observed": int(max_queue_size_observed),
+        "nonfinite_count": int(raw_nonfinite_count),
+        "integrity_gap_count": int(integrity_gap_count),
+        "integrity_missing_estimate": int(integrity_missing_estimate),
         "last_received_lsl_ts": stream_health_last_received_lsl_ts,
         "last_written_lsl_ts": stream_health_last_written_lsl_ts,
         "lsl_stream": lsl_stream_signature,
         "label_check_status": health_state.label_check_status,
         "samples_received": int(state.samples_seen),
         "samples_written": int(state.samples_written),
+        "first_received_lsl_ts": first_received_lsl_ts,
+        "last_received_lsl_ts": last_received_lsl_ts,
+        "first_written_lsl_ts": first_written_lsl_ts,
+        "last_written_lsl_ts": last_written_lsl_ts,
         "windows_processed": int(state.windows_processed),
         "unhealthy_duration_s": float(
             now_monotonic - health_state.unhealthy_since_mono
@@ -2782,8 +3050,6 @@ def _route_writers_for_health(now_mono: float, decision) -> None:
     if _label_check_blocked():
         health_state.unhealthy_since_mono = None
         health_state.failed_write_until_mono = None
-        if failed_writers.is_open():
-            failed_writers.close_failed_files()
         return
 
     if not decision.healthy:
@@ -2793,8 +3059,9 @@ def _route_writers_for_health(now_mono: float, decision) -> None:
             health_state.failed_write_until_mono or 0.0,
             now_mono + float(hard_stop_policy.failed_write_window_s),
         )
-        if not failed_writers.is_open():
-            _open_failed_files()
+        with failed_writers_lock:
+            if not failed_writers.is_open():
+                _open_failed_files()
         unhealthy_duration = float(now_mono - health_state.unhealthy_since_mono)
         if (
             unhealthy_duration >= float(UNHEALTHY_SOFT_STOP_S)
@@ -2810,7 +3077,7 @@ def _route_writers_for_health(now_mono: float, decision) -> None:
             and _is_true_input_stall(now_mono)
         ):
             hard_reason = decision.reason or "hard_stop_input_stall"
-            if decision.reason == "stall_no_samples":
+            if decision.reason == "lsl_starvation":
                 hard_reason = "hard_stop_input_stall"
             _write_hard_stop_report_and_exit(hard_reason, now_mono, decision)
         return
@@ -2823,11 +3090,10 @@ def _route_writers_for_health(now_mono: float, decision) -> None:
     ):
         health_state.failed_write_until_mono = None
     if decision.event_allowed and health_state.failed_write_until_mono is None:
-        if failed_writers.is_open():
-            failed_writers.close_failed_files()
+        with failed_writers_lock:
+            if failed_writers.is_open():
+                failed_writers.close_failed_files()
         if SAVE_TO_DISK and (csv_writer is None or predictions_writer is None):
-            _open_segment_files()
-        if SAVE_RAW and raw_writer is None:
             _open_segment_files()
 
 
@@ -2881,8 +3147,9 @@ def _update_stream_health(now_monotonic: float) -> None:
 
     prev_active = data_stream_active
     prev_event_allowed = event_marking_allowed
-    decision = health_gate.evaluate(now_monotonic)
-    if decision.reason == "stall_no_samples" and not _is_true_input_stall(now_monotonic):
+    with health_gate_lock:
+        decision = health_gate.evaluate(now_monotonic)
+    if decision.reason == "lsl_starvation" and not _is_true_input_stall(now_monotonic):
         decision.reason = "backpressure_processing"
     health_state.has_health_decision = True
     health_state.last_health_reason = decision.reason
@@ -3018,26 +3285,242 @@ def _extract_time_window(
         window[:, ch_idx] = np.interp(grid, times, values[:, ch_idx])
     return window, gap_fraction, gap_flag, max_gap
 
-# =========================
-# ===== MAIN LOOP =========
-# =========================
-if not IMPORT_ONLY:
-    print("▶ Streaming — type 'end_stream' OR press q/ESC to stop")
+
+def _update_queue_metrics() -> None:
+    global max_processing_queue_size_observed, max_raw_queue_size_observed
+    global max_queue_size_observed
+    processing_size = processing_queue.qsize()
+    raw_size = raw_queue.qsize()
+    max_processing_queue_size_observed = max(
+        max_processing_queue_size_observed, processing_size
+    )
+    max_raw_queue_size_observed = max(max_raw_queue_size_observed, raw_size)
+    max_queue_size_observed = max(max_queue_size_observed, processing_size, raw_size)
+    with health_gate_lock:
+        health_gate.set_queue_size(max(processing_size, raw_size))
+
+
+def _enqueue_with_overflow(
+    target_queue: queue.Queue, item: SamplePacket, *, label: str
+) -> None:
+    global processing_queue_overflow_count, raw_queue_overflow_count
+    global last_health_warning_time
+    now_mono = time.monotonic()
+    try:
+        target_queue.put_nowait(item)
+    except queue.Full:
+        try:
+            target_queue.get_nowait()
+        except queue.Empty:
+            pass
+        if label == "raw":
+            raw_queue_overflow_count += 1
+        else:
+            processing_queue_overflow_count += 1
+        if (now_mono - last_health_warning_time) >= 2.0:
+            print(f"⚠️ {label} queue overflow; dropping oldest sample.")
+            last_health_warning_time = now_mono
+        with health_gate_lock:
+            health_gate.mark_backlog_overflow(now_mono)
+        try:
+            target_queue.put_nowait(item)
+        except queue.Full:
+            if label == "raw":
+                raw_queue_overflow_count += 1
+            else:
+                processing_queue_overflow_count += 1
+    _update_queue_metrics()
+
+
+def _should_route_raw_to_failed(now_mono: float) -> bool:
+    if _label_check_blocked():
+        return True
+    if (
+        health_state.failed_write_until_mono is not None
+        and now_mono <= health_state.failed_write_until_mono
+    ):
+        return True
+    decision = last_health_decision
+    if decision is None or not health_state.has_health_decision:
+        return False
+    return not decision.healthy
+
+
+def _open_raw_csv(path: Path) -> tuple:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists() and path.stat().st_size > 0
+    file_obj = open(path, "a", newline="", buffering=int(RAW_WRITE_BUFFER_BYTES))
+    writer = csv.writer(file_obj)
+    if not exists:
+        writer.writerow(_raw_header(CHANNELS))
+    return file_obj, writer
+
+
+def _write_raw_batch(
+    target_kind: str,
+    target_path: Optional[Path],
+    rows: List[List[Any]],
+    flags: List[int],
+    lsl_ts_mono: List[float],
+    clean_path: Optional[Path],
+    clean_file,
+    clean_writer,
+) -> tuple[Optional[Path], Optional[Any], Optional[Any]]:
+    global raw_written_count, raw_written_nonfinite_count
+    global last_written_lsl_ts, first_written_lsl_ts, data_stream_last_write_ts
+    global last_sample_written_time
+    if not rows:
+        return clean_path, clean_file, clean_writer
+    writer = None
+    if target_kind == "failed":
+        with failed_writers_lock:
+            if failed_writers.raw_writer is None:
+                _open_failed_files()
+            writer = failed_writers.raw_writer
+    else:
+        if target_path is None:
+            return clean_path, clean_file, clean_writer
+        if clean_path != target_path:
+            if clean_file:
+                try:
+                    clean_file.flush()
+                    clean_file.close()
+                except Exception:
+                    pass
+            clean_path = target_path
+            clean_file, clean_writer = _open_raw_csv(clean_path)
+        writer = clean_writer
+    if writer is None:
+        return clean_path, clean_file, clean_writer
+    write_mono = time.monotonic()
+    writer.writerows(rows)
+    data_stream_last_write_ts = utc_now_iso_z()
+    last_sample_written_time = write_mono
+    with stats_lock:
+        raw_written_count += len(rows)
+        state.samples_written = int(raw_written_count)
+        raw_written_nonfinite_count += int(
+            sum(1 for flag in flags if flag & RAW_FLAG_NONFINITE)
+        )
+    for lsl_ts_mono_value in lsl_ts_mono:
+        last_written_lsl_ts = float(lsl_ts_mono_value)
+        with health_gate_lock:
+            health_gate.record_written(float(lsl_ts_mono_value), write_mono)
+    if first_written_lsl_ts is None and lsl_ts_mono:
+        first_written_lsl_ts = float(lsl_ts_mono[0])
+    return clean_path, clean_file, clean_writer
+
+
+def _raw_writer_worker() -> None:
+    global raw_written_count, raw_written_nonfinite_count, raw_writer_thread_error
+    global last_written_lsl_ts, first_written_lsl_ts, data_stream_last_write_ts
+    global last_sample_written_time
+    clean_path: Optional[Path] = None
+    clean_file = None
+    clean_writer = None
+    batch_rows: List[List[Any]] = []
+    batch_flags: List[int] = []
+    batch_lsl_ts_mono: List[float] = []
+    batch_target_kind: Optional[str] = None
+    batch_target_path: Optional[Path] = None
+    try:
+        while not stop_event.is_set() or not raw_queue.empty():
+            try:
+                packet = raw_queue.get(timeout=0.1)
+            except queue.Empty:
+                packet = None
+            _update_queue_metrics()
+            if packet is None:
+                if stop_event.is_set():
+                    break
+                continue
+            now_mono = time.monotonic()
+            route_failed = _should_route_raw_to_failed(now_mono)
+            target_kind = "failed" if route_failed else "clean"
+            target_path = None if route_failed else packet.raw_path
+            if batch_target_kind is None:
+                batch_target_kind = target_kind
+                batch_target_path = target_path
+            if (
+                target_kind != batch_target_kind
+                or target_path != batch_target_path
+                or len(batch_rows) >= int(RAW_WRITE_BATCH_MAX)
+            ):
+                clean_path, clean_file, clean_writer = _write_raw_batch(
+                    batch_target_kind,
+                    batch_target_path,
+                    batch_rows,
+                    batch_flags,
+                    batch_lsl_ts_mono,
+                    clean_path,
+                    clean_file,
+                    clean_writer,
+                )
+                batch_rows = []
+                batch_flags = []
+                batch_lsl_ts_mono = []
+                batch_target_kind = target_kind
+                batch_target_path = target_path
+            batch_rows.append(
+                _build_raw_row(
+                    packet.lsl_ts_raw,
+                    packet.lsl_ts_mono,
+                    packet.local_ts,
+                    packet.sample,
+                    packet.flags,
+                )
+            )
+            batch_flags.append(int(packet.flags))
+            batch_lsl_ts_mono.append(float(packet.lsl_ts_mono))
+    except Exception as exc:
+        raw_writer_thread_error = exc
+        stop_event.set()
+    finally:
+        clean_path, clean_file, clean_writer = _write_raw_batch(
+            batch_target_kind,
+            batch_target_path,
+            batch_rows,
+            batch_flags,
+            batch_lsl_ts_mono,
+            clean_path,
+            clean_file,
+            clean_writer,
+        )
+        if clean_file:
+            try:
+                clean_file.flush()
+                clean_file.close()
+            except Exception:
+                pass
+
+
+def _acquisition_worker(inlet: StreamInlet) -> None:
+    global non_finite_sample_warned, raw_nonfinite_count, acquisition_thread_error
+    global last_lsl_pull_monotonic_time, last_any_sample_received_time
+    global last_any_sample_received_lsl_ts, last_received_lsl_ts, first_received_lsl_ts
+    global total_backward_timestamp_count, time_s_clamped_count, clamped_samples_total
+    global max_backwards_jump_s, last_clamp_localtime, last_clamp_lsl_ts
+    global integrity_gap_count, integrity_missing_estimate, integrity_gap_max_s
+    global data_stream_active, data_stream_stalled_reason
+
+    acq_segment_id = int(segment_id)
+    last_mono: Optional[float] = None
+    integrity_prev_ts: Optional[float] = None
+    nominal_dt = 1.0 / float(SAMPLING_RATE)
+    gap_tolerance = _gap_tolerance_s(nominal_dt)
 
     try:
         while not stop_event.is_set():
-            now_monotonic = time.monotonic()
-            if now_monotonic - last_stream_check >= DATA_STREAM_CHECK_INTERVAL_S:
-                _update_stream_health(now_monotonic)
-                last_stream_check = now_monotonic
-
-            # Drain incoming samples into a bounded queue.
-            while True:
-                last_lsl_pull_monotonic_time = time.monotonic()
-                sample, lsl_ts = inlet.pull_sample(timeout=0.0)
-                if sample is None:
+            last_lsl_pull_monotonic_time = time.monotonic()
+            samples, timestamps = inlet.pull_chunk(
+                timeout=float(ACQ_PULL_TIMEOUT_S),
+                max_samples=int(ACQ_MAX_CHUNKLEN),
+            )
+            if not timestamps:
+                continue
+            for sample, lsl_ts in zip(samples, timestamps):
+                if stop_event.is_set():
                     break
-
                 try:
                     sample = _apply_channel_indices(sample, channel_indices, CHANNELS)
                 except ValueError as exc:
@@ -3046,627 +3529,731 @@ if not IMPORT_ONLY:
                     _write_session_state(label="stream_error:channel_indices")
                     print(f"⚠️ {exc}")
                     stop_event.set()
-                    sample_queue.clear()
                     break
+                lsl_ts_raw = float(lsl_ts)
+                clamped = False
+                if last_mono is not None and lsl_ts_raw <= last_mono:
+                    backwards_delta = float(last_mono - lsl_ts_raw)
+                    clamped = True
+                    lsl_ts_mono = float(last_mono + LSL_MONO_EPS_S)
+                    total_backward_timestamp_count += 1
+                    time_s_clamped_count += 1
+                    clamped_samples_total += 1
+                    max_backwards_jump_s = max(max_backwards_jump_s, backwards_delta)
+                    last_clamp_localtime = time.time()
+                    last_clamp_lsl_ts = lsl_ts_mono
+                else:
+                    lsl_ts_mono = lsl_ts_raw
+                segment_break_reason = None
+                if last_mono is not None:
+                    dt_mono = float(lsl_ts_mono - last_mono)
+                    if dt_mono > GAP_BREAK_S:
+                        acq_segment_id += 1
+                        segment_break_reason = "gap"
+                last_mono = lsl_ts_mono
 
-                if not np.all(np.isfinite(sample)):
+                flags = _raw_flags_for_sample(sample)
+                if flags & RAW_FLAG_NONFINITE:
+                    raw_nonfinite_count += 1
                     if not non_finite_sample_warned:
                         print(
-                            "⚠️ Non-finite EEG sample detected (NaN/Inf). Skipping sample to keep ICA stable."
+                            "⚠️ Non-finite EEG sample detected (NaN/Inf). Logging with flag."
                         )
                         non_finite_sample_warned = True
-                    continue
 
-                state.samples_seen += 1
-                last_received_lsl_ts = float(lsl_ts)
                 sample_monotonic = time.monotonic()
                 last_any_sample_received_time = sample_monotonic
-                last_any_sample_received_lsl_ts = float(lsl_ts)
-                health_ts = float(lsl_ts)
-                if last_received_lsl_ts_for_health is not None:
-                    if health_ts <= last_received_lsl_ts_for_health:
-                        health_ts = last_received_lsl_ts_for_health + LSL_MONO_EPS_S
-                last_received_lsl_ts_for_health = health_ts
-                health_gate.record_received(health_ts, sample_monotonic)
-                if len(sample_queue) >= MAX_QUEUE:
-                    queue_drop_count += 1
-                    health_gate.set_queue_size(len(sample_queue) + 1)
-                    if (sample_monotonic - last_health_warning_time) >= 2.0:
-                        print("⚠️ Sample queue overflow; dropping samples.")
-                        last_health_warning_time = sample_monotonic
-                    continue
+                last_any_sample_received_lsl_ts = float(lsl_ts_raw)
+                last_received_lsl_ts = float(lsl_ts_raw)
+                if first_received_lsl_ts is None:
+                    first_received_lsl_ts = float(lsl_ts_raw)
 
-                sample_queue.append((float(lsl_ts), sample))
-                health_gate.set_queue_size(len(sample_queue))
+                if integrity_prev_ts is not None:
+                    dt_integrity = float(lsl_ts_raw - integrity_prev_ts)
+                    if dt_integrity > gap_tolerance:
+                        integrity_gap_count += 1
+                        integrity_missing_estimate += _estimate_missing_samples(
+                            dt_integrity, nominal_dt, gap_tolerance
+                        )
+                        integrity_gap_max_s = max(integrity_gap_max_s, dt_integrity)
+                integrity_prev_ts = float(lsl_ts_raw)
 
-            if not sample_queue:
+                with stats_lock:
+                    state.samples_seen += 1
+
+                local_ts = float(local_clock()) if local_clock else float(time.time())
+                raw_path = _segment_paths(acq_segment_id)[4]
+                packet = SamplePacket(
+                    lsl_ts_raw=float(lsl_ts_raw),
+                    lsl_ts_mono=float(lsl_ts_mono),
+                    local_ts=float(local_ts),
+                    sample=list(sample),
+                    flags=int(flags),
+                    segment_id=int(acq_segment_id),
+                    raw_path=raw_path,
+                    clamped=bool(clamped),
+                    segment_break_reason=segment_break_reason,
+                )
+                _enqueue_with_overflow(processing_queue, packet, label="processing")
+                if SAVE_RAW:
+                    _enqueue_with_overflow(raw_queue, packet, label="raw")
+
+                with health_gate_lock:
+                    health_gate.record_received(float(lsl_ts_mono), sample_monotonic)
+    except Exception as exc:
+        acquisition_thread_error = exc
+        stop_event.set()
+    finally:
+        try:
+            processing_queue.put_nowait(None)
+        except queue.Full:
+            pass
+        try:
+            raw_queue.put_nowait(None)
+        except queue.Full:
+            pass
+
+# =========================
+# ===== MAIN LOOP =========
+# =========================
+if not IMPORT_ONLY:
+    print("▶ Streaming — type 'end_stream' OR press q/ESC to stop")
+
+    run_error = None
+    acq_thread = None
+    raw_thread = None
+    try:
+        acq_thread = threading.Thread(
+            target=_acquisition_worker, args=(inlet,), daemon=True
+        )
+        acq_thread.start()
+        if SAVE_RAW:
+            raw_thread = threading.Thread(target=_raw_writer_worker, daemon=True)
+            raw_thread.start()
+        while not stop_event.is_set() or not processing_queue.empty():
+            if acquisition_thread_error is not None:
+                raise acquisition_thread_error
+            if raw_writer_thread_error is not None:
+                raise raw_writer_thread_error
+            now_monotonic = time.monotonic()
+            if now_monotonic - last_stream_check >= DATA_STREAM_CHECK_INTERVAL_S:
+                _update_stream_health(now_monotonic)
+                last_stream_check = now_monotonic
+
+            try:
+                packet = processing_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            _update_queue_metrics()
+            if packet is None:
+                if stop_event.is_set():
+                    break
                 continue
 
-            while sample_queue and not stop_event.is_set():
-                lsl_ts, sample = sample_queue.popleft()
-                health_gate.set_queue_size(len(sample_queue))
-                now_mono = time.monotonic()
-
-                # =========================
-                # ===== TIMEBASE INIT ======
-                # =========================
-                lsl_ts_raw = float(lsl_ts)
-                lsl_ts_mono = lsl_ts_raw
+            now_mono = time.monotonic()
+            if packet.segment_id != segment_id:
                 candidate_time_s = (
-                    float(lsl_ts_mono - stream_start_lsl_ts)
+                    float(packet.lsl_ts_mono - stream_start_lsl_ts)
                     if stream_start_lsl_ts is not None
                     else None
                 )
-
-                segment_break_reason = None
-                clamped = False
                 if last_lsl_ts_mono is not None:
-                    if lsl_ts_mono <= last_lsl_ts_mono:
-                        backwards_delta = float(last_lsl_ts_mono - lsl_ts_mono)
-                        state.backward_timestamp_count += 1
-                        total_backward_timestamp_count += 1
-                        time_s_clamped_count += 1
-                        clamped_samples_total += 1
-                        max_backwards_jump_s = max(max_backwards_jump_s, backwards_delta)
-                        lsl_ts_mono = float(last_lsl_ts_mono + LSL_MONO_EPS_S)
-                        last_clamp_localtime = time.time()
-                        last_clamp_lsl_ts = lsl_ts_mono
-                        clamped = True
-                    else:
-                        dt_s = float(lsl_ts_mono - last_lsl_ts_mono)
-                        if is_gap(dt_s, nominal_dt_s):
-                            total_gap_count += 1
-                            gap_durations_s.append(dt_s)
-                            summary = summarize_gaps(gap_durations_s)
-                            state.gap_count = summary.count
-                            state.gap_max_s = summary.max_gap_s or 0.0
-                            state.gap_p95_s = summary.p95_gap_s
-                            state.gap_p99_s = summary.p99_gap_s
-                        if dt_s > GAP_BREAK_S:
-                            segment_break_reason = "gap"
-                            if dt_s > GAP_RESET_THRESHOLD_S:
-                                _reset_lstm_state(
-                                    "gap_reset",
-                                    candidate_time_s,
-                                    {"gap_dt_s": dt_s, "lsl_ts_raw": lsl_ts_raw},
-                                )
-
-                if segment_break_reason is not None:
-                    _start_segment(segment_break_reason)
-                    _drain_inlet(inlet, label="segment_break")
-                    sample_queue.clear()
-                    continue
-
-                if stream_start_lsl_ts is None:
-                    stream_start_lsl_ts = float(lsl_ts_mono)
-                    state.stream_start_lsl_ts = stream_start_lsl_ts
-                    segment_start_lsl_ts = stream_start_lsl_ts
-                    local_clock_at_start = float(local_clock())
-                    clock_offset = float(stream_start_lsl_ts - local_clock_at_start)
-                    state.local_clock_at_start = local_clock_at_start
-                    state.clock_offset = clock_offset
-                    run_start_utc_iso = utc_now_iso_z()
-                    run_start_local_iso = local_now_iso()
-                    timebase_written = False
-                    timebase_report_initialized = False
-                    next_window_start_s = 0.0
-
-                if clock_offset is None:
-                    clock_offset = float(lsl_ts_raw - local_clock())
-                    state.clock_offset = clock_offset
-                    if not clock_offset_estimated:
-                        print("⚠️ clock_offset missing; estimating from current sample.")
-                        clock_offset_estimated = True
-                    timebase_written = False
-
-                if not timebase_written and stream_start_lsl_ts is not None:
-                    _update_session_meta(complete=False, label="timebase")
-                    _write_session_state(label="timebase")
-                    timebase_written = True
-                if stream_start_lsl_ts is not None and not timebase_report_initialized:
-                    _write_timebase_report("init")
-                    timebase_report_initialized = True
-
-                if segment_start_lsl_ts is None:
-                    segment_start_lsl_ts = float(lsl_ts_mono)
-                    _write_session_state(label="segment_start")
-
-                time_s = float(lsl_ts_mono - stream_start_lsl_ts)
-                latency_ms = (local_clock() - lsl_ts_raw) * 1000.0
-
-                sample_arr = np.asarray(sample, dtype=float)
-                recent_accepted_timestamps.append(float(lsl_ts_mono))
-                recent_accepted_clamped_flags.append(bool(clamped))
-                debug_sample_counter += 1
-                if debug_sample_counter % DEBUG_SAMPLE_DECIMATE == 0:
-                    try:
-                        recent_tp9_values.append(float(sample_arr[0]))
-                    except Exception:
-                        pass
-                state.sample_time_buffer.append((time_s, sample_arr))
-                buffer_min_time = time_s - float(WINDOW_SEC) - 1.0
-                while (
-                    state.sample_time_buffer
-                    and state.sample_time_buffer[0][0] < buffer_min_time
-                ):
-                    state.sample_time_buffer.popleft()
-
-                raw_target = _active_raw_writer(now_mono)
-                if raw_target is not None:
-                    raw_target.writerow([lsl_ts_raw, lsl_ts_mono, *sample])
-
-                last_lsl_ts_raw = lsl_ts_raw
-                last_lsl_ts_mono = lsl_ts_mono
-
-                # ===== OPTIONAL ICA =====
-                cleaned = None
-                latest_sample = sample_arr
-                latest_window = None
-                if time_s >= WINDOW_SEC:
-                    latest_window, _, latest_gap_flag, _ = _extract_time_window(
-                        time_s - WINDOW_SEC, time_s
-                    )
-                    if latest_window is not None and latest_gap_flag:
-                        latest_window = None
-
-                if ENABLE_ICA and ica is not None and not ica_disabled_due_to_error:
-                    ica_skipped_reason = None
-                    compressed = None
-                    if latest_window is None:
-                        ica_skipped_reason = "window_unavailable"
-                    else:
-                        diff_mask = np.any(np.diff(latest_window, axis=0) != 0, axis=1)
-                        compressed = latest_window[1:][diff_mask]
-                        if len(compressed) < CHANNELS:
-                            ica_skipped_reason = "compressed_short"
-
-                    if state.ica_fit_future is not None and state.ica_fit_future.done():
-                        fit_segment = state.ica_fit_segment_id
-                        try:
-                            result = state.ica_fit_future.result()
-                            if not _should_accept_ica_result(segment_id, fit_segment):
-                                if LOG_ICA_DIAGNOSTICS:
-                                    print(
-                                        "⚠️ Discarding ICA fit from previous segment."
-                                    )
-                            elif result.get("ok"):
-                                state.ica_fitted = True
-                                ica_ran = True
-                            else:
-                                ica_skipped_reason = result.get("reason")
-                                if LOG_ICA_DIAGNOSTICS:
-                                    print(
-                                        f"⚠️ ICA skipped: {result.get('reason')} {result.get('diagnostics')}"
-                                    )
-                        except Exception as exc:
-                            ica_failed_exception = repr(exc)
-                            ica_retries += 1
-                            ica_skipped_reason = "fit_exception"
-                            print(f"⚠️ ICA fit failed: {exc}")
-                            if ica_retries >= ICA_MAX_RETRIES_PER_SESSION:
-                                ica_disabled_due_to_error = True
-                                print(
-                                    "⚠️ ICA disabled for session due to repeated failures."
-                                )
-                        state.ica_fit_future = None
-                        state.ica_fit_segment_id = None
-
-                    if (
-                        state.ica_transform_future is not None
-                        and state.ica_transform_future.done()
-                    ):
-                        transform_segment = state.ica_transform_segment_id
-                        try:
-                            result = state.ica_transform_future.result()
-                            if not _should_accept_ica_result(
-                                segment_id, transform_segment
-                            ):
-                                if LOG_ICA_DIAGNOSTICS:
-                                    print(
-                                        "⚠️ Discarding ICA transform from previous segment."
-                                    )
-                            elif result.get("ok"):
-                                cleaned = result.get("cleaned")
-                                if cleaned is not None and len(cleaned):
-                                    latest_sample = cleaned[-1]
-                                    ica_ran = True
-                            else:
-                                ica_skipped_reason = result.get("reason")
-                                if LOG_ICA_DIAGNOSTICS:
-                                    print(
-                                        f"⚠️ ICA skipped: {result.get('reason')} {result.get('diagnostics')}"
-                                    )
-                        except Exception as exc:
-                            ica_failed_exception = repr(exc)
-                            ica_retries += 1
-                            ica_skipped_reason = "transform_exception"
-                            print(f"⚠️ ICA transform failed: {exc}")
-                            if ica_retries >= ICA_MAX_RETRIES_PER_SESSION:
-                                ica_disabled_due_to_error = True
-                                print(
-                                    "⚠️ ICA disabled for session due to repeated failures."
-                                )
-                        state.ica_transform_future = None
-                        state.ica_transform_segment_id = None
-
-                    if (
-                        not state.ica_fitted
-                        and latest_window is not None
-                        and ica_skipped_reason is None
-                        and state.ica_fit_future is None
-                    ):
-                        warmup_ready = state.samples_seen >= int(
-                            ICA_WARMUP_S * SAMPLING_RATE
+                    dt_s = float(packet.lsl_ts_mono - last_lsl_ts_mono)
+                    if dt_s > 0 and is_gap(dt_s, nominal_dt_s):
+                        total_gap_count += 1
+                        gap_durations_s.append(dt_s)
+                        summary = summarize_gaps(gap_durations_s)
+                        state.gap_count = summary.count
+                        state.gap_max_s = summary.max_gap_s or 0.0
+                        state.gap_p95_s = summary.p95_gap_s
+                        state.gap_p99_s = summary.p99_gap_s
+                    if dt_s > GAP_RESET_THRESHOLD_S:
+                        _reset_lstm_state(
+                            "gap_reset",
+                            candidate_time_s,
+                            {"gap_dt_s": dt_s, "lsl_ts_raw": packet.lsl_ts_raw},
                         )
-                        if not warmup_ready:
-                            ica_skipped_reason = "warmup"
-                        elif compressed is not None and ica_executor is not None:
-                            state.ica_fit_segment_id = int(segment_id)
-                            state.ica_fit_future = ica_executor.submit(
-                                _ica_fit_worker, compressed.copy()
-                            )
-
-                    if (
-                        state.ica_fitted
-                        and latest_window is not None
-                        and ica_skipped_reason is None
-                        and state.ica_transform_future is None
-                        and ica_executor is not None
-                    ):
-                        state.ica_transform_segment_id = int(segment_id)
-                        state.ica_transform_future = ica_executor.submit(
-                            _ica_transform_worker, latest_window.copy()
-                        )
-                if cleaned is None:
-                    cleaned = latest_window if latest_window is not None else None
-
-                if latest_sample is None:
-                    continue
-
-                # ===== DEFAULTS ===== (runs per sample)
-                pred_action = int(last_pred_action)
-                pred_finger = int(last_pred_finger)
-                action_confidence = float(last_action_confidence)
-                action_uncertainty = float(last_action_uncertainty)
-                finger_confidence = float(last_finger_confidence)
-                finger_uncertainty = float(last_finger_uncertainty)
-                velocity = (
-                    action_confidence * (1.0 - action_uncertainty)
-                    if pred_action != ACTION_REST
-                    else 0.0
+                _start_segment(
+                    packet.segment_break_reason or "gap",
+                    segment_id_override=packet.segment_id,
                 )
 
-                # ===== INFERENCE =====
-                inference_enabled = DEMO_MODE and model is not None and scaler is not None
-                if not inference_enabled and lstm_state is not None:
-                    _reset_lstm_state("inference_disabled", time_s)
+            # =========================
+            # ===== TIMEBASE INIT ======
+            # =========================
+            lsl_ts_raw = float(packet.lsl_ts_raw)
+            lsl_ts_mono = float(packet.lsl_ts_mono)
+            candidate_time_s = (
+                float(lsl_ts_mono - stream_start_lsl_ts)
+                if stream_start_lsl_ts is not None
+                else None
+            )
 
-                if inference_enabled and next_window_start_s is not None:
-                    max_windows_per_cycle = 5
-                    windows_processed = 0
-                    latest_time_s = float(time_s)
+            if packet.clamped:
+                state.backward_timestamp_count += 1
 
-                    while (next_window_start_s + WINDOW_SEC) <= latest_time_s:
-                        if windows_processed >= max_windows_per_cycle:
-                            backlog = int(
-                                ((latest_time_s - WINDOW_SEC) - next_window_start_s)
-                                // WINDOW_HOP_SEC
-                            )
-                            if backlog > 0:
-                                state.window_drop_count += backlog
-                                next_window_start_s += backlog * WINDOW_HOP_SEC
-                            break
+            if last_lsl_ts_mono is not None:
+                dt_s = float(lsl_ts_mono - last_lsl_ts_mono)
+                if dt_s > 0 and is_gap(dt_s, nominal_dt_s):
+                    total_gap_count += 1
+                    gap_durations_s.append(dt_s)
+                    summary = summarize_gaps(gap_durations_s)
+                    state.gap_count = summary.count
+                    state.gap_max_s = summary.max_gap_s or 0.0
+                    state.gap_p95_s = summary.p95_gap_s
+                    state.gap_p99_s = summary.p99_gap_s
 
-                        window_start_s = float(next_window_start_s)
-                        window_end_s = float(window_start_s + WINDOW_SEC)
-                        window_center_s = float(window_start_s + (WINDOW_SEC / 2.0))
+            if stream_start_lsl_ts is None:
+                stream_start_lsl_ts = float(lsl_ts_mono)
+                state.stream_start_lsl_ts = stream_start_lsl_ts
+                segment_start_lsl_ts = stream_start_lsl_ts
+                local_clock_at_start = float(local_clock())
+                clock_offset = float(stream_start_lsl_ts - local_clock_at_start)
+                state.local_clock_at_start = local_clock_at_start
+                state.clock_offset = clock_offset
+                run_start_utc_iso = utc_now_iso_z()
+                run_start_local_iso = local_now_iso()
+                timebase_written = False
+                timebase_report_initialized = False
+                next_window_start_s = 0.0
 
-                        if not data_stream_active:
-                            state.window_health_drop_count += 1
-                            _reset_lstm_state("stream_unhealthy", window_center_s)
-                            next_window_start_s += WINDOW_HOP_SEC
-                            continue
+            if clock_offset is None:
+                clock_offset = float(lsl_ts_raw - local_clock())
+                state.clock_offset = clock_offset
+                if not clock_offset_estimated:
+                    print("⚠️ clock_offset missing; estimating from current sample.")
+                    clock_offset_estimated = True
+                timebase_written = False
 
-                        (
-                            window_data,
-                            gap_fraction,
-                            gap_flag,
-                            max_gap,
-                        ) = _extract_time_window(window_start_s, window_end_s)
-                        if window_data is None:
-                            state.window_incomplete_drop_count += 1
-                            next_window_start_s += WINDOW_HOP_SEC
-                            continue
-                        if gap_flag:
-                            state.window_gap_drop_count += 1
-                            if max_gap is not None and max_gap > GAP_RESET_THRESHOLD_S:
-                                _reset_lstm_state("gap_reset", window_center_s)
-                            next_window_start_s += WINDOW_HOP_SEC
-                            continue
+            if not timebase_written and stream_start_lsl_ts is not None:
+                _update_session_meta(complete=False, label="timebase")
+                _write_session_state(label="timebase")
+                timebase_written = True
+            if stream_start_lsl_ts is not None and not timebase_report_initialized:
+                _write_timebase_report("init")
+                timebase_report_initialized = True
 
-                        window_input = standardize_window_TxC(
-                            window_data.astype(np.float32), scaler
-                        )
-                        x_BTC = (
-                            torch.tensor(window_input, dtype=torch.float32)
-                            .unsqueeze(0)
-                            .to(DEVICE)
-                        )
-                        if hasattr(model, "forward_with_state"):
-                            (
-                                finger_logits,
-                                action_logits,
-                                lstm_state,
-                            ) = model.forward_with_state(x_BTC, lstm_state)
-                        else:
-                            finger_logits, action_logits = model(x_BTC)
-                            lstm_state = None
+            if segment_start_lsl_ts is None:
+                segment_start_lsl_ts = float(lsl_ts_mono)
+                _write_session_state(label="segment_start")
 
-                        action_probs = torch.softmax(action_logits, dim=1).squeeze(0)
-                        finger_probs = torch.softmax(finger_logits, dim=1).squeeze(0)
-                        action_probs_np = action_probs.detach().cpu().numpy()
-                        finger_probs_np = finger_probs.detach().cpu().numpy()
+            time_s = float(lsl_ts_mono - stream_start_lsl_ts)
+            latency_ms = (packet.local_ts - lsl_ts_raw) * 1000.0
 
-                        pred_action = int(np.argmax(action_probs_np))
-                        action_confidence = float(action_probs_np[pred_action])
-                        action_uncertainty = 0.0
+            sample_arr = np.asarray(packet.sample, dtype=float)
+            recent_accepted_timestamps.append(float(lsl_ts_mono))
+            recent_accepted_clamped_flags.append(bool(packet.clamped))
+            debug_sample_counter += 1
+            if debug_sample_counter % DEBUG_SAMPLE_DECIMATE == 0:
+                try:
+                    if not (packet.flags & RAW_FLAG_NONFINITE):
+                        recent_tp9_values.append(float(sample_arr[0]))
+                except Exception:
+                    pass
 
-                        pred_finger = int(np.argmax(finger_probs_np))
-                        finger_confidence = float(finger_probs_np[pred_finger])
-                        finger_uncertainty = 0.0
+            last_lsl_ts_raw = lsl_ts_raw
+            last_lsl_ts_mono = lsl_ts_mono
 
-                        adaptive_thresh = min(
-                            0.99,
-                            max(
-                                BASE_CONF_THRESH,
-                                BASE_CONF_THRESH
-                                + UNCERTAINTY_WEIGHT * action_uncertainty,
-                            ),
-                        )
+            if packet.flags & RAW_FLAG_NONFINITE:
+                _maybe_write_timebase_report()
+                continue
 
-                        state.action_pred_buffer.append(pred_action)
-                        if pred_action != ACTION_REST:
-                            velocity = action_confidence * (1.0 - action_uncertainty)
+            state.sample_time_buffer.append((time_s, sample_arr))
+            buffer_min_time = time_s - float(WINDOW_SEC) - 1.0
+            while (
+                state.sample_time_buffer
+                and state.sample_time_buffer[0][0] < buffer_min_time
+            ):
+                state.sample_time_buffer.popleft()
 
-                        if ENABLE_ACTUATION and pred_action != ACTION_REST:
-                            stable = (
-                            len(state.action_pred_buffer) == STABILITY_FRAMES
-                            and len(set(state.action_pred_buffer)) == 1
-                            )
-                            if (
-                                stable
-                                and calibrator.allow_actuation(
-                                    action_confidence, action_uncertainty
-                                )
-                                and action_confidence >= adaptive_thresh
-                            ):
-                                pass
+            # ===== OPTIONAL ICA =====
+            cleaned = None
+            latest_sample = sample_arr
+            latest_window = None
+            if time_s >= WINDOW_SEC:
+                latest_window, _, latest_gap_flag, _ = _extract_time_window(
+                    time_s - WINDOW_SEC, time_s
+                )
+                if latest_window is not None and latest_gap_flag:
+                    latest_window = None
 
-                        prediction_time_s = window_center_s
-                        prediction_lsl_ts = (
-                            float(stream_start_lsl_ts + prediction_time_s)
-                            if stream_start_lsl_ts is not None
-                            else np.nan
-                        )
-                        if np.isfinite(prediction_lsl_ts):
-                            inference_latency_ms = (
-                                local_clock() - prediction_lsl_ts
-                            ) * 1000.0
-                        else:
-                            inference_latency_ms = np.nan
+            if ENABLE_ICA and ica is not None and not ica_disabled_due_to_error:
+                ica_skipped_reason = None
+                compressed = None
+                if latest_window is None:
+                    ica_skipped_reason = "window_unavailable"
+                else:
+                    diff_mask = np.any(np.diff(latest_window, axis=0) != 0, axis=1)
+                    compressed = latest_window[1:][diff_mask]
+                    if len(compressed) < CHANNELS:
+                        ica_skipped_reason = "compressed_short"
 
-                        predictions_target = _active_predictions_writer(now_mono)
-                        if predictions_target is not None:
-                            predictions_target.writerow(
-                                [
-                                    prediction_time_s,
-                                    prediction_lsl_ts,
-                                    window_start_s,
-                                    window_end_s,
-                                    int(segment_id),
-                                    pred_action,
-                                    pred_finger,
-                                    action_confidence,
-                                    action_uncertainty,
-                                    finger_confidence,
-                                    finger_uncertainty,
-                                    inference_latency_ms,
-                                    experiment_hash,
-                                    MODEL_PATH,
-                                ]
-                            )
-
-                        if (
-                            live_viz_enabled
-                            and lstm_state is not None
-                            and live_viz_fps > 0
-                        ):
-                            now_live = time.monotonic()
-                            min_interval = 1.0 / float(live_viz_fps)
-                            if (now_live - last_live_viz_emit) >= min_interval:
-                                try:
-                                    h_state = lstm_state[0] if isinstance(lstm_state, tuple) else lstm_state
-                                    hidden_vec = h_state[-1, 0].detach().cpu().numpy()
-                                    hidden_mag = float(np.linalg.norm(hidden_vec))
-                                    print(
-                                        f"VIZ hidden_mag={hidden_mag:.6f} t={prediction_time_s:.3f}"
-                                    )
-                                    last_live_viz_emit = now_live
-                                except Exception:
-                                    pass
-
-                        last_pred_action = pred_action
-                        last_pred_finger = pred_finger
-                        last_action_confidence = action_confidence
-                        last_action_uncertainty = action_uncertainty
-                        last_finger_confidence = finger_confidence
-                        last_finger_uncertainty = finger_uncertainty
-
-                        state.windows_processed += 1
-                        windows_processed += 1
-                        next_window_start_s += WINDOW_HOP_SEC
-
-                # ===== OPTIONAL ONLINE CALIBRATION FEEDBACK =====
-                if DEMO_MODE and TRAINING_MODE:
+                if state.ica_fit_future is not None and state.ica_fit_future.done():
+                    fit_segment = state.ica_fit_segment_id
                     try:
-                        true_action = int(
-                            input("Action label (0=REST,1=OPEN,2=CLOSE): ")
-                        )
-                        true_finger = int(input("Finger label (0=NONE,1-5): "))
-
-                        correct = (pred_action == true_action) and (
-                            true_action == ACTION_REST or pred_finger == true_finger
-                        )
-
-                        calibrator.update(action_confidence, correct)
-                        record_prediction(
-                            subject_id=subject_id,
-                            experiment_hash=experiment_hash,
-                            confidence=action_confidence,
-                            uncertainty=action_uncertainty,
-                            correct=correct,
-                            threshold=calibrator.threshold,
-                        )
-
-                        CALIBRATION_STATE_PATH.write_text(
-                            json.dumps(
-                                {
-                                    "threshold": calibrator.threshold,
-                                    "history": [],
-                                    "config": {
-                                        "init_threshold": calibrator.threshold,
-                                        "min_threshold": calibrator.min_threshold,
-                                        "max_threshold": calibrator.max_threshold,
-                                        "ema_alpha": calibrator.alpha,
-                                    },
-                                },
-                                indent=2,
+                        result = state.ica_fit_future.result()
+                        if not _should_accept_ica_result(segment_id, fit_segment):
+                            if LOG_ICA_DIAGNOSTICS:
+                                print(
+                                    "⚠️ Discarding ICA fit from previous segment."
+                                )
+                        elif result.get("ok"):
+                            state.ica_fitted = True
+                            ica_ran = True
+                        else:
+                            ica_skipped_reason = result.get("reason")
+                            if LOG_ICA_DIAGNOSTICS:
+                                print(
+                                    f"⚠️ ICA skipped: {result.get('reason')} {result.get('diagnostics')}"
+                                )
+                    except Exception as exc:
+                        ica_failed_exception = repr(exc)
+                        ica_retries += 1
+                        ica_skipped_reason = "fit_exception"
+                        print(f"⚠️ ICA fit failed: {exc}")
+                        if ica_retries >= ICA_MAX_RETRIES_PER_SESSION:
+                            ica_disabled_due_to_error = True
+                            print(
+                                "⚠️ ICA disabled for session due to repeated failures."
                             )
-                        )
-                    except Exception:
-                        pass
+                    state.ica_fit_future = None
+                    state.ica_fit_segment_id = None
 
-                # ===== SAVE FEATURES =====
-                feature_target = _active_feature_writer(now_mono)
-                if feature_target is not None:
-                    if time_s is None or not np.isfinite(time_s):
+                if (
+                    state.ica_transform_future is not None
+                    and state.ica_transform_future.done()
+                ):
+                    transform_segment = state.ica_transform_segment_id
+                    try:
+                        result = state.ica_transform_future.result()
+                        if not _should_accept_ica_result(
+                            segment_id, transform_segment
+                        ):
+                            if LOG_ICA_DIAGNOSTICS:
+                                print(
+                                    "⚠️ Discarding ICA transform from previous segment."
+                                )
+                        elif result.get("ok"):
+                            cleaned = result.get("cleaned")
+                            if cleaned is not None and len(cleaned):
+                                latest_sample = cleaned[-1]
+                                ica_ran = True
+                        else:
+                            ica_skipped_reason = result.get("reason")
+                            if LOG_ICA_DIAGNOSTICS:
+                                print(
+                                    f"⚠️ ICA skipped: {result.get('reason')} {result.get('diagnostics')}"
+                                )
+                    except Exception as exc:
+                        ica_failed_exception = repr(exc)
+                        ica_retries += 1
+                        ica_skipped_reason = "transform_exception"
+                        print(f"⚠️ ICA transform failed: {exc}")
+                        if ica_retries >= ICA_MAX_RETRIES_PER_SESSION:
+                            ica_disabled_due_to_error = True
+                            print(
+                                "⚠️ ICA disabled for session due to repeated failures."
+                            )
+                    state.ica_transform_future = None
+                    state.ica_transform_segment_id = None
+
+                if (
+                    not state.ica_fitted
+                    and latest_window is not None
+                    and ica_skipped_reason is None
+                    and state.ica_fit_future is None
+                ):
+                    warmup_ready = state.samples_seen >= int(
+                        ICA_WARMUP_S * SAMPLING_RATE
+                    )
+                    if not warmup_ready:
+                        ica_skipped_reason = "warmup"
+                    elif compressed is not None and ica_executor is not None:
+                        state.ica_fit_segment_id = int(segment_id)
+                        state.ica_fit_future = ica_executor.submit(
+                            _ica_fit_worker, compressed.copy()
+                        )
+
+                if (
+                    state.ica_fitted
+                    and latest_window is not None
+                    and ica_skipped_reason is None
+                    and state.ica_transform_future is None
+                    and ica_executor is not None
+                ):
+                    state.ica_transform_segment_id = int(segment_id)
+                    state.ica_transform_future = ica_executor.submit(
+                        _ica_transform_worker, latest_window.copy()
+                    )
+            if cleaned is None:
+                cleaned = latest_window if latest_window is not None else None
+
+            if latest_sample is None:
+                continue
+
+            # ===== DEFAULTS ===== (runs per sample)
+            pred_action = int(last_pred_action)
+            pred_finger = int(last_pred_finger)
+            action_confidence = float(last_action_confidence)
+            action_uncertainty = float(last_action_uncertainty)
+            finger_confidence = float(last_finger_confidence)
+            finger_uncertainty = float(last_finger_uncertainty)
+            velocity = (
+                action_confidence * (1.0 - action_uncertainty)
+                if pred_action != ACTION_REST
+                else 0.0
+            )
+
+            # ===== INFERENCE =====
+            inference_enabled = DEMO_MODE and model is not None and scaler is not None
+            if not inference_enabled and lstm_state is not None:
+                _reset_lstm_state("inference_disabled", time_s)
+
+            if inference_enabled and next_window_start_s is not None:
+                max_windows_per_cycle = 5
+                windows_processed = 0
+                latest_time_s = float(time_s)
+
+                while (next_window_start_s + WINDOW_SEC) <= latest_time_s:
+                    if windows_processed >= max_windows_per_cycle:
+                        backlog = int(
+                            ((latest_time_s - WINDOW_SEC) - next_window_start_s)
+                            // WINDOW_HOP_SEC
+                        )
+                        if backlog > 0:
+                            state.window_drop_count += backlog
+                            next_window_start_s += backlog * WINDOW_HOP_SEC
+                        break
+
+                    window_start_s = float(next_window_start_s)
+                    window_end_s = float(window_start_s + WINDOW_SEC)
+                    window_center_s = float(window_start_s + (WINDOW_SEC / 2.0))
+
+                    if not data_stream_active:
+                        state.window_health_drop_count += 1
+                        _reset_lstm_state("stream_unhealthy", window_center_s)
+                        next_window_start_s += WINDOW_HOP_SEC
                         continue
 
-                    row = [
-                        lsl_ts_raw,
-                        lsl_ts_mono,
-                        time_s,
-                        int(segment_id),
-                        *latest_sample,
-                        pred_action,
-                        pred_finger,
-                        action_confidence,
-                        action_uncertainty,
-                        finger_confidence,
-                        finger_uncertainty,
-                        velocity,
-                        latency_ms,
-                    ]
-                    if len(row) != len(header):
-                        raise RuntimeError(
-                            f"Feature row length {len(row)} does not match header length {len(header)}"
-                    )
-                    feature_target.writerow(row)
+                    (
+                        window_data,
+                        gap_fraction,
+                        gap_flag,
+                        max_gap,
+                    ) = _extract_time_window(window_start_s, window_end_s)
+                    if window_data is None:
+                        state.window_incomplete_drop_count += 1
+                        next_window_start_s += WINDOW_HOP_SEC
+                        continue
+                    if gap_flag:
+                        state.window_gap_drop_count += 1
+                        if max_gap is not None and max_gap > GAP_RESET_THRESHOLD_S:
+                            _reset_lstm_state("gap_reset", window_center_s)
+                        next_window_start_s += WINDOW_HOP_SEC
+                        continue
 
-                if feature_target is not None:
-                    data_stream_last_write_ts = utc_now_iso_z()
-                    write_mono = time.monotonic()
-                    health_gate.record_written(float(lsl_ts_mono), write_mono)
-                    last_written_lsl_ts = float(lsl_ts_mono)
-                    last_sample_written_time = write_mono
-                    if time_s is not None and np.isfinite(time_s):
-                        last_written_time_s = float(time_s)
-                        last_time_s = float(last_written_time_s)
-                        last_sample_time_s = float(time_s)
-                        last_sample_lsl_ts = float(lsl_ts_mono)
-                        state.recent_sample_times.append(last_sample_time_s)
-                        if first_time_s is None:
-                            first_time_s = last_sample_time_s
-                        last_time_s_seen = last_sample_time_s
-                        if first_lsl_ts is None:
-                            first_lsl_ts = float(lsl_ts_raw)
-                        last_lsl_ts = float(lsl_ts_raw)
-                        state.samples_written += 1
-                        _maybe_write_timebase_report()
+                    window_input = standardize_window_TxC(
+                        window_data.astype(np.float32), scaler
+                    )
+                    x_BTC = (
+                        torch.tensor(window_input, dtype=torch.float32)
+                        .unsqueeze(0)
+                        .to(DEVICE)
+                    )
+                    if hasattr(model, "forward_with_state"):
+                        (
+                            finger_logits,
+                            action_logits,
+                            lstm_state,
+                        ) = model.forward_with_state(x_BTC, lstm_state)
+                    else:
+                        finger_logits, action_logits = model(x_BTC)
+                        lstm_state = None
 
-                # ===== PLOT =====
-                if ENABLE_PLOT:
-                    plot_data = (
-                        cleaned
-                        if cleaned is not None
-                        else np.asarray([latest_sample], dtype=float)
+                    action_probs = torch.softmax(action_logits, dim=1).squeeze(0)
+                    finger_probs = torch.softmax(finger_logits, dim=1).squeeze(0)
+                    action_probs_np = action_probs.detach().cpu().numpy()
+                    finger_probs_np = finger_probs.detach().cpu().numpy()
+
+                    pred_action = int(np.argmax(action_probs_np))
+                    action_confidence = float(action_probs_np[pred_action])
+                    action_uncertainty = 0.0
+
+                    pred_finger = int(np.argmax(finger_probs_np))
+                    finger_confidence = float(finger_probs_np[pred_finger])
+                    finger_uncertainty = 0.0
+
+                    adaptive_thresh = min(
+                        0.99,
+                        max(
+                            BASE_CONF_THRESH,
+                            BASE_CONF_THRESH
+                            + UNCERTAINTY_WEIGHT * action_uncertainty,
+                        ),
                     )
-                    for i in range(CHANNELS):
-                        lines[i].set_data(range(len(plot_data)), plot_data[:, i])
-                    ax.set_xlim(0, len(plot_data))
-                    ax.relim()
-                    ax.autoscale_view()
-                    ax.set_ylim(-100, 100)
-                    latency_text.set_text(
-                        f"Latency: {latency_ms:.1f} ms" if DEMO_MODE else ""
+
+                    state.action_pred_buffer.append(pred_action)
+                    if pred_action != ACTION_REST:
+                        velocity = action_confidence * (1.0 - action_uncertainty)
+
+                    if ENABLE_ACTUATION and pred_action != ACTION_REST:
+                        stable = (
+                        len(state.action_pred_buffer) == STABILITY_FRAMES
+                        and len(set(state.action_pred_buffer)) == 1
+                        )
+                        if (
+                            stable
+                            and calibrator.allow_actuation(
+                                action_confidence, action_uncertainty
+                            )
+                            and action_confidence >= adaptive_thresh
+                        ):
+                            pass
+
+                    prediction_time_s = window_center_s
+                    prediction_lsl_ts = (
+                        float(stream_start_lsl_ts + prediction_time_s)
+                        if stream_start_lsl_ts is not None
+                        else np.nan
                     )
-                    info_text.set_text(
-                        f"Act: {ACTION_NAMES.get(pred_action, '?')}  Conf: {action_confidence:.2f}  Unc: {action_uncertainty:.3f}  Vel: {velocity:.3f}"
-                        if DEMO_MODE
-                        else ""
+                    if np.isfinite(prediction_lsl_ts):
+                        inference_latency_ms = (
+                            local_clock() - prediction_lsl_ts
+                        ) * 1000.0
+                    else:
+                        inference_latency_ms = np.nan
+
+                    predictions_target = _active_predictions_writer(now_mono)
+                    if predictions_target is not None:
+                        predictions_target.writerow(
+                            [
+                                prediction_time_s,
+                                prediction_lsl_ts,
+                                window_start_s,
+                                window_end_s,
+                                int(segment_id),
+                                pred_action,
+                                pred_finger,
+                                action_confidence,
+                                action_uncertainty,
+                                finger_confidence,
+                                finger_uncertainty,
+                                inference_latency_ms,
+                                experiment_hash,
+                                MODEL_PATH,
+                            ]
+                        )
+
+                    if (
+                        live_viz_enabled
+                        and lstm_state is not None
+                        and live_viz_fps > 0
+                    ):
+                        now_live = time.monotonic()
+                        min_interval = 1.0 / float(live_viz_fps)
+                        if (now_live - last_live_viz_emit) >= min_interval:
+                            try:
+                                h_state = lstm_state[0] if isinstance(lstm_state, tuple) else lstm_state
+                                hidden_vec = h_state[-1, 0].detach().cpu().numpy()
+                                hidden_mag = float(np.linalg.norm(hidden_vec))
+                                print(
+                                    f"VIZ hidden_mag={hidden_mag:.6f} t={prediction_time_s:.3f}"
+                                )
+                                last_live_viz_emit = now_live
+                            except Exception:
+                                pass
+
+                    last_pred_action = pred_action
+                    last_pred_finger = pred_finger
+                    last_action_confidence = action_confidence
+                    last_action_uncertainty = action_uncertainty
+                    last_finger_confidence = finger_confidence
+                    last_finger_uncertainty = finger_uncertainty
+
+                    state.windows_processed += 1
+                    windows_processed += 1
+                    next_window_start_s += WINDOW_HOP_SEC
+
+            # ===== OPTIONAL ONLINE CALIBRATION FEEDBACK =====
+            if DEMO_MODE and TRAINING_MODE:
+                try:
+                    true_action = int(
+                        input("Action label (0=REST,1=OPEN,2=CLOSE): ")
                     )
-                    plt.pause(0.001)
+                    true_finger = int(input("Finger label (0=NONE,1-5): "))
+
+                    correct = (pred_action == true_action) and (
+                        true_action == ACTION_REST or pred_finger == true_finger
+                    )
+
+                    calibrator.update(action_confidence, correct)
+                    record_prediction(
+                        subject_id=subject_id,
+                        experiment_hash=experiment_hash,
+                        confidence=action_confidence,
+                        uncertainty=action_uncertainty,
+                        correct=correct,
+                        threshold=calibrator.threshold,
+                    )
+
+                    CALIBRATION_STATE_PATH.write_text(
+                        json.dumps(
+                            {
+                                "threshold": calibrator.threshold,
+                                "history": [],
+                                "config": {
+                                    "init_threshold": calibrator.threshold,
+                                    "min_threshold": calibrator.min_threshold,
+                                    "max_threshold": calibrator.max_threshold,
+                                    "ema_alpha": calibrator.alpha,
+                                },
+                            },
+                            indent=2,
+                        )
+                    )
+                except Exception:
+                    pass
+
+            # ===== SAVE FEATURES =====
+            feature_target = _active_feature_writer(now_mono)
+            if feature_target is not None:
+                if time_s is None or not np.isfinite(time_s):
+                    continue
+
+                row = [
+                    lsl_ts_raw,
+                    lsl_ts_mono,
+                    time_s,
+                    int(segment_id),
+                    *latest_sample,
+                    pred_action,
+                    pred_finger,
+                    action_confidence,
+                    action_uncertainty,
+                    finger_confidence,
+                    finger_uncertainty,
+                    velocity,
+                    latency_ms,
+                ]
+                if len(row) != len(header):
+                    raise RuntimeError(
+                        f"Feature row length {len(row)} does not match header length {len(header)}"
+                )
+                feature_target.writerow(row)
+
+            if feature_target is not None:
+                if time_s is not None and np.isfinite(time_s):
+                    last_written_time_s = float(time_s)
+                    last_time_s = float(last_written_time_s)
+                    last_sample_time_s = float(time_s)
+                    last_sample_lsl_ts = float(lsl_ts_mono)
+                    state.recent_sample_times.append(last_sample_time_s)
+                    if first_time_s is None:
+                        first_time_s = last_sample_time_s
+                    last_time_s_seen = last_sample_time_s
+                    if first_lsl_ts is None:
+                        first_lsl_ts = float(lsl_ts_raw)
+                    last_lsl_ts = float(lsl_ts_raw)
+
+            # ===== PLOT =====
+            if ENABLE_PLOT:
+                plot_data = (
+                    cleaned
+                    if cleaned is not None
+                    else np.asarray([latest_sample], dtype=float)
+                )
+                for i in range(CHANNELS):
+                    lines[i].set_data(range(len(plot_data)), plot_data[:, i])
+                ax.set_xlim(0, len(plot_data))
+                ax.relim()
+                ax.autoscale_view()
+                ax.set_ylim(-100, 100)
+                latency_text.set_text(
+                    f"Latency: {latency_ms:.1f} ms" if DEMO_MODE else ""
+                )
+                info_text.set_text(
+                    f"Act: {ACTION_NAMES.get(pred_action, '?')}  Conf: {action_confidence:.2f}  Unc: {action_uncertainty:.3f}  Vel: {velocity:.3f}"
+                    if DEMO_MODE
+                    else ""
+                )
+                plt.pause(0.001)
+            _maybe_write_timebase_report()
 
     except KeyboardInterrupt:
         pass
+    except Exception as exc:
+        run_error = exc
+        print(
+            f"❌ Stream crashed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+    finally:
+        # =========================
+        # ===== CLEANUP ===========
+        # =========================
+        print("\n🧹 Cleaning up")
 
-    # =========================
-    # ===== CLEANUP ===========
-    # =========================
-    print("\n🧹 Cleaning up")
+        stop_event.set()
+        if acq_thread is not None:
+            acq_thread.join(timeout=2.0)
+        if raw_thread is not None:
+            raw_thread.join(timeout=5.0)
+            if raw_thread.is_alive():
+                print("⚠️ Raw writer thread did not stop cleanly.")
 
-    _close_segment_files()
-    failed_writers.close_failed_files()
+        _close_segment_files()
+        with failed_writers_lock:
+            failed_writers.close_failed_files()
+        _stop_streamer_process(streamer_proc)
 
-    if ENABLE_PLOT:
-        plt.close("all")
+        if ENABLE_PLOT:
+            plt.close("all")
 
-    if EVENT_MARKING_ENABLED:
-        if listener:
-            listener.stop()
-        with events_lock:
-            output_path = _resolve_events_output_path(time.monotonic(), last_health_decision)
-            if output_path:
-                save_events_csv(output_path, events)
-                print(f"📝 Events saved to {output_path}")
+        if EVENT_MARKING_ENABLED:
+            if listener:
+                listener.stop()
+            with events_lock:
+                output_path = _resolve_events_output_path(
+                    time.monotonic(), last_health_decision
+                )
+                if output_path:
+                    save_events_csv(output_path, events)
+                    print(f"📝 Events saved to {output_path}")
 
-    if ica_executor is not None:
-        ica_executor.shutdown(wait=False)
+        if ica_executor is not None:
+            ica_executor.shutdown(wait=False)
 
-    # Write final timebase report
-    _maybe_write_timebase_report(force=True, label="final")
+        # Write final timebase report
+        _maybe_write_timebase_report(force=True, label="final")
 
-    # Final run timestamps
-    run_end_utc_iso = utc_now_iso_z()
-    run_end_local_iso = local_now_iso()
+        # Write raw integrity report
+        _write_raw_integrity_report()
 
-    # Update session-continuous elapsed time at end of run
-    last_time_s_updated = float(
-        last_written_time_s if last_written_time_s >= 0 else last_time_s
-    )
-    segment_elapsed_s = last_time_s_updated if last_time_s_updated >= 0 else 0.0
-    total_elapsed_s_updated = float(total_elapsed_s + segment_elapsed_s)
+        # Final run timestamps
+        run_end_utc_iso = utc_now_iso_z()
+        run_end_local_iso = local_now_iso()
 
-    # Commit updated times so next resume uses the correct anchor
-    total_elapsed_s = total_elapsed_s_updated
-    last_time_s = last_time_s_updated
+        # Update session-continuous elapsed time at end of run
+        last_time_s_updated = float(
+            last_written_time_s if last_written_time_s >= 0 else last_time_s
+        )
+        segment_elapsed_s = last_time_s_updated if last_time_s_updated >= 0 else 0.0
+        total_elapsed_s_updated = float(total_elapsed_s + segment_elapsed_s)
 
-    _update_session_meta(complete=True, label="final")
-    _write_session_state(
-        label="final",
-        total_elapsed_override=total_elapsed_s_updated,
-        last_time_override=last_time_s_updated,
-        block_id_override=int(BLOCK_ID) + 1,
-    )
+        # Commit updated times so next resume uses the correct anchor
+        total_elapsed_s = total_elapsed_s_updated
+        last_time_s = last_time_s_updated
 
-    print("✅ Stream terminated cleanly")
+        _update_session_meta(complete=True, label="final")
+        _write_session_state(
+            label="final",
+            total_elapsed_override=total_elapsed_s_updated,
+            last_time_override=last_time_s_updated,
+            block_id_override=int(BLOCK_ID) + 1,
+        )
+
+        if run_error is None:
+            print("✅ Stream terminated cleanly")
+        else:
+            print("❌ Stream terminated after error", file=sys.stderr)
+            raise SystemExit(1)

@@ -88,6 +88,7 @@ from app.paths import (
 )
 from app.process_runner import ProcessRunner
 from app.repo_probe import discover_scripts
+from muse_streaming.config import DEFAULT_STREAM_NAME, DEFAULT_STREAM_TYPE
 from muse_streaming.healthcheck import run_healthcheck
 from visualization.live_viz import LiveHiddenMagnitudePlot, parse_viz_line
 from visualization.replay_viz import ReplayVisualizer
@@ -544,8 +545,8 @@ class MainWindow(QMainWindow):
         self.live_stream_ready = False
         self.live_label_acknowledged = False
         self.live_label_details: Dict[str, Any] = {}
-        self.live_stream_name = "Muse2-EEG"
-        self.live_stream_type = "EEG"
+        self.live_stream_name = DEFAULT_STREAM_NAME
+        self.live_stream_type = DEFAULT_STREAM_TYPE
         self.hard_stop_locked = False
 
         self.live_hidden_plot: Optional[LiveHiddenMagnitudePlot] = None
@@ -3241,8 +3242,9 @@ class MainWindow(QMainWindow):
         labels, rate, _ = self._current_live_config()
         args = [
             "-m",
-            "muse_streaming.cli",
-            "--name",
+            "cli",
+            "start-streamer",
+            "--stream-name",
             self.live_stream_name,
             "--type",
             self.live_stream_type,
@@ -3261,7 +3263,7 @@ class MainWindow(QMainWindow):
         labels, _rate, require_exact = self._current_live_config()
         try:
             result = run_healthcheck(
-                name=self.live_stream_name,
+                stream_name=self.live_stream_name,
                 stype=self.live_stream_type,
                 required_labels=labels,
                 require_exact_channels=require_exact,
@@ -3542,29 +3544,42 @@ class MainWindow(QMainWindow):
 
         subject = self.current_subject
         session = self.current_session_backend
-        features_src = (
-            self.repo_root
-            / "data"
-            / "processed"
-            / f"{subject}_{session}_eeg_features.csv"
-        )
-        events_src = (
-            self.repo_root / "data" / "processed" / f"{subject}_{session}_events.csv"
-        )
-        autosave_src = (
-            self.repo_root
-            / "data"
-            / "processed"
-            / f"{subject}_{session}_events_autosave.csv"
-        )
-        raw_src = self.repo_root / "data" / "raw" / f"{subject}_{session}_raw.csv"
-        meta_src = (
-            self.repo_root
-            / "data"
-            / "processed"
-            / f"{subject}_{session}_session_meta.json"
-        )
         state_src = self.repo_root / "logs" / f"session_state_{subject}.json"
+        state_payload = self._read_session_state_payload()
+        state_session = state_payload.get("session_id") if state_payload else None
+
+        features_src = None
+        events_src = None
+        raw_src = None
+        if state_payload and state_session == session:
+            features_path = state_payload.get("features_path")
+            events_path = state_payload.get("events_path")
+            raw_path = state_payload.get("raw_path")
+            if features_path:
+                features_src = Path(features_path)
+            if events_path:
+                events_src = Path(events_path)
+            if raw_path:
+                raw_src = Path(raw_path)
+
+        if features_src is None:
+            features_src = (
+                self.repo_root
+                / "data"
+                / "processed"
+                / f"{subject}_{session}_eeg_features.csv"
+            )
+        if events_src is None:
+            events_src = (
+                self.repo_root / "data" / "processed" / f"{subject}_{session}_events.csv"
+            )
+        if raw_src is None:
+            raw_src = self.repo_root / "data" / "raw" / f"{subject}_{session}_raw.csv"
+
+        autosave_src = events_src.with_name(
+            events_src.name.replace("_events.csv", "_events_autosave.csv")
+        )
+        meta_src = features_src.parent / f"{subject}_{session}_session_meta.json"
 
         self._safe_copy(
             features_src, subject_dir / "features" / features_src.name, allow_overwrite
