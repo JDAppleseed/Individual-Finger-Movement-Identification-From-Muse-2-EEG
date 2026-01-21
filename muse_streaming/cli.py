@@ -179,7 +179,7 @@ def main() -> int:
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
-        print(f\"❌ CLI failed: {exc}\", file=sys.stderr)
+        print(f"❌ CLI failed: {exc}", file=sys.stderr)
         return 2
     finally:
         if sim_streamer is not None:
