@@ -298,32 +298,80 @@ class OutlineTextHighlighter(QSyntaxHighlighter):
 
 
 class OutlineLineEdit(QLineEdit):
+    """Line edit with *no* custom painting.
+
+    We previously attempted to draw an outline around the editable text to
+    improve contrast. On macOS (and some retina/HiDPI configurations) this can
+    produce visible "ghost" glyphs/overdraw in the central forms.
+
+    Keeping this subclass preserves drop-in compatibility with the rest of the
+    file, while reverting to Qt's native text rendering for clean, crisp inputs.
+    """
+
+    # Intentionally do not override paintEvent.
+    pass
+
+
+class OutlinedLabel(QLabel):
+    """QLabel that paints white text with a thin black outline.
+
+    This avoids global style overrides that can cause duplicated/overlapping
+    text on some platforms.
+    """
+
+    def __init__(
+        self,
+        text: str = "",
+        parent: Optional[QWidget] = None,
+        *,
+        outline_width: float = 1.1,
+        outline_color: QColor = QColor(0, 0, 0, 255),
+        fill_color: QColor = QColor(255, 255, 255, 255),
+    ) -> None:
+        super().__init__(text, parent)
+        self._outline_width = float(outline_width)
+        self._outline_color = QColor(outline_color)
+        self._fill_color = QColor(fill_color)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+
     def paintEvent(self, event) -> None:
+        # Let Qt handle background/frames.
         super().paintEvent(event)
-        text = self.displayText()
+        text = self.text()
         if not text:
-            text = self.placeholderText()
-            if not text:
-                return
-        option = QStyleOptionFrame()
-        option.initFrom(self)
-        option.rect = self.rect()
-        contents = self.style().subElementRect(QStyle.SE_LineEditContents, option, self)
-        margins = self.textMargins()
-        contents = contents.adjusted(
-            margins.left(), margins.top(), -margins.right(), -margins.bottom()
-        )
-        flags = self.alignment() | Qt.TextSingleLine
-        if not (flags & Qt.AlignVertical_Mask):
-            flags |= Qt.AlignVCenter
-        fm = QFontMetrics(self.font())
-        text_rect = fm.boundingRect(contents, flags, text)
+            return
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.setClipRect(contents)
+        painter.setRenderHint(QPainter.TextAntialiasing)
+        painter.setFont(self.font())
+
+        rect = self.contentsRect()
+        flags = int(self.alignment())
+        if not (flags & int(Qt.AlignVertical_Mask)):
+            flags |= int(Qt.AlignVCenter)
+        flags |= int(Qt.TextSingleLine)
+
+        fm = QFontMetrics(self.font())
+        elided = fm.elidedText(text, Qt.ElideRight, rect.width())
+
+        # Compute a baseline position inside rect for path drawing.
+        # We use boundingRect to position the text, then convert to baseline.
+        br = fm.boundingRect(rect, flags, elided)
+        x = br.left()
+        y = br.top() + fm.ascent()
+
         path = QPainterPath()
-        path.addText(text_rect.left(), text_rect.top() + fm.ascent(), self.font(), text)
-        painter.strokePath(path, QPen(Qt.black, 1))
+        path.addText(x, y, self.font(), elided)
+
+        # Stroke outline, then fill.
+        painter.setPen(QPen(self._outline_color, self._outline_width))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(path)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._fill_color)
+        painter.drawPath(path)
 
 
 class OutlinePlainTextEdit(QPlainTextEdit):
@@ -502,6 +550,8 @@ class MainWindow(QMainWindow):
 
         self.live_hidden_plot: Optional[LiveHiddenMagnitudePlot] = None
         self.replay_viz: Optional[ReplayVisualizer] = None
+        self.model_views_window: Optional[QDialog] = None
+        self._model_views_root: Optional[QWidget] = None
 
         self._build_ui()
 
@@ -698,6 +748,8 @@ class MainWindow(QMainWindow):
         tools_menu.addAction("Stream Setup", lambda: self.workflow_list.setCurrentRow(2))
         tools_menu.addAction("Event Review", lambda: self.workflow_list.setCurrentRow(4))
         tools_menu.addAction("Diagnostics", lambda: self.workflow_list.setCurrentRow(9))
+        model_views_action = tools_menu.addAction("Model Views", self._open_model_views_window)
+        model_views_action.setShortcut("Ctrl+M")
 
         plot_menu = menu.addMenu("Plot")
         plot_menu.addAction("Live Plot (Step 1)", lambda: self.workflow_list.setCurrentRow(3))
@@ -723,15 +775,19 @@ class MainWindow(QMainWindow):
         bar.setObjectName("StatusBarFrame")
         bar.setFrameShape(QFrame.StyledPanel)
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(14)
 
-        self.project_label = QLabel("Project: -")
-        self.subject_label = QLabel("Subject: -")
-        self.session_label = QLabel("Session: -")
-        self.stream_state_label = QLabel("Stream: idle")
-        self.ica_state_label = QLabel("ICA: off")
-        self.events_state_label = QLabel("Events: off")
-        self.battery_label = QLabel("Battery: N/A")
+        # Use outlined labels (painted inside their own rect) to avoid the
+        # QGraphicsEffect halo overlapping adjacent widgets.
+        self.project_label = OutlinedLabel("Project: -")
+        self.subject_label = OutlinedLabel("Subject: -")
+        self.session_label = OutlinedLabel("Session: -")
+        self.stream_state_label = OutlinedLabel("Stream: idle")
+        self.ica_state_label = OutlinedLabel("ICA: off")
+        self.events_state_label = OutlinedLabel("Events: off")
+        self.battery_label = OutlinedLabel("Battery: N/A")
+
         for label in (
             self.project_label,
             self.subject_label,
@@ -741,19 +797,30 @@ class MainWindow(QMainWindow):
             self.events_state_label,
             self.battery_label,
         ):
-            label.setMinimumWidth(140)
             label.setWordWrap(False)
-            self._apply_text_outline_effect(label)
+            label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            label.setMinimumWidth(0)
+
+        def _sep() -> QFrame:
+            line = QFrame()
+            line.setFrameShape(QFrame.VLine)
+            line.setFrameShadow(QFrame.Sunken)
+            line.setStyleSheet("color: rgba(0,0,0,120);")
+            return line
 
         layout.addWidget(self.project_label)
+        layout.addWidget(_sep())
         layout.addWidget(self.subject_label)
+        layout.addWidget(_sep())
         layout.addWidget(self.session_label)
+        layout.addWidget(_sep())
         layout.addWidget(self.stream_state_label)
+        layout.addWidget(_sep())
         layout.addWidget(self.ica_state_label)
+        layout.addWidget(_sep())
         layout.addWidget(self.events_state_label)
         layout.addStretch(1)
         layout.addWidget(self.battery_label)
-        self._set_status_semantic(self.battery_label, "neutral", "Battery: N/A")
 
         return bar
 
@@ -899,6 +966,9 @@ class MainWindow(QMainWindow):
         open_infer_btn = QPushButton("Open Live Inference")
         open_infer_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(7))
         model_layout.addWidget(open_infer_btn)
+        open_model_views_btn = QPushButton("Open Model Views")
+        open_model_views_btn.clicked.connect(self._open_model_views_window)
+        model_layout.addWidget(open_model_views_btn)
         model_layout.addStretch(1)
         model_dock = QDockWidget("Model", self)
         model_dock.setWidget(self._wrap_scroll(model_widget, "Sidebar"))
@@ -943,19 +1013,18 @@ class MainWindow(QMainWindow):
         session_dock.setMinimumWidth(260)
         self.addDockWidget(Qt.RightDockWidgetArea, session_dock)
 
-        self._build_model_views_dock()
         self.resizeDocks(
             [event_dock, model_dock, session_dock],
             [320, 320, 320],
-            Qt.Horizontal,
+            Qt.Vertical,
         )
 
-    def _build_model_views_dock(self) -> None:
-        dock = QDockWidget("Model Views", self)
+    def _build_model_views_widget(self) -> QWidget:
         widget = QWidget()
-        widget.setObjectName("Sidebar")
+        widget.setObjectName("CentralWorkspace")
         widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         layout = QVBoxLayout(widget)
+        layout.setContentsMargins(6, 6, 6, 6)
 
         model_views_header = QLabel("Model Views")
         self._apply_text_outline_effect(model_views_header)
@@ -989,13 +1058,7 @@ class MainWindow(QMainWindow):
             pg_note = QLabel("pyqtgraph not available; model visualizations disabled.")
             self._apply_text_outline_effect(pg_note)
             layout.addWidget(pg_note)
-            dock.setWidget(self._wrap_scroll(widget, "Sidebar"))
-            dock.setFeatures(
-                QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
-            )
-            dock.setMinimumWidth(260)
-            self.addDockWidget(Qt.RightDockWidgetArea, dock)
-            return
+            return widget
 
         self.model_view_tabs = QTabWidget()
 
@@ -1047,12 +1110,6 @@ class MainWindow(QMainWindow):
         self.model_view_tabs.addTab(replay_tab, "Replay")
         self.model_view_tabs.addTab(live_tab, "Live")
         layout.addWidget(self.model_view_tabs)
-
-        dock.setWidget(self._wrap_scroll(widget, "Sidebar"))
-        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
-        dock.setMinimumWidth(260)
-        self.addDockWidget(Qt.RightDockWidgetArea, dock)
-
         self._bind_checkbox(self.live_viz_checkbox, "infer", "LIVE_VIZ_ENABLED")
         field = self.fields.get("infer", {}).get("LIVE_VIZ_FPS")
         if isinstance(field, QSpinBox):
@@ -1060,6 +1117,38 @@ class MainWindow(QMainWindow):
             self.live_viz_fps_spin.valueChanged.connect(field.setValue)
             field.valueChanged.connect(self.live_viz_fps_spin.setValue)
         self._toggle_model_views("Off")
+        return widget
+
+    def _open_model_views_window(self) -> None:
+        if self.model_views_window and self.model_views_window.isVisible():
+            self.model_views_window.raise_()
+            self.model_views_window.activateWindow()
+            return
+        if self.model_views_window is None and self._model_views_root is not None:
+            self._model_views_root = None
+        content = self._build_model_views_widget()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Model Views")
+        dialog.setMinimumSize(980, 740)
+        dialog.setModal(False)
+        dialog_layout = QVBoxLayout(dialog)
+        dialog_layout.setContentsMargins(6, 6, 6, 6)
+        scroll = self._wrap_scroll(content, "CentralWorkspace")
+        dialog_layout.addWidget(scroll)
+        close_row = QHBoxLayout()
+        close_row.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.close)
+        close_row.addWidget(close_btn)
+        dialog_layout.addLayout(close_row)
+        dialog.finished.connect(self._on_model_views_window_closed)
+        self.model_views_window = dialog
+        self._model_views_root = content
+        dialog.show()
+
+    def _on_model_views_window_closed(self, *_args) -> None:
+        self.model_views_window = None
+        self._model_views_root = None
 
     def _toggle_model_views(self, mode: str) -> None:
         if not PYQTGRAPH_AVAILABLE:
@@ -1427,7 +1516,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(note)
 
         self.live_status_label = QLabel("Live status: idle")
-        self._apply_text_outline_effect(self.live_status_label)
         layout.addWidget(self.live_status_label)
 
         btn_row = QHBoxLayout()
@@ -3247,8 +3335,6 @@ class MainWindow(QMainWindow):
         if exit_code != 0:
             self._update_live_status("Live status: streamer stopped")
             self.live_stream_ready = False
-        if hasattr(self, "battery_label") and self.battery_label is not None:
-            self._set_status_semantic(self.battery_label, "neutral", "Battery: N/A")
         self._set_live_buttons_state()
 
     def _set_live_buttons_state(self) -> None:
@@ -3350,11 +3436,6 @@ class MainWindow(QMainWindow):
             if payload and self.live_hidden_plot:
                 self.live_hidden_plot.update(payload)
             return
-        match = _BATT_RE.search(line)
-        if match and hasattr(self, "battery_label") and self.battery_label is not None:
-            pct = max(0, min(100, int(match.group(1))))
-            state = "green" if pct >= 30 else "yellow" if pct >= 15 else "red"
-            self._set_status_semantic(self.battery_label, state, f"Battery: {pct}%")
         self.log_console.appendPlainText(line)
         if line.startswith("🛑 HARD STOP"):
             self._handle_hard_stop_detected()
@@ -3897,7 +3978,9 @@ class MainWindow(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
-    app.setStyle(OutlineStyle(app.style()))
+    # NOTE: Avoid a global proxy style that outlines *all* text.
+    # It can cause glyph overdraw/"ghosting" on form labels and controls.
+    # We instead outline only key labels via OutlinedLabel / delegates.
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

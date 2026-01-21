@@ -20,6 +20,7 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -30,7 +31,7 @@ from datetime import datetime, timezone
 from collections import deque
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -72,10 +73,8 @@ from utils.lsl_stream_select import (
     stream_signature,
 )
 from utils.stream_timebase import (
-    clamp_lsl_timestamp,
     gap_threshold_s,
     is_gap,
-    should_segment_break_backwards,
     summarize_gaps,
 )
 from utils.timebase_selfcheck import evaluate_timebase_alignment
@@ -114,7 +113,7 @@ N_FINGERS = 6
 N_ACTIONS = 3
 TIMEBASE_VERSION = "absolute_v1"
 
-MODEL_PATH = "finger_action_model.pt"
+MODEL_PATH = "models/finger_action_model.pt"
 SCALER_PATH = "scaler.save"
 
 # =========================
@@ -124,6 +123,7 @@ SOFT_BACKWARDS_EPS_S = 0.010
 HARD_BACKWARDS_S = 0.200
 SOFT_BACKWARDS_LIMIT = 6
 SOFT_BACKWARDS_WINDOW_S = 1.0
+LSL_MONO_EPS_S = 1e-5
 
 # =========================
 # ===== SAFETY & UNCERTAINTY ======
@@ -172,6 +172,7 @@ DATA_STREAM_CHECK_INTERVAL_S = 0.5
 GAP_BREAK_S = 1.0
 GAP_RESET_THRESHOLD_S = 0.5
 STALL_S = 0.25
+STALL_INPUT_S = 5.0
 HEALTH_WINDOW_S = 2.0
 MIN_WRITE_FRACTION = 0.90
 MAX_QUEUE = 512
@@ -180,6 +181,13 @@ BACKWARDS_WINDOW_S = 1.0
 BACKWARDS_LIMIT = 3
 EVENT_MAX_LAG_S = 2.0
 EVENT_MAX_LEAD_S = 0.5
+
+DRAIN_MAX_SECONDS = 1.0
+DRAIN_MAX_SAMPLES = int(0.5 * SAMPLING_RATE)
+UNHEALTHY_WARN_S = 2.0
+UNHEALTHY_SOFT_STOP_S = 10.0
+UNHEALTHY_HARD_STOP_S = 20.0
+DEBUG_SAMPLE_DECIMATE = 4
 
 # =========================
 # ===== SUBJECT INFO ======
@@ -259,6 +267,7 @@ class StreamState:
     ica_transform_future: Any = None
     ica_fit_segment_id: Optional[int] = None
     ica_transform_segment_id: Optional[int] = None
+    soft_stop_triggered: bool = False
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
@@ -303,9 +312,25 @@ def _parse_label_list(value) -> List[str]:
     if value is None:
         return []
     if isinstance(value, list):
-        return [str(v).strip() for v in value if str(v).strip()]
+        out: List[str] = []
+        for v in value:
+            s = str(v).strip()
+            if not s:
+                continue
+            # Configs/UI sometimes embed quotes inside the string, e.g. "'TP9'".
+            # Normalize at the boundary so downstream label checks are stable.
+            s = s.strip("\"'")
+            out.append(s)
+        return out
     if isinstance(value, str):
-        return [v.strip() for v in value.split(",") if v.strip()]
+        out: List[str] = []
+        for v in value.split(","):
+            s = v.strip()
+            if not s:
+                continue
+            s = s.strip("\"'")
+            out.append(s)
+        return out
     return [str(value).strip()]
 
 
@@ -317,7 +342,16 @@ def _evaluate_label_check(
     found_labels = [str(x) for x in (found_labels or [])]
 
     def _norm(label: str) -> str:
-        return str(label).strip().lower()
+        # Aggressive normalization to avoid false "label mismatch" due to
+        # quoting/spacing differences across config/UI/LSL metadata.
+        s = str(label).strip()
+        # Remove any quoting characters wherever they appear (configs sometimes
+        # contain "'TP9'" as a literal string).
+        s = s.replace("\"", "").replace("'", "")
+        # Normalize whitespace and remove it for stable comparisons.
+        s = " ".join(s.split())
+        s = s.replace(" ", "")
+        return s.lower()
 
     invalid_required = [lab for lab in raw_required if _norm(lab) == "aux"]
     required_labels = [lab for lab in raw_required if _norm(lab) != "aux"]
@@ -389,7 +423,7 @@ stream_requirements = StreamRequirements(
 )
 hard_stop_policy = HardStopPolicy(
     hard_stop_after_unhealthy_s=float(
-        config_settings.get("HARD_STOP_AFTER_UNHEALTHY_S", 2.0)
+        config_settings.get("HARD_STOP_AFTER_UNHEALTHY_S", UNHEALTHY_HARD_STOP_S)
     ),
     failed_write_window_s=float(config_settings.get("FAILED_WRITE_WINDOW_S", 5.0)),
     failed_dir=str(config_settings.get("FAILED_DIR", "data/failed")),
@@ -422,6 +456,7 @@ state = StreamState(
     local_clock_at_start=None,
     clock_offset=None,
 )
+state.soft_stop_triggered = False
 
 experiment_config = {
     "sampling_rate": SAMPLING_RATE,
@@ -867,7 +902,15 @@ def _build_session_state_payload(
     last_time_override=None,
     block_id_override=None,
     segment_id_override=None,
+    soft_stop_triggered: Optional[bool] = None,
 ):
+    soft_stop = (
+        bool(getattr(state, "soft_stop_triggered", False))
+        if soft_stop_triggered is None
+        else bool(soft_stop_triggered)
+    )
+    soft_stop_report = globals().get("soft_stop_report_path", None)
+    timebase_health = globals().get("timebase_health_snapshot", None)
     segment_id_val = (
         int(segment_id_override)
         if segment_id_override is not None
@@ -932,6 +975,10 @@ def _build_session_state_payload(
         "hard_stop_report_path": str(health_state.hard_stop_report_path)
         if health_state.hard_stop_report_path
         else None,
+        "soft_stop_triggered": soft_stop,
+        "soft_stop_report_path": str(soft_stop_report)
+        if soft_stop_report
+        else None,
         "data_stream_active": bool(data_stream_active),
         "data_stream_last_write_ts": data_stream_last_write_ts,
         "data_stream_stalled_reason": data_stream_stalled_reason,
@@ -942,6 +989,7 @@ def _build_session_state_payload(
         "stream_health_last_received_lsl_ts": stream_health_last_received_lsl_ts,
         "stream_health_last_written_lsl_ts": stream_health_last_written_lsl_ts,
         "event_marking_allowed": bool(event_marking_allowed),
+        "timebase_health": timebase_health,
         # Legacy/diagnostic
         "segment_start_lsl_ts": segment_start_lsl_ts,
     }
@@ -956,17 +1004,25 @@ def _write_session_state(
 ):
     if INIT_ONLY:
         return
-    payload = _build_session_state_payload(
-        state,
-        total_elapsed_override=total_elapsed_override,
-        last_time_override=last_time_override,
-        block_id_override=block_id_override,
-        segment_id_override=segment_id_override,
-    )
-    SESSION_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    msg = "Updating" if SESSION_STATE_PATH.exists() else "Writing"
-    print(f"ℹ️ {msg} session state ({label}): {SESSION_STATE_PATH}")
-    _write_json_atomic(SESSION_STATE_PATH, payload)
+    try:
+        soft_stop = bool(getattr(state, "soft_stop_triggered", False))
+        payload = _build_session_state_payload(
+            state,
+            total_elapsed_override=total_elapsed_override,
+            last_time_override=last_time_override,
+            block_id_override=block_id_override,
+            segment_id_override=segment_id_override,
+            soft_stop_triggered=soft_stop,
+        )
+        SESSION_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        msg = "Updating" if SESSION_STATE_PATH.exists() else "Writing"
+        print(f"ℹ️ {msg} session state ({label}): {SESSION_STATE_PATH}")
+        _write_json_atomic(SESSION_STATE_PATH, payload)
+    except Exception as exc:
+        print(
+            f"⚠️ Failed to write session state ({label}): {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _report_stamp() -> str:
@@ -1150,6 +1206,7 @@ def listen_for_exit():
         try:
             if input().strip().lower() == "end_stream":
                 print("\n🛑 end_stream received")
+                state.soft_stop_triggered = True
                 stop_event.set()
         except EOFError:
             break
@@ -1174,6 +1231,31 @@ def _time_s_from_lsl(lsl_ts: float):
     if stream_start_lsl_ts is None:
         return None
     return float(lsl_ts - stream_start_lsl_ts)
+
+
+def validate_timestamp_sequence(
+    timestamps, clamp_flags: Optional[Iterable[bool]] = None, epsilon: float = LSL_MONO_EPS_S
+) -> Dict[str, Any]:
+    ts = np.asarray(list(timestamps), dtype=float)
+    if ts.size < 2:
+        return {"monotonic_violations": 0, "clamp_count": 0, "fs_estimate": None}
+    diffs = np.diff(ts)
+    violations = int(np.sum(diffs <= 0))
+    if clamp_flags is not None:
+        clamp_count = int(np.sum([1 for flag in clamp_flags if flag]))
+    else:
+        clamp_count = int(np.sum(diffs <= float(epsilon)))
+    pos = diffs[diffs > 0]
+    fs_estimate = None
+    if pos.size:
+        median_dt = float(np.median(pos))
+        if median_dt > 0:
+            fs_estimate = float(1.0 / median_dt)
+    return {
+        "monotonic_violations": violations,
+        "clamp_count": clamp_count,
+        "fs_estimate": fs_estimate,
+    }
 
 
 def _event_time_ok(event_time_s: float) -> bool:
@@ -1313,6 +1395,91 @@ def _maybe_write_timebase_report(force: bool = False, label: str = "periodic"):
         last_report_samples_written = state.samples_written
 
 
+def _compute_timebase_health(now_monotonic: float) -> Dict[str, Any]:
+    ts_list = list(recent_accepted_timestamps)
+    clamp_flags = list(recent_accepted_clamped_flags)
+    diffs = np.diff(np.asarray(ts_list, dtype=float)) if len(ts_list) >= 2 else np.array([])
+    last_dt_ms = float(diffs[-1] * 1000.0) if diffs.size else None
+    min_dt_ms = float(np.min(diffs) * 1000.0) if diffs.size else None
+    max_dt_ms = float(np.max(diffs) * 1000.0) if diffs.size else None
+    validation = validate_timestamp_sequence(
+        ts_list, clamp_flags=clamp_flags, epsilon=LSL_MONO_EPS_S
+    )
+    lsl_gap_ms = (
+        float((now_monotonic - last_any_sample_received_time) * 1000.0)
+        if last_any_sample_received_time is not None
+        else None
+    )
+    processing_lag_ms = None
+    if last_lsl_ts_mono is not None:
+        try:
+            processing_lag_ms = float((local_clock() - last_lsl_ts_mono) * 1000.0)
+        except Exception:
+            processing_lag_ms = None
+
+    return {
+        "monotonic_ok": validation["monotonic_violations"] == 0,
+        "clamped_samples_total": int(clamped_samples_total),
+        "backwards_detected_total": int(total_backward_timestamp_count),
+        "last_dt_ms": last_dt_ms,
+        "min_dt_ms": min_dt_ms,
+        "max_dt_ms": max_dt_ms,
+        "lsl_gap_ms": lsl_gap_ms,
+        "processing_lag_ms": processing_lag_ms,
+        "write_rate_samples_per_s": float(stream_health_write_rate),
+        "last_clamp_localtime": last_clamp_localtime,
+        "last_clamp_lsl_ts": last_clamp_lsl_ts,
+    }
+
+
+def _maybe_write_timebase_health(now_monotonic: float, reason: str = "periodic") -> None:
+    global last_timebase_health_write, timebase_health_snapshot
+    timebase_health_snapshot = _compute_timebase_health(now_monotonic)
+    if last_timebase_health_write is None:
+        last_timebase_health_write = float(now_monotonic)
+    if (now_monotonic - last_timebase_health_write) >= 1.0:
+        _write_session_state(label=f"timebase_health:{reason}")
+        last_timebase_health_write = float(now_monotonic)
+
+
+def _write_debug_timebase_dump(reason: str, now_monotonic: float, decision) -> None:
+    report_dir = Path("logs")
+    report_dir.mkdir(parents=True, exist_ok=True)
+    stamp = _report_stamp()
+    report_path = report_dir / f"debug_timebase_{subject_id}_{session_id}_{stamp}.json"
+    ts_list = list(recent_accepted_timestamps)
+    clamp_flags = list(recent_accepted_clamped_flags)
+    clamp_indices = [idx for idx, flag in enumerate(clamp_flags) if flag]
+    validation = validate_timestamp_sequence(
+        ts_list, clamp_flags=clamp_flags, epsilon=LSL_MONO_EPS_S
+    )
+    payload = {
+        "reason": reason,
+        "timestamp_utc": utc_now_iso_z(),
+        "timestamp_monotonic": float(now_monotonic),
+        "subject_id": subject_id,
+        "session_id": session_id,
+        "segment_id": int(segment_id),
+        "last_accepted_timestamps": ts_list,
+        "clamp_indices": clamp_indices,
+        "tp9_values_decimated": list(recent_tp9_values),
+        "measured_fs": decision.measured_fs if decision else None,
+        "fs_estimate": validation.get("fs_estimate"),
+        "queue_size": int(stream_health_queue_size),
+        "write_rate": float(stream_health_write_rate),
+        "samples_received": int(state.samples_seen),
+        "samples_written": int(state.samples_written),
+        "last_received_lsl_ts": last_received_lsl_ts,
+        "last_written_lsl_ts": last_written_lsl_ts,
+        "last_any_sample_received_time": last_any_sample_received_time,
+        "last_sample_written_time": last_sample_written_time,
+        "last_lsl_pull_monotonic_time": last_lsl_pull_monotonic_time,
+        "clamped_samples_total": int(clamped_samples_total),
+        "backwards_detected_total": int(total_backward_timestamp_count),
+        "timebase_health": timebase_health_snapshot,
+    }
+    report_path.write_text(json.dumps(_to_jsonable(payload), indent=2))
+
 # =========================
 # ===== EVENT MARKING =====
 # =========================
@@ -1363,6 +1530,23 @@ last_action_confidence = 0.0
 last_action_uncertainty = 0.0
 last_finger_confidence = 0.0
 last_finger_uncertainty = 0.0
+clamped_samples_total = 0
+last_clamp_localtime: Optional[float] = None
+last_clamp_lsl_ts: Optional[float] = None
+last_lsl_pull_monotonic_time: Optional[float] = None
+last_any_sample_received_time: Optional[float] = None
+last_any_sample_received_lsl_ts: Optional[float] = None
+last_sample_written_time: Optional[float] = None
+recent_accepted_timestamps: Deque[float] = deque(maxlen=200)
+recent_accepted_clamped_flags: Deque[bool] = deque(maxlen=200)
+recent_tp9_values: Deque[float] = deque(maxlen=200)
+debug_sample_counter = 0
+timebase_health_snapshot: Dict[str, Any] = {}
+last_timebase_health_write: Optional[float] = None
+soft_stop_report_path: Optional[Path] = None
+last_debug_dump_time: Optional[float] = None
+last_debug_dump_reason: Optional[str] = None
+last_received_lsl_ts_for_health: Optional[float] = None
 
 
 def _apply_segment_paths(seg_id: int) -> None:
@@ -1394,6 +1578,8 @@ def _reset_segment_state(state: StreamState) -> None:
     global last_report_samples_written, timebase_report_initialized
     global last_live_viz_emit
     global ica_scaler, ica
+    global recent_accepted_timestamps, recent_accepted_clamped_flags, recent_tp9_values
+    global debug_sample_counter
     segment_start_lsl_ts = None
     stream_start_lsl_ts = None
     local_clock_at_start = None
@@ -1434,6 +1620,10 @@ def _reset_segment_state(state: StreamState) -> None:
     last_report_samples_written = 0
     timebase_report_initialized = False
     last_live_viz_emit = 0.0
+    recent_accepted_timestamps.clear()
+    recent_accepted_clamped_flags.clear()
+    recent_tp9_values.clear()
+    debug_sample_counter = 0
     if state.ica_fit_future is not None:
         state.ica_fit_future.cancel()
         state.ica_fit_future = None
@@ -1839,6 +2029,7 @@ def on_key_press(key):
     # Quick stop hotkey
     if key == keyboard.Key.esc or key_char == "q":
         print("🛑 Stop requested (ESC/q).")
+        state.soft_stop_triggered = True
         stop_event.set()
         return
 
@@ -2008,33 +2199,69 @@ def mc_dropout_predict(model, x_BTC, passes: int):
     }
 
 
+model = None
+scaler = None
 if DEMO_MODE:
-    model = CNNLSTMFingerActionNet(
-        n_channels=CHANNELS, n_fingers=N_FINGERS, n_actions=N_ACTIONS
-    ).to(DEVICE)
-
+    # In lab workflows it's common to start streaming/recording before a
+    # trained model exists. Do not hard-fail the entire session if the model
+    # artifact is missing; instead disable inference-related features and
+    # continue with raw/feature logging.
     if not os.path.exists(MODEL_PATH):
-        raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
-
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
-    model.train()  # keep dropout active
-
-    if os.path.exists(SCALER_PATH):
-        scaler = joblib.load(SCALER_PATH)
+        print(f"⚠️  Model file not found: {MODEL_PATH}")
+        print("⚠️  Continuing without inference/actuation (recording still runs).")
+        ENABLE_ACTUATION = False
+        DEMO_MODE = False
+        model = None
+        scaler = None
+    else:
+        model = CNNLSTMFingerActionNet(
+            n_channels=CHANNELS, n_fingers=N_FINGERS, n_actions=N_ACTIONS
+        ).to(DEVICE)
+        model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+        model.train()  # keep dropout active
+        if os.path.exists(SCALER_PATH):
+            scaler = joblib.load(SCALER_PATH)
 
 
 # =========================
 # ===== LSL SETUP =========
 # =========================
-def _drain_inlet(inlet: StreamInlet, drain_s: float = 0.75) -> int:
+def _drain_inlet(
+    inlet: StreamInlet,
+    *,
+    label: str,
+    max_samples: Optional[int] = None,
+    max_seconds: Optional[float] = None,
+) -> int:
     drained = 0
+    max_samples = int(DRAIN_MAX_SAMPLES if max_samples is None else max_samples)
+    max_seconds = float(DRAIN_MAX_SECONDS if max_seconds is None else max_seconds)
     start = time.monotonic()
-    while time.monotonic() - start < drain_s:
+    idle_start = None
+    stop_reason = "max_seconds"
+
+    while True:
+        now = time.monotonic()
+        if drained >= max_samples:
+            stop_reason = "max_samples"
+            break
+        if (now - start) >= max_seconds:
+            stop_reason = "max_seconds"
+            break
         sample, _ = inlet.pull_sample(timeout=0.0)
         if sample is None:
+            if drained > 0:
+                if idle_start is None:
+                    idle_start = now
+                elif (now - idle_start) >= 0.05:
+                    stop_reason = "completed"
+                    break
             time.sleep(0.005)
             continue
+        idle_start = None
         drained += 1
+
+    print(f"🧹 Drained {drained} stale LSL samples ({label}, stop={stop_reason}).")
     return drained
 
 
@@ -2134,9 +2361,7 @@ if not IMPORT_ONLY:
         f"✅ EEG connected ({info.channel_count()} channels, using indices {channel_indices})"
     )
     selected_channel_indices = channel_indices
-    drained_samples = _drain_inlet(inlet, drain_s=0.75)
-    if drained_samples:
-        print(f"🧹 Drained {drained_samples} stale LSL samples before start.")
+    _drain_inlet(inlet, label="startup")
 
 # =========================
 # ===== BUFFERS ===========
@@ -2292,7 +2517,7 @@ if not IMPORT_ONLY:
 health_gate = RollingStreamHealthGate(
     expected_fs=float(SAMPLING_RATE),
     health_window_s=float(HEALTH_WINDOW_S),
-    stall_s=float(STALL_S),
+    stall_s=float(STALL_INPUT_S),
     min_write_fraction=float(MIN_WRITE_FRACTION),
     max_queue=int(MAX_QUEUE),
     recovery_s=float(RECOVERY_S),
@@ -2372,6 +2597,12 @@ def _label_check_blocked() -> bool:
     )
 
 
+def _is_true_input_stall(now_monotonic: float) -> bool:
+    if last_any_sample_received_time is None:
+        return True
+    return (now_monotonic - last_any_sample_received_time) > float(STALL_INPUT_S)
+
+
 def _write_hard_stop_report_and_exit(
     reason: str, now_monotonic: float, decision
 ) -> None:
@@ -2438,6 +2669,65 @@ def _write_hard_stop_report_and_exit(
     raise SystemExit(hard_stop_policy.hard_stop_exit_code)
 
 
+def _write_soft_stop_report(reason: str, now_monotonic: float, decision) -> None:
+    global soft_stop_report_path
+    if bool(getattr(state, "soft_stop_triggered", False)):
+        return
+    report_dir = Path("logs")
+    report_dir.mkdir(parents=True, exist_ok=True)
+    stamp = _report_stamp()
+    report_path = report_dir / (
+        f"soft_stop_{subject_id}_{session_id or 'UNKNOWN'}_{stamp}.json"
+    )
+    payload = {
+        "reason": reason,
+        "subject_id": subject_id,
+        "session_id": session_id,
+        "segment_id": int(segment_id),
+        "timestamp_utc": utc_now_iso_z(),
+        "timestamp_monotonic": float(now_monotonic),
+        "measured_fs": decision.measured_fs if decision else None,
+        "write_rate": float(stream_health_write_rate),
+        "queue_size": int(stream_health_queue_size),
+        "backwards_count": int(stream_health_backwards_count),
+        "last_received_lsl_ts": stream_health_last_received_lsl_ts,
+        "last_written_lsl_ts": stream_health_last_written_lsl_ts,
+        "lsl_stream": lsl_stream_signature,
+        "label_check_status": health_state.label_check_status,
+        "samples_received": int(state.samples_seen),
+        "samples_written": int(state.samples_written),
+        "windows_processed": int(state.windows_processed),
+        "unhealthy_duration_s": float(
+            now_monotonic - health_state.unhealthy_since_mono
+            if health_state.unhealthy_since_mono is not None
+            else 0.0
+        ),
+        "clean_paths": {
+            "features": str(FEATURES_ARCHIVE_PATH),
+            "predictions": str(PREDICTIONS_ARCHIVE_PATH),
+            "raw": str(RAW_ARCHIVE_PATH),
+            "events": str(EVENTS_CSV_PATH),
+        },
+        "failed_paths": {
+            "features": str(failed_writers.features_file.name)
+            if failed_writers.features_file
+            else None,
+            "predictions": str(failed_writers.preds_file.name)
+            if failed_writers.preds_file
+            else None,
+            "raw": str(failed_writers.raw_file.name) if failed_writers.raw_file else None,
+            "events": str(failed_writers.events_path)
+            if failed_writers.events_path
+            else None,
+        },
+    }
+    report_path.write_text(json.dumps(_to_jsonable(payload), indent=2))
+    soft_stop_report_path = report_path
+    state.soft_stop_triggered = True
+    _write_session_state(label="soft_stop")
+    print(f"⚠️ SOFT STOP: {reason} — wrote report: {report_path}")
+
+
 def _route_writers_for_health(now_mono: float, decision) -> None:
     if not health_state.has_health_decision:
         return
@@ -2457,11 +2747,24 @@ def _route_writers_for_health(now_mono: float, decision) -> None:
         )
         if not failed_writers.is_open():
             _open_failed_files()
+        unhealthy_duration = float(now_mono - health_state.unhealthy_since_mono)
         if (
-            (now_mono - health_state.unhealthy_since_mono)
-            >= float(hard_stop_policy.hard_stop_after_unhealthy_s)
+            unhealthy_duration >= float(UNHEALTHY_SOFT_STOP_S)
+            and not bool(getattr(state, "soft_stop_triggered", False))
         ):
-            _write_hard_stop_report_and_exit(decision.reason or "unhealthy", now_mono, decision)
+            stop_reason = decision.reason or "unhealthy"
+            if _is_true_input_stall(now_mono):
+                stop_reason = "soft_stop_input_stall"
+            _write_soft_stop_report(stop_reason, now_mono, decision)
+            stop_event.set()
+        if (
+            unhealthy_duration >= float(hard_stop_policy.hard_stop_after_unhealthy_s)
+            and _is_true_input_stall(now_mono)
+        ):
+            hard_reason = decision.reason or "hard_stop_input_stall"
+            if decision.reason == "stall_no_samples":
+                hard_reason = "hard_stop_input_stall"
+            _write_hard_stop_report_and_exit(hard_reason, now_mono, decision)
         return
 
     health_state.unhealthy_since_mono = None
@@ -2526,10 +2829,13 @@ def _update_stream_health(now_monotonic: float) -> None:
     global segment_break_hold_until, last_health_warning_time
     global current_event
     global last_health_decision
+    global last_debug_dump_time, last_debug_dump_reason
 
     prev_active = data_stream_active
     prev_event_allowed = event_marking_allowed
     decision = health_gate.evaluate(now_monotonic)
+    if decision.reason == "stall_no_samples" and not _is_true_input_stall(now_monotonic):
+        decision.reason = "backpressure_processing"
     health_state.has_health_decision = True
     health_state.last_health_reason = decision.reason
     last_health_decision = decision
@@ -2551,13 +2857,35 @@ def _update_stream_health(now_monotonic: float) -> None:
         event_allowed = False
 
     _route_writers_for_health(now_monotonic, decision)
+    _maybe_write_timebase_health(now_monotonic, reason=decision.reason or "healthy")
 
     if not data_stream_active:
-        if (now_monotonic - last_health_warning_time) >= 2.0:
+        unhealthy_duration = float(
+            now_monotonic - health_state.unhealthy_since_mono
+            if health_state.unhealthy_since_mono is not None
+            else 0.0
+        )
+        should_dump = False
+        if last_debug_dump_time is None or (now_monotonic - last_debug_dump_time) >= 2.0:
+            should_dump = True
+        if decision.reason != last_debug_dump_reason:
+            should_dump = True
+        if unhealthy_duration >= UNHEALTHY_WARN_S:
+            should_dump = True
+        if should_dump:
+            _write_debug_timebase_dump(
+                decision.reason or "unhealthy", now_monotonic, decision
+            )
+            last_debug_dump_time = float(now_monotonic)
+            last_debug_dump_reason = decision.reason
+
+        if (now_monotonic - last_health_warning_time) >= 2.0 and unhealthy_duration >= UNHEALTHY_WARN_S:
             reason = data_stream_stalled_reason or "unhealthy"
             if label_blocked:
                 reason = "label_check_unacknowledged"
-            print(f"⚠️ Stream unhealthy ({reason}); event marking disabled.")
+            print(
+                f"⚠️ Stream unhealthy ({reason}); event marking disabled (unhealthy_for={unhealthy_duration:.1f}s)."
+            )
             last_health_warning_time = now_monotonic
         if event_marking_active:
             stop_event_listener()
@@ -2657,6 +2985,7 @@ if not IMPORT_ONLY:
 
             # Drain incoming samples into a bounded queue.
             while True:
+                last_lsl_pull_monotonic_time = time.monotonic()
                 sample, lsl_ts = inlet.pull_sample(timeout=0.0)
                 if sample is None:
                     break
@@ -2683,7 +3012,14 @@ if not IMPORT_ONLY:
                 state.samples_seen += 1
                 last_received_lsl_ts = float(lsl_ts)
                 sample_monotonic = time.monotonic()
-                health_gate.record_received(float(lsl_ts), sample_monotonic)
+                last_any_sample_received_time = sample_monotonic
+                last_any_sample_received_lsl_ts = float(lsl_ts)
+                health_ts = float(lsl_ts)
+                if last_received_lsl_ts_for_health is not None:
+                    if health_ts <= last_received_lsl_ts_for_health:
+                        health_ts = last_received_lsl_ts_for_health + LSL_MONO_EPS_S
+                last_received_lsl_ts_for_health = health_ts
+                health_gate.record_received(health_ts, sample_monotonic)
                 if len(sample_queue) >= MAX_QUEUE:
                     queue_drop_count += 1
                     health_gate.set_queue_size(len(sample_queue) + 1)
@@ -2707,80 +3043,49 @@ if not IMPORT_ONLY:
                 # ===== TIMEBASE INIT ======
                 # =========================
                 lsl_ts_raw = float(lsl_ts)
-                clamp_result = clamp_lsl_timestamp(
-                    last_lsl_ts_mono,
-                    lsl_ts_raw,
-                    epsilon_s=SOFT_BACKWARDS_EPS_S,
-                    hard_backwards_s=HARD_BACKWARDS_S,
-                )
-                lsl_ts_mono = clamp_result.mono_ts
+                lsl_ts_mono = lsl_ts_raw
                 candidate_time_s = (
                     float(lsl_ts_mono - stream_start_lsl_ts)
                     if stream_start_lsl_ts is not None
-                    else 0.0
+                    else None
                 )
 
                 segment_break_reason = None
-                if clamp_result.clamped:
-                    state.backward_timestamp_count += 1
-                    total_backward_timestamp_count += 1
-                    time_s_clamped_count += 1
-                    max_backwards_jump_s = max(
-                        max_backwards_jump_s, clamp_result.backwards_delta_s
-                    )
-                    clamp_details = {
-                        "backwards_delta_s": clamp_result.backwards_delta_s,
-                        "lsl_ts_raw": lsl_ts_raw,
-                        "lsl_ts_prev": last_lsl_ts_mono,
-                        "lsl_ts_mono": lsl_ts_mono,
-                    }
-                    if clamp_result.is_hard_backwards:
-                        segment_break_reason = "backwards_hard"
-                        _reset_lstm_state(
-                            "backwards_timestamp",
-                            candidate_time_s,
-                            {**clamp_details, "backwards_kind": "hard"},
-                        )
-                    elif clamp_result.is_soft_backwards:
-                        if should_segment_break_backwards(
-                            backwards_events_monotonic,
-                            now_monotonic,
-                            soft_limit=SOFT_BACKWARDS_LIMIT,
-                            window_s=SOFT_BACKWARDS_WINDOW_S,
-                            hard_backwards=False,
-                        ):
-                            segment_break_reason = "backwards_burst"
-                            _reset_lstm_state(
-                                "backwards_timestamp",
-                                candidate_time_s,
-                                {**clamp_details, "backwards_kind": "burst"},
-                            )
-                elif last_lsl_ts_mono is not None:
-                    dt_s = float(lsl_ts_mono - last_lsl_ts_mono)
-                    if is_gap(dt_s, nominal_dt_s):
-                        total_gap_count += 1
-                        gap_durations_s.append(dt_s)
-                        summary = summarize_gaps(gap_durations_s)
-                        state.gap_count = summary.count
-                        state.gap_max_s = summary.max_gap_s or 0.0
-                        state.gap_p95_s = summary.p95_gap_s
-                        state.gap_p99_s = summary.p99_gap_s
-                    if dt_s > GAP_BREAK_S:
-                        segment_break_reason = "gap"
-                        if dt_s > GAP_RESET_THRESHOLD_S:
-                            _reset_lstm_state(
-                                "gap_reset",
-                                candidate_time_s,
-                                {"gap_dt_s": dt_s, "lsl_ts_raw": lsl_ts_raw},
-                            )
+                clamped = False
+                if last_lsl_ts_mono is not None:
+                    if lsl_ts_mono <= last_lsl_ts_mono:
+                        backwards_delta = float(last_lsl_ts_mono - lsl_ts_mono)
+                        state.backward_timestamp_count += 1
+                        total_backward_timestamp_count += 1
+                        time_s_clamped_count += 1
+                        clamped_samples_total += 1
+                        max_backwards_jump_s = max(max_backwards_jump_s, backwards_delta)
+                        lsl_ts_mono = float(last_lsl_ts_mono + LSL_MONO_EPS_S)
+                        last_clamp_localtime = time.time()
+                        last_clamp_lsl_ts = lsl_ts_mono
+                        clamped = True
+                    else:
+                        dt_s = float(lsl_ts_mono - last_lsl_ts_mono)
+                        if is_gap(dt_s, nominal_dt_s):
+                            total_gap_count += 1
+                            gap_durations_s.append(dt_s)
+                            summary = summarize_gaps(gap_durations_s)
+                            state.gap_count = summary.count
+                            state.gap_max_s = summary.max_gap_s or 0.0
+                            state.gap_p95_s = summary.p95_gap_s
+                            state.gap_p99_s = summary.p99_gap_s
+                        if dt_s > GAP_BREAK_S:
+                            segment_break_reason = "gap"
+                            if dt_s > GAP_RESET_THRESHOLD_S:
+                                _reset_lstm_state(
+                                    "gap_reset",
+                                    candidate_time_s,
+                                    {"gap_dt_s": dt_s, "lsl_ts_raw": lsl_ts_raw},
+                                )
 
                 if segment_break_reason is not None:
                     _start_segment(segment_break_reason)
-                    drained = _drain_inlet(inlet, drain_s=0.75)
-                    if drained:
-                        print(
-                            f"🧹 Drained {drained} stale LSL samples after segment break."
-                        )
+                    _drain_inlet(inlet, label="segment_break")
                     sample_queue.clear()
                     continue
 
@@ -2822,6 +3127,14 @@ if not IMPORT_ONLY:
                 latency_ms = (local_clock() - lsl_ts_raw) * 1000.0
 
                 sample_arr = np.asarray(sample, dtype=float)
+                recent_accepted_timestamps.append(float(lsl_ts_mono))
+                recent_accepted_clamped_flags.append(bool(clamped))
+                debug_sample_counter += 1
+                if debug_sample_counter % DEBUG_SAMPLE_DECIMATE == 0:
+                    try:
+                        recent_tp9_values.append(float(sample_arr[0]))
+                    except Exception:
+                        pass
                 state.sample_time_buffer.append((time_s, sample_arr))
                 buffer_min_time = time_s - float(WINDOW_SEC) - 1.0
                 while (
@@ -3214,13 +3527,15 @@ if not IMPORT_ONLY:
 
                 if feature_target is not None:
                     data_stream_last_write_ts = utc_now_iso_z()
-                    health_gate.record_written(float(lsl_ts_raw), time.monotonic())
-                    last_written_lsl_ts = float(lsl_ts_raw)
+                    write_mono = time.monotonic()
+                    health_gate.record_written(float(lsl_ts_mono), write_mono)
+                    last_written_lsl_ts = float(lsl_ts_mono)
+                    last_sample_written_time = write_mono
                     if time_s is not None and np.isfinite(time_s):
                         last_written_time_s = float(time_s)
                         last_time_s = float(last_written_time_s)
                         last_sample_time_s = float(time_s)
-                        last_sample_lsl_ts = float(lsl_ts_raw)
+                        last_sample_lsl_ts = float(lsl_ts_mono)
                         state.recent_sample_times.append(last_sample_time_s)
                         if first_time_s is None:
                             first_time_s = last_sample_time_s
