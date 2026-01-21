@@ -126,6 +126,10 @@ def record(
         resume=recorder.resume,
     )
     logger = wrap_logger_with_session(logger, paths.session_id)
+    if logger is None:
+        # If no logger is provided, use a dummy logger to prevent crashes.
+        logger = logging.getLogger(__name__)
+        logger.addHandler(logging.NullHandler())
     state = RecordState()
     state.stop_requested = False
     _register_signals(state)
