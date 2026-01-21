@@ -6,7 +6,7 @@ Also: keyboard event marking (space=hold event), autosave events
 
 FIXES (this version):
 - Stream-relative absolute_v1 timebase with monotonic clamp:
-    time_s = lsl_ts - stream_start_lsl_ts (clamped on backward jumps)
+    time_s = continuous_mono - stream_start_continuous_mono (clamped on backward jumps)
 - Events aligned to the same stream timebase with clamp protection.
 - Per-segment timebase fields anchored to EEG start:
     stream_start_lsl_ts, local_clock_at_start, clock_offset
@@ -20,6 +20,7 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
+import logging
 import sys
 import threading
 import subprocess
@@ -89,6 +90,8 @@ from utils.stream_runtime import (
 )
 from utils.output_paths import resolve_output_dir
 from muse_streaming.io_paths import default_processed_dir, default_raw_dir
+from console_utils import install_console_logging, log_burst, log_every
+from timebase import TimebaseMapper, TimebaseSnapshot, map_lsl_to_mono_snapshot
 
 try:
     from pynput import keyboard
@@ -98,6 +101,7 @@ except Exception:
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+logger = logging.getLogger("muse_stream")
 
 # =========================
 # ===== CONFIG FLAGS ======
@@ -107,6 +111,12 @@ DEMO_MODE = False
 ENABLE_PLOT = True
 SAVE_TO_DISK = True
 SAVE_RAW = True
+ENABLE_RATE_LIMITED_LOGS = True
+CONSOLE_CAP_CHARS = 200_000
+CONSOLE_RING_CHARS = 50_000
+LOG_EVERY_S_HEALTH = 2.0
+LOG_EVERY_S_QUEUE = 2.0
+LOG_EVERY_S_PERF = 2.0
 
 SAMPLING_RATE = 256
 WINDOW_SEC = 0.25
@@ -178,7 +188,7 @@ def _stop_streamer_process(proc) -> None:
             except subprocess.TimeoutExpired:
                 proc.kill()
     except (OSError, AttributeError) as exc:
-        print(f"⚠️ Failed to stop streamer process: {exc}", file=sys.stderr)
+        logger.warning("Failed to stop streamer process: %s", exc)
 
 # =========================
 # ===== ICA SAFETY ========
@@ -214,6 +224,7 @@ DRAIN_MAX_SAMPLES = int(0.5 * SAMPLING_RATE)
 UNHEALTHY_WARN_S = 2.0
 UNHEALTHY_SOFT_STOP_S = 10.0
 UNHEALTHY_HARD_STOP_S = 20.0
+TIMEBASE_DISCONTINUITY_GRACE_S = 2.0
 DEBUG_SAMPLE_DECIMATE = 4
 ACQ_MAX_BUFLEN_S = 60.0
 ACQ_MAX_CHUNKLEN = 1024
@@ -224,6 +235,12 @@ RAW_WRITE_BUFFER_BYTES = 1024 * 1024
 RAW_WRITE_BATCH_MAX = 2000
 BACKLOG_SECONDS_THRESHOLD = 2.0
 BACKLOG_GRACE_S = 2.0
+PROCESSING_BACKLOG_HIGH_WATERMARK_FRAC = 0.8
+BACKLOG_FEATURE_WRITE_STRIDE = 3
+FEATURE_WRITE_BATCH_MAX = 50
+FEATURE_WRITE_BATCH_INTERVAL_S = 0.5
+TIMEBASE_SNAPSHOT_UPDATE_INTERVAL_S = 0.02
+TIMEBASE_SNAPSHOT_UPDATE_EVERY_N = 5
 HEALTH_GAP_THRESHOLD_MULT = 1.5
 HEALTH_GAP_MAX_EVENTS = 3
 HEALTH_GAP_WINDOW_S = 2.0
@@ -324,6 +341,7 @@ class SamplePacket:
     raw_path: Path
     clamped: bool
     segment_break_reason: Optional[str] = None
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
@@ -479,6 +497,28 @@ if args.subject_id:
 
 INIT_ONLY = bool(args.init_only)
 
+logger = install_console_logging(
+    CONSOLE_CAP_CHARS,
+    ring_chars=CONSOLE_RING_CHARS,
+    level=logging.INFO,
+)
+
+
+def _log_every(key: str, interval_s: float, level: int, msg: str, *args) -> None:
+    if ENABLE_RATE_LIMITED_LOGS:
+        log_every(key, interval_s, level, msg, *args)
+    else:
+        logger.log(level, msg, *args)
+
+
+def _log_burst(
+    key: str, max_per_window: int, window_s: float, level: int, msg: str, *args
+) -> None:
+    if ENABLE_RATE_LIMITED_LOGS:
+        log_burst(key, max_per_window, window_s, level, msg, *args)
+    else:
+        logger.log(level, msg, *args)
+
 subject_id = (
     SUBJECT_ID_OVERRIDE or ("unknown" if IMPORT_ONLY else get_subject_id(GENDER, AGE))
 )
@@ -590,7 +630,7 @@ if SESSION_STATE_PATH.exists():
     try:
         session_state = json.loads(SESSION_STATE_PATH.read_text())
     except Exception as e:
-        print(f"⚠️ Failed to load session state: {e}")
+        logger.warning("Failed to load session state: %s", e)
 
 # Defaults (initialized early for safe imports)
 total_elapsed_s = 0.0  # session-continuous elapsed time (excludes downtime)
@@ -623,6 +663,7 @@ last_health_decision = None
 
 # Canonical timebase fields (absolute_v1, per segment)
 stream_start_lsl_ts = None
+stream_start_continuous_mono = None
 local_clock_at_start = None
 clock_offset = None
 segment_start_lsl_ts = None
@@ -704,8 +745,10 @@ def _unique_session_id(session: str, subject: str) -> str:
     while True:
         candidate = f"{session}_{suffix:02d}"
         if not _session_has_existing_outputs(candidate, subject):
-            print(
-                f"⚠️ Session ID collision for {session}; using {candidate} to avoid overwrite."
+            logger.warning(
+                "Session ID collision for %s; using %s to avoid overwrite.",
+                session,
+                candidate,
             )
             return candidate
         suffix += 1
@@ -781,7 +824,7 @@ def _maybe_backup_path(path: Path, label: str):
         backup_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = path.with_name(f"{path.name}.bak_{backup_stamp}")
         path.rename(backup_path)
-        print(f"⚠️ {label} backed up to {backup_path}")
+        logger.warning("%s backed up to %s", label, backup_path)
         return backup_path
     return None
 
@@ -892,6 +935,7 @@ if true_resume:
 
     # Reset per-segment timebase; we intentionally DO NOT reuse old alignment across runs.
     stream_start_lsl_ts = None
+    stream_start_continuous_mono = None
     local_clock_at_start = None
     clock_offset = None
     state.stream_start_lsl_ts = None
@@ -931,17 +975,19 @@ state.experiment_hash = experiment_hash
 if true_resume and state_features_path:
     resume_processed_dir = Path(state_features_path).expanduser().resolve().parent
     if resume_processed_dir != PROCESSED_DIR:
-        print(
-            "⚠️ Resume override: using existing processed_dir "
-            f"{resume_processed_dir} (requested {PROCESSED_DIR})"
+        logger.warning(
+            "Resume override: using existing processed_dir %s (requested %s)",
+            resume_processed_dir,
+            PROCESSED_DIR,
         )
     PROCESSED_DIR = resume_processed_dir
 if true_resume and state_raw_path:
     resume_raw_dir = Path(state_raw_path).expanduser().resolve().parent
     if resume_raw_dir != RAW_DIR:
-        print(
-            "⚠️ Resume override: using existing raw_dir "
-            f"{resume_raw_dir} (requested {RAW_DIR})"
+        logger.warning(
+            "Resume override: using existing raw_dir %s (requested %s)",
+            resume_raw_dir,
+            RAW_DIR,
         )
     RAW_DIR = resume_raw_dir
 PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
@@ -1036,13 +1082,13 @@ def _update_session_meta(complete: bool, label: str):
     existing = _load_session_meta(SESSION_META_PATH)
     merged = _merge_non_none(existing, payload)
     msg = "Updating" if SESSION_META_PATH.exists() else "Writing"
-    print(f"ℹ️ {msg} session meta ({label}): {SESSION_META_PATH}")
+    logger.info("%s session meta (%s): %s", msg, label, SESSION_META_PATH)
     _write_json_atomic(SESSION_META_PATH, merged)
 
     root_existing = _load_session_meta(ROOT_SESSION_META_PATH)
     root_merged = _merge_non_none(root_existing, payload)
     root_msg = "Updating" if ROOT_SESSION_META_PATH.exists() else "Writing"
-    print(f"ℹ️ {root_msg} root session meta ({label}): {ROOT_SESSION_META_PATH}")
+    logger.info("%s root session meta (%s): %s", root_msg, label, ROOT_SESSION_META_PATH)
     _write_json_atomic(ROOT_SESSION_META_PATH, root_merged)
 
 
@@ -1166,12 +1212,14 @@ def _write_session_state(
         )
         SESSION_STATE_DIR.mkdir(parents=True, exist_ok=True)
         msg = "Updating" if SESSION_STATE_PATH.exists() else "Writing"
-        print(f"ℹ️ {msg} session state ({label}): {SESSION_STATE_PATH}")
+        logger.info("%s session state (%s): %s", msg, label, SESSION_STATE_PATH)
         _write_json_atomic(SESSION_STATE_PATH, payload)
     except Exception as exc:
-        print(
-            f"⚠️ Failed to write session state ({label}): {type(exc).__name__}: {exc}",
-            file=sys.stderr,
+        logger.warning(
+            "Failed to write session state (%s): %s: %s",
+            label,
+            type(exc).__name__,
+            exc,
         )
 
 
@@ -1230,71 +1278,81 @@ def _should_accept_ica_result(current_segment: int, result_segment: Optional[int
 channel_list = "TP9, AF7, AF8, TP10"
 
 if not IMPORT_ONLY:
-    print("-" * 50)
-    print("🧠 EEG SESSION INITIALIZED")
-    print("-" * 50)
-    print(f"Subject ID        : {subject_id}")
-    print(f"Session ID        : {session_id}")
-    print(f"Experiment Hash   : {experiment_hash}")
-    print("")
-    print(
-        f"Resume Requested  : {'YES' if resume_requested else 'NO'} ({resume_request_reason})"
+    logger.info("%s", "-" * 50)
+    logger.info("🧠 EEG SESSION INITIALIZED")
+    logger.info("%s", "-" * 50)
+    logger.info("Subject ID        : %s", subject_id)
+    logger.info("Session ID        : %s", session_id)
+    logger.info("Experiment Hash   : %s", experiment_hash)
+    logger.info("")
+    logger.info(
+        "Resume Requested  : %s (%s)",
+        "YES" if resume_requested else "NO",
+        resume_request_reason,
     )
-    print(f"Resume Decision   : {resume_flag}")
+    logger.info("Resume Decision   : %s", resume_flag)
     if resume_blockers and not true_resume:
-        print(f"Resume Blockers   : {', '.join(resume_blockers)}")
-    print(f"Current Block ID  : {BLOCK_ID}")
-    print(
-        f"Total Elapsed Time: {total_elapsed_s:.2f} s (session-continuous across segments)"
+        logger.warning("Resume Blockers   : %s", ", ".join(resume_blockers))
+    logger.info("Current Block ID  : %s", BLOCK_ID)
+    logger.info(
+        "Total Elapsed Time: %.2f s (session-continuous across segments)",
+        total_elapsed_s,
     )
-    print("")
+    logger.info("")
     if true_resume and state_events_missing:
-        print(
-            f"⚠️ Resume note: events file missing at {resolved_events_path}; a new events file will be created."
+        logger.warning(
+            "Resume note: events file missing at %s; a new events file will be created.",
+            resolved_events_path,
         )
-    print(f"EEG Channels      : {channel_list} ({CHANNELS})")
-    print(f"Sampling Rate     : {SAMPLING_RATE} Hz")
-    print(f"Window Length     : {WINDOW_SEC} s")
-    print(f"Timebase Version  : {TIMEBASE_VERSION}")
-    print(f"Stream Start LSL  : {_fmt_time_value(stream_start_lsl_ts)}")
-    print(f"Stream Start Local: {_fmt_time_value(local_clock_at_start)}")
-    print(f"Clock Offset      : {_fmt_time_value(clock_offset)}")
-    print("")
-    print("Modes:")
-    print(f"  Event Marking   : {'ENABLED' if EVENT_MARKING_ENABLED else 'DISABLED'}")
-    print(f"  Demo Mode       : {'ON' if DEMO_MODE else 'OFF'}")
-    print(f"  Training Mode   : {'ON' if TRAINING_MODE else 'OFF'}")
-    print(f"  Actuation       : {'ENABLED' if ENABLE_ACTUATION else 'DISABLED'}")
-    print(f"  ICA             : {'ENABLED' if ENABLE_ICA else 'DISABLED'}")
-    print("")
-    print("Output Paths:")
-    print(f"  Processed Dir   : {PROCESSED_DIR}")
-    print(f"  Raw Dir         : {RAW_DIR}")
-    print(f"  Features CSV    : {FEATURES_ARCHIVE_PATH}")
-    print(f"  Events CSV      : {EVENTS_ARCHIVE_PATH}")
-    print(f"  Predictions CSV : {PREDICTIONS_ARCHIVE_PATH}")
-    print(f"  Raw EEG CSV     : {RAW_ARCHIVE_PATH}")
-    print(f"  Session State   : {SESSION_STATE_PATH}")
-    print("")
-    print("Controls:")
-    print("  SPACE  = hold event")
-    print("  O/C/R  = OPEN / CLOSE / REST")
-    print("  1–5    = assign finger")
-    print("  A      = artifact")
-    print("  N      = clear override")
-    print("  Q or ESC = end stream safely")
-    print("")
-    print("Status:")
-    print("  ✔ LSL EEG connected")
-    print(f"  ✔ Time base aligned ({TIMEBASE_VERSION}, session-continuous)")
-    print("  ✔ Resume-safe logging enabled")
-    print("-" * 50)
-    print("▶ Streaming started…")
-    print("-" * 50)
-    print("Type 'end_stream' into terminal OR press ESC/q to stop safely.")
+    logger.info("EEG Channels      : %s (%s)", channel_list, CHANNELS)
+    logger.info("Sampling Rate     : %s Hz", SAMPLING_RATE)
+    logger.info("Window Length     : %s s", WINDOW_SEC)
+    logger.info("Timebase Version  : %s", TIMEBASE_VERSION)
+    logger.info("Stream Start LSL  : %s", _fmt_time_value(stream_start_lsl_ts))
+    logger.info("Stream Start Local: %s", _fmt_time_value(local_clock_at_start))
+    logger.info("Clock Offset      : %s", _fmt_time_value(clock_offset))
+    logger.info("")
+    logger.info("Modes:")
+    logger.info(
+        "  Event Marking   : %s",
+        "ENABLED" if EVENT_MARKING_ENABLED else "DISABLED",
+    )
+    logger.info("  Demo Mode       : %s", "ON" if DEMO_MODE else "OFF")
+    logger.info("  Training Mode   : %s", "ON" if TRAINING_MODE else "OFF")
+    logger.info(
+        "  Actuation       : %s",
+        "ENABLED" if ENABLE_ACTUATION else "DISABLED",
+    )
+    logger.info("  ICA             : %s", "ENABLED" if ENABLE_ICA else "DISABLED")
+    logger.info("")
+    logger.info("Output Paths:")
+    logger.info("  Processed Dir   : %s", PROCESSED_DIR)
+    logger.info("  Raw Dir         : %s", RAW_DIR)
+    logger.info("  Features CSV    : %s", FEATURES_ARCHIVE_PATH)
+    logger.info("  Events CSV      : %s", EVENTS_ARCHIVE_PATH)
+    logger.info("  Predictions CSV : %s", PREDICTIONS_ARCHIVE_PATH)
+    logger.info("  Raw EEG CSV     : %s", RAW_ARCHIVE_PATH)
+    logger.info("  Session State   : %s", SESSION_STATE_PATH)
+    logger.info("")
+    logger.info("Controls:")
+    logger.info("  SPACE  = hold event")
+    logger.info("  O/C/R  = OPEN / CLOSE / REST")
+    logger.info("  1–5    = assign finger")
+    logger.info("  A      = artifact")
+    logger.info("  N      = clear override")
+    logger.info("  Q or ESC = end stream safely")
+    logger.info("")
+    logger.info("Status:")
+    logger.info("  ✔ LSL EEG connected")
+    logger.info("  ✔ Time base aligned (%s, session-continuous)", TIMEBASE_VERSION)
+    logger.info("  ✔ Resume-safe logging enabled")
+    logger.info("%s", "-" * 50)
+    logger.info("▶ Streaming started…")
+    logger.info("%s", "-" * 50)
+    logger.info("Type 'end_stream' into terminal OR press ESC/q to stop safely.")
 
     if INIT_ONLY:
-        print("ℹ️ Init-only mode: exiting before LSL stream.")
+        logger.info("Init-only mode: exiting before LSL stream.")
         raise SystemExit(0)
 
     # Prepare output directories and metadata/state files.
@@ -1343,9 +1401,9 @@ if not IMPORT_ONLY and CALIBRATION_STATE_PATH.exists():
             max_threshold=cfg.get("max_threshold", 0.90),
             ema_alpha=cfg.get("ema_alpha", 0.05),
         )
-        print(f"🧠 Loaded calibration threshold: {calibrator.threshold:.2f}")
+        logger.info("Loaded calibration threshold: %.2f", calibrator.threshold)
     except Exception as e:
-        print(f"⚠️ Failed to load calibration state: {e}")
+        logger.warning("Failed to load calibration state: %s", e)
 
 # =========================
 # ===== CLEAN STOP ========
@@ -1357,7 +1415,7 @@ def listen_for_exit():
     while not stop_event.is_set():
         try:
             if input().strip().lower() == "end_stream":
-                print("\n🛑 end_stream received")
+                logger.info("end_stream received")
                 state.soft_stop_triggered = True
                 stop_event.set()
         except EOFError:
@@ -1378,11 +1436,16 @@ def _lsl_now():
     return float(local_clock())
 
 
+def _map_lsl_to_mono(lsl_ts: Optional[float]) -> Optional[float]:
+    with timebase_snapshot_lock:
+        return map_lsl_to_mono_snapshot(timebase_snapshot, lsl_ts)
+
+
 def _time_s_from_lsl(lsl_ts: float):
-    """Stream-relative time_s from an LSL timestamp."""
-    if stream_start_lsl_ts is None:
+    """Stream-relative time_s from a monotonic-domain timestamp."""
+    if stream_start_continuous_mono is None:
         return None
-    return float(lsl_ts - stream_start_lsl_ts)
+    return float(lsl_ts - stream_start_continuous_mono)
 
 
 def validate_timestamp_sequence(
@@ -1591,19 +1654,25 @@ def _write_timebase_report(label: str):
         payload["label"] = label
         selfcheck = payload.get("timebase_selfcheck", {})
         if selfcheck.get("error"):
-            print(
-                "⚠️ Timebase self-check error: event/sample alignment exceeds threshold."
+            _log_every(
+                "timebase_selfcheck_error",
+                LOG_EVERY_S_HEALTH,
+                logging.WARNING,
+                "Timebase self-check error: event/sample alignment exceeds threshold.",
             )
         elif selfcheck.get("warn"):
-            print(
-                "⚠️ Timebase self-check warning: event/sample alignment drift detected."
+            _log_every(
+                "timebase_selfcheck_warn",
+                LOG_EVERY_S_HEALTH,
+                logging.WARNING,
+                "Timebase self-check warning: event/sample alignment drift detected.",
             )
         report_path.parent.mkdir(parents=True, exist_ok=True)
         _write_json_atomic(report_path, payload)
         pointer_path.parent.mkdir(parents=True, exist_ok=True)
         _write_json_atomic(pointer_path, payload)
     except Exception as exc:
-        print(f"⚠️ Failed to write timebase report: {exc}")
+        logger.warning("Failed to write timebase report: %s", exc)
 
 
 def _maybe_write_timebase_report(force: bool = False, label: str = "periodic"):
@@ -1642,7 +1711,7 @@ def _compute_timebase_health(now_monotonic: float) -> Dict[str, Any]:
     processing_lag_ms = None
     if last_lsl_ts_mono is not None:
         try:
-            processing_lag_ms = float((local_clock() - last_lsl_ts_mono) * 1000.0)
+            processing_lag_ms = float((now_monotonic - last_lsl_ts_mono) * 1000.0)
         except Exception:
             processing_lag_ms = None
 
@@ -1766,7 +1835,7 @@ def _write_raw_integrity_report() -> Optional[Path]:
         f"nonfinite={payload['nonfinite_count']} "
         f"queue_overflows={payload['queue_overflow_count']}"
     )
-    print(f"ℹ️ {summary} (report={report_path})")
+    logger.info("%s (report=%s)", summary, report_path)
     return report_path
 
 # =========================
@@ -1792,6 +1861,8 @@ last_written_lsl_ts: Optional[float] = None
 last_received_lsl_ts: Optional[float] = None
 last_lsl_ts_mono: Optional[float] = None
 last_lsl_ts_raw: Optional[float] = None
+timebase_snapshot = TimebaseSnapshot()
+timebase_snapshot_lock = threading.Lock()
 gap_durations_s: List[float] = []
 first_time_s: Optional[float] = None
 last_time_s_seen: Optional[float] = None
@@ -1814,6 +1885,9 @@ raw_queue_overflow_count = 0
 max_processing_queue_size_observed = 0
 max_raw_queue_size_observed = 0
 max_queue_size_observed = 0
+processing_backlog_high_watermark = max(
+    1, int(PROCESSING_QUEUE_MAXSIZE * PROCESSING_BACKLOG_HIGH_WATERMARK_FRAC)
+)
 raw_nonfinite_count = 0
 raw_written_count = 0
 raw_written_nonfinite_count = 0
@@ -1826,7 +1900,10 @@ raw_writer_thread_error: Optional[Exception] = None
 acquisition_thread_error: Optional[Exception] = None
 backwards_events_monotonic: Deque[float] = deque(maxlen=256)
 segment_break_hold_until: Optional[float] = None
-last_health_warning_time = 0.0
+feature_write_buffer: List[List[Any]] = []
+last_feature_flush_mono: Optional[float] = None
+feature_write_counter = 0
+last_feature_writer = None
 nominal_dt_s = 1.0 / float(SAMPLING_RATE)
 gap_threshold = gap_threshold_s(nominal_dt_s)
 next_window_start_s: Optional[float] = None
@@ -1877,7 +1954,7 @@ def _reset_segment_state(state: StreamState) -> None:
     global segment_start_lsl_ts, last_written_lsl_ts, last_sample_time_s
     global last_sample_lsl_ts, first_time_s, last_time_s_seen
     global first_lsl_ts, last_lsl_ts, last_report_time
-    global stream_start_lsl_ts, local_clock_at_start, clock_offset
+    global stream_start_lsl_ts, stream_start_continuous_mono, local_clock_at_start, clock_offset
     global last_lsl_ts_mono, last_lsl_ts_raw
     global gap_durations_s, next_window_start_s
     global backwards_events_monotonic
@@ -1889,6 +1966,7 @@ def _reset_segment_state(state: StreamState) -> None:
     global debug_sample_counter
     segment_start_lsl_ts = None
     stream_start_lsl_ts = None
+    stream_start_continuous_mono = None
     local_clock_at_start = None
     clock_offset = None
     state.stream_start_lsl_ts = None
@@ -2009,6 +2087,9 @@ def _start_segment(reason: str, *, segment_id_override: Optional[int] = None) ->
     else:
         segment_id += 1
     state.segment_id = segment_id
+    with timebase_snapshot_lock:
+        timebase_snapshot.stream_start_continuous_mono = None
+        timebase_snapshot.segment_id = int(segment_id)
     _apply_segment_paths(segment_id)
     _reset_segment_state(state)
     failed_writers.close_failed_files()
@@ -2016,7 +2097,14 @@ def _start_segment(reason: str, *, segment_id_override: Optional[int] = None) ->
     last_event_index = None
     segment_break_hold_until = time.monotonic() + float(RECOVERY_S)
     _write_session_state(label=f"segment_break:{reason}", segment_id_override=segment_id)
-    print(f"⚠️ Segment break ({reason}); now writing segment {segment_id:02d}")
+    _log_every(
+        "segment_break",
+        LOG_EVERY_S_HEALTH,
+        logging.WARNING,
+        "Segment break (%s); now writing segment %02d",
+        reason,
+        segment_id,
+    )
 
 
 def _load_existing_events(path: Path):
@@ -2094,7 +2182,7 @@ def _load_existing_events(path: Path):
                 e["confidence"] = row.get("confidence", "")
                 loaded.append(e)
     except Exception as e:
-        print(f"⚠️ Could not load existing events from {path}: {e}")
+        logger.warning("Could not load existing events from %s: %s", path, e)
         return []
     return loaded
 
@@ -2109,8 +2197,10 @@ if true_resume:
         trial_id_counter = max(
             [int(e.get("trial_id", 0) or 0) for e in loaded_events] + [0]
         )
-        print(
-            f"🧾 Resumed events: loaded {len(loaded_events)} existing events (trial_id_counter={trial_id_counter})."
+        logger.info(
+            "Resumed events: loaded %s existing events (trial_id_counter=%s).",
+            len(loaded_events),
+            trial_id_counter,
         )
 
 
@@ -2286,22 +2376,32 @@ def on_key_press(key):
         if not event_marking_allowed:
             return
         if current_event is None:
-            # Refuse to stamp events until stream_start_lsl_ts exists,
+            # Refuse to stamp events until stream_start_continuous_mono exists,
             # because that's the anchor for the stream-relative timebase.
-            if stream_start_lsl_ts is None or clock_offset is None:
-                print(
-                    "⚠️ Event ignored: timebase not initialized yet (waiting for first LSL sample)."
+            if stream_start_continuous_mono is None or clock_offset is None:
+                _log_every(
+                    "event_timebase_wait",
+                    LOG_EVERY_S_HEALTH,
+                    logging.WARNING,
+                    "Event ignored: timebase not initialized yet (waiting for first LSL sample).",
                 )
                 return
 
             event_local = local_clock()
-            onset_lsl = _lsl_now()
+            onset_lsl_raw = _lsl_now()
+            onset_lsl = _map_lsl_to_mono(onset_lsl_raw)
             if onset_lsl is None:
+                _log_every(
+                    "event_timebase_unanchored",
+                    LOG_EVERY_S_HEALTH,
+                    logging.WARNING,
+                    "Event ignored: timebase not anchored yet.",
+                )
                 return
 
-            if stream_start_lsl_ts is None:
+            if stream_start_continuous_mono is None:
                 return
-            onset_s = float(onset_lsl - stream_start_lsl_ts)
+            onset_s = float(onset_lsl - stream_start_continuous_mono)
             if onset_s is None or not _event_time_ok(onset_s):
                 return
 
@@ -2338,7 +2438,7 @@ def on_key_press(key):
 
     # Quick stop hotkey
     if key == keyboard.Key.esc or key_char == "q":
-        print("🛑 Stop requested (ESC/q).")
+        logger.info("Stop requested (ESC/q).")
         state.soft_stop_triggered = True
         stop_event.set()
         return
@@ -2354,32 +2454,35 @@ def on_key_press(key):
         else:
             current_action_id = ACTION_REST
             current_override = "rest"
-        print(f"📝 Action mode: {ACTION_NAMES[current_action_id]}")
+        logger.info("Action mode: %s", ACTION_NAMES[current_action_id])
         return
 
     # Overrides
     if key_char == "a":
         current_action_id = ACTION_REST
         current_override = "artifact"
-        print("📝 Event override: artifact")
+        logger.info("Event override: artifact")
         return
 
     if key_char == "k":
         current_action_id = ACTION_REST
         current_override = "calibration"
-        print("📝 Event override: calibration")
+        logger.info("Event override: calibration")
         return
 
     if key_char == "n":
         current_override = None
-        print("📝 Event override cleared")
+        logger.info("Event override cleared")
         return
 
     # Assign finger to last completed event (0-5)
     if key_char in {"0", "1", "2", "3", "4", "5"}:
         finger_id = int(key_char)
         update_last_event_finger(finger_id)
-        print(f"📝 Finger assigned: {FINGER_NAMES.get(finger_id, 'UNKNOWN')}")
+        logger.info(
+            "Finger assigned: %s",
+            FINGER_NAMES.get(finger_id, "UNKNOWN"),
+        )
 
 
 def on_key_release(key):
@@ -2390,21 +2493,28 @@ def on_key_release(key):
         if not event_marking_allowed:
             current_event = None
             return
-        if stream_start_lsl_ts is None or clock_offset is None:
+        if stream_start_continuous_mono is None or clock_offset is None:
             return
 
         end_local = local_clock()
-        end_lsl = _lsl_now()
+        end_lsl_raw = _lsl_now()
+        end_lsl = _map_lsl_to_mono(end_lsl_raw)
         if end_lsl is None:
+            _log_every(
+                "event_end_unanchored",
+                LOG_EVERY_S_HEALTH,
+                logging.WARNING,
+                "Event end ignored: timebase not anchored yet.",
+            )
             return
 
         onset_lsl = current_event.get("onset_lsl", np.nan)
         if not np.isfinite(onset_lsl):
             return
 
-        if stream_start_lsl_ts is None:
+        if stream_start_continuous_mono is None:
             return
-        end_s = float(end_lsl - stream_start_lsl_ts)
+        end_s = float(end_lsl - stream_start_continuous_mono)
         if end_s is None or not _event_time_ok(end_s):
             return
 
@@ -2423,7 +2533,7 @@ def on_key_release(key):
 
 
 if EVENT_MARKING_ENABLED and keyboard is None:
-    print("⚠️ Event marking disabled (pynput not installed).")
+    logger.warning("Event marking disabled (pynput not installed).")
     EVENT_MARKING_ENABLED = False
 
 listener = None
@@ -2517,8 +2627,10 @@ if DEMO_MODE:
     # artifact is missing; instead disable inference-related features and
     # continue with raw/feature logging.
     if not os.path.exists(MODEL_PATH):
-        print(f"⚠️  Model file not found: {MODEL_PATH}")
-        print("⚠️  Continuing without inference/actuation (recording still runs).")
+        logger.warning("Model file not found: %s", MODEL_PATH)
+        logger.warning(
+            "Continuing without inference/actuation (recording still runs)."
+        )
         ENABLE_ACTUATION = False
         DEMO_MODE = False
         model = None
@@ -2571,7 +2683,12 @@ def _drain_inlet(
         idle_start = None
         drained += 1
 
-    print(f"🧹 Drained {drained} stale LSL samples ({label}, stop={stop_reason}).")
+    logger.info(
+        "Drained %s stale LSL samples (%s, stop=%s).",
+        drained,
+        label,
+        stop_reason,
+    )
     return drained
 
 
@@ -2599,7 +2716,7 @@ def resolve_eeg_channel_indices(info, expected):
 
 channel_indices = list(range(CHANNELS))
 if not IMPORT_ONLY:
-    print("🔍 Resolving EEG stream...")
+    logger.info("Resolving EEG stream...")
     if CSV_OFFLINE_PATH:
         raise RuntimeError("CSV offline mode is not supported in 1_stream_and_record.py.")
     if streamer_internal and not LSL_STREAM_NAME:
@@ -2654,25 +2771,31 @@ if not IMPORT_ONLY:
         expected_n = int(stream_requirements.expected_channels)
         report_path = _write_label_check_report(label_status)
         _write_session_state(label="label_check_failed")
-        print(
-            "🛑 LABEL CHECK FAILED: expected labels "
-            f"{label_status['expected_labels']} ({expected_n}ch). "
-            f"Found channels={channel_count}, labels={label_status['found_labels']}. "
-            f"Report={report_path}"
+        logger.error(
+            "LABEL CHECK FAILED: expected labels %s (%sch). Found channels=%s, labels=%s. Report=%s",
+            label_status["expected_labels"],
+            expected_n,
+            channel_count,
+            label_status["found_labels"],
+            report_path,
         )
         if not label_check_acknowledged:
-            print(
-                "⚠️ Label mismatch not acknowledged; clean logging disabled until acknowledged."
+            logger.warning(
+                "Label mismatch not acknowledged; clean logging disabled until acknowledged."
             )
         else:
-            print("⚠️ Label mismatch acknowledged by operator; proceeding with caution.")
+            logger.warning(
+                "Label mismatch acknowledged by operator; proceeding with caution."
+            )
     else:
         health_state.label_check_status = label_status
 
     if channel_indices is None:
         channel_indices = list(range(int(stream_requirements.expected_channels)))
-    print(
-        f"✅ EEG connected ({info.channel_count()} channels, using indices {channel_indices})"
+    logger.info(
+        "EEG connected (%s channels, using indices %s)",
+        info.channel_count(),
+        channel_indices,
     )
     selected_channel_indices = channel_indices
     _drain_inlet(inlet, label="startup")
@@ -2899,6 +3022,14 @@ def _is_true_input_stall(now_monotonic: float) -> bool:
     return (now_monotonic - last_any_sample_received_time) > float(STALL_INPUT_S)
 
 
+def _recent_timebase_discontinuity(now_monotonic: float) -> bool:
+    with timebase_snapshot_lock:
+        last_disc = timebase_snapshot.last_discontinuity_mono
+    if last_disc is None:
+        return False
+    return (now_monotonic - last_disc) <= float(TIMEBASE_DISCONTINUITY_GRACE_S)
+
+
 def _write_hard_stop_report_and_exit(
     reason: str, now_monotonic: float, decision
 ) -> None:
@@ -2966,9 +3097,11 @@ def _write_hard_stop_report_and_exit(
     health_state.hard_stop_report_path = report_path
     health_state.hard_stop_triggered = True
     _write_session_state(label="hard_stop")
-    print(
-        "🛑 HARD STOP: "
-        f"{reason} — wrote report: {report_path} — exiting (code {hard_stop_policy.hard_stop_exit_code})"
+    logger.error(
+        "HARD STOP: %s — wrote report: %s — exiting (code %s)",
+        reason,
+        report_path,
+        hard_stop_policy.hard_stop_exit_code,
     )
     _close_segment_files()
     failed_writers.close_failed_files()
@@ -3041,7 +3174,7 @@ def _write_soft_stop_report(reason: str, now_monotonic: float, decision) -> None
     soft_stop_report_path = report_path
     state.soft_stop_triggered = True
     _write_session_state(label="soft_stop")
-    print(f"⚠️ SOFT STOP: {reason} — wrote report: {report_path}")
+    logger.warning("SOFT STOP: %s — wrote report: %s", reason, report_path)
 
 
 def _route_writers_for_health(now_mono: float, decision) -> None:
@@ -3063,6 +3196,11 @@ def _route_writers_for_health(now_mono: float, decision) -> None:
             if not failed_writers.is_open():
                 _open_failed_files()
         unhealthy_duration = float(now_mono - health_state.unhealthy_since_mono)
+        extra_grace_s = (
+            float(TIMEBASE_DISCONTINUITY_GRACE_S)
+            if _recent_timebase_discontinuity(now_mono)
+            else 0.0
+        )
         if (
             unhealthy_duration >= float(UNHEALTHY_SOFT_STOP_S)
             and not bool(getattr(state, "soft_stop_triggered", False))
@@ -3073,7 +3211,8 @@ def _route_writers_for_health(now_mono: float, decision) -> None:
             _write_soft_stop_report(stop_reason, now_mono, decision)
             stop_event.set()
         if (
-            unhealthy_duration >= float(hard_stop_policy.hard_stop_after_unhealthy_s)
+            unhealthy_duration
+            >= (float(hard_stop_policy.hard_stop_after_unhealthy_s) + extra_grace_s)
             and _is_true_input_stall(now_mono)
         ):
             hard_reason = decision.reason or "hard_stop_input_stall"
@@ -3125,6 +3264,23 @@ def _active_feature_writer(now_mono: float) -> Optional[Any]:
     return _active_writer_for_mode(now_mono, csv_writer, failed_writers.features_writer)
 
 
+def _flush_feature_buffer(target_writer: Optional[Any]) -> None:
+    global feature_write_buffer, last_feature_flush_mono
+    if not feature_write_buffer or target_writer is None:
+        return
+    target_writer.writerows(feature_write_buffer)
+    feature_write_buffer = []
+    last_feature_flush_mono = time.monotonic()
+
+
+def _should_write_feature(backlog_active: bool) -> bool:
+    global feature_write_counter
+    stride = int(BACKLOG_FEATURE_WRITE_STRIDE) if backlog_active else 1
+    stride = max(1, stride)
+    feature_write_counter += 1
+    return (feature_write_counter % stride) == 0
+
+
 def _active_raw_writer(now_mono: float) -> Optional[Any]:
     return _active_writer_for_mode(now_mono, raw_writer, failed_writers.raw_writer)
 
@@ -3140,7 +3296,7 @@ def _update_stream_health(now_monotonic: float) -> None:
     global stream_health_measured_fs, stream_health_write_rate, stream_health_queue_size
     global stream_health_backwards_count, stream_health_last_received_lsl_ts
     global stream_health_last_written_lsl_ts, event_marking_allowed
-    global segment_break_hold_until, last_health_warning_time
+    global segment_break_hold_until
     global current_event
     global last_health_decision
     global last_debug_dump_time, last_debug_dump_reason
@@ -3149,8 +3305,11 @@ def _update_stream_health(now_monotonic: float) -> None:
     prev_event_allowed = event_marking_allowed
     with health_gate_lock:
         decision = health_gate.evaluate(now_monotonic)
-    if decision.reason == "lsl_starvation" and not _is_true_input_stall(now_monotonic):
-        decision.reason = "backpressure_processing"
+    if decision.reason == "lsl_starvation":
+        if _recent_timebase_discontinuity(now_monotonic):
+            decision.reason = "timebase_discontinuity_recovering"
+        elif not _is_true_input_stall(now_monotonic):
+            decision.reason = "backpressure_processing"
     health_state.has_health_decision = True
     health_state.last_health_reason = decision.reason
     last_health_decision = decision
@@ -3194,14 +3353,18 @@ def _update_stream_health(now_monotonic: float) -> None:
             last_debug_dump_time = float(now_monotonic)
             last_debug_dump_reason = decision.reason
 
-        if (now_monotonic - last_health_warning_time) >= 2.0 and unhealthy_duration >= UNHEALTHY_WARN_S:
+        if unhealthy_duration >= UNHEALTHY_WARN_S:
             reason = data_stream_stalled_reason or "unhealthy"
             if label_blocked:
                 reason = "label_check_unacknowledged"
-            print(
-                f"⚠️ Stream unhealthy ({reason}); event marking disabled (unhealthy_for={unhealthy_duration:.1f}s)."
+            _log_every(
+                "stream_unhealthy",
+                LOG_EVERY_S_HEALTH,
+                logging.WARNING,
+                "Stream unhealthy (%s); event marking disabled (unhealthy_for=%.1fs).",
+                reason,
+                unhealthy_duration,
             )
-            last_health_warning_time = now_monotonic
         if event_marking_active:
             stop_event_listener()
         if current_event is not None:
@@ -3213,14 +3376,19 @@ def _update_stream_health(now_monotonic: float) -> None:
 
     if event_allowed and not event_marking_allowed:
         event_marking_allowed = True
-        print("✅ Stream healthy; event marking re-enabled.")
+        logger.info("Stream healthy; event marking re-enabled.")
         if EVENT_MARKING_ENABLED:
             start_event_listener()
         if not prev_event_allowed:
             _write_session_state(label="stream_healthy")
     elif not event_allowed and event_marking_allowed:
         event_marking_allowed = False
-        print("⚠️ Event marking disabled due to stalled writes.")
+        _log_every(
+            "event_marking_disabled",
+            LOG_EVERY_S_HEALTH,
+            logging.WARNING,
+            "Event marking disabled due to stalled writes.",
+        )
         stop_event_listener()
         if prev_event_allowed:
             _write_session_state(label="event_marking_disabled")
@@ -3240,7 +3408,14 @@ def _reset_lstm_state(
     if details:
         entry.update(details)
     state.lstm_reset_log.append(entry)
-    print(f"⚠️ LSTM state reset ({reason}) at {entry['time_s']}")
+    _log_every(
+        "lstm_reset",
+        LOG_EVERY_S_HEALTH,
+        logging.WARNING,
+        "LSTM state reset (%s) at %s",
+        reason,
+        entry["time_s"],
+    )
 
 
 def _extract_time_window(
@@ -3297,38 +3472,41 @@ def _update_queue_metrics() -> None:
     max_raw_queue_size_observed = max(max_raw_queue_size_observed, raw_size)
     max_queue_size_observed = max(max_queue_size_observed, processing_size, raw_size)
     with health_gate_lock:
-        health_gate.set_queue_size(max(processing_size, raw_size))
+        health_gate.set_queue_size(raw_size, label="raw")
 
 
 def _enqueue_with_overflow(
     target_queue: queue.Queue, item: SamplePacket, *, label: str
 ) -> None:
     global processing_queue_overflow_count, raw_queue_overflow_count
-    global last_health_warning_time
     now_mono = time.monotonic()
-    try:
-        target_queue.put_nowait(item)
-    except queue.Full:
-        try:
-            target_queue.get_nowait()
-        except queue.Empty:
-            pass
-        if label == "raw":
-            raw_queue_overflow_count += 1
-        else:
-            processing_queue_overflow_count += 1
-        if (now_mono - last_health_warning_time) >= 2.0:
-            print(f"⚠️ {label} queue overflow; dropping oldest sample.")
-            last_health_warning_time = now_mono
-        with health_gate_lock:
-            health_gate.mark_backlog_overflow(now_mono)
+    dropped = 0
+    while True:
         try:
             target_queue.put_nowait(item)
+            break
         except queue.Full:
-            if label == "raw":
-                raw_queue_overflow_count += 1
-            else:
-                processing_queue_overflow_count += 1
+            try:
+                target_queue.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                break
+    if dropped:
+        if label == "raw":
+            raw_queue_overflow_count += dropped
+        else:
+            processing_queue_overflow_count += dropped
+        _log_every(
+            f"queue_overflow_{label}",
+            LOG_EVERY_S_QUEUE,
+            logging.WARNING,
+            "%s queue overflow; dropped %s oldest sample(s).",
+            label,
+            dropped,
+        )
+        if label == "raw":
+            with health_gate_lock:
+                health_gate.mark_backlog_overflow(now_mono)
     _update_queue_metrics()
 
 
@@ -3504,7 +3682,10 @@ def _acquisition_worker(inlet: StreamInlet) -> None:
     global data_stream_active, data_stream_stalled_reason
 
     acq_segment_id = int(segment_id)
-    last_mono: Optional[float] = None
+    mapper = TimebaseMapper(segment_id=acq_segment_id)
+    last_snapshot_update_mono: Optional[float] = None
+    snapshot_sample_counter = 0
+    last_continuous: Optional[float] = None
     integrity_prev_ts: Optional[float] = None
     nominal_dt = 1.0 / float(SAMPLING_RATE)
     gap_tolerance = _gap_tolerance_s(nominal_dt)
@@ -3527,42 +3708,81 @@ def _acquisition_worker(inlet: StreamInlet) -> None:
                     data_stream_active = False
                     data_stream_stalled_reason = "channel_indices_out_of_range"
                     _write_session_state(label="stream_error:channel_indices")
-                    print(f"⚠️ {exc}")
+                    logger.error("%s", exc)
                     stop_event.set()
                     break
                 lsl_ts_raw = float(lsl_ts)
-                clamped = False
-                if last_mono is not None and lsl_ts_raw <= last_mono:
-                    backwards_delta = float(last_mono - lsl_ts_raw)
-                    clamped = True
-                    lsl_ts_mono = float(last_mono + LSL_MONO_EPS_S)
+                now_mono = time.monotonic()
+                (
+                    continuous_mono,
+                    mapped_mono,
+                    discontinuity,
+                    clamped,
+                ) = mapper.map(lsl_ts_raw, now_mono)
+                segment_break_reason = None
+                if discontinuity:
+                    acq_segment_id = int(mapper.segment_id)
+                    segment_break_reason = "timebase_discontinuity"
+                if last_continuous is not None and not discontinuity:
+                    dt_mono = float(continuous_mono - last_continuous)
+                    if dt_mono > GAP_BREAK_S:
+                        acq_segment_id += 1
+                        mapper.segment_id = acq_segment_id
+                        segment_break_reason = "gap"
+                if clamped and last_continuous is not None:
+                    backwards_delta = max(0.0, float(last_continuous - mapped_mono))
                     total_backward_timestamp_count += 1
                     time_s_clamped_count += 1
                     clamped_samples_total += 1
                     max_backwards_jump_s = max(max_backwards_jump_s, backwards_delta)
                     last_clamp_localtime = time.time()
-                    last_clamp_lsl_ts = lsl_ts_mono
-                else:
-                    lsl_ts_mono = lsl_ts_raw
-                segment_break_reason = None
-                if last_mono is not None:
-                    dt_mono = float(lsl_ts_mono - last_mono)
-                    if dt_mono > GAP_BREAK_S:
-                        acq_segment_id += 1
-                        segment_break_reason = "gap"
-                last_mono = lsl_ts_mono
+                    last_clamp_lsl_ts = float(continuous_mono)
+                last_continuous = float(continuous_mono)
+                snapshot_sample_counter += 1
+                should_update_snapshot = False
+                if discontinuity:
+                    should_update_snapshot = True
+                elif last_snapshot_update_mono is None:
+                    should_update_snapshot = True
+                elif (
+                    now_mono - last_snapshot_update_mono
+                ) >= float(TIMEBASE_SNAPSHOT_UPDATE_INTERVAL_S):
+                    should_update_snapshot = True
+                elif snapshot_sample_counter % int(TIMEBASE_SNAPSHOT_UPDATE_EVERY_N) == 0:
+                    should_update_snapshot = True
+
+                if should_update_snapshot:
+                    with timebase_snapshot_lock:
+                        timebase_snapshot.offset = mapper.offset
+                        timebase_snapshot.has_anchor = mapper.has_anchor
+                        timebase_snapshot.prev_continuous_mono = float(continuous_mono)
+                        timebase_snapshot.last_discontinuity_mono = (
+                            mapper.last_discontinuity_mono
+                        )
+                        timebase_snapshot.eps = mapper.EPS
+                        if (
+                            timebase_snapshot.stream_start_continuous_mono is None
+                            and mapper.has_anchor
+                        ):
+                            timebase_snapshot.stream_start_continuous_mono = float(
+                                continuous_mono
+                            )
+                        timebase_snapshot.segment_id = int(acq_segment_id)
+                    last_snapshot_update_mono = now_mono
 
                 flags = _raw_flags_for_sample(sample)
                 if flags & RAW_FLAG_NONFINITE:
                     raw_nonfinite_count += 1
                     if not non_finite_sample_warned:
-                        print(
-                            "⚠️ Non-finite EEG sample detected (NaN/Inf). Logging with flag."
+                        _log_every(
+                            "non_finite_sample",
+                            LOG_EVERY_S_HEALTH,
+                            logging.WARNING,
+                            "Non-finite EEG sample detected (NaN/Inf). Logging with flag.",
                         )
                         non_finite_sample_warned = True
 
-                sample_monotonic = time.monotonic()
-                last_any_sample_received_time = sample_monotonic
+                last_any_sample_received_time = now_mono
                 last_any_sample_received_lsl_ts = float(lsl_ts_raw)
                 last_received_lsl_ts = float(lsl_ts_raw)
                 if first_received_lsl_ts is None:
@@ -3585,7 +3805,7 @@ def _acquisition_worker(inlet: StreamInlet) -> None:
                 raw_path = _segment_paths(acq_segment_id)[4]
                 packet = SamplePacket(
                     lsl_ts_raw=float(lsl_ts_raw),
-                    lsl_ts_mono=float(lsl_ts_mono),
+                    lsl_ts_mono=float(continuous_mono),
                     local_ts=float(local_ts),
                     sample=list(sample),
                     flags=int(flags),
@@ -3599,7 +3819,7 @@ def _acquisition_worker(inlet: StreamInlet) -> None:
                     _enqueue_with_overflow(raw_queue, packet, label="raw")
 
                 with health_gate_lock:
-                    health_gate.record_received(float(lsl_ts_mono), sample_monotonic)
+                    health_gate.record_received(float(continuous_mono), now_mono)
     except Exception as exc:
         acquisition_thread_error = exc
         stop_event.set()
@@ -3617,7 +3837,7 @@ def _acquisition_worker(inlet: StreamInlet) -> None:
 # ===== MAIN LOOP =========
 # =========================
 if not IMPORT_ONLY:
-    print("▶ Streaming — type 'end_stream' OR press q/ESC to stop")
+    logger.info("Streaming — type 'end_stream' OR press q/ESC to stop")
 
     run_error = None
     acq_thread = None
@@ -3651,10 +3871,21 @@ if not IMPORT_ONLY:
                 continue
 
             now_mono = time.monotonic()
+            processing_queue_size = processing_queue.qsize()
+            backlog_active = processing_queue_size >= processing_backlog_high_watermark
+            if backlog_active:
+                _log_every(
+                    "processing_backlog",
+                    LOG_EVERY_S_QUEUE,
+                    logging.WARNING,
+                    "Processing backlog high (%s/%s); throttling plotting/features.",
+                    processing_queue_size,
+                    PROCESSING_QUEUE_MAXSIZE,
+                )
             if packet.segment_id != segment_id:
                 candidate_time_s = (
-                    float(packet.lsl_ts_mono - stream_start_lsl_ts)
-                    if stream_start_lsl_ts is not None
+                    float(packet.lsl_ts_mono - stream_start_continuous_mono)
+                    if stream_start_continuous_mono is not None
                     else None
                 )
                 if last_lsl_ts_mono is not None:
@@ -3684,8 +3915,8 @@ if not IMPORT_ONLY:
             lsl_ts_raw = float(packet.lsl_ts_raw)
             lsl_ts_mono = float(packet.lsl_ts_mono)
             candidate_time_s = (
-                float(lsl_ts_mono - stream_start_lsl_ts)
-                if stream_start_lsl_ts is not None
+                float(lsl_ts_mono - stream_start_continuous_mono)
+                if stream_start_continuous_mono is not None
                 else None
             )
 
@@ -3703,12 +3934,13 @@ if not IMPORT_ONLY:
                     state.gap_p95_s = summary.p95_gap_s
                     state.gap_p99_s = summary.p99_gap_s
 
-            if stream_start_lsl_ts is None:
+            if stream_start_continuous_mono is None:
+                stream_start_continuous_mono = float(lsl_ts_mono)
                 stream_start_lsl_ts = float(lsl_ts_mono)
                 state.stream_start_lsl_ts = stream_start_lsl_ts
-                segment_start_lsl_ts = stream_start_lsl_ts
+                segment_start_lsl_ts = stream_start_continuous_mono
                 local_clock_at_start = float(local_clock())
-                clock_offset = float(stream_start_lsl_ts - local_clock_at_start)
+                clock_offset = float(lsl_ts_raw - local_clock_at_start)
                 state.local_clock_at_start = local_clock_at_start
                 state.clock_offset = clock_offset
                 run_start_utc_iso = utc_now_iso_z()
@@ -3721,15 +3953,20 @@ if not IMPORT_ONLY:
                 clock_offset = float(lsl_ts_raw - local_clock())
                 state.clock_offset = clock_offset
                 if not clock_offset_estimated:
-                    print("⚠️ clock_offset missing; estimating from current sample.")
+                    _log_every(
+                        "clock_offset_missing",
+                        LOG_EVERY_S_HEALTH,
+                        logging.WARNING,
+                        "clock_offset missing; estimating from current sample.",
+                    )
                     clock_offset_estimated = True
                 timebase_written = False
 
-            if not timebase_written and stream_start_lsl_ts is not None:
+            if not timebase_written and stream_start_continuous_mono is not None:
                 _update_session_meta(complete=False, label="timebase")
                 _write_session_state(label="timebase")
                 timebase_written = True
-            if stream_start_lsl_ts is not None and not timebase_report_initialized:
+            if stream_start_continuous_mono is not None and not timebase_report_initialized:
                 _write_timebase_report("init")
                 timebase_report_initialized = True
 
@@ -3737,8 +3974,8 @@ if not IMPORT_ONLY:
                 segment_start_lsl_ts = float(lsl_ts_mono)
                 _write_session_state(label="segment_start")
 
-            time_s = float(lsl_ts_mono - stream_start_lsl_ts)
-            latency_ms = (packet.local_ts - lsl_ts_raw) * 1000.0
+            time_s = float(lsl_ts_mono - stream_start_continuous_mono)
+            latency_ms = float((now_mono - lsl_ts_mono) * 1000.0)
 
             sample_arr = np.asarray(packet.sample, dtype=float)
             recent_accepted_timestamps.append(float(lsl_ts_mono))
@@ -3794,8 +4031,11 @@ if not IMPORT_ONLY:
                         result = state.ica_fit_future.result()
                         if not _should_accept_ica_result(segment_id, fit_segment):
                             if LOG_ICA_DIAGNOSTICS:
-                                print(
-                                    "⚠️ Discarding ICA fit from previous segment."
+                                _log_every(
+                                    "ica_fit_discard",
+                                    LOG_EVERY_S_PERF,
+                                    logging.WARNING,
+                                    "Discarding ICA fit from previous segment.",
                                 )
                         elif result.get("ok"):
                             state.ica_fitted = True
@@ -3803,18 +4043,29 @@ if not IMPORT_ONLY:
                         else:
                             ica_skipped_reason = result.get("reason")
                             if LOG_ICA_DIAGNOSTICS:
-                                print(
-                                    f"⚠️ ICA skipped: {result.get('reason')} {result.get('diagnostics')}"
+                                _log_every(
+                                    "ica_skip",
+                                    LOG_EVERY_S_PERF,
+                                    logging.WARNING,
+                                    "ICA skipped: %s %s",
+                                    result.get("reason"),
+                                    result.get("diagnostics"),
                                 )
                     except Exception as exc:
                         ica_failed_exception = repr(exc)
                         ica_retries += 1
                         ica_skipped_reason = "fit_exception"
-                        print(f"⚠️ ICA fit failed: {exc}")
+                        _log_every(
+                            "ica_fit_failed",
+                            LOG_EVERY_S_PERF,
+                            logging.WARNING,
+                            "ICA fit failed: %s",
+                            exc,
+                        )
                         if ica_retries >= ICA_MAX_RETRIES_PER_SESSION:
                             ica_disabled_due_to_error = True
-                            print(
-                                "⚠️ ICA disabled for session due to repeated failures."
+                            logger.warning(
+                                "ICA disabled for session due to repeated failures."
                             )
                     state.ica_fit_future = None
                     state.ica_fit_segment_id = None
@@ -3830,8 +4081,11 @@ if not IMPORT_ONLY:
                             segment_id, transform_segment
                         ):
                             if LOG_ICA_DIAGNOSTICS:
-                                print(
-                                    "⚠️ Discarding ICA transform from previous segment."
+                                _log_every(
+                                    "ica_transform_discard",
+                                    LOG_EVERY_S_PERF,
+                                    logging.WARNING,
+                                    "Discarding ICA transform from previous segment.",
                                 )
                         elif result.get("ok"):
                             cleaned = result.get("cleaned")
@@ -3841,18 +4095,29 @@ if not IMPORT_ONLY:
                         else:
                             ica_skipped_reason = result.get("reason")
                             if LOG_ICA_DIAGNOSTICS:
-                                print(
-                                    f"⚠️ ICA skipped: {result.get('reason')} {result.get('diagnostics')}"
+                                _log_every(
+                                    "ica_transform_skip",
+                                    LOG_EVERY_S_PERF,
+                                    logging.WARNING,
+                                    "ICA skipped: %s %s",
+                                    result.get("reason"),
+                                    result.get("diagnostics"),
                                 )
                     except Exception as exc:
                         ica_failed_exception = repr(exc)
                         ica_retries += 1
                         ica_skipped_reason = "transform_exception"
-                        print(f"⚠️ ICA transform failed: {exc}")
+                        _log_every(
+                            "ica_transform_failed",
+                            LOG_EVERY_S_PERF,
+                            logging.WARNING,
+                            "ICA transform failed: %s",
+                            exc,
+                        )
                         if ica_retries >= ICA_MAX_RETRIES_PER_SESSION:
                             ica_disabled_due_to_error = True
-                            print(
-                                "⚠️ ICA disabled for session due to repeated failures."
+                            logger.warning(
+                                "ICA disabled for session due to repeated failures."
                             )
                     state.ica_transform_future = None
                     state.ica_transform_segment_id = None
@@ -4012,13 +4277,13 @@ if not IMPORT_ONLY:
 
                     prediction_time_s = window_center_s
                     prediction_lsl_ts = (
-                        float(stream_start_lsl_ts + prediction_time_s)
-                        if stream_start_lsl_ts is not None
+                        float(stream_start_continuous_mono + prediction_time_s)
+                        if stream_start_continuous_mono is not None
                         else np.nan
                     )
                     if np.isfinite(prediction_lsl_ts):
                         inference_latency_ms = (
-                            local_clock() - prediction_lsl_ts
+                            now_mono - prediction_lsl_ts
                         ) * 1000.0
                     else:
                         inference_latency_ms = np.nan
@@ -4056,8 +4321,13 @@ if not IMPORT_ONLY:
                                 h_state = lstm_state[0] if isinstance(lstm_state, tuple) else lstm_state
                                 hidden_vec = h_state[-1, 0].detach().cpu().numpy()
                                 hidden_mag = float(np.linalg.norm(hidden_vec))
-                                print(
-                                    f"VIZ hidden_mag={hidden_mag:.6f} t={prediction_time_s:.3f}"
+                                _log_every(
+                                    "live_viz_hidden",
+                                    LOG_EVERY_S_PERF,
+                                    logging.INFO,
+                                    "VIZ hidden_mag=%.6f t=%.3f",
+                                    hidden_mag,
+                                    prediction_time_s,
                                 )
                                 last_live_viz_emit = now_live
                             except Exception:
@@ -4116,30 +4386,43 @@ if not IMPORT_ONLY:
 
             # ===== SAVE FEATURES =====
             feature_target = _active_feature_writer(now_mono)
+            if feature_target is not last_feature_writer and feature_write_buffer:
+                _flush_feature_buffer(last_feature_writer)
+            last_feature_writer = feature_target
+            should_write_feature = _should_write_feature(backlog_active)
             if feature_target is not None:
                 if time_s is None or not np.isfinite(time_s):
                     continue
 
-                row = [
-                    lsl_ts_raw,
-                    lsl_ts_mono,
-                    time_s,
-                    int(segment_id),
-                    *latest_sample,
-                    pred_action,
-                    pred_finger,
-                    action_confidence,
-                    action_uncertainty,
-                    finger_confidence,
-                    finger_uncertainty,
-                    velocity,
-                    latency_ms,
-                ]
-                if len(row) != len(header):
-                    raise RuntimeError(
-                        f"Feature row length {len(row)} does not match header length {len(header)}"
-                )
-                feature_target.writerow(row)
+                if should_write_feature:
+                    row = [
+                        lsl_ts_raw,
+                        lsl_ts_mono,
+                        time_s,
+                        int(segment_id),
+                        *latest_sample,
+                        pred_action,
+                        pred_finger,
+                        action_confidence,
+                        action_uncertainty,
+                        finger_confidence,
+                        finger_uncertainty,
+                        velocity,
+                        latency_ms,
+                    ]
+                    if len(row) != len(header):
+                        raise RuntimeError(
+                            f"Feature row length {len(row)} does not match header length {len(header)}"
+                        )
+                    feature_write_buffer.append(row)
+
+                if (
+                    len(feature_write_buffer) >= int(FEATURE_WRITE_BATCH_MAX)
+                    or last_feature_flush_mono is None
+                    or (now_mono - last_feature_flush_mono)
+                    >= float(FEATURE_WRITE_BATCH_INTERVAL_S)
+                ):
+                    _flush_feature_buffer(feature_target)
 
             if feature_target is not None:
                 if time_s is not None and np.isfinite(time_s):
@@ -4156,7 +4439,7 @@ if not IMPORT_ONLY:
                     last_lsl_ts = float(lsl_ts_raw)
 
             # ===== PLOT =====
-            if ENABLE_PLOT:
+            if ENABLE_PLOT and not backlog_active:
                 plot_data = (
                     cleaned
                     if cleaned is not None
@@ -4183,15 +4466,12 @@ if not IMPORT_ONLY:
         pass
     except Exception as exc:
         run_error = exc
-        print(
-            f"❌ Stream crashed: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
+        logger.error("Stream crashed: %s: %s", type(exc).__name__, exc)
     finally:
         # =========================
         # ===== CLEANUP ===========
         # =========================
-        print("\n🧹 Cleaning up")
+        logger.info("Cleaning up")
 
         stop_event.set()
         if acq_thread is not None:
@@ -4199,7 +4479,10 @@ if not IMPORT_ONLY:
         if raw_thread is not None:
             raw_thread.join(timeout=5.0)
             if raw_thread.is_alive():
-                print("⚠️ Raw writer thread did not stop cleanly.")
+                logger.warning("Raw writer thread did not stop cleanly.")
+
+        if feature_write_buffer:
+            _flush_feature_buffer(last_feature_writer)
 
         _close_segment_files()
         with failed_writers_lock:
@@ -4218,7 +4501,7 @@ if not IMPORT_ONLY:
                 )
                 if output_path:
                     save_events_csv(output_path, events)
-                    print(f"📝 Events saved to {output_path}")
+                    logger.info("Events saved to %s", output_path)
 
         if ica_executor is not None:
             ica_executor.shutdown(wait=False)
@@ -4253,7 +4536,7 @@ if not IMPORT_ONLY:
         )
 
         if run_error is None:
-            print("✅ Stream terminated cleanly")
+            logger.info("Stream terminated cleanly")
         else:
-            print("❌ Stream terminated after error", file=sys.stderr)
+            logger.error("Stream terminated after error")
             raise SystemExit(1)

@@ -39,6 +39,7 @@ class RollingHealthDecision:
     write_rate: float
     event_allowed: bool
     queue_size: int
+    queue_label: Optional[str]
     backwards_count: int
     last_received_lsl_ts: Optional[float]
     last_written_lsl_ts: Optional[float]
@@ -77,6 +78,7 @@ class RollingStreamHealthGate:
         self._backwards = []
         self._gaps = []
         self._queue_size = 0
+        self._queue_label: Optional[str] = None
         self._last_received_mono: Optional[float] = None
         self._last_received_lsl_ts: Optional[float] = None
         self._last_written_lsl_ts: Optional[float] = None
@@ -90,6 +92,7 @@ class RollingStreamHealthGate:
             items.pop(0)
 
     def record_received(self, lsl_ts: float, now_monotonic: float) -> None:
+        \"\"\"Record a received sample time using the monotonic domain.\"\"\"
         if self._last_received_lsl_ts is not None and lsl_ts <= self._last_received_lsl_ts:
             self._backwards.append((float(now_monotonic), float(lsl_ts)))
         if self._last_received_lsl_ts is not None:
@@ -101,11 +104,14 @@ class RollingStreamHealthGate:
         self._received.append((float(now_monotonic), float(lsl_ts)))
 
     def record_written(self, lsl_ts: float, now_monotonic: float) -> None:
+        \"\"\"Record a written sample time using the monotonic domain.\"\"\"
         self._last_written_lsl_ts = float(lsl_ts)
         self._written.append((float(now_monotonic), float(lsl_ts)))
 
-    def set_queue_size(self, size: int) -> None:
+    def set_queue_size(self, size: int, *, label: Optional[str] = None) -> None:
         self._queue_size = int(size)
+        if label is not None:
+            self._queue_label = str(label)
 
     def mark_backlog_overflow(self, now_monotonic: float) -> None:
         if self._backlog_since is None:
@@ -132,21 +138,29 @@ class RollingStreamHealthGate:
             )
             reason = None
             healthy = True
-            if self._queue_size > self.max_queue:
+            warn_queue = max(1, int(self.max_queue * 0.8))
+            fail_queue = max(1, int(self.max_queue))
+            if self._queue_size > warn_queue:
                 if self._backlog_since is None:
                     self._backlog_since = now
                 if (now - self._backlog_since) >= self.backlog_grace_s:
-                    healthy = False
-                    reason = "raw_backlog_high"
+                    if self._queue_size > fail_queue:
+                        healthy = False
+                        reason = "raw_backlog_high"
+                    else:
+                        reason = "raw_backlog_warn"
+                else:
+                    reason = None
             else:
                 self._backlog_since = None
+            if healthy and reason == "raw_backlog_warn":
+                healthy = True
             if healthy and len(self._gaps) >= self.gap_count_threshold:
                 healthy = False
                 reason = "lsl_timestamp_gaps"
             if healthy and len(self._backwards) >= self.backwards_threshold:
                 healthy = False
                 reason = "lsl_timestamp_backwards"
-
         if healthy:
             if self._healthy_since is None:
                 self._healthy_since = now
@@ -163,6 +177,7 @@ class RollingStreamHealthGate:
             write_rate=float(write_rate),
             event_allowed=self._event_allowed,
             queue_size=self._queue_size,
+            queue_label=self._queue_label,
             backwards_count=len(self._backwards),
             last_received_lsl_ts=self._last_received_lsl_ts,
             last_written_lsl_ts=self._last_written_lsl_ts,
