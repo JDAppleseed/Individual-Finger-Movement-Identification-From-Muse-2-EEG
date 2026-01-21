@@ -5,6 +5,9 @@ import time
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
+from muse_streaming.config import StreamSettings
+from muse_streaming.timebase import check_timebase_invariants
+
 try:
     from pylsl import StreamInfo, StreamInlet, resolve_streams
 
@@ -25,6 +28,9 @@ class HealthcheckResult:
     channel_count: int
     labels: List[str]
     samples_received: int
+    nominal_srate: float
+    timebase_ok: bool
+    timebase_warnings: List[str]
 
     def to_dict(self) -> dict:
         return {
@@ -35,6 +41,9 @@ class HealthcheckResult:
             "channel_count": self.channel_count,
             "labels": self.labels,
             "samples_received": self.samples_received,
+            "nominal_srate": self.nominal_srate,
+            "timebase_ok": self.timebase_ok,
+            "timebase_warnings": self.timebase_warnings,
         }
 
 
@@ -63,40 +72,44 @@ def _match_labels(found: Iterable[str], required: Iterable[str]) -> bool:
 
 def run_healthcheck(
     *,
-    name: str,
-    stype: str,
-    required_labels: Iterable[str],
+    stream: StreamSettings,
     require_exact_channels: bool = True,
     min_sample_window_s: float = 0.5,
     timeout_s: float = 3.0,
+    check_timebase: bool = True,
+    nominal_srate_tolerance: float = 1.0,
 ) -> HealthcheckResult:
     if not LSL_AVAILABLE or resolve_streams is None:
         raise RuntimeError("pylsl is required for health checks.")
 
     streams = resolve_streams()
     match: Optional[StreamInfo] = None
-    for stream in streams:
-        if name and stream.name() != name:
+    for candidate in streams:
+        if stream.name and candidate.name() != stream.name:
             continue
-        if stype and stream.type() != stype:
+        if stream.stype and candidate.type() != stream.stype:
             continue
-        match = stream
+        match = candidate
         break
 
     if match is None:
         return HealthcheckResult(
             ok=False,
             reason="stream_not_found",
-            name=name,
-            stype=stype,
+            name=stream.name,
+            stype=stream.stype,
             channel_count=0,
             labels=[],
             samples_received=0,
+            nominal_srate=0.0,
+            timebase_ok=False,
+            timebase_warnings=[],
         )
 
     channel_count = int(match.channel_count())
     labels = _extract_channel_labels(match)
-    if require_exact_channels and channel_count != len(list(required_labels)):
+    nominal_srate = float(match.nominal_srate() or 0.0)
+    if require_exact_channels and channel_count != len(list(stream.labels)):
         return HealthcheckResult(
             ok=False,
             reason="channel_count_mismatch",
@@ -105,9 +118,12 @@ def run_healthcheck(
             channel_count=channel_count,
             labels=labels,
             samples_received=0,
+            nominal_srate=float(match.nominal_srate() or 0.0),
+            timebase_ok=False,
+            timebase_warnings=[],
         )
 
-    if not _match_labels(labels, required_labels):
+    if not _match_labels(labels, stream.labels):
         return HealthcheckResult(
             ok=False,
             reason="label_mismatch",
@@ -116,21 +132,49 @@ def run_healthcheck(
             channel_count=channel_count,
             labels=labels,
             samples_received=0,
+            nominal_srate=float(match.nominal_srate() or 0.0),
+            timebase_ok=False,
+            timebase_warnings=[],
         )
+
+    if stream.nominal_srate and nominal_srate:
+        if abs(nominal_srate - float(stream.nominal_srate)) > nominal_srate_tolerance:
+            return HealthcheckResult(
+                ok=False,
+                reason="nominal_srate_mismatch",
+                name=match.name(),
+                stype=match.type(),
+                channel_count=channel_count,
+                labels=labels,
+                samples_received=0,
+                nominal_srate=nominal_srate,
+                timebase_ok=False,
+                timebase_warnings=[],
+            )
 
     inlet = StreamInlet(match)
     start = time.monotonic()
     samples = 0
-    target_samples = int(min_sample_window_s * float(match.nominal_srate() or 1))
+    nominal_srate = float(match.nominal_srate() or 1.0)
+    target_samples = int(min_sample_window_s * nominal_srate)
+    timestamps: List[float] = []
     while time.monotonic() - start < timeout_s:
-        sample, _ = inlet.pull_sample(timeout=0.2)
+        sample, lsl_ts = inlet.pull_sample(timeout=0.2)
         if sample is None:
             continue
         samples += 1
+        if lsl_ts is not None:
+            timestamps.append(float(lsl_ts))
         if samples >= max(1, target_samples):
             break
 
     ok = samples >= max(1, target_samples)
+    timebase_ok = True
+    warnings: List[str] = []
+    if check_timebase and len(timestamps) >= 2:
+        check = check_timebase_invariants(timestamps, max_gap_s=1.0)
+        timebase_ok = check.ok
+        warnings = check.warnings
     return HealthcheckResult(
         ok=ok,
         reason="ok" if ok else "no_samples",
@@ -139,6 +183,9 @@ def run_healthcheck(
         channel_count=channel_count,
         labels=labels,
         samples_received=samples,
+        nominal_srate=nominal_srate,
+        timebase_ok=timebase_ok,
+        timebase_warnings=warnings,
     )
 
 
@@ -150,14 +197,17 @@ def main() -> int:
     parser.add_argument("--type", type=str, default="EEG")
     parser.add_argument("--labels", type=str, default="TP9,AF7,AF8,TP10")
     parser.add_argument("--exact", action="store_true", help="Require exact channel count")
+    parser.add_argument("--check-timebase", action="store_true", help="Validate timestamps")
+    parser.add_argument("--srate-tol", type=float, default=1.0, help="Nominal srate tolerance")
     args = parser.parse_args()
 
     labels = [label.strip() for label in args.labels.split(",") if label.strip()]
+    stream = StreamSettings(name=args.name, stype=args.type, labels=labels)
     result = run_healthcheck(
-        name=args.name,
-        stype=args.type,
-        required_labels=labels,
+        stream=stream,
         require_exact_channels=args.exact,
+        check_timebase=args.check_timebase,
+        nominal_srate_tolerance=args.srate_tol,
     )
     print(json.dumps(result.to_dict(), indent=2))
     return 0 if result.ok else 2

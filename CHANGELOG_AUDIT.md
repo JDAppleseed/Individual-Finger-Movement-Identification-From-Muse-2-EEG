@@ -1,5 +1,21 @@
 # Pipeline Audit Change Log
 
+## 2026-01-21
+
+- muse_streaming/muse_lsl_streamer.py
+  - Added simulator mode, buffer backpressure handling, and removed stray heartbeat code.
+- muse_streaming/cli.py, cli.py, muse_streaming/recorder.py, muse_streaming/healthcheck.py
+  - Introduced a unified CLI with stream/record/healthcheck/list commands, plus simulator support.
+  - Added structured logging, timebase checks, and fixed-size resampling in the recorder.
+  - Fixed stream listing output formatting and logger adapter handling.
+- muse_streaming/config.py, muse_streaming/timebase.py, muse_streaming/io_paths.py, muse_streaming/resample.py
+  - Centralized configuration, timebase invariants, resume-safe session paths, and resampling utilities.
+- 1_stream_and_record.py
+  - Hardened session ID uniqueness on new sessions and corrected inference latency timebase.
+- README.md
+  - Documented the CLI quickstart, timebase invariants, resume semantics, and artifact schemas.
+  - Noted legacy output directory overrides via flags/environment.
+
 ## 2025-12-29
 
 - utils/report_generator.py:1-292

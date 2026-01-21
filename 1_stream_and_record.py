@@ -60,7 +60,6 @@ from utils.label_schema import (
     FINGER_NAMES,
     event_type_for,
 )
-from utils.session_timebase import compute_event_lsl_ts
 from utils.lsl_stream_select import (
     LSLStreamSelectError,
     MultipleStreamsMatchedError,
@@ -86,6 +85,7 @@ from utils.stream_runtime import (
     HealthStopState,
     StreamRequirements,
 )
+from muse_streaming.io_paths import default_processed_dir, default_raw_dir
 
 try:
     from pynput import keyboard
@@ -115,6 +115,14 @@ TIMEBASE_VERSION = "absolute_v1"
 
 MODEL_PATH = "models/finger_action_model.pt"
 SCALER_PATH = "scaler.save"
+
+# =========================
+# ===== OUTPUT PATHS ======
+# =========================
+DEFAULT_PROCESSED_DIR = default_processed_dir()
+DEFAULT_RAW_DIR = default_raw_dir()
+PROCESSED_DIR = DEFAULT_PROCESSED_DIR
+RAW_DIR = DEFAULT_RAW_DIR
 
 # =========================
 # ===== TIMEBASE JITTER =====
@@ -284,6 +292,18 @@ parser.add_argument(
     action="store_true",
     help="Always start a new session (ignore resume state)",
 )
+parser.add_argument(
+    "--processed-dir",
+    type=str,
+    default=str(DEFAULT_PROCESSED_DIR),
+    help="Directory for processed outputs (features/events)",
+)
+parser.add_argument(
+    "--raw-dir",
+    type=str,
+    default=str(DEFAULT_RAW_DIR),
+    help="Directory for raw EEG outputs",
+)
 
 
 def _load_config(path: str):
@@ -402,6 +422,9 @@ _apply_config_to_args(args, config_settings, defaults)
 
 if args.subject_id:
     SUBJECT_ID_OVERRIDE = args.subject_id
+
+PROCESSED_DIR = Path(args.processed_dir).expanduser()
+RAW_DIR = Path(args.raw_dir).expanduser()
 
 INIT_ONLY = bool(args.init_only)
 
@@ -580,6 +603,31 @@ def _infer_session_id_from_path(path: Path, subject: str):
     return None
 
 
+def _session_has_existing_outputs(session: str, subject: str) -> bool:
+    processed = PROCESSED_DIR
+    raw = RAW_DIR
+    patterns = [
+        processed.glob(f"{subject}_{session}_*.csv"),
+        raw.glob(f"{subject}_{session}_*.csv"),
+        processed.glob(f"{subject}_{session}_*.json"),
+    ]
+    return any(any(pat) for pat in patterns)
+
+
+def _unique_session_id(session: str, subject: str) -> str:
+    if not _session_has_existing_outputs(session, subject):
+        return session
+    suffix = 1
+    while True:
+        candidate = f"{session}_{suffix:02d}"
+        if not _session_has_existing_outputs(candidate, subject):
+            print(
+                f"⚠️ Session ID collision for {session}; using {candidate} to avoid overwrite."
+            )
+            return candidate
+        suffix += 1
+
+
 def _resolve_events_path(state_events_path, state_features_path, subject, session):
     if state_events_path:
         return Path(state_events_path)
@@ -716,9 +764,7 @@ if not events_path_safe:
 
 state_meta = {}
 if state_session_id:
-    meta_candidate = (
-        Path("data/processed") / f"{subject_id}_{state_session_id}_session_meta.json"
-    )
+    meta_candidate = PROCESSED_DIR / f"{subject_id}_{state_session_id}_session_meta.json"
     state_meta = _load_session_meta(meta_candidate)
     if not state_timebase_version:
         state_timebase_version = state_meta.get("timebase_version") or state_meta.get(
@@ -791,14 +837,16 @@ if not session_id:
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 if not true_resume and SESSION_ID_OVERRIDE:
     session_id = str(SESSION_ID_OVERRIDE)
+if not true_resume and session_id:
+    session_id = _unique_session_id(session_id, subject_id)
 if experiment_hash is None:
     experiment_hash = generate_experiment_hash(subject_id, experiment_config)
 state.session_id = session_id
 state.segment_id = segment_id
 state.experiment_hash = experiment_hash
 
-FEATURES_ARCHIVE_DIR = Path("data/processed")
-RAW_ARCHIVE_DIR = Path("data/raw")
+FEATURES_ARCHIVE_DIR = PROCESSED_DIR
+RAW_ARCHIVE_DIR = RAW_DIR
 
 
 def _segment_tag(seg_id: int) -> str:
@@ -1149,7 +1197,7 @@ if not IMPORT_ONLY:
     FEATURES_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     SESSION_STATE_DIR.mkdir(parents=True, exist_ok=True)
     if SAVE_RAW:
-        Path("data/raw").mkdir(parents=True, exist_ok=True)
+        RAW_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 
     if not true_resume:
         _maybe_backup_path(FEATURES_ARCHIVE_PATH, "Existing features file")
@@ -1220,10 +1268,10 @@ if not IMPORT_ONLY:
 # ===== TIMEBASE HELPERS ===
 # =========================
 def _lsl_now():
-    """LSL-domain timestamp for 'now' using local_clock and current clock_offset."""
-    if clock_offset is None:
+    """LSL-domain timestamp for 'now' using pylsl local_clock (already in LSL domain)."""
+    if local_clock is None:
         return None
-    return compute_event_lsl_ts(local_clock(), clock_offset)
+    return float(local_clock())
 
 
 def _time_s_from_lsl(lsl_ts: float):
@@ -3400,9 +3448,9 @@ if not IMPORT_ONLY:
                             if stream_start_lsl_ts is not None
                             else np.nan
                         )
-                        if clock_offset is not None and np.isfinite(prediction_lsl_ts):
+                        if np.isfinite(prediction_lsl_ts):
                             inference_latency_ms = (
-                                local_clock() - (prediction_lsl_ts - clock_offset)
+                                local_clock() - prediction_lsl_ts
                             ) * 1000.0
                         else:
                             inference_latency_ms = np.nan
