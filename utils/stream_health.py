@@ -92,7 +92,7 @@ class RollingStreamHealthGate:
             items.pop(0)
 
     def record_received(self, lsl_ts: float, now_monotonic: float) -> None:
-        \"\"\"Record a received sample time using the monotonic domain.\"\"\"
+        """Record a received sample time using the monotonic domain."""
         if self._last_received_lsl_ts is not None and lsl_ts <= self._last_received_lsl_ts:
             self._backwards.append((float(now_monotonic), float(lsl_ts)))
         if self._last_received_lsl_ts is not None:
@@ -104,7 +104,7 @@ class RollingStreamHealthGate:
         self._received.append((float(now_monotonic), float(lsl_ts)))
 
     def record_written(self, lsl_ts: float, now_monotonic: float) -> None:
-        \"\"\"Record a written sample time using the monotonic domain.\"\"\"
+        """Record a written sample time using the monotonic domain."""
         self._last_written_lsl_ts = float(lsl_ts)
         self._written.append((float(now_monotonic), float(lsl_ts)))
 
