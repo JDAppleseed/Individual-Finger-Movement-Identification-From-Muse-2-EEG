@@ -533,15 +533,15 @@ if args.subject_id:
     SUBJECT_ID_OVERRIDE = args.subject_id
 
 INIT_ONLY = bool(args.init_only)
-MODE = str(getattr(args, "mode", "train_record") or "train_record")
+MODE = args.mode
 LIVE_INFER = MODE == "live_infer"
-ALLOW_DROP = bool(getattr(args, "allow_drop", False))
-ENABLE_PLOT = bool(getattr(args, "enable_plot", False))
+ALLOW_DROP = args.allow_drop
+ENABLE_PLOT = args.enable_plot
 ENABLE_INFERENCE = LIVE_INFER
 ENABLE_FEATURES = LIVE_INFER
-SAVE_RAW = True if MODE == "train_record" else bool(getattr(args, "save_raw", False))
-SAVE_TO_DISK = True if MODE == "train_record" else bool(SAVE_RAW or ENABLE_FEATURES)
-ENABLE_ACTUATION = bool(getattr(args, "enable_actuation", False)) if LIVE_INFER else False
+SAVE_RAW = True if MODE == "train_record" else args.save_raw
+SAVE_TO_DISK = True if MODE == "train_record" else (SAVE_RAW or ENABLE_FEATURES)
+ENABLE_ACTUATION = args.enable_actuation if LIVE_INFER else False
 if MODE == "train_record":
     if ALLOW_DROP:
         raise SystemExit("allow_drop is forbidden in train_record mode.")
