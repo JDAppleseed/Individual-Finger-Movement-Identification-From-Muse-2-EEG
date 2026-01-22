@@ -1,6 +1,6 @@
 import struct
 
-from demo_backend.palm_link import MAGIC, PKT_VER, append_crc16, encode_packet
+from utils.palm_link import MAGIC, PKT_VER, append_crc16, encode_packet
 
 
 def test_encode_packet_format():

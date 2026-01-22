@@ -78,6 +78,16 @@ _last_logged: Dict[str, float] = {}
 _burst_windows: Dict[str, Deque[float]] = {}
 
 
+def reset_console_budget() -> None:
+    global _console_budget
+    if _console_budget is None:
+        return
+    _console_budget.emitted_chars = 0
+    _console_budget.warned = False
+    _console_budget.ring.clear()
+    _console_budget._ring_chars = 0
+
+
 def install_console_logging(
     cap_chars: int = CONSOLE_CAP_CHARS,
     *,
@@ -85,14 +95,24 @@ def install_console_logging(
     level: int = logging.INFO,
 ) -> logging.Logger:
     global _console_budget
-    if _console_budget is None:
+    budget_changed = False
+    if (
+        _console_budget is None
+        or _console_budget.cap_chars != cap_chars
+        or _console_budget.ring_chars != ring_chars
+    ):
         _console_budget = ConsoleBudget(
             cap_chars=int(cap_chars),
             ring_chars=int(ring_chars),
         )
+        budget_changed = True
     logger = logging.getLogger("muse_stream")
     logger.setLevel(level)
-    if not any(isinstance(h, CappedStreamHandler) for h in logger.handlers):
+    handlers = [h for h in logger.handlers if isinstance(h, CappedStreamHandler)]
+    if handlers and budget_changed and _console_budget is not None:
+        for handler in handlers:
+            handler.budget = _console_budget
+    if not handlers:
         handler = CappedStreamHandler(_console_budget)
         formatter = logging.Formatter("%(levelname)s:%(name)s:%(message)s")
         handler.setFormatter(formatter)

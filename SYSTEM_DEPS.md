@@ -20,10 +20,3 @@ sudo tlmgr install geometry amsmath amsfonts graphics booktabs hyperref microtyp
 sudo apt-get update
 sudo apt-get install -y texlive-latex-base texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended latexmk
 ```
-
-## Node tooling (demo_app)
-
-```bash
-cd demo_app
-npm install
-```

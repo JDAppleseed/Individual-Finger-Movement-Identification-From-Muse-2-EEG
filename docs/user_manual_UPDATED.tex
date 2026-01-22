@@ -62,7 +62,7 @@ This manual explains the complete end-to-end workflow implemented in the EEG-BCI
 \item training a compact multi-head deep model (action head + finger head),
 \item evaluating accuracy and calibration,
 \item generating reports (including Deepchecks outputs),
-\item running a live demo UI + backend using LSL streams,
+\item running the desktop UI live workflow using LSL streams,
 \item improving live stability via postprocessing (smoothing, hysteresis, threshold gating, adjacency assist),
 \item troubleshooting the most common runtime issues on macOS (OpenMP duplicate runtime).
 \end{itemize}
@@ -73,8 +73,7 @@ This manual explains the complete end-to-end workflow implemented in the EEG-BCI
 2_train_model.py
 3_evaluate_model.py
 4_generate_reports.py
-demo_backend/
-demo_app/
+eeglab_wrapper_ui.py
 \end{lstlisting}
 
 \section{System overview}
@@ -102,7 +101,7 @@ demo_app/
   \item plots and confusion matrices.
   \end{itemize}
 \item \textbf{Reports (Step 4)} build subject and cross-subject summaries.
-\item \textbf{Live demo} streams LSL EEG into the backend, runs inference, applies postprocessing, and visualizes decisions in a Vite/React UI.
+\item \textbf{Live desktop UI} streams LSL EEG via the GUI, runs inference, applies postprocessing, and surfaces decisions in the operator window.
 \end{enumerate}
 
 \subsection{Labeling problem: two heads}
@@ -121,8 +120,9 @@ Recommended onboarding reading order:
 \item \textbf{\texttt{models/cnn\_lstm\_finger\_action\_net.py}}: network architecture and tensor shapes.
 \item \textbf{\texttt{2\_train\_model.py}}: training loop, loss definitions, and saved artifacts.
 \item \textbf{\texttt{3\_evaluate\_model.py}}: evaluation metrics, calibration, confusion matrices, plots.
-\item \textbf{\texttt{demo\_backend/}}: inference engine, live LSL source, replay source, and WebSocket tick schema.
-\item \textbf{\texttt{demo\_app/}}: UI controls, connection logic, and diagnostics display.
+\item \textbf{\texttt{utils/inference.py}}: inference engine and confidence gating helpers.
+\item \textbf{\texttt{utils/postprocess.py}}: stateful postprocessing for live stability.
+\item \textbf{\texttt{eeglab\_wrapper\_ui.py}}: desktop UI entrypoint for live workflow.
 \end{enumerate}
 
 \section{Quickstart for new researchers}
@@ -393,30 +393,17 @@ Deepchecks-style reports usually surface:
 \end{itemize}
 When interpreting the report, prioritize findings that directly match observed confusions in your finger confusion matrix.
 
-\section{Live demo system}
+\section{Live desktop UI}
 \subsection{Components}
 \begin{itemize}[leftmargin=*]
-\item \textbf{demo\_backend}: Python server that handles model loading, LSL acquisition, replay, inference, and WebSocket streaming to the UI.
-\item \textbf{demo\_app}: Vite/React frontend that connects to the backend, displays predictions, and exposes controls.
+\item \textbf{Desktop UI}: the \texttt{eeglab\_wrapper\_ui.py} application that runs streaming, inference, and operator controls.
 \item \textbf{LSL (Lab Streaming Layer)}: network discovery and streaming of EEG samples (e.g., \texttt{PetalStream\_eeg}).
 \end{itemize}
 
-\subsection{Starting the backend}
+\subsection{Starting the UI}
 From repo root:
 \begin{lstlisting}
-conda activate base
-python -m demo_backend.server
-\end{lstlisting}
-
-\subsection{Starting the UI}
-From \texttt{demo\_app}:
-\begin{lstlisting}
-cd demo_app
-npm run dev
-\end{lstlisting}
-If port 5173 is taken, Vite will automatically choose another (e.g., 5174):
-\begin{lstlisting}
-Local: http://localhost:5174/
+python eeglab_wrapper_ui.py
 \end{lstlisting}
 
 \subsection{LSL stream selection}
@@ -479,50 +466,13 @@ Then tune in this order:
 \item Disable adjacency assist if it causes systematic bias toward a neighbor finger.
 \end{enumerate}
 
-\section{UI controls: what to click (operator checklist)}
-This section describes the UI workflow for running tests and checks. Labels may vary slightly, but the control intent is stable.
-
-\subsection{Open the UI}
+\section{Desktop UI workflow (operator checklist)}
 \begin{enumerate}[leftmargin=*]
-\item Start backend: \texttt{python -m demo\_backend.server}
-\item Start UI: \texttt{cd demo\_app \;\; \&\& \;\; npm run dev}
-\item In the terminal, read the printed URL (e.g., \url{http://localhost:5174/}) and open it in your browser.
+\item Launch the UI: \texttt{python eeglab\_wrapper\_ui.py}
+\item Click \textbf{Connect Muse 2} to start the internal BLE $\rightarrow$ LSL streamer.
+\item Click \textbf{Start Recording} to launch \texttt{1\_stream\_and\_record.py} for live capture/inference.
+\item Follow prompts for any channel/label warnings or hard stops.
 \end{enumerate}
-
-\subsection{Connection and mode selection}
-In the UI:
-\begin{enumerate}[leftmargin=*]
-\item Locate the \textbf{Mode} selector. Choose:
-  \begin{itemize}
-  \item \textbf{Replay} to test on a saved dataset (\texttt{eeg\_windows.npz}).
-  \item \textbf{Live} to connect to LSL and run real-time inference.
-  \item \textbf{Idle} to stop streaming.
-  \end{itemize}
-\item If in \textbf{Replay} mode, set the \textbf{Replay path} to \texttt{eeg\_windows.npz} unless testing another file.
-\item Click \textbf{Start} (or equivalent). Confirm status shows ``Connected'' and ticks begin updating.
-\item For \textbf{Live} mode, confirm an EEG LSL stream exists. If not, the UI should show a status warning such as ``no eeg stream found'' and disconnect.
-\end{enumerate}
-
-\subsection{Model stability controls}
-Still in the UI, in the control panel:
-\begin{enumerate}[leftmargin=*]
-\item Enable \textbf{Smoothing}.
-\item Choose \textbf{Method: Vote} initially.
-\item Set \textbf{Window N} to 5 (increase if too jittery).
-\item Enable \textbf{Hysteresis} in live mode; in replay mode it may be off by default (unless the user explicitly enabled it).
-\item Set \textbf{Hysteresis frames} to 3.
-\item Set \textbf{Action threshold} to 75\%.
-\item Set \textbf{Finger threshold} to 75\%.
-\item Enable \textbf{Adjacency assist}.
-\end{enumerate}
-
-\subsection{Decision diagnostics}
-Use the \textbf{Decision} panel:
-\begin{itemize}[leftmargin=*]
-\item Confirm \texttt{decision\_reason} is usually \texttt{vote\_commit} or \texttt{ema\_commit}.
-\item If you see \texttt{below\_threshold} frequently during intended movement, thresholds are too high \emph{or} the model is underconfident.
-\item If you see \texttt{hysteresis\_hold} frequently during intentional transitions, reduce hysteresis frames or margin.
-\end{itemize}
 
 \section{Troubleshooting}
 \subsection{OpenMP duplicate runtime crash on macOS}
@@ -544,14 +494,6 @@ Longer-term fix options for maintainers:
 \item Ensure a single OpenMP runtime is used (avoid linking two copies via Conda + Homebrew).
 \item Prefer consistent builds of numpy/scipy/pytorch (all conda-forge or all defaults) to reduce runtime duplication.
 \end{itemize}
-
-\subsection{Vite port already in use}
-If you see:
-\begin{lstlisting}
-Port 5173 is in use, trying another one...
-Local: http://localhost:5174/
-\end{lstlisting}
-Just open the shown URL.
 
 \subsection{LSL connects to wrong stream}
 If LSL attaches to gyro/ppg/etc. instead of EEG:
@@ -618,15 +560,10 @@ python 4_generate_reports.py
 zip -r deepchecks_report.zip reports/deepchecks
 \end{lstlisting}
 
-\subsection{Run the demo}
+\subsection{Run the desktop UI}
 \begin{lstlisting}
-# Terminal 1: backend
 conda activate base
-python -m demo_backend.server
-
-# Terminal 2: UI
-cd demo_app
-npm run dev
+python eeglab_wrapper_ui.py
 \end{lstlisting}
 
 \section{Appendix B: Glossary}
@@ -644,5 +581,3 @@ EMA & Exponential moving average of probabilities for smoothing.\\
 \bottomrule
 \end{longtable}
 \end{document}
-
-

@@ -7,7 +7,7 @@ from typing import Any, Deque, Dict, Optional, Tuple
 import numpy as np
 import torch
 
-from demo_backend.utils_demo import apply_channel_normalizer, compute_health_score
+from utils.runtime_utils import apply_channel_normalizer, compute_health_score
 
 
 @dataclass

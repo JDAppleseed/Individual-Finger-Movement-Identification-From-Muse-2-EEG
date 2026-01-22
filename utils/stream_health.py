@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -39,7 +39,7 @@ class RollingHealthDecision:
     write_rate: float
     event_allowed: bool
     queue_size: int
-    queue_label: Optional[str]
+    queue_label: Optional[str] = field(default=None, kw_only=True)
     backwards_count: int
     last_received_lsl_ts: Optional[float]
     last_written_lsl_ts: Optional[float]

@@ -213,12 +213,6 @@ Resampled extraction (fixed shape windows):
 python 1b_extract_windows.py --target-fs 256
 ```
 
-## Demo backend (deprecated)
-
-The `demo_backend/` FastAPI + Vite flow is deprecated and no longer in the run path.
-It remains in the repo for reference only and will be removed once the desktop live flow
-is fully validated. See `demo_backend/DEPRECATED.md`.
-
 ## Notes
 
 - Muse 2 sampling rate defaults to 256 Hz in code.

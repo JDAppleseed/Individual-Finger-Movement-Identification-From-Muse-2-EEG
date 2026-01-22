@@ -10,9 +10,9 @@ from typing import Deque, List, Optional, Tuple
 import numpy as np
 import torch
 
-from demo_backend.inference import InferenceConfig, InferenceEngine
-from demo_backend.timebase import clamp_monotonic_window
-from demo_backend.utils_demo import load_normalizer, repo_root, resolve_device
+from utils.inference import InferenceConfig, InferenceEngine
+from utils.runtime_utils import load_normalizer, repo_root, resolve_device
+from utils.timebase import clamp_monotonic_window
 
 from utils.label_schema import ACTION_NAMES, FINGER_NAMES
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet

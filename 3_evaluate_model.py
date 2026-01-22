@@ -40,7 +40,7 @@ from utils.sequence_data import (
     split_indices,
     apply_channel_normalizer,
 )
-from demo_backend.postprocess import (
+from utils.postprocess import (
     PostprocessSettings,
     PostprocessState,
     postprocess_predictions,

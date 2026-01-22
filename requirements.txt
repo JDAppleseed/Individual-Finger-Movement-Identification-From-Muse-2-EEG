@@ -14,5 +14,3 @@ bitstring>=4.1
 pyqtgraph>=0.13
 tqdm>=4.65
 pynput>=1.7
-fastapi>=0.104
-uvicorn>=0.23

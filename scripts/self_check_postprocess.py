@@ -9,7 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def main():
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
-    from demo_backend.postprocess import (
+    from utils.postprocess import (
         PostprocessSettings,
         PostprocessState,
         postprocess_predictions,

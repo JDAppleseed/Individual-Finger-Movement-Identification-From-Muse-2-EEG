@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import json
-import logging
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import joblib
 import numpy as np
 import torch
-import joblib
 
 
 def repo_root() -> Path:
@@ -25,18 +24,6 @@ def ensure_repo_on_path() -> None:
 
 def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def setup_logger(name: str, log_dir: Path) -> logging.Logger:
-    log_dir.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
-    if not logger.handlers:
-        file_handler = logging.FileHandler(log_dir / "demo_backend.log")
-        formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-    return logger
 
 
 def resolve_device(requested: str) -> torch.device:

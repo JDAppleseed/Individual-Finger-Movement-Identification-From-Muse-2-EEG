@@ -12,8 +12,6 @@ update defaults consistently and safely.
   - 5_review_events.py
   - 5_validate_events.py
   - app/config_model.py
-  - demo_backend/schemas.py
-  - demo_app/src/types/schema.test.ts
 - Updated the default demographic fields to match "8-M16":
   - 1_stream_and_record.py: set GENDER = "M", AGE = 16
 
@@ -35,10 +33,6 @@ Use these paths when updating the subject default again.
   - argparse default for --subject-id.
 - app/config_model.py
   - default_step1b_settings() and default_train_settings() subject_id.
-- demo_backend/schemas.py
-  - sample_tick().session.subject_id for demo payloads.
-- demo_app/src/types/schema.test.ts
-  - sample tick test payload subject_id.
 
 ## How to update for a new subject
 1) Replace all default subject IDs (currently "8-M16") with the new subject ID

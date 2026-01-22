@@ -35,7 +35,7 @@ def _apply_scaler(window_txc: np.ndarray, scaler_obj):
 
 
 def main():
-    from demo_backend.postprocess import (
+    from utils.postprocess import (
         PostprocessSettings,
         PostprocessState,
         postprocess_predictions,

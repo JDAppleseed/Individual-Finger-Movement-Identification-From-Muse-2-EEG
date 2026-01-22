@@ -1,5 +1,5 @@
-from demo_backend.command_shaper import CommandShaper, CommandShaperConfig
-from demo_backend.palm_link import FLAG_HOLD, FLAG_WATCHDOG
+from utils.command_shaper import CommandShaper, CommandShaperConfig
+from utils.palm_link import FLAG_HOLD, FLAG_WATCHDOG
 
 
 def test_confidence_to_speed_mapping():

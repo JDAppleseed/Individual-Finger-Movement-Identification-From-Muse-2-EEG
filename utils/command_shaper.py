@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from demo_backend.palm_link import FLAG_HOLD, FLAG_THERMAL, FLAG_WATCHDOG
+from utils.palm_link import FLAG_HOLD, FLAG_THERMAL, FLAG_WATCHDOG
 
 
 @dataclass

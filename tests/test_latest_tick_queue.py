@@ -1,4 +1,4 @@
-from demo_backend.latest_queue import LatestTickQueue
+from utils.latest_queue import LatestTickQueue
 
 
 def test_latest_tick_queue_overwrite():

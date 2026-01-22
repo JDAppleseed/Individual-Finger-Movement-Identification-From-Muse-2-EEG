@@ -32,7 +32,6 @@ STEP_SCRIPTS = {
     "train": "2_train_model.py",
     "evaluate": "3_evaluate_model.py",
     "diagnostics": "tools/check_time_alignment.py",
-    "demo_server": "demo_backend/server.py",
 }
 
 
