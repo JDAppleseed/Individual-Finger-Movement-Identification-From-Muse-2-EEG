@@ -62,11 +62,15 @@ def load_json(path: Path) -> Dict[str, Any]:
 
 def default_step1_settings() -> Dict[str, Any]:
     return {
+        "MODE": "train_record",
+        "ALLOW_DROP": False,
         "TRAINING_MODE": False,
         "DEMO_MODE": False,
-        "ENABLE_PLOT": True,
+        "ENABLE_PLOT": False,
         "SAVE_TO_DISK": True,
         "SAVE_RAW": True,
+        "ENABLE_FEATURES": False,
+        "ENABLE_INFERENCE": False,
         "ENABLE_ICA": False,
         "ICA_WARMUP_S": 10.0,
         "ICA_MIN_SAMPLES": 256 * 5,
@@ -76,6 +80,11 @@ def default_step1_settings() -> Dict[str, Any]:
         "LOG_ICA_DIAGNOSTICS": True,
         "DATA_STREAM_TIMEOUT_S": 5.0,
         "DATA_STREAM_CHECK_INTERVAL_S": 0.5,
+        "PROCESSING_QUEUE_MAXSIZE": 2048,
+        "RAW_QUEUE_MAXSIZE": 4096,
+        "MAX_BACKPRESSURE_S": 3.0,
+        "QUEUE_PUT_TIMEOUT_S": 0.1,
+        "RAW_SHARD_SAMPLES": 2048,
         "SAMPLING_RATE": 256,
         "WINDOW_SEC": 0.25,
         "CHANNELS": 4,
@@ -87,7 +96,7 @@ def default_step1_settings() -> Dict[str, Any]:
         "BASE_CONF_THRESH": 0.75,
         "UNCERTAINTY_WEIGHT": 0.5,
         "STABILITY_FRAMES": 3,
-        "ENABLE_ACTUATION": True,
+        "ENABLE_ACTUATION": False,
         "MC_DROPOUT_PASSES": 10,
         "EVENT_MARKING_ENABLED": True,
         "EVENTS_CSV_PATH": None,
@@ -118,11 +127,13 @@ def default_step1_settings() -> Dict[str, Any]:
 
 def default_step1b_settings() -> Dict[str, Any]:
     return {
+        "session_dir": None,
         "features": None,
         "events": None,
         "subject_id": "8-M16",
         "target_fs": None,
         "allow_gaps": False,
+        "allow_partial": False,
         "ignore_misalignment": False,
         "WINDOW_SEC": 0.25,
         "SOURCE_FS_DEFAULT": 256,
@@ -164,15 +175,22 @@ def default_train_settings() -> Dict[str, Any]:
 
 
 def default_infer_settings() -> Dict[str, Any]:
-    settings = default_step1_settings()
-    settings.update(
-        {
-            "DEMO_MODE": True,
-            "SAVE_TO_DISK": False,
-            "EVENT_MARKING_ENABLED": False,
-        }
-    )
-    return settings
+    return {
+        "model_path": "models/finger_action_model.pt",
+        "scaler_path": "scaler.save",
+        "stream_name": "Muse2-EEG",
+        "stream_type": "EEG",
+        "window_sec": 0.25,
+        "hop_sec": 0.05,
+        "target_fs": 256.0,
+        "allow_drop": False,
+        "latency_threshold_ms": 250.0,
+        "latency_policy": "warn",
+        "log_every": 1.0,
+        "enable_actuation": False,
+        "bluetooth_target": "",
+        "record_raw": False,
+    }
 
 
 def default_preprocess_settings() -> Dict[str, Any]:

@@ -115,6 +115,7 @@ def record(
     recorder: RecorderSettings,
     logger,
     duration_s: Optional[float] = None,
+    mode: str = "train_record",
 ) -> RecordArtifacts:
     if not LSL_AVAILABLE:
         raise RuntimeError("pylsl is required for recording.")
@@ -138,7 +139,10 @@ def record(
     inlet = StreamInlet(info)
 
     raw_writer, raw_handle = _open_writer(paths.raw_path)
-    features_writer, features_handle = _open_writer(paths.features_path)
+    features_writer = None
+    features_handle = None
+    if mode != "train_record":
+        features_writer, features_handle = _open_writer(paths.features_path)
     events_writer = None
     events_handle = None
     if recorder.events_enabled:
@@ -149,7 +153,7 @@ def record(
             raw_writer,
             ["time_s", "lsl_ts", "latency_ms", *stream.labels],
         )
-    if not resumed or paths.features_path.stat().st_size == 0:
+    if features_writer and (not resumed or paths.features_path.stat().st_size == 0):
         feature_fields = [
             "time_s",
             "lsl_ts",
@@ -200,7 +204,7 @@ def record(
             current_latency_ms = latency_ms(float(local_clock()), lsl_ts)
             raw_writer.writerow([time_s, lsl_ts, current_latency_ms, *sample_arr.tolist()])
 
-            if window_start_s is None:
+            if window_start_s is None or mode == "train_record":
                 continue
 
             while (window_start_s + recorder.window_sec) <= time_s:
@@ -244,11 +248,19 @@ def record(
                 center_s = window_start_s + recorder.window_sec / 2.0
                 feature_lsl_ts = state.stream_start_lsl_ts + center_s
                 feature_latency = latency_ms(float(local_clock()), feature_lsl_ts)
-                features = _make_features(window)
-                features_writer.writerow(
-                    [center_s, feature_lsl_ts, window_start_s, window_end_s, feature_latency, *features]
-                )
-                last_feature_time_s = center_s
+                if features_writer is not None:
+                    features = _make_features(window)
+                    features_writer.writerow(
+                        [
+                            center_s,
+                            feature_lsl_ts,
+                            window_start_s,
+                            window_end_s,
+                            feature_latency,
+                            *features,
+                        ]
+                    )
+                    last_feature_time_s = center_s
                 window_start_s += recorder.window_hop_sec
 
             if len(sample_timestamps) >= 2:
@@ -261,7 +273,8 @@ def record(
             events_writer.writerow([state.last_time_s, end_lsl, "session_end"])
 
         raw_handle.close()
-        features_handle.close()
+        if features_handle:
+            features_handle.close()
         if events_handle:
             events_handle.close()
 

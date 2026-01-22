@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QColor,
+    QDesktopServices,
     QFontMetrics,
     QPainter,
     QPainterPath,
@@ -88,6 +89,7 @@ from app.paths import (
 )
 from app.process_runner import ProcessRunner
 from app.repo_probe import discover_scripts
+from app.ui_config_validation import validate_step_settings
 from muse_streaming.config import DEFAULT_STREAM_NAME, DEFAULT_STREAM_TYPE
 from muse_streaming.healthcheck import run_healthcheck
 from visualization.live_viz import LiveHiddenMagnitudePlot, parse_viz_line
@@ -125,11 +127,15 @@ class ArgSpec:
 
 
 TOOLTIPS: Dict[str, str] = {
+    "MODE": "Runtime mode (train_record for lossless capture, live_infer for deployment).",
+    "ALLOW_DROP": "Allow queue eviction in live_infer (never allowed in train_record).",
     "TRAINING_MODE": "Enable training capture mode (no live inference).",
     "DEMO_MODE": "Enable demo/inference mode during streaming.",
     "ENABLE_PLOT": "Show live plots during streaming.",
     "SAVE_TO_DISK": "Write features/events to disk during run.",
     "SAVE_RAW": "Write raw EEG CSV.",
+    "ENABLE_FEATURES": "Write feature CSVs (disabled in train_record).",
+    "ENABLE_INFERENCE": "Enable live inference (live_infer mode only).",
     "ENABLE_ICA": "Enable ICA preprocessing during streaming.",
     "ICA_WARMUP_S": "Seconds of warmup before ICA fitting.",
     "ICA_MIN_SAMPLES": "Minimum samples required for ICA fit.",
@@ -139,6 +145,11 @@ TOOLTIPS: Dict[str, str] = {
     "LOG_ICA_DIAGNOSTICS": "Log ICA diagnostics when skipped.",
     "DATA_STREAM_TIMEOUT_S": "Seconds before stream stall disables event marking.",
     "DATA_STREAM_CHECK_INTERVAL_S": "Stream health check interval in seconds.",
+    "PROCESSING_QUEUE_MAXSIZE": "Max size of processing queue (advanced).",
+    "RAW_QUEUE_MAXSIZE": "Max size of raw queue (advanced).",
+    "MAX_BACKPRESSURE_S": "Seconds of sustained backpressure before abort (train_record).",
+    "QUEUE_PUT_TIMEOUT_S": "Queue put timeout seconds (train_record).",
+    "RAW_SHARD_SAMPLES": "Samples per raw shard file (train_record).",
     "SAMPLING_RATE": "Expected sampling rate (Hz).",
     "CHANNELS": "Number of EEG channels (read-only).",
     "TIMEBASE_VERSION": "Enforced absolute timebase (absolute_v1).",
@@ -167,6 +178,21 @@ TOOLTIPS: Dict[str, str] = {
     "STREAMER_STREAM_NAME": "Internal streamer LSL name.",
     "STREAMER_STREAM_TYPE": "Internal streamer LSL type.",
     "LABEL_CHECK_ACKNOWLEDGED": "Operator acknowledged label mismatch.",
+    "model_path": "Model path for live inference.",
+    "scaler_path": "Scaler path for live inference.",
+    "stream_name": "LSL stream name for live inference.",
+    "stream_type": "LSL stream type for live inference.",
+    "hop_sec": "Window hop length in seconds.",
+    "target_fs": "Target sampling rate for live inference.",
+    "allow_drop": "Allow dropping windows in live inference.",
+    "latency_threshold_ms": "Latency p95 threshold (ms).",
+    "latency_policy": "Latency policy when threshold is exceeded.",
+    "log_every": "Live inference log interval (s).",
+    "enable_actuation": "Enable actuation (if configured).",
+    "bluetooth_target": "Bluetooth device name/address for actuation.",
+    "record_raw": "Record raw EEG during live inference.",
+    "raw_dir": "Session root for raw recording.",
+    "session_id": "Session ID for raw recording.",
 }
 
 EEGLAB_STYLE = """
@@ -553,6 +579,7 @@ class MainWindow(QMainWindow):
         self.replay_viz: Optional[ReplayVisualizer] = None
         self.model_views_window: Optional[QDialog] = None
         self._model_views_root: Optional[QWidget] = None
+        self.log_entries: list[str] = []
 
         self._build_ui()
 
@@ -579,31 +606,37 @@ class MainWindow(QMainWindow):
             "QListWidget::item:selected { background: rgb(110,130,170); }"
         )
         for item in [
+            "Pipeline Overview",
+            "Session Management",
+            "1) Train-Record (Lossless)",
+            "2) Extract Windows",
+            "3) Train Model",
+            "4) Evaluate",
+            "5) Live Infer + Actuate",
+            "Events: Mark/Edit",
+            "Logs & Diagnostics",
             "Project",
             "Subject",
             "Stream Setup",
-            "Step 1: Record + Events",
-            "Events: Mark/Edit",
-            "Step 1b: Windowing",
-            "Step 3: Train",
-            "Step 4: Live Inference",
             "Export",
-            "Logs & Diagnostics",
         ]:
             QListWidgetItem(item, self.workflow_list)
         self.workflow_list.currentRowChanged.connect(self._switch_page)
 
         self.stack = QStackedWidget()
+        self.stack.addWidget(self._wrap_scroll(self._build_pipeline_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_session_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_step1_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_step1b_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_train_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_evaluate_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_infer_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_event_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_logs_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_project_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_subject_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_stream_page(), "CentralWorkspace"))
-        self.stack.addWidget(self._wrap_scroll(self._build_step1_page(), "CentralWorkspace"))
-        self.stack.addWidget(self._wrap_scroll(self._build_event_page(), "CentralWorkspace"))
-        self.stack.addWidget(self._wrap_scroll(self._build_step1b_page(), "CentralWorkspace"))
-        self.stack.addWidget(self._wrap_scroll(self._build_train_page(), "CentralWorkspace"))
-        self.stack.addWidget(self._wrap_scroll(self._build_infer_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_export_page(), "CentralWorkspace"))
-        self.stack.addWidget(self._wrap_scroll(self._build_logs_page(), "CentralWorkspace"))
         self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         splitter.addWidget(self.workflow_list)
@@ -636,21 +669,52 @@ class MainWindow(QMainWindow):
                 ),
             ],
             "infer": [
-                ArgSpec("subject_id", "--subject-id", "text", "Override subject ID."),
-                ArgSpec("init_only", "--init-only", "bool", "Initialize session then exit."),
+                ArgSpec("model_path", "--model-path", "text", "Model path."),
+                ArgSpec("scaler_path", "--scaler-path", "text", "Scaler path."),
+                ArgSpec("stream_name", "--stream-name", "text", "LSL stream name."),
+                ArgSpec("stream_type", "--stream-type", "text", "LSL stream type."),
+                ArgSpec("window_sec", "--window-sec", "float", "Window length (s)."),
+                ArgSpec("hop_sec", "--hop-sec", "float", "Window hop (s)."),
+                ArgSpec("target_fs", "--target-fs", "float", "Target FS for resampling."),
+                ArgSpec("allow_drop", "--allow-drop", "bool", "Allow dropping windows."),
                 ArgSpec(
-                    "force_new_session",
-                    "--force-new-session",
-                    "bool",
-                    "Force a new session (ignore resume).",
+                    "latency_threshold_ms",
+                    "--latency-threshold-ms",
+                    "float",
+                    "Latency p95 threshold (ms).",
                 ),
+                ArgSpec(
+                    "latency_policy",
+                    "--latency-policy",
+                    "text",
+                    "Latency policy (warn/drop/degrade).",
+                ),
+                ArgSpec("log_every", "--log-every", "float", "Log interval (s)."),
+                ArgSpec("enable_actuation", "--enable-actuation", "bool", "Enable actuation."),
+                ArgSpec(
+                    "bluetooth_target",
+                    "--bluetooth-target",
+                    "text",
+                    "Bluetooth target name/address.",
+                ),
+                ArgSpec("record_raw", "--record-raw", "bool", "Record raw EEG."),
+                ArgSpec("raw_dir", "--raw-dir", "text", "Raw session root."),
+                ArgSpec("subject_id", "--subject-id", "text", "Subject ID for raw recording."),
+                ArgSpec("session_id", "--session-id", "text", "Session ID for raw recording."),
             ],
             "step1b": [
+                ArgSpec("session_dir", "--session-dir", "text", "Session directory path."),
                 ArgSpec("features", "--features", "text", "Override features path."),
                 ArgSpec("events", "--events", "text", "Override events path."),
                 ArgSpec("subject_id", "--subject-id", "text", "Subject ID override."),
                 ArgSpec("target_fs", "--target-fs", "float", "Target resample rate."),
                 ArgSpec("allow_gaps", "--allow-gaps", "bool", "Allow gaps in windows."),
+                ArgSpec(
+                    "allow_partial",
+                    "--allow-partial",
+                    "bool",
+                    "Allow partial sessions (skip strict manifest validation).",
+                ),
                 ArgSpec(
                     "ignore_misalignment",
                     "--ignore-misalignment",
@@ -737,39 +801,64 @@ class MainWindow(QMainWindow):
     def _build_menu(self) -> None:
         menu = self.menuBar()
         file_menu = menu.addMenu("File")
-        file_menu.addAction("Project Manager", lambda: self.workflow_list.setCurrentRow(0))
-        file_menu.addAction("Subject Manager", lambda: self.workflow_list.setCurrentRow(1))
+        file_menu.addAction(
+            "Project Manager", lambda: self.workflow_list.setCurrentRow(9)
+        )
+        file_menu.addAction(
+            "Subject Manager", lambda: self.workflow_list.setCurrentRow(10)
+        )
         file_menu.addSeparator()
         file_menu.addAction("Quit", self.close)
 
         edit_menu = menu.addMenu("Edit")
-        edit_menu.addAction("Session Settings", lambda: self.workflow_list.setCurrentRow(2))
+        edit_menu.addAction(
+            "Session Settings", lambda: self.workflow_list.setCurrentRow(1)
+        )
 
         tools_menu = menu.addMenu("Tools")
-        tools_menu.addAction("Stream Setup", lambda: self.workflow_list.setCurrentRow(2))
-        tools_menu.addAction("Event Review", lambda: self.workflow_list.setCurrentRow(4))
-        tools_menu.addAction("Diagnostics", lambda: self.workflow_list.setCurrentRow(9))
+        tools_menu.addAction(
+            "Stream Setup", lambda: self.workflow_list.setCurrentRow(11)
+        )
+        tools_menu.addAction(
+            "Session Management", lambda: self.workflow_list.setCurrentRow(1)
+        )
+        tools_menu.addAction("Event Review", lambda: self.workflow_list.setCurrentRow(7))
+        tools_menu.addAction("Diagnostics", lambda: self.workflow_list.setCurrentRow(8))
         model_views_action = tools_menu.addAction("Model Views", self._open_model_views_window)
         model_views_action.setShortcut("Ctrl+M")
 
         plot_menu = menu.addMenu("Plot")
-        plot_menu.addAction("Live Plot (Step 1)", lambda: self.workflow_list.setCurrentRow(3))
+        plot_menu.addAction(
+            "Train-Record", lambda: self.workflow_list.setCurrentRow(2)
+        )
 
         study_menu = menu.addMenu("Study")
-        study_menu.addAction("Windowing", lambda: self.workflow_list.setCurrentRow(5))
-        study_menu.addAction("Training", lambda: self.workflow_list.setCurrentRow(6))
+        study_menu.addAction("Windowing", lambda: self.workflow_list.setCurrentRow(3))
+        study_menu.addAction("Training", lambda: self.workflow_list.setCurrentRow(4))
+        study_menu.addAction("Evaluate", lambda: self.workflow_list.setCurrentRow(5))
 
         datasets_menu = menu.addMenu("Datasets")
-        datasets_menu.addAction("Export", lambda: self.workflow_list.setCurrentRow(8))
+        datasets_menu.addAction("Export", lambda: self.workflow_list.setCurrentRow(12))
 
         run_menu = menu.addMenu("Run")
-        run_menu.addAction("Run Step 1", lambda: self._run_step("step1", "step1"))
-        run_menu.addAction("Run Step 1b", lambda: self._run_step("step1b", "step1b"))
+        run_menu.addAction(
+            "Run Train-Record", lambda: self._run_step("step1", "step1")
+        )
+        run_menu.addAction(
+            "Run Extract Windows", lambda: self._run_step("step1b", "step1b")
+        )
         run_menu.addAction("Run Train", lambda: self._run_step("train", "train"))
-        run_menu.addAction("Run Inference", lambda: self._run_step("infer", "step1"))
+        run_menu.addAction("Run Evaluate", self._run_evaluate_all)
+        run_menu.addAction(
+            "Run Live Infer", lambda: self._run_step("infer", "live_infer")
+        )
 
         help_menu = menu.addMenu("Help")
-        help_menu.addAction("Logs", lambda: self.workflow_list.setCurrentRow(9))
+        help_menu.addAction("Logs", lambda: self.workflow_list.setCurrentRow(8))
+        help_menu.addAction("Open README.md", lambda: self._open_doc("README.md"))
+        help_menu.addAction(
+            "Open DATA_CONTRACT.md", lambda: self._open_doc("DATA_CONTRACT.md")
+        )
 
     def _build_status_bar(self) -> QWidget:
         bar = QFrame()
@@ -833,6 +922,18 @@ class MainWindow(QMainWindow):
         container.setObjectName("BottomBar")
         layout = QVBoxLayout(container)
         layout.setContentsMargins(4, 4, 4, 4)
+        filter_row = QHBoxLayout()
+        filter_label = QLabel("Filter")
+        self.log_filter_combo = QComboBox()
+        self.log_filter_combo.addItems(["All", "Warnings", "Errors"])
+        self.log_filter_combo.currentTextChanged.connect(self._refresh_log_display)
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(self._clear_logs)
+        filter_row.addWidget(filter_label)
+        filter_row.addWidget(self.log_filter_combo)
+        filter_row.addStretch(1)
+        filter_row.addWidget(clear_btn)
+        layout.addLayout(filter_row)
         self.hard_stop_banner = QLabel("HARD STOP — Stream Unhealthy")
         self.hard_stop_banner.setStyleSheet(
             "background-color: #b71c1c; color: white; font-weight: 700; padding: 6px;"
@@ -865,7 +966,7 @@ class MainWindow(QMainWindow):
         stream_layout.addWidget(detect_btn)
         stream_layout.addWidget(test_btn)
         open_stream_btn = QPushButton("Open Stream Setup")
-        open_stream_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(2))
+        open_stream_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(11))
         stream_layout.addWidget(open_stream_btn)
         stream_layout.addStretch(1)
         stream_dock = QDockWidget("Stream Control", self)
@@ -883,28 +984,26 @@ class MainWindow(QMainWindow):
         pipeline_header = QLabel("Pipeline Controls")
         self._apply_text_outline_effect(pipeline_header)
         pipeline_layout.addWidget(pipeline_header)
-        run_step1_btn = QPushButton("Run Step 1")
+        run_step1_btn = QPushButton("Run Train-Record")
         run_step1_btn.clicked.connect(lambda: self._run_step("step1", "step1"))
         pipeline_layout.addWidget(run_step1_btn)
-        run_step1b_btn = QPushButton("Run Step 1b")
+        run_step1b_btn = QPushButton("Run Extract Windows")
         run_step1b_btn.clicked.connect(lambda: self._run_step("step1b", "step1b"))
         pipeline_layout.addWidget(run_step1b_btn)
         run_train_btn = QPushButton("Run Train")
         run_train_btn.clicked.connect(lambda: self._run_step("train", "train"))
         pipeline_layout.addWidget(run_train_btn)
-        run_infer_btn = QPushButton("Run Inference")
-        run_infer_btn.clicked.connect(lambda: self._run_step("infer", "step1"))
+        run_eval_btn = QPushButton("Run Evaluate")
+        run_eval_btn.clicked.connect(self._run_evaluate_all)
+        pipeline_layout.addWidget(run_eval_btn)
+        run_infer_btn = QPushButton("Run Live Infer")
+        run_infer_btn.clicked.connect(lambda: self._run_step("infer", "live_infer"))
         pipeline_layout.addWidget(run_infer_btn)
-        self.live_connect_btn = QPushButton("Connect Muse 2")
-        self.live_connect_btn.clicked.connect(self._connect_muse)
-        pipeline_layout.addWidget(self.live_connect_btn)
-        self.live_start_btn = QPushButton("Start Recording")
-        self.live_start_btn.clicked.connect(self._start_live_recording)
-        self.live_start_btn.setEnabled(False)
-        pipeline_layout.addWidget(self.live_start_btn)
-        self.live_stop_btn = QPushButton("Stop Live (Hard Stop)")
-        self.live_stop_btn.clicked.connect(self._stop_live_hard)
-        pipeline_layout.addWidget(self.live_stop_btn)
+        validate_btn = QPushButton("Validate Session")
+        validate_btn.clicked.connect(self._run_validate_session)
+        pipeline_layout.addWidget(validate_btn)
+        self.dry_run_checkbox = QCheckBox("Dry run (print CLI only)")
+        pipeline_layout.addWidget(self.dry_run_checkbox)
         stop_btn = QPushButton("Stop Active Run")
         stop_btn.clicked.connect(self._stop_process)
         pipeline_layout.addWidget(stop_btn)
@@ -934,7 +1033,7 @@ class MainWindow(QMainWindow):
         event_validate_btn.clicked.connect(self._run_event_validate)
         event_layout.addWidget(event_validate_btn)
         open_event_btn = QPushButton("Open Event Tools")
-        open_event_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(4))
+        open_event_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(7))
         event_layout.addWidget(open_event_btn)
         event_layout.addStretch(1)
         event_dock = QDockWidget("Events", self)
@@ -955,17 +1054,11 @@ class MainWindow(QMainWindow):
         self.ica_toggle_dock = QCheckBox("Enable ICA")
         self._bind_checkbox(self.ica_toggle_dock, "step1", "ENABLE_ICA")
         model_layout.addWidget(self.ica_toggle_dock)
-        self.demo_toggle_dock = QCheckBox("Demo mode")
-        self._bind_checkbox(self.demo_toggle_dock, "step1", "DEMO_MODE")
-        model_layout.addWidget(self.demo_toggle_dock)
-        self.training_toggle_dock = QCheckBox("Training mode")
-        self._bind_checkbox(self.training_toggle_dock, "step1", "TRAINING_MODE")
-        model_layout.addWidget(self.training_toggle_dock)
         self.plot_toggle_dock = QCheckBox("Enable plot")
         self._bind_checkbox(self.plot_toggle_dock, "step1", "ENABLE_PLOT")
         model_layout.addWidget(self.plot_toggle_dock)
         open_infer_btn = QPushButton("Open Live Inference")
-        open_infer_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(7))
+        open_infer_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(6))
         model_layout.addWidget(open_infer_btn)
         open_model_views_btn = QPushButton("Open Model Views")
         open_model_views_btn.clicked.connect(self._open_model_views_window)
@@ -1000,10 +1093,10 @@ class MainWindow(QMainWindow):
         session_layout.addWidget(self.subject_label_dock)
         session_layout.addWidget(self.session_label_dock)
         project_btn = QPushButton("Project Page")
-        project_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(0))
+        project_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(9))
         session_layout.addWidget(project_btn)
         subject_btn = QPushButton("Subject Page")
-        subject_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(1))
+        subject_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(10))
         session_layout.addWidget(subject_btn)
         session_layout.addStretch(1)
         session_dock = QDockWidget("Session", self)
@@ -1395,13 +1488,163 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return page
 
+    def _build_pipeline_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        header = QLabel("Pipeline Overview")
+        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        layout.addWidget(header)
+        intro = QLabel(
+            "Use the navigation on the left to walk through the lossless pipeline. "
+            "Train-record is lossless by default, window extraction and training are offline, "
+            "and live inference is a separate script."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        for label, row in [
+            ("1) Train-Record (Lossless)", 2),
+            ("2) Extract Windows", 3),
+            ("3) Train Model", 4),
+            ("4) Evaluate", 5),
+            ("5) Live Infer + Actuate", 6),
+        ]:
+            box = QGroupBox(label)
+            box_layout = QVBoxLayout(box)
+            go_btn = QPushButton(f"Open {label}")
+            go_btn.clicked.connect(lambda _=None, r=row: self.workflow_list.setCurrentRow(r))
+            box_layout.addWidget(go_btn)
+            layout.addWidget(box)
+
+        layout.addStretch(1)
+        return page
+
+    def _build_session_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        header = QLabel("Session Management")
+        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        layout.addWidget(header)
+
+        form = QFormLayout()
+        self.session_root_input = OutlineLineEdit()
+        root_btn = QPushButton("Browse")
+        root_btn.clicked.connect(
+            lambda: self._browse_dir(self.session_root_input, "Select Session Root")
+        )
+        root_row = QHBoxLayout()
+        root_row.setContentsMargins(0, 0, 0, 0)
+        root_row.addWidget(self.session_root_input)
+        root_row.addWidget(root_btn)
+        root_widget = QWidget()
+        root_widget.setLayout(root_row)
+        form.addRow("Session Root", root_widget)
+
+        self.session_dir_input = OutlineLineEdit()
+        session_btn = QPushButton("Browse")
+        session_btn.clicked.connect(
+            lambda: self._browse_dir(self.session_dir_input, "Select Session Directory")
+        )
+        session_row = QHBoxLayout()
+        session_row.setContentsMargins(0, 0, 0, 0)
+        session_row.addWidget(self.session_dir_input)
+        session_row.addWidget(session_btn)
+        session_widget = QWidget()
+        session_widget.setLayout(session_row)
+        form.addRow("Session Dir", session_widget)
+        layout.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        new_btn = QPushButton("Create New Session")
+        new_btn.clicked.connect(self._create_new_session)
+        load_btn = QPushButton("Load Session")
+        load_btn.clicked.connect(self._load_session_summary)
+        validate_btn = QPushButton("Validate Session")
+        validate_btn.clicked.connect(self._run_validate_session)
+        self.allow_partial_checkbox = QCheckBox("Allow partial validation")
+        btn_row.addWidget(new_btn)
+        btn_row.addWidget(load_btn)
+        btn_row.addWidget(validate_btn)
+        btn_row.addWidget(self.allow_partial_checkbox)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        summary = QGroupBox("Session Summary")
+        summary_layout = QFormLayout(summary)
+        self.session_summary_labels = {
+            "session_id": QLabel("-"),
+            "created_at": QLabel("-"),
+            "mode": QLabel("-"),
+            "termination_reason": QLabel("-"),
+            "seq_range": QLabel("-"),
+            "missing_seq": QLabel("-"),
+            "shards": QLabel("-"),
+            "total_samples": QLabel("-"),
+            "timebase_ranges": QLabel("-"),
+            "events": QLabel("-"),
+        }
+        summary_layout.addRow("Session ID", self.session_summary_labels["session_id"])
+        summary_layout.addRow("Created at", self.session_summary_labels["created_at"])
+        summary_layout.addRow("Mode", self.session_summary_labels["mode"])
+        summary_layout.addRow(
+            "Termination", self.session_summary_labels["termination_reason"]
+        )
+        summary_layout.addRow("Seq range", self.session_summary_labels["seq_range"])
+        summary_layout.addRow("Missing seq", self.session_summary_labels["missing_seq"])
+        summary_layout.addRow("Shards", self.session_summary_labels["shards"])
+        summary_layout.addRow("Total samples", self.session_summary_labels["total_samples"])
+        summary_layout.addRow(
+            "Timebase ranges", self.session_summary_labels["timebase_ranges"]
+        )
+        summary_layout.addRow("Event count", self.session_summary_labels["events"])
+        layout.addWidget(summary)
+
+        layout.addStretch(1)
+        return page
+
+    def _build_evaluate_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        header = QLabel("Step 4: Evaluate")
+        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        layout.addWidget(header)
+        note = QLabel(
+            "Run evaluation scripts (3b/3c/4) on trained models and extracted windows."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        btn_row = QHBoxLayout()
+        deepchecks_btn = QPushButton("Run 3b Deepchecks")
+        deepchecks_btn.clicked.connect(
+            lambda: self._run_eval_script("evaluate_deepchecks")
+        )
+        figures_btn = QPushButton("Run 3c Paper Figures")
+        figures_btn.clicked.connect(lambda: self._run_eval_script("evaluate_figures"))
+        reports_btn = QPushButton("Run 4 Generate Reports")
+        reports_btn.clicked.connect(lambda: self._run_eval_script("evaluate_reports"))
+        btn_row.addWidget(deepchecks_btn)
+        btn_row.addWidget(figures_btn)
+        btn_row.addWidget(reports_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+        layout.addStretch(1)
+        return page
+
     def _build_step1_page(self) -> QWidget:
+        lossless_banner = QLabel(
+            "LOSSLESS TRAIN RECORD — raw EEG + events only. No drops allowed. Ensure disk throughput."
+        )
+        lossless_banner.setStyleSheet(
+            "background: #263238; color: #fff; padding: 6px; font-weight: 700;"
+        )
         return self._build_step_page(
             step_id="step1",
-            title="Step 1: Record + Events",
+            title="Step 1: Train-Record (Lossless)",
             defaults=default_step1_settings(),
             script_key="step1",
             include_event_tools=True,
+            custom_controls=lossless_banner,
         )
 
     def _build_event_page(self) -> QWidget:
@@ -1466,12 +1709,18 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_step1b_page(self) -> QWidget:
+        note = QLabel(
+            "Extract windows from a lossless session directory (raw/ + events.jsonl). "
+            "Use the Session Dir field or select a session in Session Management."
+        )
+        note.setWordWrap(True)
         return self._build_step_page(
             step_id="step1b",
-            title="Step 1b: Windowing",
+            title="Step 2: Extract Windows",
             defaults=default_step1b_settings(),
             script_key="step1b",
             include_event_tools=False,
+            custom_controls=note,
         )
 
     def _build_preprocess_page(self) -> QWidget:
@@ -1488,50 +1737,34 @@ class MainWindow(QMainWindow):
     def _build_train_page(self) -> QWidget:
         return self._build_step_page(
             step_id="train",
-            title="Step 3: Train",
+            title="Step 3: Train Model",
             defaults=default_train_settings(),
             script_key="train",
             include_event_tools=False,
         )
 
     def _build_infer_page(self) -> QWidget:
-        live_controls = self._build_live_controls()
+        live_controls = self._build_live_infer_controls()
         return self._build_step_page(
             step_id="infer",
-            title="Step 4: Live Inference",
+            title="Step 5: Live Infer + Actuate",
             defaults=default_infer_settings(),
-            script_key="step1",
+            script_key="live_infer",
             include_event_tools=False,
-            include_run_controls=False,
+            include_run_controls=True,
             custom_controls=live_controls,
         )
 
-    def _build_live_controls(self) -> QWidget:
-        box = QGroupBox("Live Controls")
+    def _build_live_infer_controls(self) -> QWidget:
+        box = QGroupBox("Live Inference Notes")
         layout = QVBoxLayout(box)
         note = QLabel(
-            "Live streaming uses the internal Muse 2 BLE → LSL streamer. "
-            "Connect first, verify health, then start recording."
+            "Live inference runs in 7_live_infer_and_actuate.py. "
+            "Set model/scaler paths, stream name/type, and windowing parameters. "
+            "Allow-drop is OFF by default; enable only if you accept latency-driven drops."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
-
-        self.live_status_label = QLabel("Live status: idle")
-        layout.addWidget(self.live_status_label)
-
-        btn_row = QHBoxLayout()
-        self.live_connect_btn_page = QPushButton("Connect Muse 2")
-        self.live_connect_btn_page.clicked.connect(self._connect_muse)
-        self.live_start_btn_page = QPushButton("Start Recording")
-        self.live_start_btn_page.clicked.connect(self._start_live_recording)
-        self.live_start_btn_page.setEnabled(False)
-        self.live_stop_btn_page = QPushButton("Stop Live (Hard Stop)")
-        self.live_stop_btn_page.clicked.connect(self._stop_live_hard)
-        btn_row.addWidget(self.live_connect_btn_page)
-        btn_row.addWidget(self.live_start_btn_page)
-        btn_row.addWidget(self.live_stop_btn_page)
-        btn_row.addStretch(1)
-        layout.addLayout(btn_row)
         return box
 
     def _build_export_page(self) -> QWidget:
@@ -1595,6 +1828,21 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return page
 
+    def _step_description(self, step_id: str) -> str:
+        descriptions = {
+            "step1": (
+                "Lossless train-record: capture raw EEG + events into a session directory "
+                "with backpressure and integrity manifests."
+            ),
+            "step1b": (
+                "Offline window extraction from a session directory; validates manifest "
+                "continuity by default."
+            ),
+            "train": "Offline model training from extracted windows.",
+            "infer": "Live inference/actuation with latency guardrails.",
+        }
+        return descriptions.get(step_id, "")
+
     def _build_step_page(
         self,
         step_id: str,
@@ -1613,6 +1861,11 @@ class MainWindow(QMainWindow):
         header = QLabel(title)
         header.setStyleSheet("font-weight: 600; font-size: 16px;")
         layout.addWidget(header)
+        description = self._step_description(step_id)
+        if description:
+            desc_label = QLabel(description)
+            desc_label.setWordWrap(True)
+            layout.addWidget(desc_label)
 
         status_row = QHBoxLayout()
         status_label = QLabel("Status: Idle")
@@ -1673,6 +1926,9 @@ class MainWindow(QMainWindow):
         dropdown_row.addStretch(1)
         layout.addLayout(dropdown_row)
 
+        if custom_controls is not None:
+            layout.addWidget(custom_controls)
+
         if include_run_controls:
             buttons = QHBoxLayout()
             run_btn = QPushButton("Run")
@@ -1689,8 +1945,6 @@ class MainWindow(QMainWindow):
             if script_key not in self.scripts:
                 run_btn.setEnabled(False)
                 status_label.setText("Status: Missing script")
-        elif custom_controls is not None:
-            layout.addWidget(custom_controls)
 
         self._build_checklist(step_id, layout)
 
@@ -1879,24 +2133,27 @@ class MainWindow(QMainWindow):
 
     def _populate_basic_fields(self, step_id: str, form: QFormLayout) -> None:
         defaults = self.defaults[step_id]
-        if step_id in {"step1", "infer"}:
-            self._add_checkbox(
-                step_id, form, "TRAINING_MODE", "Training mode", defaults
-            )
-            self._add_checkbox(step_id, form, "DEMO_MODE", "Demo mode", defaults)
+        if step_id == "step1":
+            self._add_text(step_id, form, "MODE", "Mode", defaults, read_only=True)
             self._add_checkbox(step_id, form, "ENABLE_PLOT", "Enable plot", defaults)
-            self._add_checkbox(step_id, form, "SAVE_TO_DISK", "Save to disk", defaults)
             self._add_checkbox(step_id, form, "SAVE_RAW", "Save raw", defaults)
+            save_raw_widget = self.fields[step_id].get("SAVE_RAW")
+            if isinstance(save_raw_widget, QCheckBox):
+                save_raw_widget.setEnabled(False)
+            self._add_checkbox(
+                step_id, form, "EVENT_MARKING_ENABLED", "Event marking", defaults
+            )
             self._add_spin(
                 step_id, form, "SAMPLING_RATE", "Sampling rate", defaults, 1, 4096
             )
             self._add_spin(
                 step_id, form, "CHANNELS", "Channels", defaults, 1, 64, read_only=True
             )
+        elif step_id == "infer":
             self._add_file_picker(
                 step_id,
                 form,
-                "MODEL_PATH",
+                "model_path",
                 "Model path",
                 defaults,
                 "Model (*.pt *.pth);;All Files (*)",
@@ -1904,14 +2161,46 @@ class MainWindow(QMainWindow):
             self._add_file_picker(
                 step_id,
                 form,
-                "SCALER_PATH",
+                "scaler_path",
                 "Scaler path",
                 defaults,
                 "Scaler (*.save *.pkl);;All Files (*)",
             )
-            self._add_checkbox(
-                step_id, form, "EVENT_MARKING_ENABLED", "Event marking", defaults
+            self._add_text(step_id, form, "stream_name", "Stream name", defaults)
+            self._add_text(step_id, form, "stream_type", "Stream type", defaults)
+            self._add_spin(
+                step_id,
+                form,
+                "window_sec",
+                "Window sec",
+                defaults,
+                0,
+                10,
+                is_float=True,
             )
+            self._add_spin(
+                step_id,
+                form,
+                "hop_sec",
+                "Hop sec",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "target_fs",
+                "Target FS",
+                defaults,
+                1,
+                4096,
+                is_float=True,
+            )
+            self._add_checkbox(step_id, form, "allow_drop", "Allow drop", defaults)
+            self._add_checkbox(step_id, form, "record_raw", "Record raw", defaults)
+            self._add_text(step_id, form, "raw_dir", "Raw dir", defaults)
         elif step_id == "step1b":
             self._add_spin(
                 step_id,
@@ -1923,6 +2212,7 @@ class MainWindow(QMainWindow):
                 10,
                 is_float=True,
             )
+            self._add_text(step_id, form, "session_dir", "Session dir", defaults)
             self._add_file_picker(
                 step_id,
                 form,
@@ -1951,6 +2241,9 @@ class MainWindow(QMainWindow):
                 is_float=True,
             )
             self._add_checkbox(step_id, form, "allow_gaps", "Allow gaps", defaults)
+            self._add_checkbox(
+                step_id, form, "allow_partial", "Allow partial sessions", defaults
+            )
             self._add_checkbox(
                 step_id, form, "ignore_misalignment", "Ignore misalignment", defaults
             )
@@ -2015,12 +2308,59 @@ class MainWindow(QMainWindow):
 
     def _populate_advanced_fields(self, step_id: str, form: QFormLayout) -> None:
         defaults = self.defaults[step_id]
-        if step_id in {"step1", "infer"}:
+        if step_id == "step1":
             self._add_spin(
                 step_id,
                 form,
                 "WINDOW_SEC",
                 "Window sec",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "RAW_SHARD_SAMPLES",
+                "Raw shard samples",
+                defaults,
+                256,
+                16384,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "PROCESSING_QUEUE_MAXSIZE",
+                "Processing queue max",
+                defaults,
+                128,
+                100000,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "RAW_QUEUE_MAXSIZE",
+                "Raw queue max",
+                defaults,
+                128,
+                100000,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "MAX_BACKPRESSURE_S",
+                "Backpressure abort (s)",
+                defaults,
+                0,
+                60,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "QUEUE_PUT_TIMEOUT_S",
+                "Queue put timeout (s)",
                 defaults,
                 0,
                 10,
@@ -2232,6 +2572,36 @@ class MainWindow(QMainWindow):
                 defaults,
                 read_only=True,
             )
+        elif step_id == "infer":
+            self._add_spin(
+                step_id,
+                form,
+                "latency_threshold_ms",
+                "Latency threshold (ms)",
+                defaults,
+                0,
+                5000,
+                is_float=True,
+            )
+            self._add_text(step_id, form, "latency_policy", "Latency policy", defaults)
+            self._add_spin(
+                step_id,
+                form,
+                "log_every",
+                "Log every (s)",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
+            self._add_checkbox(
+                step_id, form, "enable_actuation", "Enable actuation", defaults
+            )
+            self._add_text(
+                step_id, form, "bluetooth_target", "Bluetooth target", defaults
+            )
+            self._add_text(step_id, form, "subject_id", "Subject ID", defaults)
+            self._add_text(step_id, form, "session_id", "Session ID", defaults)
         elif step_id == "step1b":
             self._add_spin(
                 step_id,
@@ -2945,6 +3315,18 @@ class MainWindow(QMainWindow):
         if path:
             widget.setText(path)
 
+    def _browse_dir(self, widget: QLineEdit, title: str) -> None:
+        path = QFileDialog.getExistingDirectory(self, title, "")
+        if path:
+            widget.setText(path)
+
+    def _open_doc(self, rel_path: str) -> None:
+        path = self.repo_root / rel_path
+        if not path.exists():
+            self._append_log(f"Doc not found: {path}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
     def _run_step(self, step_id: str, script_key: str) -> None:
         if self.hard_stop_locked:
             self._show_blocking_notice(
@@ -2972,6 +3354,18 @@ class MainWindow(QMainWindow):
 
         settings = self._collect_settings(step_id)
         settings["TIMEBASE_VERSION"] = TIMEBASE_VERSION
+        if step_id == "step1":
+            settings["MODE"] = "train_record"
+            settings["ALLOW_DROP"] = False
+            settings["SAVE_RAW"] = True
+            settings["ENABLE_FEATURES"] = False
+            settings["ENABLE_INFERENCE"] = False
+            session_root_value = self.session_root_input.text().strip()
+            if session_root_value:
+                settings["raw_dir"] = session_root_value
+            if self.current_project and self.current_subject:
+                subject_dir = subject_root(self.current_project, self.current_subject)
+                settings["processed_dir"] = str(subject_dir / "processed")
         if step_id == "infer":
             settings["STREAMER_INTERNAL"] = self.streamer_runner.is_running()
             settings["STREAMER_STREAM_NAME"] = self.live_stream_name
@@ -2981,6 +3375,8 @@ class MainWindow(QMainWindow):
             settings["LABEL_CHECK_ACKNOWLEDGED"] = self.live_label_acknowledged
             settings["LABEL_CHECK_FOUND_LABELS"] = self.live_label_details.get("labels")
             settings["LABEL_CHECK_EXPECTED_LABELS"] = settings.get("REQUIRED_LSL_LABELS")
+            if not settings.get("session_id") and self.current_session_backend:
+                settings["session_id"] = self.current_session_backend
         if (
             step_id in {"step1", "infer"}
             and self.input_source.currentText() == "CSV Offline"
@@ -3017,6 +3413,9 @@ class MainWindow(QMainWindow):
 
         if step_id == "step1b":
             settings["subject_id"] = settings.get("subject_id") or self.current_subject
+            session_dir_value = self.session_dir_input.text().strip()
+            if session_dir_value:
+                settings["session_dir"] = session_dir_value
             if settings.get("WINDOW_SEC") is not None:
                 settings["WINDOW_SEC_DEFAULT"] = settings.get("WINDOW_SEC")
             if not settings.get("features"):
@@ -3043,6 +3442,17 @@ class MainWindow(QMainWindow):
                 if latest_npz:
                     settings["npz"] = str(latest_npz)
 
+        validation = validate_step_settings(step_id, settings)
+        if not validation.ok:
+            QMessageBox.warning(
+                self,
+                "Invalid Settings",
+                "\n".join(validation.errors),
+            )
+            return
+        for warning in validation.warnings:
+            self._append_log(f"⚠️ {warning}")
+
         if backend_session:
             self.current_session_backend = backend_session
             self.current_session_ui = ui_session_id(
@@ -3063,6 +3473,14 @@ class MainWindow(QMainWindow):
         self._write_session_snapshot(subject_dir, config.to_dict(), step_id)
 
         args = [str(script_info.path), "--config", str(config_path)]
+        if step_id == "step1":
+            args.extend(["--mode", "train_record"])
+        if step_id == "step1b":
+            session_dir_value = self.session_dir_input.text().strip()
+            if session_dir_value:
+                args.extend(["--session-dir", session_dir_value])
+                if self.allow_partial_checkbox.isChecked():
+                    args.append("--allow-partial")
         args.extend(self._collect_step_args(step_id))
         cwd = str(self.repo_root)
         if step_id == "step1b" and self.current_session_ui:
@@ -3076,6 +3494,9 @@ class MainWindow(QMainWindow):
         self.active_settings = dict(settings)
         self._set_step_status(step_id, "Running")
         self._append_log(f"Running: {args} (cwd={cwd})")
+        if getattr(self, "dry_run_checkbox", None) and self.dry_run_checkbox.isChecked():
+            self._append_log("Dry run enabled; command not executed.")
+            return
         self.runner.start(sys.executable, args, cwd=cwd)
 
     def _write_session_snapshot(
@@ -3118,6 +3539,121 @@ class MainWindow(QMainWindow):
             defaults["LSL_STREAM_TYPE"] = self._selected_stream_type()
         defaults["CSV_OFFLINE_PATH"] = self.csv_path.text().strip() or None
         return defaults
+
+    def _create_new_session(self) -> None:
+        if not self.current_subject:
+            QMessageBox.warning(self, "Subject Required", "Select a subject first.")
+            return
+        session_root_value = self.session_root_input.text().strip()
+        if not session_root_value:
+            QMessageBox.warning(self, "Session Root Required", "Select a session root.")
+            return
+        session_id = session_backend_id()
+        session_dir = Path(session_root_value) / f"{self.current_subject}_{session_id}"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        self.current_session_backend = session_id
+        self.current_session_ui = ui_session_id(self.current_subject, session_id)
+        self.session_dir_input.setText(str(session_dir))
+        self._set_session_label(f"Session: {self.current_session_ui}")
+        self._append_log(f"Created session dir: {session_dir}")
+        self._load_session_summary()
+
+    def _load_session_summary(self) -> None:
+        session_dir_value = self.session_dir_input.text().strip()
+        if not session_dir_value:
+            return
+        session_dir = Path(session_dir_value)
+        manifest_path = session_dir / "manifest.json"
+        meta_path = session_dir / "meta.json"
+        events_path = session_dir / "events" / "events.jsonl"
+        timebase_path = session_dir / "timebase_report.json"
+        manifest = {}
+        meta = {}
+        timebase = {}
+        try:
+            if manifest_path.exists():
+                manifest = json.loads(manifest_path.read_text())
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text())
+            if timebase_path.exists():
+                timebase = json.loads(timebase_path.read_text())
+        except Exception as exc:
+            self._append_log(f"Failed to read session summary: {exc}")
+            return
+        event_count = 0
+        if events_path.exists():
+            event_count = len([ln for ln in events_path.read_text().splitlines() if ln.strip()])
+        seq_min = manifest.get("seq_min")
+        seq_max = manifest.get("seq_max")
+        seq_range = f"{seq_min}..{seq_max}" if seq_min is not None else "-"
+        shard_list = manifest.get("shard_list") or []
+        total_samples = manifest.get("actual_sample_count")
+        timebase_ranges = timebase.get("ranges") if isinstance(timebase, dict) else None
+        self.session_summary_labels["session_id"].setText(str(meta.get("session_id", "-")))
+        self.session_summary_labels["created_at"].setText(
+            str(meta.get("created_at_utc", "-"))
+        )
+        self.session_summary_labels["mode"].setText(str(meta.get("mode", "-")))
+        self.session_summary_labels["termination_reason"].setText(
+            str(manifest.get("termination_reason", "-"))
+        )
+        self.session_summary_labels["seq_range"].setText(seq_range)
+        self.session_summary_labels["missing_seq"].setText(
+            str(manifest.get("missing_seq_count", "-"))
+        )
+        self.session_summary_labels["shards"].setText(str(len(shard_list)))
+        self.session_summary_labels["total_samples"].setText(str(total_samples or "-"))
+        self.session_summary_labels["timebase_ranges"].setText(
+            str(len(timebase_ranges or []))
+        )
+        self.session_summary_labels["events"].setText(str(event_count))
+
+    def _run_validate_session(self) -> None:
+        if self.runner.is_running():
+            self._append_log("Another process is running; stop it before validation.")
+            return
+        session_dir_value = self.session_dir_input.text().strip()
+        if not session_dir_value:
+            self._append_log("No session directory selected for validation.")
+            return
+        args = [
+            "-m",
+            "muse_streaming.validate_session",
+            "--session",
+            session_dir_value,
+        ]
+        if self.allow_partial_checkbox.isChecked():
+            args.append("--allow-partial")
+        self.active_step = "validate_session"
+        self._append_log(f"Validating session: {args}")
+        if getattr(self, "dry_run_checkbox", None) and self.dry_run_checkbox.isChecked():
+            self._append_log("Dry run enabled; validation command not executed.")
+            return
+        self.runner.start(sys.executable, args, cwd=str(self.repo_root))
+
+    def _run_evaluate_all(self) -> None:
+        self._append_log(
+            "Run evaluate pipeline: starting 3b (deepchecks). Run 3c/4 manually after completion."
+        )
+        self._run_eval_script("evaluate_deepchecks")
+
+    def _run_eval_script(self, script_key: str) -> None:
+        if self.runner.is_running():
+            self._append_log("Another process is running; stop it before evaluation.")
+            return
+        script_info = self.scripts.get(script_key)
+        if not script_info:
+            self._append_log(f"Evaluation script not found: {script_key}")
+            return
+        args = [str(script_info.path)]
+        if self.current_subject and script_key == "evaluate_reports":
+            args += ["--subject-id", self.current_subject]
+        self.active_step = script_key
+        self._append_log(f"Running: {args} (cwd={self.repo_root})")
+        if getattr(self, "dry_run_checkbox", None) and self.dry_run_checkbox.isChecked():
+            self._append_log("Dry run enabled; command not executed.")
+            return
+        self.runner.start(sys.executable, args, cwd=str(self.repo_root))
 
     def _collect_step_args(self, step_id: str) -> list[str]:
         specs = self.step_arg_specs.get(step_id, [])
@@ -3438,9 +3974,31 @@ class MainWindow(QMainWindow):
             if payload and self.live_hidden_plot:
                 self.live_hidden_plot.update(payload)
             return
-        self.log_console.appendPlainText(line)
+        self.log_entries.append(line)
+        self._refresh_log_display()
         if line.startswith("🛑 HARD STOP"):
             self._handle_hard_stop_detected()
+
+    def _refresh_log_display(self) -> None:
+        filter_mode = (
+            self.log_filter_combo.currentText()
+            if hasattr(self, "log_filter_combo")
+            else "All"
+        )
+        lines: list[str] = []
+        for line in self.log_entries:
+            if filter_mode == "Errors" and "ERROR" not in line:
+                continue
+            if filter_mode == "Warnings" and not any(
+                token in line for token in ["WARN", "WARNING", "ERROR"]
+            ):
+                continue
+            lines.append(line)
+        self.log_console.setPlainText("\n".join(lines))
+
+    def _clear_logs(self) -> None:
+        self.log_entries = []
+        self.log_console.clear()
 
     def _handle_hard_stop_detected(self) -> None:
         if self.hard_stop_locked:
@@ -3533,6 +4091,13 @@ class MainWindow(QMainWindow):
             or not self.current_session_backend
         ):
             return
+        session_dir_value = self.session_dir_input.text().strip()
+        if session_dir_value:
+            self._append_log(
+                "Session dir selected; raw session artifacts remain in session root."
+            )
+            self._auto_fill_paths()
+            return
         subject_dir = subject_root(self.current_project, self.current_subject)
         session_dir = session_root(
             subject_dir,
@@ -3623,7 +4188,12 @@ class MainWindow(QMainWindow):
         ):
             return
         subject_dir = subject_root(self.current_project, self.current_subject)
-        session_dir = session_root(subject_dir, self.current_session_ui)
+        session_dir_value = self.session_dir_input.text().strip()
+        session_dir = (
+            Path(session_dir_value)
+            if session_dir_value
+            else session_root(subject_dir, self.current_session_ui)
+        )
         windows_dir = session_dir / "windows"
         if not windows_dir.exists():
             return
@@ -3688,6 +4258,12 @@ class MainWindow(QMainWindow):
             existing = self._read_session_state()
             if existing:
                 return existing
+        if self.current_session_backend and self.session_dir_input.text().strip():
+            settings["SESSION_ID_OVERRIDE"] = self.current_session_backend
+            widget = self.fields.get(step_id, {}).get("SESSION_ID_OVERRIDE")
+            if isinstance(widget, QLineEdit):
+                widget.setText(self.current_session_backend)
+            return self.current_session_backend
         backend_id = session_backend_id()
         settings["SESSION_ID_OVERRIDE"] = backend_id
         widget = self.fields.get(step_id, {}).get("SESSION_ID_OVERRIDE")
@@ -3768,56 +4344,14 @@ class MainWindow(QMainWindow):
             return outputs
         subject = self.current_subject
         session = self.current_session_backend
-        outputs.append(
-            (
-                "Features",
-                str(
-                    self.repo_root
-                    / "data"
-                    / "processed"
-                    / f"{subject}_{session}_eeg_features.csv"
-                ),
-            )
-        )
-        outputs.append(
-            (
-                "Events",
-                str(
-                    self.repo_root
-                    / "data"
-                    / "processed"
-                    / f"{subject}_{session}_events.csv"
-                ),
-            )
-        )
-        outputs.append(
-            (
-                "Events autosave",
-                str(
-                    self.repo_root
-                    / "data"
-                    / "processed"
-                    / f"{subject}_{session}_events_autosave.csv"
-                ),
-            )
-        )
-        outputs.append(
-            (
-                "Session meta",
-                str(
-                    self.repo_root
-                    / "data"
-                    / "processed"
-                    / f"{subject}_{session}_session_meta.json"
-                ),
-            )
-        )
-        outputs.append(
-            (
-                "Raw",
-                str(self.repo_root / "data" / "raw" / f"{subject}_{session}_raw.csv"),
-            )
-        )
+        session_root_value = self.session_root_input.text().strip()
+        if session_root_value:
+            session_dir = Path(session_root_value) / f"{subject}_{session}"
+            outputs.append(("Session dir", str(session_dir)))
+            outputs.append(("Manifest", str(session_dir / "manifest.json")))
+            outputs.append(("Timebase report", str(session_dir / "timebase_report.json")))
+            outputs.append(("Raw shards", str(session_dir / "raw")))
+            outputs.append(("Events JSONL", str(session_dir / "events" / "events.jsonl")))
         outputs.append(
             (
                 "Session state",
@@ -3861,17 +4395,14 @@ class MainWindow(QMainWindow):
 
     def _expected_step1b_outputs(self) -> list[tuple[str, str]]:
         outputs: list[tuple[str, str]] = []
-        if (
-            not self.current_project
-            or not self.current_subject
-            or not self.current_session_ui
-        ):
+        session_dir_value = self.session_dir_input.text().strip()
+        if not session_dir_value:
             return outputs
-        subject_dir = subject_root(self.current_project, self.current_subject)
-        session_dir = session_root(subject_dir, self.current_session_ui)
+        session_dir = Path(session_dir_value)
         outputs.append(("Window CSV", str(session_dir / "windows" / "eeg_windows.csv")))
         outputs.append(("Window NPZ", str(session_dir / "windows" / "eeg_windows.npz")))
-        if self.current_session_backend:
+        if self.current_project and self.current_subject and self.current_session_backend:
+            subject_dir = subject_root(self.current_project, self.current_subject)
             outputs.append(
                 (
                     "Project window CSV",

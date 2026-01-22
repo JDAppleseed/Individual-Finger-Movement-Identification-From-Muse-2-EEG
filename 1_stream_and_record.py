@@ -25,6 +25,7 @@ import sys
 import threading
 import subprocess
 import queue
+import itertools
 from concurrent.futures import ThreadPoolExecutor
 import time
 import csv
@@ -90,6 +91,7 @@ from utils.stream_runtime import (
 )
 from utils.output_paths import resolve_output_dir
 from muse_streaming.io_paths import default_processed_dir, default_raw_dir
+from muse_streaming.session_writer import SessionWriter
 from console_utils import install_console_logging, log_burst, log_every
 from timebase import TimebaseMapper, TimebaseSnapshot, map_lsl_to_mono_snapshot
 
@@ -106,11 +108,14 @@ logger = logging.getLogger("muse_stream")
 # =========================
 # ===== CONFIG FLAGS ======
 # =========================
-TRAINING_MODE = False
-DEMO_MODE = False
-ENABLE_PLOT = True
+MODE = "train_record"
+LIVE_INFER = False
+ALLOW_DROP = False
+ENABLE_PLOT = False
 SAVE_TO_DISK = True
 SAVE_RAW = True
+ENABLE_FEATURES = False
+ENABLE_INFERENCE = False
 ENABLE_RATE_LIMITED_LOGS = True
 CONSOLE_CAP_CHARS = 200_000
 CONSOLE_RING_CHARS = 50_000
@@ -154,6 +159,7 @@ UNCERTAINTY_WEIGHT = 0.5
 STABILITY_FRAMES = 3
 ENABLE_ACTUATION = True
 MC_DROPOUT_PASSES = 10
+ONLINE_CALIBRATION_ENABLED = False
 
 TIMEBASE_SELF_CHECK_WARN_S = 0.05
 TIMEBASE_SELF_CHECK_ERROR_S = 0.2
@@ -233,10 +239,13 @@ RAW_QUEUE_MAXSIZE = 20000
 PROCESSING_QUEUE_MAXSIZE = 20000
 RAW_WRITE_BUFFER_BYTES = 1024 * 1024
 RAW_WRITE_BATCH_MAX = 2000
+RAW_SHARD_SAMPLES = 2048
 BACKLOG_SECONDS_THRESHOLD = 2.0
 BACKLOG_GRACE_S = 2.0
 PROCESSING_BACKLOG_HIGH_WATERMARK_FRAC = 0.8
 BACKLOG_FEATURE_WRITE_STRIDE = 3
+MAX_BACKPRESSURE_S = 3.0
+QUEUE_PUT_TIMEOUT_S = 0.1
 FEATURE_WRITE_BATCH_MAX = 50
 FEATURE_WRITE_BATCH_INTERVAL_S = 0.5
 TIMEBASE_SNAPSHOT_UPDATE_INTERVAL_S = 0.02
@@ -332,10 +341,11 @@ RAW_FLAG_NONFINITE = 1
 
 @dataclass(frozen=True)
 class SamplePacket:
+    seq: int
     lsl_ts_raw: float
     lsl_ts_mono: float
     local_ts: float
-    sample: List[float]
+    sample: np.ndarray
     flags: int
     segment_id: int
     raw_path: Path
@@ -369,6 +379,33 @@ parser.add_argument(
     type=str,
     default=None,
     help="Directory for raw EEG outputs",
+)
+parser.add_argument(
+    "--mode",
+    type=str,
+    choices=["train_record", "live_infer"],
+    default="train_record",
+    help="Runtime mode: train_record (lossless acquisition) or live_infer (low latency)",
+)
+parser.add_argument(
+    "--save-raw",
+    action="store_true",
+    help="Persist raw EEG in live_infer mode (train_record always saves raw)",
+)
+parser.add_argument(
+    "--allow-drop",
+    action="store_true",
+    help="Allow queue eviction in live_infer mode (drops counted and logged)",
+)
+parser.add_argument(
+    "--enable-plot",
+    action="store_true",
+    help="Enable live plotting (disabled by default in train_record)",
+)
+parser.add_argument(
+    "--enable-actuation",
+    action="store_true",
+    help="Enable actuation in live_infer mode",
 )
 
 
@@ -496,6 +533,21 @@ if args.subject_id:
     SUBJECT_ID_OVERRIDE = args.subject_id
 
 INIT_ONLY = bool(args.init_only)
+MODE = str(getattr(args, "mode", "train_record") or "train_record")
+LIVE_INFER = MODE == "live_infer"
+ALLOW_DROP = bool(getattr(args, "allow_drop", False))
+ENABLE_PLOT = bool(getattr(args, "enable_plot", False))
+ENABLE_INFERENCE = LIVE_INFER
+ENABLE_FEATURES = LIVE_INFER
+SAVE_RAW = True if MODE == "train_record" else bool(getattr(args, "save_raw", False))
+SAVE_TO_DISK = True if MODE == "train_record" else bool(SAVE_RAW or ENABLE_FEATURES)
+ENABLE_ACTUATION = bool(getattr(args, "enable_actuation", False)) if LIVE_INFER else False
+if MODE == "train_record":
+    if ALLOW_DROP:
+        raise SystemExit("allow_drop is forbidden in train_record mode.")
+    SAVE_RAW = True
+    ENABLE_FEATURES = False
+    ENABLE_INFERENCE = False
 
 logger = install_console_logging(
     CONSOLE_CAP_CHARS,
@@ -754,6 +806,21 @@ def _unique_session_id(session: str, subject: str) -> str:
         suffix += 1
 
 
+def _unique_session_dir_id(session: str, subject: str, raw_dir: Path) -> str:
+    candidate = session
+    suffix = 0
+    while (raw_dir / f"{subject}_{candidate}").exists():
+        suffix += 1
+        candidate = f"{session}_{suffix:02d}"
+    if candidate != session:
+        logger.warning(
+            "Session directory collision for %s; using %s to avoid overwrite.",
+            session,
+            candidate,
+        )
+    return candidate
+
+
 def _resolve_events_path(state_events_path, state_features_path, subject, session):
     if state_events_path:
         return Path(state_events_path)
@@ -843,6 +910,9 @@ state_subject_id = session_state.get("subject_id")
 resume_subject_match = bool(state_subject_id == subject_id)
 if not resume_requested:
     resume_blockers.append("forced_new_session")
+if MODE == "train_record":
+    resume_requested = False
+    resume_blockers.append("mode_train_record")
 if not resume_subject_match:
     resume_blockers.append("subject_id_mismatch")
 
@@ -992,6 +1062,9 @@ if true_resume and state_raw_path:
     RAW_DIR = resume_raw_dir
 PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 RAW_DIR.mkdir(parents=True, exist_ok=True)
+if SAVE_RAW and not true_resume:
+    session_id = _unique_session_dir_id(session_id, subject_id, RAW_DIR)
+    state.session_id = session_id
 
 FEATURES_ARCHIVE_DIR = PROCESSED_DIR
 RAW_ARCHIVE_DIR = RAW_DIR
@@ -1037,6 +1110,10 @@ state.raw_path = str(RAW_ARCHIVE_PATH)
 
 
 def _build_session_meta_payload(complete: bool):
+    session_dir = session_writer.paths.session_dir if session_writer else None
+    events_jsonl_path = (
+        session_writer.paths.events_dir / "events.jsonl" if session_writer else None
+    )
     return {
         "subject_id": subject_id,
         "session_id": session_id,
@@ -1048,6 +1125,8 @@ def _build_session_meta_payload(complete: bool):
         "events_path": str(EVENTS_ARCHIVE_PATH),
         "predictions_path": str(PREDICTIONS_ARCHIVE_PATH),
         "raw_path": str(RAW_ARCHIVE_PATH),
+        "session_dir": str(session_dir) if session_dir else None,
+        "events_jsonl_path": str(events_jsonl_path) if events_jsonl_path else None,
         "timebase_version": TIMEBASE_VERSION,
         "timebase": TIMEBASE_VERSION,
         # Canonical (segment-relative) bookkeeping
@@ -1317,8 +1396,11 @@ if not IMPORT_ONLY:
         "  Event Marking   : %s",
         "ENABLED" if EVENT_MARKING_ENABLED else "DISABLED",
     )
-    logger.info("  Demo Mode       : %s", "ON" if DEMO_MODE else "OFF")
-    logger.info("  Training Mode   : %s", "ON" if TRAINING_MODE else "OFF")
+    logger.info("  Mode            : %s", MODE)
+    logger.info("  Live Inference  : %s", "ON" if LIVE_INFER else "OFF")
+    logger.info("  Allow Drop      : %s", "ON" if ALLOW_DROP else "OFF")
+    if MODE == "train_record":
+        logger.info("  LOSSLESS TRAIN RECORD: backpressure enforced, no drops allowed.")
     logger.info(
         "  Actuation       : %s",
         "ENABLED" if ENABLE_ACTUATION else "DISABLED",
@@ -1885,6 +1967,13 @@ raw_queue_overflow_count = 0
 max_processing_queue_size_observed = 0
 max_raw_queue_size_observed = 0
 max_queue_size_observed = 0
+backpressure_start_mono: Dict[str, Optional[float]] = {"raw": None, "processing": None}
+backpressure_max_duration_s: Dict[str, float] = {"raw": 0.0, "processing": 0.0}
+backpressure_total_duration_s: Dict[str, float] = {"raw": 0.0, "processing": 0.0}
+termination_reason = "normal"
+session_writer: Optional[SessionWriter] = None
+session_writer_error: Optional[Exception] = None
+seq_counter = itertools.count(start=0)
 processing_backlog_high_watermark = max(
     1, int(PROCESSING_QUEUE_MAXSIZE * PROCESSING_BACKLOG_HIGH_WATERMARK_FRAC)
 )
@@ -2298,6 +2387,17 @@ def save_events_csv(path, items):
         shutil.copyfile(path, EVENTS_ARCHIVE_PATH)
 
 
+def _append_event_jsonl(event: Dict[str, Any]) -> None:
+    if session_writer is None:
+        return
+    payload = dict(event)
+    payload["subject_id"] = subject_id
+    payload["session_id"] = session_id
+    payload["segment_id"] = int(payload.get("segment_id", segment_id))
+    payload["timestamp_utc"] = utc_now_iso_z()
+    session_writer.append_event(payload)
+
+
 def finalize_event():
     global current_event, last_event_index, trial_id_counter, event_stamps_count
     if current_event is None:
@@ -2339,6 +2439,7 @@ def finalize_event():
         events.append(current_event)
         last_event_index = len(events) - 1
         save_events_csv(EVENTS_AUTOSAVE_PATH, events)
+        _append_event_jsonl(current_event)
 
     event_stamps_count += 1
     _record_nearest_sample_delta(current_event.get("onset_s"), label="onset")
@@ -2621,7 +2722,7 @@ def mc_dropout_predict(model, x_BTC, passes: int):
 
 model = None
 scaler = None
-if DEMO_MODE:
+if LIVE_INFER:
     # In lab workflows it's common to start streaming/recording before a
     # trained model exists. Do not hard-fail the entire session if the model
     # artifact is missing; instead disable inference-related features and
@@ -2632,7 +2733,8 @@ if DEMO_MODE:
             "Continuing without inference/actuation (recording still runs)."
         )
         ENABLE_ACTUATION = False
-        DEMO_MODE = False
+        LIVE_INFER = False
+        ENABLE_INFERENCE = False
         model = None
         scaler = None
     else:
@@ -2798,6 +2900,28 @@ if not IMPORT_ONLY:
         channel_indices,
     )
     selected_channel_indices = channel_indices
+    if SAVE_RAW:
+        session_channel_labels = []
+        if found_labels:
+            for idx in selected_channel_indices:
+                label = found_labels[idx] if idx < len(found_labels) else None
+                session_channel_labels.append(label or f"ch{idx + 1}")
+        else:
+            session_channel_labels = [f"ch{idx + 1}" for idx in selected_channel_indices]
+        session_writer = SessionWriter(
+            output_root=RAW_DIR,
+            subject_id=subject_id,
+            session_id=session_id,
+            channel_labels=session_channel_labels,
+            sampling_rate=SAMPLING_RATE,
+            timebase_version=TIMEBASE_VERSION,
+            shard_size_samples=RAW_SHARD_SAMPLES,
+            resume=bool(true_resume),
+            mode=MODE,
+        )
+        if session_writer.session_id != session_id:
+            session_id = session_writer.session_id
+            state.session_id = session_id
     _drain_inlet(inlet, label="startup")
 
 # =========================
@@ -2865,7 +2989,7 @@ def _open_failed_files() -> None:
         prefix,
         headers=header,
         save_raw=bool(SAVE_RAW),
-        save_preds=bool(SAVE_TO_DISK),
+        save_preds=bool(SAVE_TO_DISK and ENABLE_INFERENCE),
         failed_dir=hard_stop_policy.failed_dir,
         prediction_header=[
             "prediction_time_s",
@@ -2889,13 +3013,14 @@ def _open_failed_files() -> None:
 
 def _open_segment_files() -> None:
     global csv_file, csv_writer, raw_file, raw_writer, predictions_file, predictions_writer
-    if SAVE_TO_DISK:
+    if SAVE_TO_DISK and ENABLE_FEATURES:
         FEATURES_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
         features_exists = FEATURES_PATH.exists() and FEATURES_PATH.stat().st_size > 0
         csv_file = open(FEATURES_PATH, "a", newline="")
         csv_writer = csv.writer(csv_file)
         if not features_exists:
             csv_writer.writerow(header)
+    if SAVE_TO_DISK and ENABLE_INFERENCE:
         predictions_exists = (
             PREDICTIONS_ARCHIVE_PATH.exists()
             and PREDICTIONS_ARCHIVE_PATH.stat().st_size > 0
@@ -3232,7 +3357,10 @@ def _route_writers_for_health(now_mono: float, decision) -> None:
         with failed_writers_lock:
             if failed_writers.is_open():
                 failed_writers.close_failed_files()
-        if SAVE_TO_DISK and (csv_writer is None or predictions_writer is None):
+        if SAVE_TO_DISK and (
+            (ENABLE_FEATURES and csv_writer is None)
+            or (ENABLE_INFERENCE and predictions_writer is None)
+        ):
             _open_segment_files()
 
 
@@ -3480,33 +3608,83 @@ def _enqueue_with_overflow(
 ) -> None:
     global processing_queue_overflow_count, raw_queue_overflow_count
     now_mono = time.monotonic()
-    dropped = 0
-    while True:
-        try:
-            target_queue.put_nowait(item)
-            break
-        except queue.Full:
-            try:
-                target_queue.get_nowait()
-                dropped += 1
-            except queue.Empty:
-                break
-    if dropped:
-        if label == "raw":
-            raw_queue_overflow_count += dropped
-        else:
-            processing_queue_overflow_count += dropped
+
+    def _mark_backpressure_start() -> None:
+        if backpressure_start_mono.get(label) is None:
+            backpressure_start_mono[label] = now_mono
+
+    def _clear_backpressure_start() -> None:
+        start = backpressure_start_mono.get(label)
+        if start is not None:
+            duration = max(0.0, now_mono - float(start))
+            backpressure_total_duration_s[label] += duration
+            backpressure_max_duration_s[label] = max(
+                backpressure_max_duration_s[label], duration
+            )
+        backpressure_start_mono[label] = None
+
+    def _abort_due_to_backpressure() -> None:
+        global termination_reason
+        termination_reason = "backpressure_abort"
+        start = backpressure_start_mono.get(label)
+        if start is not None:
+            duration = max(0.0, now_mono - float(start))
+            backpressure_total_duration_s[label] += duration
+            backpressure_max_duration_s[label] = max(
+                backpressure_max_duration_s[label], duration
+            )
         _log_every(
-            f"queue_overflow_{label}",
+            f"queue_backpressure_{label}",
             LOG_EVERY_S_QUEUE,
-            logging.WARNING,
-            "%s queue overflow; dropped %s oldest sample(s).",
+            logging.ERROR,
+            "%s queue backpressure exceeded %.2fs; initiating shutdown.",
             label,
-            dropped,
+            MAX_BACKPRESSURE_S,
         )
-        if label == "raw":
-            with health_gate_lock:
-                health_gate.mark_backlog_overflow(now_mono)
+        stop_event.set()
+
+    if MODE == "train_record" or not ALLOW_DROP:
+        while not stop_event.is_set():
+            try:
+                target_queue.put(item, timeout=float(QUEUE_PUT_TIMEOUT_S))
+                now_mono = time.monotonic()
+                _clear_backpressure_start()
+                break
+            except queue.Full:
+                now_mono = time.monotonic()
+                _mark_backpressure_start()
+                elapsed = now_mono - float(backpressure_start_mono[label] or now_mono)
+                if elapsed >= float(MAX_BACKPRESSURE_S):
+                    _abort_due_to_backpressure()
+                    break
+    else:
+        dropped = 0
+        while True:
+            try:
+                target_queue.put_nowait(item)
+                break
+            except queue.Full:
+                try:
+                    target_queue.get_nowait()
+                    dropped += 1
+                except queue.Empty:
+                    break
+        if dropped:
+            if label == "raw":
+                raw_queue_overflow_count += dropped
+            else:
+                processing_queue_overflow_count += dropped
+            _log_every(
+                f"queue_overflow_{label}",
+                LOG_EVERY_S_QUEUE,
+                logging.WARNING,
+                "%s queue overflow; dropped %s oldest sample(s).",
+                label,
+                dropped,
+            )
+            if label == "raw":
+                with health_gate_lock:
+                    health_gate.mark_backlog_overflow(now_mono)
     _update_queue_metrics()
 
 
@@ -3593,14 +3771,7 @@ def _raw_writer_worker() -> None:
     global raw_written_count, raw_written_nonfinite_count, raw_writer_thread_error
     global last_written_lsl_ts, first_written_lsl_ts, data_stream_last_write_ts
     global last_sample_written_time
-    clean_path: Optional[Path] = None
-    clean_file = None
-    clean_writer = None
-    batch_rows: List[List[Any]] = []
-    batch_flags: List[int] = []
-    batch_lsl_ts_mono: List[float] = []
-    batch_target_kind: Optional[str] = None
-    batch_target_path: Optional[Path] = None
+    batch_packets: List[SamplePacket] = []
     try:
         while not stop_event.is_set() or not raw_queue.empty():
             try:
@@ -3612,64 +3783,49 @@ def _raw_writer_worker() -> None:
                 if stop_event.is_set():
                     break
                 continue
-            now_mono = time.monotonic()
-            route_failed = _should_route_raw_to_failed(now_mono)
-            target_kind = "failed" if route_failed else "clean"
-            target_path = None if route_failed else packet.raw_path
-            if batch_target_kind is None:
-                batch_target_kind = target_kind
-                batch_target_path = target_path
-            if (
-                target_kind != batch_target_kind
-                or target_path != batch_target_path
-                or len(batch_rows) >= int(RAW_WRITE_BATCH_MAX)
-            ):
-                clean_path, clean_file, clean_writer = _write_raw_batch(
-                    batch_target_kind,
-                    batch_target_path,
-                    batch_rows,
-                    batch_flags,
-                    batch_lsl_ts_mono,
-                    clean_path,
-                    clean_file,
-                    clean_writer,
-                )
-                batch_rows = []
-                batch_flags = []
-                batch_lsl_ts_mono = []
-                batch_target_kind = target_kind
-                batch_target_path = target_path
-            batch_rows.append(
-                _build_raw_row(
-                    packet.lsl_ts_raw,
-                    packet.lsl_ts_mono,
-                    packet.local_ts,
-                    packet.sample,
-                    packet.flags,
-                )
-            )
-            batch_flags.append(int(packet.flags))
-            batch_lsl_ts_mono.append(float(packet.lsl_ts_mono))
+            batch_packets.append(packet)
+            if len(batch_packets) >= int(RAW_WRITE_BATCH_MAX):
+                _flush_raw_packets(batch_packets)
+                batch_packets = []
     except Exception as exc:
         raw_writer_thread_error = exc
         stop_event.set()
     finally:
-        clean_path, clean_file, clean_writer = _write_raw_batch(
-            batch_target_kind,
-            batch_target_path,
-            batch_rows,
-            batch_flags,
-            batch_lsl_ts_mono,
-            clean_path,
-            clean_file,
-            clean_writer,
+        if batch_packets:
+            _flush_raw_packets(batch_packets)
+
+
+def _flush_raw_packets(packets: List[SamplePacket]) -> None:
+    global raw_written_count, raw_written_nonfinite_count, raw_writer_thread_error
+    global last_written_lsl_ts, first_written_lsl_ts, data_stream_last_write_ts
+    global last_sample_written_time, session_writer_error, termination_reason
+    if not packets:
+        return
+    write_mono = time.monotonic()
+    if session_writer is None:
+        raise RuntimeError("Session writer is not initialized for raw writing.")
+    try:
+        session_writer.append_packets(packets)
+    except Exception as exc:
+        session_writer_error = exc
+        raw_writer_thread_error = exc
+        termination_reason = "error"
+        stop_event.set()
+        return
+    data_stream_last_write_ts = utc_now_iso_z()
+    last_sample_written_time = write_mono
+    with stats_lock:
+        raw_written_count += len(packets)
+        state.samples_written = int(raw_written_count)
+        raw_written_nonfinite_count += int(
+            sum(1 for packet in packets if packet.flags & RAW_FLAG_NONFINITE)
         )
-        if clean_file:
-            try:
-                clean_file.flush()
-                clean_file.close()
-            except Exception:
-                pass
+    for packet in packets:
+        last_written_lsl_ts = float(packet.lsl_ts_mono)
+        with health_gate_lock:
+            health_gate.record_written(float(packet.lsl_ts_mono), write_mono)
+    if first_written_lsl_ts is None:
+        first_written_lsl_ts = float(packets[0].lsl_ts_mono)
 
 
 def _acquisition_worker(inlet: StreamInlet) -> None:
@@ -3804,10 +3960,11 @@ def _acquisition_worker(inlet: StreamInlet) -> None:
                 local_ts = float(local_clock()) if local_clock else float(time.time())
                 raw_path = _segment_paths(acq_segment_id)[4]
                 packet = SamplePacket(
+                    seq=next(seq_counter),
                     lsl_ts_raw=float(lsl_ts_raw),
                     lsl_ts_mono=float(continuous_mono),
                     local_ts=float(local_ts),
-                    sample=list(sample),
+                    sample=np.asarray(sample, dtype=float),
                     flags=int(flags),
                     segment_id=int(acq_segment_id),
                     raw_path=raw_path,
@@ -4002,6 +4159,9 @@ if not IMPORT_ONLY:
                 and state.sample_time_buffer[0][0] < buffer_min_time
             ):
                 state.sample_time_buffer.popleft()
+            if not LIVE_INFER:
+                _maybe_write_timebase_report()
+                continue
 
             # ===== OPTIONAL ICA =====
             cleaned = None
@@ -4170,7 +4330,7 @@ if not IMPORT_ONLY:
             )
 
             # ===== INFERENCE =====
-            inference_enabled = DEMO_MODE and model is not None and scaler is not None
+            inference_enabled = ENABLE_INFERENCE and model is not None and scaler is not None
             if not inference_enabled and lstm_state is not None:
                 _reset_lstm_state("inference_disabled", time_s)
 
@@ -4345,7 +4505,7 @@ if not IMPORT_ONLY:
                     next_window_start_s += WINDOW_HOP_SEC
 
             # ===== OPTIONAL ONLINE CALIBRATION FEEDBACK =====
-            if DEMO_MODE and TRAINING_MODE:
+            if ONLINE_CALIBRATION_ENABLED and ENABLE_INFERENCE:
                 try:
                     true_action = int(
                         input("Action label (0=REST,1=OPEN,2=CLOSE): ")
@@ -4452,11 +4612,11 @@ if not IMPORT_ONLY:
                 ax.autoscale_view()
                 ax.set_ylim(-100, 100)
                 latency_text.set_text(
-                    f"Latency: {latency_ms:.1f} ms" if DEMO_MODE else ""
+                    f"Latency: {latency_ms:.1f} ms" if LIVE_INFER else ""
                 )
                 info_text.set_text(
                     f"Act: {ACTION_NAMES.get(pred_action, '?')}  Conf: {action_confidence:.2f}  Unc: {action_uncertainty:.3f}  Vel: {velocity:.3f}"
-                    if DEMO_MODE
+                    if LIVE_INFER
                     else ""
                 )
                 plt.pause(0.001)
@@ -4534,6 +4694,19 @@ if not IMPORT_ONLY:
             last_time_override=last_time_s_updated,
             block_id_override=int(BLOCK_ID) + 1,
         )
+
+        if termination_reason == "backpressure_abort" and run_error is None:
+            run_error = RuntimeError("backpressure_abort")
+
+        if session_writer is not None:
+            if run_error is not None and termination_reason == "normal":
+                termination_reason = "error"
+            extra_manifest = {
+                "backpressure_max_duration_s": dict(backpressure_max_duration_s),
+                "backpressure_total_duration_s": dict(backpressure_total_duration_s),
+                "max_queue_depth_observed": int(max_queue_size_observed),
+            }
+            session_writer.finalize(termination_reason, extra_manifest=extra_manifest)
 
         if run_error is None:
             logger.info("Stream terminated cleanly")

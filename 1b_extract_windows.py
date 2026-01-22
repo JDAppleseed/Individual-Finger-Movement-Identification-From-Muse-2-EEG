@@ -486,6 +486,80 @@ def _load_features(path: Path):
     return times, signal, channel_cols
 
 
+def _load_session_raw(session_dir: Path):
+    meta = _read_json(session_dir / "meta.json")
+    manifest = _read_json(session_dir / "manifest.json")
+    raw_dir = session_dir / "raw"
+    shard_paths = sorted(raw_dir.glob("eeg_raw_shard_*.npy"))
+    if not shard_paths:
+        raise RuntimeError(f"No raw shards found in {raw_dir}")
+    records = [np.load(path) for path in shard_paths]
+    raw = np.concatenate(records) if len(records) > 1 else records[0]
+    if raw.size < 2:
+        raise RuntimeError(f"Not enough raw samples in {raw_dir}")
+    if "seq" not in raw.dtype.names or "lsl_ts_mono" not in raw.dtype.names:
+        raise RuntimeError(f"Raw shard format missing required fields in {raw_dir}")
+
+    seq = raw["seq"].astype(np.int64)
+    seq_diffs = np.diff(seq)
+    if np.any(seq_diffs != 1):
+        missing = int(np.sum(np.maximum(seq_diffs - 1, 0)))
+        raise RuntimeError(f"Missing sequence numbers detected: {missing}")
+    lsl_ts_mono = raw["lsl_ts_mono"].astype(float)
+    if np.any(np.diff(lsl_ts_mono) <= 0):
+        raise RuntimeError("Non-monotonic lsl_ts_mono detected in raw data.")
+
+    time_s = lsl_ts_mono - float(lsl_ts_mono[0])
+    signal = raw["sample"].astype(float)
+    channel_labels = meta.get("channel_labels") if isinstance(meta, dict) else None
+    if not channel_labels:
+        channel_labels = [f"ch{i+1}" for i in range(signal.shape[1])]
+    return time_s, signal, channel_labels, meta, manifest
+
+
+def _load_events_jsonl(path: Path) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    if not path.exists():
+        return events
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        onset_s = _safe_float(
+            payload.get("event_time_s", payload.get("onset_s", np.nan))
+        )
+        if not np.isfinite(onset_s):
+            continue
+        duration_s = _safe_float(payload.get("duration_s", 0.0))
+        if duration_s < 0:
+            duration_s = 0.0
+        end_s = _safe_float(payload.get("end_s", np.nan))
+        if not np.isfinite(end_s):
+            end_s = onset_s + duration_s
+        event = {
+            "onset_s": float(onset_s),
+            "duration_s": float(duration_s),
+            "end_s": float(end_s),
+            "type": str(payload.get("type", "")).strip(),
+            "finger_id": _safe_int(payload.get("finger_id", 0), 0),
+            "action_id": _safe_int(payload.get("action_id", 0), 0),
+            "confidence": payload.get("confidence", np.nan),
+            "source": str(payload.get("source", "")).strip() or "unknown",
+            "notes": str(payload.get("notes", "")).strip(),
+            "session_mode": str(payload.get("session_mode", "")).strip(),
+            "trial_id": _safe_int(payload.get("trial_id", 0), 0),
+            "block_id": _safe_int(payload.get("block_id", 0), 0),
+        }
+        event["event_id"] = _safe_int(payload.get("event_id", len(events)), len(events))
+        event["event_index"] = int(payload.get("event_index", len(events)))
+        events.append(event)
+    return events
+
+
 def _safe_int(x: Any, default: int = 0) -> int:
     try:
         return int(x)
@@ -779,6 +853,17 @@ def main():
     )
     parser.add_argument("--events", type=str, default=None, help="Override events path")
     parser.add_argument(
+        "--session-dir",
+        type=str,
+        default=None,
+        help="Session directory containing raw/ and events/ subfolders",
+    )
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Allow partial sessions (skip strict manifest validation)",
+    )
+    parser.add_argument(
         "--subject-id",
         type=str,
         default=DEFAULT_SUBJECT_ID,
@@ -833,7 +918,17 @@ def main():
     else:
         seed_value = int(SEED)
 
-    features_path, events_path, session_meta, source = _select_session_paths(args)
+    session_dir = _resolve_path(args.session_dir) if args.session_dir else None
+    session_manifest = {}
+    if session_dir:
+        session_dir = session_dir.expanduser().resolve()
+        features_path = session_dir / "raw"
+        events_path = session_dir / "events" / "events.jsonl"
+        session_meta = _read_json(session_dir / "meta.json")
+        session_manifest = _read_json(session_dir / "manifest.json")
+        source = "session_dir"
+    else:
+        features_path, events_path, session_meta, source = _select_session_paths(args)
 
     if not features_path:
         print(
@@ -850,9 +945,13 @@ def main():
         )
         raise SystemExit(2)
 
-    inferred_subject, inferred_session = infer_subject_session_from_features_path(
-        features_path
-    )
+    if session_dir:
+        inferred_subject = session_meta.get("subject_id") if session_meta else None
+        inferred_session = session_meta.get("session_id") if session_meta else None
+    else:
+        inferred_subject, inferred_session = infer_subject_session_from_features_path(
+            features_path
+        )
 
     # Start with filename-derived values (most reliable)
     subject_id_value = inferred_subject
@@ -890,7 +989,11 @@ def main():
     if session_id_value is None:
         session_id_value = ""
 
-    events_time_shift_s = _infer_events_shift_s(events_path)
+    events_time_shift_s = (
+        _infer_events_shift_s(events_path)
+        if events_path and events_path.suffix == ".csv"
+        else 0.0
+    )
 
     target_fs = (
         float(args.target_fs)
@@ -936,8 +1039,23 @@ def main():
     print(f"Timebase version: {timebase_version}")
 
     # ===== LOAD DATA =====
-    times, signal, channel_cols = _load_features(features_path)
-    events = _load_events(events_path, session_meta=session_meta)
+    if session_dir:
+        from muse_streaming.validate_session import validate_session_dir
+
+        validation = validate_session_dir(
+            session_dir, allow_partial=bool(args.allow_partial)
+        )
+        if not validation.get("ok"):
+            print("Session validation failed:")
+            print(json.dumps(validation, indent=2))
+            raise SystemExit(2)
+        times, signal, channel_cols, session_meta, session_manifest = _load_session_raw(
+            session_dir
+        )
+        events = _load_events_jsonl(events_path)
+    else:
+        times, signal, channel_cols = _load_features(features_path)
+        events = _load_events(events_path, session_meta=session_meta)
 
     # Alignment strictness
     if events:
@@ -1378,7 +1496,17 @@ def main():
         "gap_policy": str(gap_policy),
         "gap_interp_max_s": float(args.gap_interp_max_s),
         "allow_gap_interp": bool(args.allow_gap_interp),
+        "allow_partial": bool(args.allow_partial),
     }
+    if session_dir and session_manifest:
+        report_payload["session_manifest"] = {
+            "seq_min": session_manifest.get("seq_min"),
+            "seq_max": session_manifest.get("seq_max"),
+            "expected_sample_count": session_manifest.get("expected_sample_count"),
+            "actual_sample_count": session_manifest.get("actual_sample_count"),
+            "missing_seq_count": session_manifest.get("missing_seq_count"),
+            "termination_reason": session_manifest.get("termination_reason"),
+        }
     report_path = Path("extraction_report.json")
     report_path.write_text(json.dumps(report_payload, indent=2))
     print(f"✅ Saved extraction report → {report_path}")
