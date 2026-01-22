@@ -17,8 +17,15 @@ def validate_train_record(settings: Dict[str, Any]) -> ValidationResult:
     mode = settings.get("MODE")
     if mode and mode != "train_record":
         errors.append("MODE must be train_record for lossless capture.")
-    if settings.get("ENABLE_ACTUATION") or settings.get("enable_actuation"):
-        errors.append("Actuation must be disabled outside live_infer mode.")
+    if "ENABLE_ACTUATION" in settings:
+        errors.append(
+            "Legacy key 'ENABLE_ACTUATION' is not supported; use 'enable_actuation'."
+        )
+    if "enable_actuation" in settings:
+        if not isinstance(settings.get("enable_actuation"), bool):
+            errors.append("enable_actuation must be a boolean.")
+        elif settings.get("enable_actuation") is True:
+            errors.append("enable_actuation can only be true for the live_infer step.")
     if settings.get("ALLOW_DROP"):
         errors.append("ALLOW_DROP is forbidden in train_record mode.")
     if not settings.get("SAVE_RAW", True):
@@ -35,8 +42,14 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         errors.append("MODE must be live_infer for deployment.")
     if settings.get("ALLOW_DROP"):
         warnings.append("ALLOW_DROP is enabled; dropped windows will be logged.")
-    if settings.get("ENABLE_ACTUATION"):
-        errors.append("ENABLE_ACTUATION is not valid for live_infer settings.")
+    if "ENABLE_ACTUATION" in settings:
+        errors.append(
+            "Legacy key 'ENABLE_ACTUATION' is not supported; use 'enable_actuation'."
+        )
+    if "enable_actuation" in settings and not isinstance(
+        settings.get("enable_actuation"), bool
+    ):
+        errors.append("enable_actuation must be a boolean.")
     return ValidationResult(ok=not errors, errors=errors, warnings=warnings)
 
 
@@ -45,10 +58,16 @@ def validate_step_settings(step_id: str, settings: Dict[str, Any]) -> Validation
         return validate_train_record(settings)
     if step_id == "infer":
         return validate_live_infer(settings)
-    if settings.get("enable_actuation") or settings.get("ENABLE_ACTUATION"):
-        return ValidationResult(
-            ok=False,
-            errors=["Actuation can only be enabled for live infer steps."],
-            warnings=[],
+    errors: List[str] = []
+    warnings: List[str] = []
+    if "ENABLE_ACTUATION" in settings:
+        errors.append(
+            "Legacy key 'ENABLE_ACTUATION' is not supported; use 'enable_actuation'."
         )
+    if "enable_actuation" in settings:
+        if not isinstance(settings.get("enable_actuation"), bool):
+            errors.append("enable_actuation must be a boolean.")
+        elif settings.get("enable_actuation") is True:
+            errors.append("enable_actuation can only be true for the live_infer step.")
+    return ValidationResult(ok=not errors, errors=errors, warnings=warnings)
     return ValidationResult(ok=True, errors=[], warnings=[])
