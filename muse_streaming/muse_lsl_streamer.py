@@ -43,6 +43,8 @@ MUSE_GATT_ATTR_TP10 = "273e0006-4c4d-454d-96be-f03bac821358"
 
 HARD_ERR_S = 0.25
 MAX_FORWARD_SNAP_S = 0.05
+MAX_BACKWARD_SNAP_S = 0.05
+FUTURE_TOL_S = 0.05
 
 
 def normalize_label(label: str) -> str:
@@ -109,11 +111,19 @@ class MuseLslStreamer:
         self._labels_clean: List[str] = []
 
         # Monotonic timebase + stats
+        self._lsl_offset: float = 0.0
+        if local_clock is not None:
+            try:
+                self._lsl_offset = float(local_clock()) - time.monotonic()
+            except Exception:
+                self._lsl_offset = 0.0
         self._last_pushed_ts: Optional[float] = None
         self._monotonic_epsilon: float = 1e-6
         self._ts_alpha: float = 0.01
-        self._timebase_t0: Optional[float] = None
+        self._timebase_t0_mono: Optional[float] = None
         self._sample_index: int = 0
+        self._t0_adjust_total: float = 0.0
+        self._last_time_err_s: Optional[float] = None
 
         # Packet resilience
         self._packet_first_seen: Dict[int, float] = {}
@@ -491,35 +501,62 @@ class MuseLslStreamer:
             self._flush_packet(packet_index, slot, partial=True)
             flushed += 1
 
+    def _now_mono(self) -> float:
+        if local_clock is None:
+            return time.time()
+        return time.monotonic()
+
+    def _mono_to_lsl(self, t_mono: float) -> float:
+        if local_clock is None:
+            return float(t_mono)
+        return float(t_mono + self._lsl_offset)
+
+    def _apply_timebase_adjust(self, delta_s: float) -> None:
+        if self._timebase_t0_mono is None:
+            return
+        if delta_s == 0.0:
+            return
+        self._timebase_t0_mono = float(self._timebase_t0_mono + delta_s)
+        self._t0_adjust_total += float(delta_s)
+
     def _build_timestamps(self, n: int) -> List[float]:
         if n <= 0:
             return []
         fs = float(self.config.rate)
-        now = float(local_clock()) if local_clock is not None else time.time()
-        if self._timebase_t0 is None:
-            self._timebase_t0 = now - ((self._sample_index + n - 1) / fs)
+        now_mono = float(self._now_mono())
+        if self._timebase_t0_mono is None:
+            self._timebase_t0_mono = now_mono - ((self._sample_index + n - 1) / fs)
+            self._last_time_err_s = 0.0
         else:
-            expected_end = self._timebase_t0 + ((self._sample_index + n - 1) / fs)
-            err = float(now - expected_end)
+            expected_end = self._timebase_t0_mono + (
+                (self._sample_index + n - 1) / fs
+            )
+            err = float(now_mono - expected_end)
+            self._last_time_err_s = err
             if abs(err) > HARD_ERR_S:
                 if err > 0:
                     snap = min(err, MAX_FORWARD_SNAP_S)
-                    self._timebase_t0 += snap
+                    self._apply_timebase_adjust(snap)
                     self._log(
                         f"⚠️ [streamer] timebase discontinuity forward snap={snap:.4f}s err={err:.4f}s"
                     )
                 else:
+                    snap = max(err, -MAX_BACKWARD_SNAP_S)
+                    self._apply_timebase_adjust(snap)
                     self._log(
-                        f"⚠️ [streamer] timebase discontinuity backward err={err:.4f}s ignored"
+                        f"⚠️ [streamer] timebase discontinuity backward snap={snap:.4f}s err={err:.4f}s"
                     )
-            elif err > 0:
-                self._timebase_t0 += self._ts_alpha * err
+            elif err < -FUTURE_TOL_S:
+                snap = max(err, -MAX_BACKWARD_SNAP_S)
+                self._apply_timebase_adjust(snap)
+            else:
+                self._apply_timebase_adjust(self._ts_alpha * err)
 
-        ts = [
-            self._timebase_t0 + ((self._sample_index + i) / fs) for i in range(n)
+        ts_mono = [
+            self._timebase_t0_mono + ((self._sample_index + i) / fs) for i in range(n)
         ]
         self._sample_index += n
-        return ts
+        return [self._mono_to_lsl(t) for t in ts_mono]
 
     def _enforce_monotonic(self, ts: List[float]) -> List[float]:
         if not ts:
@@ -604,6 +641,8 @@ class MuseLslStreamer:
 
         rssi = self._device_rssi
         last_ts = self._last_push_ts
+        time_err_s = self._last_time_err_s
+        time_err_fmt = f"{time_err_s:.4f}" if time_err_s is not None else "n/a"
         msg = (
             "[streamer] heartbeat: "
             f"chunks={self._chunks_pushed_total} "
@@ -614,6 +653,8 @@ class MuseLslStreamer:
             f"last_ts={last_ts if last_ts is not None else 'n/a'} "
             f"dt_min_ms={dt_min_ms if dt_min_ms is not None else 'n/a'} "
             f"dt_max_ms={dt_max_ms if dt_max_ms is not None else 'n/a'} "
+            f"time_err_s={time_err_fmt} "
+            f"t0_adj_total={self._t0_adjust_total:.4f} "
             f"rssi={rssi if rssi is not None else 'n/a'}"
         )
         if no_push_for is not None and no_push_for > self._heartbeat_interval_s:
