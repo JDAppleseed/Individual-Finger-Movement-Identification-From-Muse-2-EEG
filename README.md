@@ -9,9 +9,9 @@ Real-time EEG-based finger + action (rest/open/close) classification with uncert
 python -m pip install -r requirements.txt
 ```
 
-2) Stream + label:
+2) Lossless train-record (raw + events):
 ```
-python 1_stream_and_record.py
+python 1_stream_and_record.py --mode train_record
 ```
 
 3) Review + validate events (optional but recommended):
@@ -20,9 +20,10 @@ python 5_review_events.py
 python 5_validate_events.py --apply
 ```
 
-4) Extract windows:
+4) Validate the session, then extract windows:
 ```
-python 1b_extract_windows.py  # outputs eeg_windows.npz + eeg_windows.csv
+python -m muse_streaming.validate_session --session <session_dir>
+python 1b_extract_windows.py --session-dir <session_dir>
 ```
 
 5) Train + evaluate:
@@ -72,11 +73,9 @@ Launch the desktop UI and use the new live workflow (production path):
 ```
 python eeglab_wrapper_ui.py
 ```
-2) Click **Connect Muse 2** to start the internal BLE → LSL streamer and run a healthcheck.
-3) If prompted about label/channel mismatches, review the warning and click **I understand** to proceed.
-4) Click **Start Recording** to launch `1_stream_and_record.py` for live capture/inference.
-5) If a hard stop triggers, a blocking modal will appear. Review the diagnostics and click **I understand**.
-   The hard stop report is written under `logs/hard_stop_<subject>_<session>_<timestamp>.json`.
+2) Select a session root in **Session Management** and create or load a session.
+3) Run **Train-Record (Lossless)** to capture raw EEG + events to the session directory.
+4) Validate the session, then extract windows, train, evaluate, and run live inference.
 
 The UI gates Start Recording until the LSL stream is healthy (or operator-acknowledged).
 
@@ -89,6 +88,26 @@ Event marking happens inside `1_stream_and_record.py` via keyboard:
 - `0–5` = assign finger to most recent event (0 = NONE)
 
 Events are saved to `events_autosave.csv` during capture and `events.csv` on exit.
+
+## Live Inference (Dedicated Script)
+
+Run live inference/actuation in a separate process:
+
+```
+python 7_live_infer_and_actuate.py \
+  --model-path models/finger_action_model.pt \
+  --scaler-path scaler.save \
+  --stream-name Muse2-EEG \
+  --stream-type EEG
+```
+
+Allow-drop is opt-in and logs dropped windows:
+
+```
+python 7_live_infer_and_actuate.py --allow-drop --latency-policy drop
+```
+
+See `DATA_CONTRACT.md` for session layout and validation requirements.
 
 Legacy script output directories can be customized via:
 - `--processed-dir` and `--raw-dir` flags, or

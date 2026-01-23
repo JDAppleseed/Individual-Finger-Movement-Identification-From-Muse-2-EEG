@@ -31,6 +31,10 @@ STEP_SCRIPTS = {
     "event_validate": "5_validate_events.py",
     "train": "2_train_model.py",
     "evaluate": "3_evaluate_model.py",
+    "evaluate_deepchecks": "3b_deepchecks_evaluate.py",
+    "evaluate_figures": "3c_live_paper_figures.py",
+    "evaluate_reports": "4_generate_reports.py",
+    "live_infer": "7_live_infer_and_actuate.py",
     "diagnostics": "tools/check_time_alignment.py",
 }
 
