@@ -93,6 +93,7 @@ class MuseLslStreamer:
             rate=float(rate),
             labels=list(labels) if labels is not None else list(DEFAULT_LABELS),
         )
+        self._source_id = f"muse2-{os.getpid()}-{int(time.time() * 1000)}"
         self.device_name = device_name
         self.mac_address = mac_address
         self.log_fn = log_fn or (lambda msg: print(msg, flush=True))
@@ -174,6 +175,7 @@ class MuseLslStreamer:
         self._normalize_labels()
 
         self._outlet = self._build_outlet(self.config)
+        print(f"LSL_SOURCE_ID={self._source_id}", flush=True)
         self._last_push_wallclock = time.time()
         self._last_push_monotonic = time.monotonic()
         self._log(
@@ -199,6 +201,7 @@ class MuseLslStreamer:
 
         self._normalize_labels()
         self._outlet = self._build_outlet(self.config)
+        print(f"LSL_SOURCE_ID={self._source_id}", flush=True)
         self._log(
             f"🧪 Simulated LSL outlet started: name={self.config.name}, type={self.config.stype}, "
             f"ch={len(self.config.labels)}, rate={self.config.rate}"
@@ -348,7 +351,12 @@ class MuseLslStreamer:
         await self._client.write_gatt_char(MUSE_GATT_ATTR_STREAM_TOGGLE, start_cmd)
 
     def _normalize_labels(self) -> None:
-        raw = list(self.config.labels)
+        raw = list(self.config.labels) if self.config.labels is not None else []
+        if not raw:
+            self._log(
+                f"⚠️ [streamer] labels empty; using DEFAULT_LABELS: {DEFAULT_LABELS}"
+            )
+            raw = list(DEFAULT_LABELS)
         clean = [normalize_label(x) for x in raw]
         # Preserve order but dedupe.
         seen = set()
@@ -357,6 +365,11 @@ class MuseLslStreamer:
             if c and c not in seen:
                 deduped.append(c)
                 seen.add(c)
+        if not deduped:
+            self._log(
+                f"⚠️ [streamer] normalized labels empty; using DEFAULT_LABELS: {DEFAULT_LABELS}"
+            )
+            deduped = [normalize_label(x) for x in DEFAULT_LABELS]
 
         self._labels_clean = deduped
         self._log(f"🧾 Raw labels: {raw}")
@@ -666,13 +679,18 @@ class MuseLslStreamer:
     # -----------------------------
 
     def _build_outlet(self, config: StreamConfig) -> StreamOutlet:
+        if not config.labels:
+            raise RuntimeError(
+                "No EEG labels available; refusing to create ch=0 LSL stream. "
+                "Check CLI/config overlay."
+            )
         info = StreamInfo(
             config.name,
             config.stype,
             len(config.labels),
             config.rate,
             "float32",
-            "muse2_internal",
+            self._source_id,
         )
         desc = info.desc()
         channels = desc.append_child("channels")

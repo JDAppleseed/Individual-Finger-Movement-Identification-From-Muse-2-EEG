@@ -470,6 +470,7 @@ def _apply_config_to_args(args_obj, settings: Dict[str, Any], defaults: Dict[str
         "EVENT_KEYMAP": "event_keymap",
         "LSL_STREAM_NAME": "stream_name",
         "LSL_STREAM_TYPE": "stream_type",
+        "LSL_SOURCE_ID": "lsl_source_id",
         "RAW_DIR": "output_dir",
         "raw_dir": "output_dir",
         "RAW_QUEUE_MAXSIZE": "raw_queue_maxsize",
@@ -507,6 +508,10 @@ def _apply_config_to_args(args_obj, settings: Dict[str, Any], defaults: Dict[str
 def _run_recording(args: argparse.Namespace) -> int:
     try:
         from pylsl import StreamInlet, local_clock, resolve_streams
+        try:
+            from pylsl import resolve_byprop
+        except Exception:
+            resolve_byprop = None
     except Exception:
         logger.error("pylsl is required for recording.")
         return 2
@@ -531,18 +536,82 @@ def _run_recording(args: argparse.Namespace) -> int:
 
     stream_name = args.stream_name
     stream_type = args.stream_type
-    streams = resolve_streams()
+    source_id = args.lsl_source_id
+
+    def _format_stream(candidate) -> str:
+        parts = [
+            f"name={candidate.name()}",
+            f"type={candidate.type()}",
+            f"ch={candidate.channel_count()}",
+        ]
+        if hasattr(candidate, "source_id"):
+            try:
+                value = candidate.source_id()
+                if value:
+                    parts.append(f"source_id={value}")
+            except Exception:
+                pass
+        if hasattr(candidate, "uid"):
+            try:
+                value = candidate.uid()
+                if value:
+                    parts.append(f"uid={value}")
+            except Exception:
+                pass
+        return ", ".join(parts)
+
     info = None
-    for candidate in streams:
-        if stream_name and candidate.name() != stream_name:
-            continue
-        if stream_type and candidate.type() != stream_type:
-            continue
-        info = candidate
-        break
-    if info is None:
-        logger.error("No matching LSL stream found.")
-        return 2
+    if source_id:
+        if resolve_byprop is not None:
+            candidates = resolve_byprop("source_id", source_id, timeout=2.0)
+        else:
+            candidates = []
+            for candidate in resolve_streams():
+                if not hasattr(candidate, "source_id"):
+                    continue
+                try:
+                    value = candidate.source_id()
+                except Exception:
+                    continue
+                if str(value).strip() == source_id:
+                    candidates.append(candidate)
+        if stream_name or stream_type:
+            candidates = [
+                candidate
+                for candidate in candidates
+                if (not stream_name or candidate.name() == stream_name)
+                and (not stream_type or candidate.type() == stream_type)
+            ]
+        if not candidates:
+            logger.error("No LSL stream found with source_id=%s.", source_id)
+            return 2
+        if len(candidates) > 1:
+            logger.error(
+                "Multiple LSL streams matched source_id=%s; refine with --stream-name/--stream-type.",
+                source_id,
+            )
+            for candidate in candidates:
+                logger.error("  - %s", _format_stream(candidate))
+            return 2
+        info = candidates[0]
+    else:
+        matches = [
+            candidate
+            for candidate in resolve_streams()
+            if (not stream_name or candidate.name() == stream_name)
+            and (not stream_type or candidate.type() == stream_type)
+        ]
+        if not matches:
+            logger.error("No matching LSL stream found.")
+            return 2
+        if len(matches) > 1:
+            logger.error(
+                "Multiple LSL streams matched. Use --lsl-source-id to disambiguate."
+            )
+            for candidate in matches:
+                logger.error("  - %s", _format_stream(candidate))
+            return 2
+        info = matches[0]
 
     inlet = StreamInlet(info, max_buflen=2, max_chunklen=32)
     channel_count = int(info.channel_count())
@@ -656,6 +725,10 @@ def _run_recording(args: argparse.Namespace) -> int:
     if enable_plot and plt is not None:
         plt.ion()
         fig, ax = plt.subplots()
+        try:
+            fig.show()
+        except Exception:
+            pass
         lines = [ax.plot([], [])[0] for _ in range(channel_count)]
         ax.set_title("EEG (uV)")
         ax.set_xlabel("Time (s)")
@@ -913,7 +986,10 @@ def main() -> int:
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--stream-name", type=str, default=None)
     parser.add_argument("--stream-type", type=str, default="EEG")
-    parser.add_argument("--enable-plot", action="store_true", default=False)
+    parser.add_argument("--lsl-source-id", type=str, default=None)
+    parser.add_argument("--enable-plot", dest="enable_plot", action="store_true")
+    parser.add_argument("--no-plot", dest="enable_plot", action="store_false")
+    parser.set_defaults(enable_plot=True)
     parser.add_argument(
         "--plot-scale",
         type=str,

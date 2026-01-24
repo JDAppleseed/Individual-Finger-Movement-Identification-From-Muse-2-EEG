@@ -117,6 +117,8 @@ except Exception:
 class StreamInfo:
     name: str
     stype: str
+    source_id: Optional[str] = None
+    uid: Optional[str] = None
 
 
 @dataclass
@@ -132,6 +134,7 @@ class MuseConnectorController(QObject):
     status_changed = Signal(str)
     device_changed = Signal(str)
     stream_changed = Signal(str)
+    source_id_changed = Signal(str)
     process_exited = Signal(int)
     error = Signal(str)
 
@@ -145,6 +148,8 @@ class MuseConnectorController(QObject):
         self._status = "idle"
         self._device = "-"
         self._stream = "-"
+        self._pid: Optional[int] = None
+        self._source_id: Optional[str] = None
 
     def is_running(self) -> bool:
         return self._runner.is_running()
@@ -156,9 +161,7 @@ class MuseConnectorController(QObject):
         cwd: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
     ) -> None:
-        if self.is_running():
-            self.error.emit("Connector already running.")
-            return
+        self._terminate_existing()
         merged_env = os.environ.copy()
         merged_env["PYTHONUNBUFFERED"] = "1"
         if env:
@@ -171,9 +174,20 @@ class MuseConnectorController(QObject):
             self.error.emit(f"Failed to start connector: {exc}")
 
     def stop(self) -> None:
+        self._terminate_existing()
+
+    def _terminate_existing(self) -> None:
         if not self.is_running():
             return
-        self._runner.stop_hard()
+        pid = self._runner.process_id()
+        if pid:
+            self._pid = pid
+        self._runner.terminate_and_wait()
+        if self.is_running():
+            self._runner.stop_hard()
+        if not self.is_running():
+            self._pid = None
+            self._source_id = None
 
     def _set_status(self, status: str) -> None:
         if status == self._status:
@@ -184,6 +198,11 @@ class MuseConnectorController(QObject):
     def _on_line(self, line: str) -> None:
         self.log_line.emit(line)
         clean = line.replace("[stderr] ", "").rstrip()
+        if clean.startswith("LSL_SOURCE_ID="):
+            source_id = clean.split("=", 1)[1].strip()
+            if source_id and source_id != self._source_id:
+                self._source_id = source_id
+                self.source_id_changed.emit(source_id)
         if clean:
             self._parse_status(clean)
 
@@ -221,9 +240,11 @@ class MuseConnectorController(QObject):
             return None
 
     def _on_started(self) -> None:
-        return
+        pid = self._runner.process_id()
+        self._pid = pid or self._pid
 
     def _on_finished(self, exit_code: int, _exit_status: int) -> None:
+        self._pid = None
         if exit_code != 0:
             self._set_status("error")
         else:
@@ -674,6 +695,7 @@ class MainWindow(QMainWindow):
         self.muse_connector.status_changed.connect(self._on_connector_status)
         self.muse_connector.device_changed.connect(self._on_connector_device)
         self.muse_connector.stream_changed.connect(self._on_connector_stream)
+        self.muse_connector.source_id_changed.connect(self._on_connector_source_id)
         self.muse_connector.process_exited.connect(self._on_connector_finished)
         self.muse_connector.error.connect(
             lambda msg: self._append_log(f"[connector] {msg}")
@@ -684,6 +706,7 @@ class MainWindow(QMainWindow):
         self.live_label_details: Dict[str, Any] = {}
         self.live_stream_name = DEFAULT_STREAM_NAME
         self.live_stream_type = DEFAULT_STREAM_TYPE
+        self.live_lsl_source_id: Optional[str] = None
         self.hard_stop_locked = False
         self._legacy_warnings: set[str] = set()
         self._auto_scan_active = False
@@ -3464,21 +3487,44 @@ class MainWindow(QMainWindow):
             return
         streams = pylsl.resolve_streams() if pylsl else []
         items = []
-        previous = self._selected_stream_name()
+        previous = self._selected_stream_info()
         for stream in streams:
             try:
-                items.append(StreamInfo(name=stream.name(), stype=stream.type()))
+                source_id = stream.source_id() if hasattr(stream, "source_id") else None
+                uid = stream.uid() if hasattr(stream, "uid") else None
+                items.append(
+                    StreamInfo(
+                        name=stream.name(),
+                        stype=stream.type(),
+                        source_id=source_id,
+                        uid=uid,
+                    )
+                )
             except Exception:
                 continue
         self.lsl_combo.clear()
-        self.lsl_combo.addItem("-")
+        self.lsl_combo.addItem("-", None)
         if not items:
             self._set_stream_status("No LSL streams detected.")
             return
         for info in items:
-            self.lsl_combo.addItem(f"{info.name} ({info.stype})")
-        if previous:
-            idx = self._find_stream_index(previous)
+            label = f"{info.name} ({info.stype})"
+            if info.source_id:
+                label += f" source_id={info.source_id}"
+            if info.uid:
+                label += f" uid={info.uid}"
+            if self.live_lsl_source_id and info.source_id == self.live_lsl_source_id:
+                label += " [active]"
+            self.lsl_combo.addItem(label, info)
+        preferred_idx = None
+        if self.live_lsl_source_id:
+            preferred_idx = self._find_stream_index(
+                None, expected_source_id=self.live_lsl_source_id
+            )
+        if preferred_idx is not None:
+            self.lsl_combo.setCurrentIndex(preferred_idx)
+        elif previous:
+            idx = self._find_stream_index(previous.name, expected_source_id=previous.source_id)
             if idx is not None:
                 self.lsl_combo.setCurrentIndex(idx)
         self._set_stream_status(f"Detected {len(items)} LSL stream(s).")
@@ -3486,11 +3532,16 @@ class MainWindow(QMainWindow):
     def _on_lsl_stream_changed(self, _text: str) -> None:
         name = self._selected_stream_name()
         stype = self._selected_stream_type()
+        info = self._selected_stream_info()
         if name:
             self.live_stream_name = name
             self._set_connector_stream(name)
         if stype:
             self.live_stream_type = stype
+        if info and info.source_id:
+            self.live_lsl_source_id = info.source_id
+        elif info is None:
+            self.live_lsl_source_id = None
         if self._auto_scan_active and name:
             self._stop_auto_scan()
             if self._auto_scan_wants_healthcheck:
@@ -3560,9 +3611,25 @@ class MainWindow(QMainWindow):
         if idx is not None:
             self.lsl_combo.setCurrentIndex(idx)
 
-    def _find_stream_index(self, expected_name: Optional[str]) -> Optional[int]:
+    def _find_stream_index(
+        self, expected_name: Optional[str], expected_source_id: Optional[str] = None
+    ) -> Optional[int]:
         expected = expected_name.lower().strip() if expected_name else ""
+        expected_source = expected_source_id.strip() if expected_source_id else ""
         for i in range(self.lsl_combo.count()):
+            data = self.lsl_combo.itemData(i)
+            if isinstance(data, StreamInfo):
+                if expected_source and data.source_id == expected_source:
+                    return i
+                if expected:
+                    name_lower = data.name.lower()
+                    if name_lower == expected or expected in name_lower:
+                        return i
+                    continue
+                if "muse" in data.name.lower() and data.stype.lower() == "eeg":
+                    return i
+                continue
+
             raw = self.lsl_combo.itemText(i)
             if not raw or raw == "-":
                 continue
@@ -3598,10 +3665,27 @@ class MainWindow(QMainWindow):
         if not choice or choice == "-":
             self._set_stream_status("No LSL stream selected.")
             return
-        name = choice.split("(")[0].strip()
+        info = self._selected_stream_info()
+        name = info.name if info else choice.split("(")[0].strip()
+        source_id = info.source_id if info else None
+        uid = info.uid if info else None
         streams = pylsl.resolve_streams() if pylsl else []
         match = None
         for stream in streams:
+            if source_id and hasattr(stream, "source_id"):
+                try:
+                    if stream.source_id() == source_id:
+                        match = stream
+                        break
+                except Exception:
+                    pass
+            if uid and hasattr(stream, "uid"):
+                try:
+                    if stream.uid() == uid:
+                        match = stream
+                        break
+                except Exception:
+                    pass
             if stream.name() == name:
                 match = stream
                 break
@@ -3811,6 +3895,8 @@ class MainWindow(QMainWindow):
                 if self.allow_partial_checkbox.isChecked():
                     args.append("--allow-partial")
         args.extend(self._collect_step_args(step_id))
+        if script_key in {"step1", "live_infer"} and self.live_lsl_source_id:
+            args.extend(["--lsl-source-id", self.live_lsl_source_id])
         cwd = str(self.repo_root)
         if step_id == "step1b" and self.current_session_ui:
             session_dir = session_root(subject_dir, self.current_session_ui)
@@ -4135,11 +4221,12 @@ class MainWindow(QMainWindow):
             )
             return
         if self.muse_connector.is_running():
-            self._append_log("Connector already running.")
-            return
+            self._append_log("Connector already running; restarting.")
+            self.muse_connector.stop()
         self.live_stream_ready = False
         self.live_label_acknowledged = False
         self.live_label_details = {}
+        self.live_lsl_source_id = None
         self._set_connector_status("scanning")
         labels, rate, _ = self._current_live_config()
         stream_name = self._effective_stream_name()
@@ -4172,6 +4259,7 @@ class MainWindow(QMainWindow):
             self._append_log("Disconnecting Muse connector...")
             self.muse_connector.stop()
         self.live_stream_ready = False
+        self.live_lsl_source_id = None
         self._stop_auto_scan()
         self._set_live_buttons_state()
 
@@ -4200,6 +4288,14 @@ class MainWindow(QMainWindow):
         self._set_connector_stream(stream_name)
         if getattr(self, "stream_name_input", None) and not self.stream_name_input.text().strip():
             self.stream_name_input.setText(stream_name)
+
+    def _on_connector_source_id(self, source_id: str) -> None:
+        cleaned = source_id.strip()
+        if not cleaned:
+            return
+        self.live_lsl_source_id = cleaned
+        if LSL_AVAILABLE and self.input_source.currentText() != "CSV Offline":
+            self._detect_lsl_streams()
 
     def _schedule_healthcheck(self, delay_ms: int = 1500) -> None:
         if self._healthcheck_pending:
@@ -4308,6 +4404,7 @@ class MainWindow(QMainWindow):
         else:
             self._set_connector_status("idle")
         self.live_stream_ready = False
+        self.live_lsl_source_id = None
         self._stop_auto_scan()
         self._set_live_buttons_state()
 
@@ -4708,13 +4805,25 @@ class MainWindow(QMainWindow):
                 allow_overwrite=True,
             )
 
+    def _selected_stream_info(self) -> Optional[StreamInfo]:
+        data = self.lsl_combo.currentData()
+        if isinstance(data, StreamInfo):
+            return data
+        return None
+
     def _selected_stream_name(self) -> Optional[str]:
+        info = self._selected_stream_info()
+        if info:
+            return info.name
         choice = self.lsl_combo.currentText().strip()
         if not choice or choice == "-":
             return None
         return choice.split("(")[0].strip()
 
     def _selected_stream_type(self) -> Optional[str]:
+        info = self._selected_stream_info()
+        if info:
+            return info.stype
         choice = self.lsl_combo.currentText().strip()
         if "(" in choice and ")" in choice:
             return choice.split("(", 1)[1].split(")", 1)[0].strip()

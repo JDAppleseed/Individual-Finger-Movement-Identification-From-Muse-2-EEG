@@ -2,6 +2,38 @@
 
 Real-time EEG-based finger + action (rest/open/close) classification with uncertainty-aware gating, calibrated confidence, and experiment reporting. Pipeline is aligned to the SDS: streaming, event labeling, window extraction, training, evaluation, calibration, and reporting.
 
+## Python support (macOS)
+
+- Supported versions: Python 3.11 or 3.12.
+- Common failure mode: torch import can hang on Python 3.13. Use the setup flow below.
+
+## Setup (macOS)
+
+One-command setup (recommended):
+```
+./scripts/setup_venv.sh
+```
+
+If you use pyenv:
+```
+pyenv install 3.11.7
+pyenv local 3.11.7
+./scripts/setup_venv.sh
+source .venv/bin/activate
+```
+
+Diagnostic command:
+```
+python scripts/diagnose_env.py
+```
+
+## How to run (UI)
+
+```
+source .venv/bin/activate
+python eeglab_wrapper_ui.py
+```
+
 ## What changed / How to run
 
 - Connect Muse: `python eeglab_wrapper_ui.py` → click **Connect Muse 2** (Step 0), or run `python -m muse_streaming.cli start-streamer --stream-name Muse2-EEG`.
@@ -13,7 +45,8 @@ Real-time EEG-based finger + action (rest/open/close) classification with uncert
 
 1) Install deps:
 ```
-python -m pip install -r requirements.txt
+./scripts/setup_venv.sh
+source .venv/bin/activate
 ```
 
 2) Record-only (raw + events):

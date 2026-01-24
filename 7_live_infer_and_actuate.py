@@ -14,6 +14,11 @@ import numpy as np
 import torch
 from pylsl import StreamInlet, resolve_streams
 
+try:
+    from pylsl import resolve_byprop as _resolve_byprop
+except Exception:
+    _resolve_byprop = None
+
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from muse_streaming.packets import SamplePacket
 from muse_streaming.session_writer import SessionWriter
@@ -59,7 +64,62 @@ def _resample_window(
     return window
 
 
-def _resolve_stream(name: Optional[str], stype: Optional[str]):
+def _resolve_stream(
+    name: Optional[str], stype: Optional[str], source_id: Optional[str]
+):
+    def _format_stream(candidate) -> str:
+        parts = [
+            f"name={candidate.name()}",
+            f"type={candidate.type()}",
+            f"ch={candidate.channel_count()}",
+        ]
+        if hasattr(candidate, "source_id"):
+            try:
+                value = candidate.source_id()
+                if value:
+                    parts.append(f"source_id={value}")
+            except Exception:
+                pass
+        if hasattr(candidate, "uid"):
+            try:
+                value = candidate.uid()
+                if value:
+                    parts.append(f"uid={value}")
+            except Exception:
+                pass
+        return ", ".join(parts)
+
+    if source_id:
+        if _resolve_byprop is not None:
+            candidates = _resolve_byprop("source_id", source_id, timeout=2.0)
+        else:
+            candidates = []
+            for candidate in resolve_streams():
+                if not hasattr(candidate, "source_id"):
+                    continue
+                try:
+                    value = candidate.source_id()
+                except Exception:
+                    continue
+                if str(value).strip() == source_id:
+                    candidates.append(candidate)
+        if name or stype:
+            candidates = [
+                candidate
+                for candidate in candidates
+                if (not name or candidate.name() == name)
+                and (not stype or candidate.type() == stype)
+            ]
+        if not candidates:
+            raise RuntimeError(f"No matching LSL stream found for source_id={source_id}.")
+        if len(candidates) > 1:
+            details = "\n".join(f"- {_format_stream(c)}" for c in candidates)
+            raise RuntimeError(
+                "Multiple LSL streams matched source_id. "
+                f"Refine with --stream-name/--stream-type.\n{details}"
+            )
+        return candidates[0]
+
     matches = [
         info
         for info in resolve_streams()
@@ -67,6 +127,12 @@ def _resolve_stream(name: Optional[str], stype: Optional[str]):
     ]
     if not matches:
         raise RuntimeError("No matching LSL stream found.")
+    if len(matches) > 1:
+        details = "\n".join(f"- {_format_stream(c)}" for c in matches)
+        raise RuntimeError(
+            "Multiple LSL streams matched. Use --lsl-source-id to disambiguate.\n"
+            + details
+        )
     return matches[0]
 
 
@@ -76,6 +142,7 @@ def main() -> int:
     parser.add_argument("--scaler-path", type=str, default="scaler.save")
     parser.add_argument("--stream-name", type=str, default=None)
     parser.add_argument("--stream-type", type=str, default="EEG")
+    parser.add_argument("--lsl-source-id", type=str, default=None)
     parser.add_argument("--window-sec", type=float, default=0.25)
     parser.add_argument("--hop-sec", type=float, default=0.05)
     parser.add_argument("--target-fs", type=float, default=256.0)
@@ -138,9 +205,10 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     if args.enable_actuation and not args.i_understand_this_moves_the_hand:
-        raise SystemExit(
-            "Refusing to actuate without --i-understand-this-moves-the-hand."
+        logger.warning(
+            "Actuation requested without --i-understand-this-moves-the-hand; running in safe mode."
         )
+        args.enable_actuation = False
 
     torch.manual_seed(0)
     if torch.cuda.is_available():
@@ -172,7 +240,7 @@ def main() -> int:
     else:
         logger.info("Actuation disabled (safe mode). Predictions only.")
 
-    info = _resolve_stream(args.stream_name, args.stream_type)
+    info = _resolve_stream(args.stream_name, args.stream_type, args.lsl_source_id)
     inlet = StreamInlet(info, max_buflen=2, max_chunklen=32)
     logger.info("Connected to stream %s (%s)", info.name(), info.type())
     session_writer = None

@@ -58,6 +58,9 @@ class ProcessRunner(QObject):
     def is_running(self) -> bool:
         return self._process.state() != QProcess.NotRunning
 
+    def process_id(self) -> int:
+        return int(self._process.processId() or 0)
+
     def start(
         self,
         program: str,
@@ -84,6 +87,18 @@ class ProcessRunner(QObject):
             return
         self._process.terminate()
         QTimer.singleShot(timeout_ms, self._kill_if_running)
+
+    def terminate_and_wait(
+        self, terminate_timeout_ms: int = 1500, kill_timeout_ms: int = 1500
+    ) -> bool:
+        if not self.is_running():
+            return True
+        self._process.terminate()
+        finished = bool(self._process.waitForFinished(int(terminate_timeout_ms)))
+        if finished:
+            return True
+        self._process.kill()
+        return bool(self._process.waitForFinished(int(kill_timeout_ms)))
 
     def stop_hard(
         self, sigint_timeout_ms: int = 1500, terminate_timeout_ms: int = 1500

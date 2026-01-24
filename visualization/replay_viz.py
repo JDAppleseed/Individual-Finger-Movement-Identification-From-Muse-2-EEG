@@ -1,13 +1,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 import numpy as np
-import torch
 import joblib
 
-from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+if TYPE_CHECKING:
+    import torch
+
+
+def _load_torch() -> Any:
+    try:
+        import torch
+    except Exception as exc:
+        message = (
+            "Torch is required for replay visualization but failed to import. "
+            "Use Python 3.11 or 3.12 and run ./scripts/setup_venv.sh to recreate "
+            "the virtual environment. Original error: "
+            f"{exc.__class__.__name__}: {exc}"
+        )
+        raise RuntimeError(message) from exc
+    return torch
 
 
 @dataclass
@@ -17,6 +31,10 @@ class ReplayVisualizer:
     scaler_path: str
 
     def __post_init__(self) -> None:
+        torch = _load_torch()
+        from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+
+        self._torch = torch
         npz = np.load(self.npz_path, allow_pickle=True)
         if "X" not in npz:
             raise ValueError("NPZ file missing 'X' windows array.")
@@ -54,12 +72,14 @@ class ReplayVisualizer:
             return (window - mean) / scale
         return window
 
-    def _tensor_from_window(self, idx: int) -> torch.Tensor:
+    def _tensor_from_window(self, idx: int) -> Any:
         window = self._standardize(self._get_window(idx))
+        torch = self._torch
         x = torch.tensor(window, dtype=torch.float32, device=self.device)
         return x.unsqueeze(0)
 
     def feature_map(self, idx: int, layer_idx: int) -> Optional[np.ndarray]:
+        torch = self._torch
         x = self._tensor_from_window(idx)
         x = x.permute(0, 2, 1)
         conv_outputs = []
@@ -75,6 +95,7 @@ class ReplayVisualizer:
         return feature
 
     def hidden_magnitude(self, idx: int) -> Optional[np.ndarray]:
+        torch = self._torch
         x = self._tensor_from_window(idx)
         x = x.permute(0, 2, 1)
         x = self.model.conv(x)
@@ -84,6 +105,7 @@ class ReplayVisualizer:
         return hidden_mag.detach().cpu().numpy()
 
     def saliency(self, idx: int) -> Optional[np.ndarray]:
+        torch = self._torch
         x = self._tensor_from_window(idx)
         x.requires_grad = True
         finger_logits, action_logits = self.model(x)

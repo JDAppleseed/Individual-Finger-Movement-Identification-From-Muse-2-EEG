@@ -110,10 +110,52 @@ def _parse_common_stream_args(
     parser.add_argument(
         "--labels",
         type=str,
-        default=",".join(DEFAULT_LABELS),
-        help="Comma-separated channel labels",
+        default=None,
+        help=f"Comma-separated channel labels (default: {','.join(DEFAULT_LABELS)})",
     )
     parser.add_argument("--log-level", type=str, default="INFO")
+
+
+def _resolve_labels_arg(
+    labels_arg: Optional[object], logger
+) -> Optional[list[str]]:
+    if labels_arg is None:
+        logger.info(
+            "Labels not provided (or empty); using DEFAULT_LABELS: %s",
+            DEFAULT_LABELS,
+        )
+        return None
+    if isinstance(labels_arg, (list, tuple)):
+        labels = [str(label).strip() for label in labels_arg if str(label).strip()]
+    else:
+        text = str(labels_arg).strip()
+        labels = parse_labels(text) if text else []
+    if labels:
+        return labels
+    logger.info(
+        "Labels not provided (or empty); using DEFAULT_LABELS: %s",
+        DEFAULT_LABELS,
+    )
+    return None
+
+
+def _build_stream_settings(
+    *,
+    name: str,
+    stype: str,
+    nominal_srate: float,
+    labels_arg: Optional[object],
+    logger,
+) -> StreamSettings:
+    labels = _resolve_labels_arg(labels_arg, logger)
+    kwargs = {
+        "name": name,
+        "stype": stype,
+        "nominal_srate": nominal_srate,
+    }
+    if labels is not None:
+        kwargs["labels"] = labels
+    return StreamSettings(**kwargs)
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -168,11 +210,12 @@ def main() -> int:
 
     try:
         if args.command == "start-streamer":
-            stream = StreamSettings(
+            stream = _build_stream_settings(
                 name=args.stream_name,
                 stype=args.type,
                 nominal_srate=args.rate,
-                labels=parse_labels(args.labels),
+                labels_arg=args.labels,
+                logger=logger,
             )
             streamer = MuseLslStreamer(
                 name=stream.name,
@@ -199,11 +242,12 @@ def main() -> int:
                     except RuntimeError as exc:
                         print(f"❌ {exc}", file=sys.stderr)
                         return 2
-            stream = StreamSettings(
+            stream = _build_stream_settings(
                 name=stream_name,
                 stype=args.type,
                 nominal_srate=args.rate,
-                labels=parse_labels(args.labels),
+                labels_arg=args.labels,
+                logger=logger,
             )
             if args.sim:
                 sim_streamer = _start_sim_streamer(stream, logger)
@@ -229,11 +273,12 @@ def main() -> int:
             return 0 if result.ok else 2
 
         if args.command == "record":
-            stream = StreamSettings(
+            stream = _build_stream_settings(
                 name=args.stream_name,
                 stype=args.type,
                 nominal_srate=args.rate,
-                labels=parse_labels(args.labels),
+                labels_arg=args.labels,
+                logger=logger,
             )
             if args.sim:
                 sim_streamer = _start_sim_streamer(stream, logger)
