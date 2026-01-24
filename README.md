@@ -2,6 +2,13 @@
 
 Real-time EEG-based finger + action (rest/open/close) classification with uncertainty-aware gating, calibrated confidence, and experiment reporting. Pipeline is aligned to the SDS: streaming, event labeling, window extraction, training, evaluation, calibration, and reporting.
 
+## What changed / How to run
+
+- Connect Muse: `python eeglab_wrapper_ui.py` → click **Connect Muse 2** (Step 0), or run `python -m muse_streaming.cli start-streamer --stream-name Muse2-EEG`.
+- Record: `python 1_stream_and_record.py --enable-plot --plot-scale fixed --plot-fixed-ylim -200 200` (outputs raw.csv + events.csv).
+- Extract/Train/Evaluate: `python 1b_extract_windows.py --session-dir <session_dir>` → `python 2_train_model.py` → `python 3_evaluate_model.py`.
+- Live infer: `python 7_live_infer_and_actuate.py --model-path models/finger_action_model.pt --scaler-path scaler.save --stream-name Muse2-EEG` (safe mode). Add `--enable-actuation --i-understand-this-moves-the-hand` to actuate.
+
 ## Quick Start
 
 1) Install deps:
@@ -9,9 +16,9 @@ Real-time EEG-based finger + action (rest/open/close) classification with uncert
 python -m pip install -r requirements.txt
 ```
 
-2) Lossless train-record (raw + events):
+2) Record-only (raw + events):
 ```
-python 1_stream_and_record.py --mode train_record
+python 1_stream_and_record.py --enable-plot --plot-scale fixed --plot-fixed-ylim -200 200
 ```
 
 3) Review + validate events (optional but recommended):
@@ -73,8 +80,8 @@ Launch the desktop UI and use the new live workflow (production path):
 ```
 python eeglab_wrapper_ui.py
 ```
-2) Select a session root in **Session Management** and create or load a session.
-3) Run **Train-Record (Lossless)** to capture raw EEG + events to the session directory.
+2) Use **Step 0: Connect Muse / LSL Status** to connect and verify LSL health.
+3) Run **Step 1: Record** to capture raw EEG + events to the session directory.
 4) Validate the session, then extract windows, train, evaluate, and run live inference.
 
 The UI gates Start Recording until the LSL stream is healthy (or operator-acknowledged).
@@ -82,12 +89,9 @@ The UI gates Start Recording until the LSL stream is healthy (or operator-acknow
 ## Event Labeling (live)
 
 Event marking happens inside `1_stream_and_record.py` via keyboard:
-- Hold `Space` = start event, release `Space` = end event
-- `o` = OPEN mode, `c` = CLOSE mode, `r` = REST mode
-- `a` = artifact override, `k` = calibration override, `n` = clear override
-- `0–5` = assign finger to most recent event (0 = NONE)
+- `space` / `1–5` / `o` / `c` / `r` record events (configurable via `EVENT_KEYMAP`)
 
-Events are saved to `events_autosave.csv` during capture and `events.csv` on exit.
+Events are saved to `events.csv` during capture.
 
 ## Live Inference (Dedicated Script)
 

@@ -19,7 +19,7 @@ def validate_train_record(settings: Dict[str, Any]) -> ValidationResult:
         errors.append("MODE must be train_record for lossless capture.")
     if "ENABLE_ACTUATION" in settings:
         errors.append(
-            "Legacy key 'ENABLE_ACTUATION' is not supported; use 'enable_actuation'."
+            "Legacy key 'ENABLE_ACTUATION' is not supported; migrate to 'enable_actuation'."
         )
     if "enable_actuation" in settings:
         if not isinstance(settings.get("enable_actuation"), bool):
@@ -44,7 +44,7 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         warnings.append("ALLOW_DROP is enabled; dropped windows will be logged.")
     if "ENABLE_ACTUATION" in settings:
         errors.append(
-            "Legacy key 'ENABLE_ACTUATION' is not supported; use 'enable_actuation'."
+            "Legacy key 'ENABLE_ACTUATION' is not supported; migrate to 'enable_actuation'."
         )
     if "enable_actuation" in settings and not isinstance(
         settings.get("enable_actuation"), bool
@@ -62,7 +62,7 @@ def validate_step_settings(step_id: str, settings: Dict[str, Any]) -> Validation
     warnings: List[str] = []
     if "ENABLE_ACTUATION" in settings:
         errors.append(
-            "Legacy key 'ENABLE_ACTUATION' is not supported; use 'enable_actuation'."
+            "Legacy key 'ENABLE_ACTUATION' is not supported; migrate to 'enable_actuation'."
         )
     if "enable_actuation" in settings:
         if not isinstance(settings.get("enable_actuation"), bool):

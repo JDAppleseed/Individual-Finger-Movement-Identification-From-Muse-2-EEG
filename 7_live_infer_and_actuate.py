@@ -100,6 +100,11 @@ def main() -> int:
         help="Enable actuation (placeholder hook)",
     )
     parser.add_argument(
+        "--i-understand-this-moves-the-hand",
+        action="store_true",
+        help="Required safety acknowledgement for actuation.",
+    )
+    parser.add_argument(
         "--bluetooth-target",
         type=str,
         default="",
@@ -132,6 +137,21 @@ def main() -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+    if args.enable_actuation and not args.i_understand_this_moves_the_hand:
+        raise SystemExit(
+            "Refusing to actuate without --i-understand-this-moves-the-hand."
+        )
+
+    torch.manual_seed(0)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(0)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    try:
+        torch.use_deterministic_algorithms(True)
+    except Exception:
+        pass
+
     model_path = Path(args.model_path)
     if not model_path.exists():
         raise SystemExit(f"Model not found: {model_path}")
@@ -149,6 +169,8 @@ def main() -> int:
             "Actuation enabled (target=%s). Placeholder hook; implement device control here.",
             args.bluetooth_target or "unspecified",
         )
+    else:
+        logger.info("Actuation disabled (safe mode). Predictions only.")
 
     info = _resolve_stream(args.stream_name, args.stream_type)
     inlet = StreamInlet(info, max_buflen=2, max_chunklen=32)
@@ -239,7 +261,7 @@ def main() -> int:
 
                 window_input = standardize_window_TxC(window.astype(np.float32), scaler)
                 x = torch.tensor(window_input, dtype=torch.float32).unsqueeze(0).to(device)
-                with torch.no_grad():
+                with torch.inference_mode():
                     finger_logits, action_logits = model(x)
                     action_probs = torch.softmax(action_logits, dim=1).squeeze(0)
                     finger_probs = torch.softmax(finger_logits, dim=1).squeeze(0)
@@ -287,6 +309,12 @@ def main() -> int:
                     latency_ms,
                     dropped_windows,
                 )
+                if args.enable_actuation:
+                    logger.debug(
+                        "Actuation hook placeholder (action=%s finger=%s).",
+                        pred_action,
+                        pred_finger,
+                    )
                 next_window_start_s += args.hop_sec
 
             now = time.monotonic()

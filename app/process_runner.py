@@ -1,11 +1,42 @@
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import os
 import signal
+import logging
 
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
+
+
+logger = logging.getLogger(__name__)
+
+
+def _normalize_exit_status(exit_status: Any) -> int:
+    """
+    Normalize Qt QProcess.ExitStatus to an int for PySide/PyQt compatibility.
+    Returns:
+      0 = NormalExit
+      1 = CrashExit (or non-normal)
+    """
+    status_val: int
+    try:
+        if hasattr(exit_status, "value"):
+            status_val = int(getattr(exit_status, "value"))
+        else:
+            status_val = int(exit_status)
+    except Exception:
+        status_val = 1
+
+    try:
+        if exit_status == QProcess.NormalExit:
+            status_val = 0
+        elif exit_status == QProcess.CrashExit:
+            status_val = 1
+    except Exception:
+        pass
+
+    return 0 if status_val == 0 else 1
 
 
 class ProcessRunner(QObject):
@@ -109,11 +140,18 @@ class ProcessRunner(QObject):
         else:
             self._stdout_buffer = buffer
 
-    def _handle_finished(self, exit_code: int, exit_status: int) -> None:
+    def _handle_finished(self, exit_code: int, exit_status: Any) -> None:
         if self._stdout_buffer.strip():
             self.line_ready.emit(self._stdout_buffer.rstrip("\r\n"))
             self._stdout_buffer = ""
         if self._stderr_buffer.strip():
             self.line_ready.emit("[stderr] " + self._stderr_buffer.rstrip("\r\n"))
             self._stderr_buffer = ""
-        self.finished.emit(exit_code, exit_status)
+        exit_status_int = _normalize_exit_status(exit_status)
+        logger.info(
+            "Process finished: exit_code=%s exit_status=%r normalized=%s",
+            exit_code,
+            exit_status,
+            exit_status_int,
+        )
+        self.finished.emit(int(exit_code), int(exit_status_int))
