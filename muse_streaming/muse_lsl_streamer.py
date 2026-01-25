@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import logging
 import signal
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -82,6 +84,9 @@ class MuseLslStreamer:
         labels: Optional[Iterable[str]] = None,
         device_name: Optional[str] = None,
         mac_address: Optional[str] = None,
+        start_delay_s: float = 0.5,
+        connect_first: bool = True,
+        throttle_logs: bool = True,
         log_fn: Optional[Callable[[str], None]] = None,
         logger: Optional[logging.Logger] = None,
         simulate: bool = False,
@@ -99,6 +104,9 @@ class MuseLslStreamer:
         self.log_fn = log_fn or (lambda msg: print(msg, flush=True))
         self.logger = logger
         self.simulate = simulate
+        self.start_delay_s = float(start_delay_s)
+        self.connect_first = bool(connect_first)
+        self.throttle_logs = bool(throttle_logs)
 
         self._client: Optional[BleakClient] = None
         self._outlet: Optional[StreamOutlet] = None
@@ -107,6 +115,10 @@ class MuseLslStreamer:
         self._last_packet_index: Optional[int] = None
         self._max_pending_packets = max(16, int(max_pending_packets))
         self._packets_dropped_overflow = 0
+        self._notify_uuids: List[str] = []
+        self._log_throttle_interval_s = 1.0
+        self._log_throttle_state: Dict[str, Dict[str, float]] = {}
+        self._timebase_discontinuities = 0
 
         # Normalized label list used everywhere after startup.
         self._labels_clean: List[str] = []
@@ -162,6 +174,33 @@ class MuseLslStreamer:
         elif self.log_fn:
             self.log_fn(message)
 
+    def _log_throttled(self, key: str, message: str, *, interval_s: float) -> None:
+        if not self.throttle_logs or interval_s <= 0:
+            self._log(message)
+            return
+        now = time.monotonic()
+        state = self._log_throttle_state.setdefault(
+            key, {"last": 0.0, "count": 0.0}
+        )
+        state["count"] = float(state.get("count", 0.0) + 1.0)
+        if (now - float(state.get("last", 0.0))) < interval_s:
+            return
+        count = int(state.get("count", 0.0))
+        state["count"] = 0.0
+        state["last"] = float(now)
+        suffix = f" (x{count})" if count > 1 else ""
+        self._log(f"{message}{suffix}")
+
+    def _start_outlet(self) -> None:
+        self._outlet = self._build_outlet(self.config)
+        print(f"LSL_SOURCE_ID={self._source_id}", flush=True)
+        self._last_push_wallclock = time.time()
+        self._last_push_monotonic = time.monotonic()
+        self._log(
+            f"✅ LSL outlet started: name={self.config.name}, type={self.config.stype}, "
+            f"ch={len(self.config.labels)}, rate={self.config.rate}"
+        )
+
     async def run(self) -> None:
         if self.simulate:
             await self._run_simulated()
@@ -174,19 +213,20 @@ class MuseLslStreamer:
         # Normalize labels once, so downstream logic can't be broken by UI serialization.
         self._normalize_labels()
 
-        self._outlet = self._build_outlet(self.config)
-        print(f"LSL_SOURCE_ID={self._source_id}", flush=True)
-        self._last_push_wallclock = time.time()
-        self._last_push_monotonic = time.monotonic()
-        self._log(
-            f"✅ LSL outlet started: name={self.config.name}, type={self.config.stype}, "
-            f"ch={len(self.config.labels)}, rate={self.config.rate}"
-        )
+        if not self.connect_first:
+            self._start_outlet()
 
         device = await self._resolve_device()
         self._client = BleakClient(device)
         await self._client.connect()
         self._log("✅ Muse 2 connected")
+
+        if self.connect_first:
+            if self.start_delay_s > 0:
+                await asyncio.sleep(self.start_delay_s)
+            self._start_outlet()
+        elif self.start_delay_s > 0:
+            await asyncio.sleep(self.start_delay_s)
 
         await self._start_streaming()
         await self._subscribe_eeg_channels()
@@ -233,8 +273,25 @@ class MuseLslStreamer:
     async def _shutdown(self) -> None:
         if self._monitor_task is not None:
             self._monitor_task.cancel()
+            try:
+                await self._monitor_task
+            except asyncio.CancelledError:
+                pass
         if self._client and getattr(self._client, "is_connected", False):
+            for uuid in list(self._notify_uuids):
+                try:
+                    await self._client.stop_notify(uuid)
+                except Exception:
+                    pass
             await self._client.disconnect()
+        if self._outlet is not None:
+            close_fn = getattr(self._outlet, "close_stream", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+            self._outlet = None
         self._log("ℹ️ Muse 2 streamer stopped")
 
     # -----------------------------
@@ -390,6 +447,7 @@ class MuseLslStreamer:
             "TP10": MUSE_GATT_ATTR_TP10,
         }
 
+        self._notify_uuids = []
         for label in self.config.labels:
             uuid = channels.get(label)
             if uuid is None:
@@ -397,6 +455,7 @@ class MuseLslStreamer:
                     f"Unsupported EEG label: {label}. Supported: {sorted(channels.keys())}"
                 )
             await self._client.start_notify(uuid, self._make_notify_handler(label))
+            self._notify_uuids.append(uuid)
 
         self._log("✅ EEG notifications enabled")
 
@@ -479,8 +538,13 @@ class MuseLslStreamer:
 
         if partial or missing:
             self._packets_flushed_partial += 1
-            self._log(
-                f"⚠️ [streamer] partial packet flushed index={packet_index} missing={missing}"
+            self._log_throttled(
+                "partial_packet",
+                (
+                    "⚠️ [streamer] partial packet flushed "
+                    f"index={packet_index} missing={missing}"
+                ),
+                interval_s=self._log_throttle_interval_s,
             )
 
         self._packet_buffer.pop(packet_index, None)
@@ -550,14 +614,26 @@ class MuseLslStreamer:
                 if err > 0:
                     snap = min(err, MAX_FORWARD_SNAP_S)
                     self._apply_timebase_adjust(snap)
-                    self._log(
-                        f"⚠️ [streamer] timebase discontinuity forward snap={snap:.4f}s err={err:.4f}s"
+                    self._timebase_discontinuities += 1
+                    self._log_throttled(
+                        "timebase_discontinuity",
+                        (
+                            "⚠️ [streamer] timebase discontinuity forward "
+                            f"snap={snap:.4f}s err={err:.4f}s"
+                        ),
+                        interval_s=self._log_throttle_interval_s,
                     )
                 else:
                     snap = max(err, -MAX_BACKWARD_SNAP_S)
                     self._apply_timebase_adjust(snap)
-                    self._log(
-                        f"⚠️ [streamer] timebase discontinuity backward snap={snap:.4f}s err={err:.4f}s"
+                    self._timebase_discontinuities += 1
+                    self._log_throttled(
+                        "timebase_discontinuity",
+                        (
+                            "⚠️ [streamer] timebase discontinuity backward "
+                            f"snap={snap:.4f}s err={err:.4f}s"
+                        ),
+                        interval_s=self._log_throttle_interval_s,
                     )
             elif err < -FUTURE_TOL_S:
                 snap = max(err, -MAX_BACKWARD_SNAP_S)
@@ -723,12 +799,21 @@ def _decode_eeg_packet(packet: bytearray) -> tuple[int, np.ndarray]:
 
 
 def install_signal_handlers(streamer: MuseLslStreamer) -> None:
-    loop = asyncio.get_event_loop()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
     for sig in (signal.SIGINT, signal.SIGTERM):
+        if loop is not None:
+            try:
+                loop.add_signal_handler(sig, streamer.request_stop)
+                continue
+            except NotImplementedError:
+                pass
         try:
-            loop.add_signal_handler(sig, streamer.request_stop)
-        except NotImplementedError:
-            # e.g. on Windows or when loop doesn't support signal handlers
+            signal.signal(sig, lambda _sig, _frame: streamer.request_stop())
+        except Exception:
+            # e.g. on Windows or when signal handlers are unavailable
             pass
 
 
@@ -764,6 +849,101 @@ def _self_test_monotonic() -> None:
     print(f"monotonic_ok={'true' if monotonic_ok else 'false'}")
 
 
-if __name__ == "__main__":
+def _configure_cli_logger(level: str) -> logging.Logger:
+    logger = logging.getLogger("muse_streaming.streamer")
+    logger.setLevel(getattr(logging, (level or "INFO").upper(), logging.INFO))
+    handler = logging.StreamHandler(stream=sys.stdout)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.handlers = [handler]
+    logger.propagate = False
+    return logger
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Muse 2 BLE -> LSL streamer")
+    parser.add_argument(
+        "--name",
+        "--stream-name",
+        dest="name",
+        type=str,
+        default="Muse2-EEG",
+        help="LSL stream name",
+    )
+    parser.add_argument(
+        "--rate",
+        type=float,
+        default=256.0,
+        help="Nominal sampling rate (Hz)",
+    )
+    parser.add_argument(
+        "--labels",
+        type=str,
+        default="TP9,AF7,AF8,TP10",
+        help="Comma-separated channel labels",
+    )
+    parser.add_argument(
+        "--device-name",
+        type=str,
+        default="Muse",
+        help="Optional BLE device name hint",
+    )
+    parser.add_argument("--mac-address", type=str, default=None, help="Optional BLE MAC")
+    parser.add_argument(
+        "--start-delay-s",
+        type=float,
+        default=0.5,
+        help="Delay after BLE connect before opening LSL outlet",
+    )
+    parser.add_argument(
+        "--connect-first",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Connect BLE before starting the LSL outlet",
+    )
+    parser.add_argument(
+        "--throttle-logs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Rate-limit high-frequency logs (heartbeat/timebase/partials)",
+    )
+    parser.add_argument("--log-level", type=str, default="INFO")
+    parser.add_argument("--sim", action="store_true", help="Run simulated stream")
+    args = parser.parse_args(argv)
+
     if os.environ.get("MUSE_LSL_SELF_TEST") == "1":
         _self_test_monotonic()
+        return 0
+
+    logger = _configure_cli_logger(args.log_level)
+    labels = [label.strip() for label in args.labels.split(",") if label.strip()]
+    labels = labels if labels else None
+    streamer = MuseLslStreamer(
+        name=args.name,
+        stype="EEG",
+        rate=float(args.rate),
+        labels=labels,
+        device_name=args.device_name or None,
+        mac_address=args.mac_address,
+        start_delay_s=float(args.start_delay_s),
+        connect_first=bool(args.connect_first),
+        throttle_logs=bool(args.throttle_logs),
+        simulate=bool(args.sim),
+        logger=logger,
+    )
+
+    async def _run() -> None:
+        install_signal_handlers(streamer)
+        await streamer.run()
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        return 130
+    except Exception as exc:
+        logger.error(f"❌ Muse streamer failed: {exc}")
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

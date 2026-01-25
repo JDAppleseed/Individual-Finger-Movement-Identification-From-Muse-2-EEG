@@ -36,7 +36,7 @@ python eeglab_wrapper_ui.py
 
 ## What changed / How to run
 
-- Connect Muse: `python eeglab_wrapper_ui.py` → click **Connect Muse 2** (Step 0), or run `python -m muse_streaming.cli start-streamer --stream-name Muse2-EEG`.
+- Connect Muse: `python eeglab_wrapper_ui.py` → click **Connect Muse 2** (Step 0), or run `python muse_lsl_streamer.py --name Muse2-EEG`.
 - Record: `python 1_stream_and_record.py --enable-plot --plot-scale fixed --plot-fixed-ylim -200 200` (outputs raw.csv + events.csv).
 - Extract/Train/Evaluate: `python 1b_extract_windows.py --session-dir <session_dir>` → `python 2_train_model.py` → `python 3_evaluate_model.py`.
 - Live infer: `python 7_live_infer_and_actuate.py --model-path models/finger_action_model.pt --scaler-path scaler.save --stream-name Muse2-EEG` (safe mode). Add `--enable-actuation --i-understand-this-moves-the-hand` to actuate.
@@ -87,7 +87,7 @@ Use the new CLI to run the lightweight Muse → LSL → recorder pipeline (suppo
 
 1) Start the LSL streamer (BLE or simulator):
 ```
-python -m cli start-streamer --sim
+python muse_lsl_streamer.py --sim
 ```
 
 2) List available streams:

@@ -24,7 +24,7 @@
 - muse_streaming/cli.py
   - Added `--stream-name` alias support, auto-detect handling for unnamed healthchecks, and quote-stripping for list-streams output.
 - eeglab_wrapper_ui.py
-  - Switched the streamer launcher to `python -m cli start-streamer` with `--stream-name` and aligned defaults to shared config.
+  - Switched the streamer launcher to `python muse_lsl_streamer.py` (canonical streamer path) and aligned defaults to shared config.
 - scripts/smoke_live_pipeline.py
   - Updated healthcheck invocation to use `stream_name`.
 - tests/test_muse_streaming_cli_healthcheck.py
