@@ -80,3 +80,30 @@ def test_session_writer_gap_counts_missing(tmp_path):
     manifest = (tmp_path / "test_sess2" / "manifest.json").read_text()
     payload = __import__("json").loads(manifest)
     assert payload["missing_seq_count"] == 1
+
+
+def test_session_writer_empty_robustness(tmp_path):
+    """Check that writer is robust to empty / null inputs."""
+    writer = SessionWriter(
+        output_root=tmp_path,
+        subject_id="test",
+        session_id="sess_empty",
+        channel_labels=["ch1", "ch2", "ch3", "ch4"],
+        sampling_rate=256.0,
+        timebase_version="absolute_v1",
+        shard_size_samples=5,
+    )
+    # These should be no-ops and not crash
+    writer.append_packets(None)
+    writer.append_packets([])
+    writer.finalize("normal")
+
+    # Check that no shards were written and counts are zero
+    manifest_path = tmp_path / "test_sess_empty" / "manifest.json"
+    assert manifest_path.exists()
+    manifest = manifest_path.read_text()
+    payload = __import__("json").loads(manifest)
+    assert payload["actual_sample_count"] == 0
+    assert not payload["shard_list"]
+    assert payload["seq_min"] is None
+    assert payload["seq_max"] is None

@@ -36,6 +36,7 @@ TIMEBASE_VERSION = "absolute_v1"
 SAMPLING_RATE = 256
 CHANNELS = 4
 
+PLOT_FPS = 30.0
 PLOT_SCALE_MODE = "fixed"
 PLOT_FIXED_YLIM = (-200.0, 200.0)
 PLOT_ROBUST_WINDOW_SEC = 5.0
@@ -420,6 +421,81 @@ def _configure_logging(log_path: Path) -> None:
     )
 
 
+def _force_interactive_matplotlib_backend(logger: logging.Logger) -> None:
+    """Force a GUI-capable Matplotlib backend.
+
+    On macOS, the default MacOSX backend can show a blank/transparent window when this
+    script is launched as a subprocess from a Qt app. QtAgg is typically the most robust.
+
+    Behavior:
+      - Prefer QtAgg when available.
+      - Fall back to TkAgg, then MacOSX.
+      - Respect an explicit MPLBACKEND unless it is clearly non-interactive.
+    """
+    try:
+        import matplotlib  # noqa: WPS433
+    except Exception as e:
+        logger.warning("[plot] Matplotlib not available: %s", e)
+        return
+
+    env_backend = os.environ.get("MPLBACKEND")
+    logger.info("[plot] env MPLBACKEND=%s", env_backend)
+
+    def _has_qt() -> bool:
+        try:
+            import PyQt5  # noqa: F401
+            return True
+        except Exception:
+            pass
+        try:
+            import PySide6  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+    def _has_tk() -> bool:
+        try:
+            import tkinter  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+    non_interactive = {"agg", "pdf", "ps", "svg", "cairo", "template"}
+    if env_backend and env_backend.strip().lower() not in non_interactive:
+        try:
+            matplotlib.interactive(True)
+        except Exception:
+            pass
+        try:
+            logger.info("[plot] Using matplotlib backend=%s", matplotlib.get_backend())
+        except Exception:
+            logger.info("[plot] Using matplotlib backend=(unknown)")
+        return
+
+    chosen = None
+    if sys.platform == "darwin":
+        if _has_qt():
+            chosen = "QtAgg"
+        elif _has_tk():
+            chosen = "TkAgg"
+        else:
+            chosen = "MacOSX"
+
+    if chosen:
+        try:
+            matplotlib.use(chosen, force=True)
+        except Exception as e:
+            logger.warning("[plot] Failed to set backend=%s (%s).", chosen, e)
+
+    try:
+        matplotlib.interactive(True)
+    except Exception:
+        pass
+
+    try:
+        logger.info("[plot] Using matplotlib backend=%s", matplotlib.get_backend())
+    except Exception:
+        logger.info("[plot] Using matplotlib backend=(unknown)")
 def _resolve_plot_fixed_ylim(value: Optional[List[float]]) -> Tuple[float, float]:
     if not value or len(value) != 2:
         return float(PLOT_FIXED_YLIM[0]), float(PLOT_FIXED_YLIM[1])
@@ -466,6 +542,8 @@ def _apply_config_to_args(args_obj, settings: Dict[str, Any], defaults: Dict[str
         "PLOT_REFERENCE_OVERLAY": "plot_reference_overlay",
         "PLOT_REFERENCE_LINES": "plot_reference_overlay",
         "PLOT_WINDOW_SEC": "plot_window_sec",
+        "plot-window-sec": "plot_window_sec",
+        "plotWindowSec": "plot_window_sec",
         "EVENT_MARKING_ENABLED": "event_marking_enabled",
         "EVENT_KEYMAP": "event_keymap",
         "LSL_STREAM_NAME": "stream_name",
@@ -500,7 +578,16 @@ def _apply_config_to_args(args_obj, settings: Dict[str, Any], defaults: Dict[str
             normalized["plot_fixed_ylim_max"],
         ]
 
+    # Special handling for plot_window_sec to log source
+    if "plot_window_sec" in normalized and normalized["plot_window_sec"] is not None:
+        args_obj.plot_window_sec = float(normalized["plot_window_sec"])
+        logger.info(f"[plot] plot_window_sec={args_obj.plot_window_sec} (source=config)")
+    else:
+        logger.info(f"[plot] plot_window_sec={args_obj.plot_window_sec} (source=cli)")
+
     for key, default in defaults.items():
+        if key == "plot_window_sec":
+            continue
         if key in normalized and getattr(args_obj, key) == default:
             setattr(args_obj, key, normalized[key])
 
@@ -559,59 +646,165 @@ def _run_recording(args: argparse.Namespace) -> int:
             except Exception:
                 pass
         return ", ".join(parts)
+    # --------------------------
+    # Resolve LSL stream robustly
+    # --------------------------
+    desired_source_id = args.lsl_source_id
+    env_source_id = os.environ.get("LSL_SOURCE_ID")
 
+    # UI historically passed a placeholder like "muse2_internal".
+    # Treat these as "auto" and prefer the connector-provided env var if present.
+    # If no env var is available, DO NOT filter by source_id (pick the best matching EEG stream).
+    AUTO_TOKENS = {None, "", "auto", "muse2_internal", "internal"}
+    desired_is_auto = (desired_source_id in AUTO_TOKENS)
+    if desired_is_auto:
+        desired_source_id = env_source_id or None
+
+
+    def _list_candidates():
+        streams = []
+        # Prefer exact source_id when we have it (and it isn't an auto token).
+        if desired_source_id and not desired_is_auto:
+            try:
+                streams = resolve_byprop("source_id", desired_source_id, timeout=LSL_RESOLVE_TIMEOUT)
+            except Exception:
+                streams = []
+            if streams:
+                return streams
+            # If the user requested a specific source_id and we couldn't find it, fail fast
+            # instead of silently falling back to name-based selection (which can pick the wrong stream).
+            avail = []
+            try:
+                avail = resolve_streams(timeout=LSL_RESOLVE_TIMEOUT)
+            except Exception:
+                avail = []
+            msg_lines = [f"Requested LSL source_id not found: {desired_source_id}"]
+            if avail:
+                msg_lines.append("Available streams:")
+                for s in avail:
+                    try:
+                        msg_lines.append(f"  - name={s.name()} type={s.type()} ch={s.channel_count()} rate={s.nominal_srate()} source_id={s.source_id()}")
+                    except Exception:
+                        pass
+            raise RuntimeError("\n".join(msg_lines))
+
+        # Otherwise, resolve by name and filter by type/ch/rate when provided.
+        try:
+            streams = resolve_stream("name", args.stream_name, timeout=LSL_RESOLVE_TIMEOUT)
+        except Exception:
+            streams = []
+        stream_type = getattr(args, "stream_type", None)
+        stream_ch = getattr(args, "stream_ch", None)
+        stream_rate = getattr(args, "stream_rate", None)
+
+        if stream_type:
+            streams = [s for s in streams if (s.type() == stream_type)]
+        if stream_ch:
+            try:
+                target_ch = int(stream_ch)
+                streams = [s for s in streams if (int(s.channel_count()) == target_ch)]
+            except Exception:
+                pass
+        if stream_rate:
+            try:
+                target = float(stream_rate)
+                streams = [s for s in streams if abs(float(s.nominal_srate()) - target) < 1e-3]
+            except Exception:
+                pass
+        return streams
+
+    def _score_stream(info_obj) -> float:
+        sid = ""
+        try:
+            sid = info_obj.source_id()
+        except Exception:
+            sid = ""
+        score = 0.0
+        if env_source_id and sid == env_source_id:
+            score += 1e12
+        if desired_source_id and sid == desired_source_id:
+            score += 5e11
+
+        # Parse trailing epoch-ms if present: muse2-<rand>-<epochms>
+        try:
+            tail = sid.split("-")[-1]
+            score += float(int(tail))
+        except Exception:
+            pass
+
+        try:
+            score += 1e4 * float(info_obj.channel_count())
+        except Exception:
+            pass
+        try:
+            score += 10.0 * float(info_obj.nominal_srate())
+        except Exception:
+            pass
+        return score
+
+    candidates = _list_candidates()
+    if not candidates:
+        logger.error(
+            "No LSL streams found for name=%s type=%s ch=%s rate=%s (requested source_id=%s, env LSL_SOURCE_ID=%s).",
+            args.stream_name,
+            args.stream_type,
+            args.stream_ch,
+            args.stream_rate,
+            args.lsl_source_id,
+            env_source_id,
+        )
+        return 1
+
+    # Log all candidates for debugging.
+    candidates_sorted = sorted(candidates, key=_score_stream, reverse=True)
+    logger.info("[lsl] Found %d candidate stream(s):", len(candidates_sorted))
+    for i, s in enumerate(candidates_sorted):
+        try:
+            logger.info(
+                "[lsl]  #%d name=%s type=%s ch=%s rate=%s source_id=%s uid=%s",
+                i,
+                s.name(),
+                s.type(),
+                s.channel_count(),
+                s.nominal_srate(),
+                s.source_id(),
+                s.uid(),
+            )
+        except Exception:
+            logger.info("[lsl]  #%d (unable to print full stream info)", i)
+
+    # Choose best candidate and verify it actually produces samples (stale/orphan streams do happen).
     info = None
-    if source_id:
-        if resolve_byprop is not None:
-            candidates = resolve_byprop("source_id", source_id, timeout=2.0)
-        else:
-            candidates = []
-            for candidate in resolve_streams():
-                if not hasattr(candidate, "source_id"):
-                    continue
-                try:
-                    value = candidate.source_id()
-                except Exception:
-                    continue
-                if str(value).strip() == source_id:
-                    candidates.append(candidate)
-        if stream_name or stream_type:
-            candidates = [
-                candidate
-                for candidate in candidates
-                if (not stream_name or candidate.name() == stream_name)
-                and (not stream_type or candidate.type() == stream_type)
-            ]
-        if not candidates:
-            logger.error("No LSL stream found with source_id=%s.", source_id)
-            return 2
-        if len(candidates) > 1:
-            logger.error(
-                "Multiple LSL streams matched source_id=%s; refine with --stream-name/--stream-type.",
-                source_id,
-            )
-            for candidate in candidates:
-                logger.error("  - %s", _format_stream(candidate))
-            return 2
-        info = candidates[0]
-    else:
-        matches = [
-            candidate
-            for candidate in resolve_streams()
-            if (not stream_name or candidate.name() == stream_name)
-            and (not stream_type or candidate.type() == stream_type)
-        ]
-        if not matches:
-            logger.error("No matching LSL stream found.")
-            return 2
-        if len(matches) > 1:
-            logger.error(
-                "Multiple LSL streams matched. Use --lsl-source-id to disambiguate."
-            )
-            for candidate in matches:
-                logger.error("  - %s", _format_stream(candidate))
-            return 2
-        info = matches[0]
+    inlet = None
+    errors = []
+    for s in candidates_sorted:
+        try:
+            test_inlet = StreamInlet(s, max_buflen=LSL_INLET_MAX_BUFLEN_SEC, max_chunklen=LSL_INLET_MAX_CHUNKLEN)
+            sample, ts = test_inlet.pull_sample(timeout=1.0)
+            if sample is None or ts is None:
+                errors.append(f"{s.source_id()}: no sample within 1s")
+                continue
+            info = s
+            inlet = test_inlet
+            break
+        except Exception as e:
+            errors.append(str(e))
+            continue
+
+    if info is None or inlet is None:
+        logger.error("[lsl] Found streams but none produced samples. Details: %s", "; ".join(errors[-6:]))
+        return 1
+
+    logger.info(
+        "Connected to LSL stream: name=%s type=%s ch=%s rate=%s source_id=%s",
+        info.name(),
+        info.type(),
+        info.channel_count(),
+        info.nominal_srate(),
+        info.source_id(),
+    )
+
+
 
     inlet = StreamInlet(info, max_buflen=2, max_chunklen=32)
     channel_count = int(info.channel_count())
@@ -658,24 +851,55 @@ def _run_recording(args: argparse.Namespace) -> int:
     plot_robust_window_sec = float(args.plot_robust_window_sec)
     plot_robust_ema = float(args.plot_robust_ema)
     plot_reference_overlay = bool(args.plot_reference_overlay)
-    plot_window_sec = float(args.plot_window_sec)
+    # B2: Add a final safety clamp to prevent non-positive/invalid plot window duration.
+    # This guards against config/UI edge cases that can set 0.0 or NaN.
+    plot_window_sec = float(getattr(args, 'plot_window_sec', PLOT_WINDOW_SEC) or PLOT_WINDOW_SEC)
+    if (not np.isfinite(plot_window_sec)) or plot_window_sec <= 0.0:
+        logger.warning("[plot] Invalid plot_window_sec=%r; defaulting to 5.0", getattr(args, 'plot_window_sec', None))
+        plot_window_sec = 5.0
 
-    enable_plot = _should_enable_plot(args.enable_plot)
-    event_marking_enabled = bool(args.event_marking_enabled)
+    # B1: Plot is always enabled for step 1.
+    enable_plot = True
+    event_marking_config_enabled = bool(args.event_marking_enabled)
     event_keymap = _parse_keymap(args.event_keymap)
 
     raw_queue: queue.Queue[SamplePacket] = queue.Queue(maxsize=int(args.raw_queue_maxsize))
+    writer_exc: Optional[BaseException] = None
 
     def _writer_worker() -> None:
-        batch: List[SamplePacket] = []
-        while not stop_event.is_set() or not raw_queue.empty():
-            try:
-                packet = raw_queue.get(timeout=0.1)
-            except queue.Empty:
-                packet = None
-            if packet is not None:
-                batch.append(packet)
-            if len(batch) >= 128 or (packet is None and batch):
+        nonlocal writer_exc
+        try:
+            batch: List[SamplePacket] = []
+            while not stop_event.is_set() or not raw_queue.empty():
+                try:
+                    packet = raw_queue.get(timeout=0.1)
+                except queue.Empty:
+                    packet = None
+                if packet is not None:
+                    batch.append(packet)
+
+                # A1.1: Guard against empty batch before costly processing.
+                if not batch:
+                    continue
+
+                if len(batch) >= 128 or (packet is None and batch):
+                    # NOTE: session_writer is now robust, but we still avoid empty calls.
+                    session_writer.append_packets(batch)
+                    for pkt in batch:
+                        row = _build_raw_row(
+                            pkt.lsl_ts_raw,
+                            pkt.lsl_ts_mono,
+                            pkt.local_ts,
+                            pkt.sample,
+                            pkt.flags,
+                            seq=pkt.seq,
+                            clamped=pkt.clamped,
+                            segment_id=pkt.segment_id,
+                        )
+                        raw_writer.writerow(row)
+                    batch = []
+            if batch:
+                session_writer.append_packets(batch)
                 for pkt in batch:
                     row = _build_raw_row(
                         pkt.lsl_ts_raw,
@@ -688,22 +912,10 @@ def _run_recording(args: argparse.Namespace) -> int:
                         segment_id=pkt.segment_id,
                     )
                     raw_writer.writerow(row)
-                session_writer.append_packets(batch)
-                batch = []
-        if batch:
-            for pkt in batch:
-                row = _build_raw_row(
-                    pkt.lsl_ts_raw,
-                    pkt.lsl_ts_mono,
-                    pkt.local_ts,
-                    pkt.sample,
-                    pkt.flags,
-                    seq=pkt.seq,
-                    clamped=pkt.clamped,
-                    segment_id=pkt.segment_id,
-                )
-                raw_writer.writerow(row)
-            session_writer.append_packets(batch)
+        # A2: Make writer-thread failures visible and fatal.
+        except BaseException as e:
+            logger.exception("Writer thread crashed")
+            writer_exc = e
 
     writer_thread = threading.Thread(target=_writer_worker, daemon=True)
     writer_thread.start()
@@ -711,22 +923,26 @@ def _run_recording(args: argparse.Namespace) -> int:
     plot_buffer: deque[Tuple[float, np.ndarray]]
     plot_buffer = deque()
     plot_ylim_ema: Optional[Tuple[float, float]] = None
-
+    plt = None
     if enable_plot:
+        _force_interactive_matplotlib_backend(logger)
         try:
             import matplotlib.pyplot as plt
         except Exception:
             enable_plot = False
             plt = None
             logger.warning("matplotlib not available; plot disabled.")
-    else:
-        plt = None
 
+    disabled_text = None
+    last_plot_draw_s = 0.0
     if enable_plot and plt is not None:
         plt.ion()
+        logger.info("[plot] plt.isinteractive()=%s", plt.isinteractive())
         fig, ax = plt.subplots()
         try:
-            fig.show()
+            fig.canvas.manager.set_window_title(f"Step 1: Recording {subject_id} - {session_id}")
+            plt.show(block=False)
+            logger.info("[plot] Figure shown (non-blocking)")
         except Exception:
             pass
         lines = [ax.plot([], [])[0] for _ in range(channel_count)]
@@ -739,6 +955,21 @@ def _run_recording(args: argparse.Namespace) -> int:
             overlay_lines.append(ax.axhline(0.0, color="#aaaaaa", alpha=0.2, linewidth=0.6))
             overlay_lines.append(ax.axhline(0.0, color="#aaaaaa", alpha=0.2, linewidth=0.6))
         ax.set_ylim(plot_fixed_ylim[0], plot_fixed_ylim[1])
+        # B2: Add overlay text for disabled event marking.
+        disabled_text = ax.text(
+            0.5,
+            0.5,
+            "Event Marking Disabled",
+            transform=ax.transAxes,
+            ha="center",
+            va="center",
+            color="red",
+            fontsize=20,
+            weight="bold",
+            visible=False,
+            zorder=999,
+            bbox=dict(facecolor="black", alpha=0.5, boxstyle="round,pad=0.5"),
+        )
     else:
         fig = None
         ax = None
@@ -746,9 +977,14 @@ def _run_recording(args: argparse.Namespace) -> int:
         overlay_lines = []
 
     def _update_plot(now_s: float) -> None:
-        nonlocal plot_ylim_ema
-        if not enable_plot or plt is None or ax is None:
+        nonlocal plot_ylim_ema, last_plot_draw_s
+        if not enable_plot or plt is None or ax is None or fig is None:
             return
+
+        if (now_s - last_plot_draw_s) < (1.0 / PLOT_FPS):
+            return
+        last_plot_draw_s = now_s
+
         while plot_buffer and (now_s - plot_buffer[0][0]) > plot_window_sec:
             plot_buffer.popleft()
         if not plot_buffer:
@@ -791,6 +1027,7 @@ def _run_recording(args: argparse.Namespace) -> int:
                 overlay_lines[1].set_ydata([mean + std, mean + std])
                 overlay_lines[2].set_ydata([mean - std, mean - std])
 
+        fig.canvas.draw_idle()
         plt.pause(0.001)
 
     last_plot_update = 0.0
@@ -801,9 +1038,12 @@ def _run_recording(args: argparse.Namespace) -> int:
     segment_id = 0
     timestamps_recent: deque[float]
     timestamps_recent = deque(maxlen=512)
+    event_marking_active = False
 
     def _record_event(label: str, metadata: Dict[str, Any]) -> None:
         nonlocal stream_start_lsl_ts, last_lsl_ts_mono
+        if not event_marking_active:
+            return
         if stream_start_lsl_ts is None:
             return
         lsl_ts_raw = float(local_clock())
@@ -831,7 +1071,7 @@ def _run_recording(args: argparse.Namespace) -> int:
         )
 
     listener = None
-    if event_marking_enabled:
+    if event_marking_config_enabled:
         try:
             from pynput import keyboard
 
@@ -851,13 +1091,16 @@ def _run_recording(args: argparse.Namespace) -> int:
             listener.start()
         except Exception:
             logger.warning("pynput not available; event marking disabled.")
-            event_marking_enabled = False
+            event_marking_config_enabled = False
 
     session_state_path = Path(__file__).resolve().parent / "logs" / f"session_state_{subject_id}.json"
     run_error: Optional[Exception] = None
 
     try:
         while not stop_event.is_set():
+            if writer_exc:
+                raise RuntimeError("Writer thread crashed") from writer_exc
+
             sample, lsl_ts = inlet.pull_sample(timeout=0.1)
             if sample is None:
                 continue
@@ -895,22 +1138,40 @@ def _run_recording(args: argparse.Namespace) -> int:
                 last_plot_update = now
 
             if now - last_state_update >= 1.0:
+                is_healthy = True
+                unhealthy_reason = "healthy"
                 packet_rate = None
                 if len(timestamps_recent) >= 2:
                     diffs = np.diff(np.array(timestamps_recent, dtype=float))
                     diffs = diffs[diffs > 0]
                     if diffs.size:
                         packet_rate = float(1.0 / np.median(diffs))
+
                 last_age = None
                 if last_lsl_ts_mono is not None:
                     last_age = float(local_clock() - last_lsl_ts_mono)
+                    if last_age > hard_stop_policy.hard_stop_after_unhealthy_s:
+                        is_healthy = False
+                        unhealthy_reason = f"stale LSL data (age: {last_age:.2f}s)"
+
+                # B2/B4: Update event marking status and overlay
+                current_event_marking_active = event_marking_config_enabled and is_healthy
+                if current_event_marking_active != event_marking_active:
+                    reason = "enabled by config and stream is healthy" if current_event_marking_active else unhealthy_reason
+                    if not event_marking_config_enabled:
+                        reason = "disabled by user config"
+                    logger.info("Event marking %s: %s", "enabled" if current_event_marking_active else "disabled", reason)
+                    if disabled_text:
+                        disabled_text.set_visible(not current_event_marking_active)
+                event_marking_active = current_event_marking_active
+
                 _write_session_state(
                     session_state_path,
                     {
                         "subject_id": subject_id,
                         "session_id": session_id,
                         "updated_utc": _now_utc_iso(),
-                        "data_stream_active": True,
+                        "data_stream_active": is_healthy,
                         "last_lsl_ts_raw": lsl_ts_raw,
                         "last_lsl_ts_mono": last_lsl_ts_mono,
                         "last_local_ts": local_ts,
@@ -918,6 +1179,7 @@ def _run_recording(args: argparse.Namespace) -> int:
                         "last_sample_age_s": last_age,
                         "termination_reason": termination_reason,
                         "hard_stop_triggered": termination_reason == "backpressure_abort",
+                        "event_marking_allowed": event_marking_active,
                     },
                 )
                 last_state_update = now
@@ -926,7 +1188,7 @@ def _run_recording(args: argparse.Namespace) -> int:
         logger.info("Stopping recording.")
     except Exception as exc:
         run_error = exc
-        logger.error("Recording error: %s", exc)
+        logger.error("Recording error: %s", exc, exc_info=True)
     finally:
         stop_event.set()
         if listener is not None:
@@ -973,6 +1235,9 @@ def _run_recording(args: argparse.Namespace) -> int:
             },
         )
 
+    if writer_exc:
+        logger.error("Writer thread failed, returning exit code 1.")
+        return 1
     if run_error is not None:
         return 1
     return 0
@@ -984,8 +1249,13 @@ def main() -> int:
     parser.add_argument("--subject-id", type=str, default=None)
     parser.add_argument("--session-id", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
-    parser.add_argument("--stream-name", type=str, default=None)
+    parser.add_argument("--stream-name", type=str, default="Muse2-EEG")
     parser.add_argument("--stream-type", type=str, default="EEG")
+
+    parser.add_argument("--stream-ch", dest="stream_ch", type=int, default=4,
+                        help="Optional: expected channel count for the input LSL stream (used for filtering when auto-selecting).")
+    parser.add_argument("--stream-rate", dest="stream_rate", type=float, default=256.0,
+                        help="Optional: expected nominal sampling rate for the input LSL stream (used for filtering when auto-selecting).")
     parser.add_argument("--lsl-source-id", type=str, default=None)
     parser.add_argument("--enable-plot", dest="enable_plot", action="store_true")
     parser.add_argument("--no-plot", dest="enable_plot", action="store_false")
@@ -1000,7 +1270,7 @@ def main() -> int:
     parser.add_argument("--plot-robust-window-sec", type=float, default=PLOT_ROBUST_WINDOW_SEC)
     parser.add_argument("--plot-robust-ema", type=float, default=PLOT_ROBUST_EMA)
     parser.add_argument("--plot-reference-overlay", action="store_true", default=False)
-    parser.add_argument("--plot-window-sec", type=float, default=PLOT_WINDOW_SEC)
+    parser.add_argument("--plot-window-sec", type=float, default=5.0, help="Seconds of EEG to display in the live plot.")
     parser.add_argument(
         "--event-marking-enabled",
         dest="event_marking_enabled",

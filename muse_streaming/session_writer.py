@@ -76,7 +76,11 @@ class RawShardWriter:
                 pieces.append(chunk[:remaining])
                 self._buffer[0] = chunk[remaining:]
                 remaining = 0
+        if not pieces:
+            return
         records = np.concatenate(pieces) if len(pieces) > 1 else pieces[0]
+        if not records.size:
+            return
         self._buffer_count -= int(records.shape[0])
         shard_name = f"eeg_raw_shard_{self._shard_index:03d}.npy"
         final_path = self.raw_dir / shard_name
@@ -163,6 +167,8 @@ class SessionWriter:
         self._paths.meta_path.write_text(json.dumps(meta, indent=2))
 
     def append_packets(self, packets: Iterable[object]) -> None:
+        if packets is None:
+            return
         packets = list(packets)
         if not packets:
             return
