@@ -10,7 +10,6 @@ import csv
 import json
 import logging
 import os
-import sys
 import queue
 import shutil
 import threading
@@ -48,10 +47,6 @@ PLOT_WINDOW_SEC = 5.0
 EVENT_MARKING_ENABLED = True
 DEFAULT_EVENT_KEYMAP = "space:mark,1:thumb,2:index,3:middle,4:ring,5:pinky,o:open,c:close,r:rest"
 
-LSL_RESOLVE_TIMEOUT = 2.0
-LSL_INLET_MAX_BUFLEN_SEC = 2
-LSL_INLET_MAX_CHUNKLEN = 1
-
 RAW_QUEUE_MAXSIZE = 4096
 RAW_SHARD_SAMPLES = 2048
 MAX_BACKPRESSURE_S = 3.0
@@ -83,7 +78,7 @@ last_live_viz_emit = 0.0
 
 stream_requirements = StreamRequirements(
     required_labels=["TP9", "AF7", "AF8", "TP10"],
-    require_exact_channels=False,
+    require_exact_channels=True,
     expected_channels=4,
 )
 
@@ -145,12 +140,8 @@ def _apply_channel_indices(
     sample: Iterable[float], indices: List[int], channel_count: int
 ) -> List[float]:
     values = list(sample)
-    # If the stream publishes more channels than we need, allow it.
-    # We only require that the requested indices are within bounds.
-    if not indices:
-        return [float(v) for v in values]
-    if max(indices) >= len(values):
-        return [float(v) for v in values]
+    if len(values) != int(channel_count) or len(indices) != int(channel_count):
+        return values
     return [float(values[idx]) for idx in indices]
 
 
@@ -669,6 +660,109 @@ def _run_recording(args: argparse.Namespace) -> int:
     if desired_is_auto:
         desired_source_id = env_source_id or None
 
+
+    def _pull_sample_compat(inlet: StreamInlet, timeout_s: float, ch: int):
+        """Pull one sample in a way that works across pylsl variants.
+
+        Returns (sample_list, timestamp_float) or (None, None) on timeout.
+
+        Some pylsl builds return (sample, ts). Others return only ts and mutate
+        a provided buffer. A few builds are picky about keyword args.
+        """
+
+        # 1) Common modern API: (sample, ts) = pull_sample(timeout=...)
+        try:
+            sample, ts = inlet.pull_sample(timeout=timeout_s)
+            if sample is None or ts is None:
+                return None, None
+            return list(sample), float(ts)
+        except Exception:
+            pass
+
+        # 2) Common positional timeout: pull_sample(timeout)
+        try:
+            sample, ts = inlet.pull_sample(timeout_s)
+            if sample is None or ts is None:
+                return None, None
+            return list(sample), float(ts)
+        except Exception:
+            pass
+
+        # 3) Buffer-first style: ts = pull_sample(buffer, timeout)
+        buf = [0.0] * int(max(1, ch))
+        try:
+            ts = inlet.pull_sample(buf, timeout_s)
+            if ts is None:
+                return None, None
+            return list(buf), float(ts)
+        except Exception:
+            pass
+
+        # 4) Numpy buffer (some bindings prefer contiguous arrays)
+        try:
+            import numpy as _np  # local import
+
+            buf_np = _np.zeros(int(max(1, ch)), dtype=_np.float32)
+            ts = inlet.pull_sample(buf_np, timeout_s)
+            if ts is None:
+                return None, None
+            return buf_np.astype(float).tolist(), float(ts)
+        except Exception:
+            return None, None
+
+
+    def _list_candidates():
+        streams = []
+        # Prefer exact source_id when we have it (and it isn't an auto token).
+        if desired_source_id and not desired_is_auto:
+            try:
+                streams = resolve_byprop("source_id", desired_source_id, timeout=LSL_RESOLVE_TIMEOUT)
+            except Exception:
+                streams = []
+            if streams:
+                return streams
+            # If the user requested a specific source_id and we couldn't find it, fail fast
+            # instead of silently falling back to name-based selection (which can pick the wrong stream).
+            avail = []
+            try:
+                avail = resolve_streams(timeout=LSL_RESOLVE_TIMEOUT)
+            except Exception:
+                avail = []
+            msg_lines = [f"Requested LSL source_id not found: {desired_source_id}"]
+            if avail:
+                msg_lines.append("Available streams:")
+                for s in avail:
+                    try:
+                        msg_lines.append(f"  - name={s.name()} type={s.type()} ch={s.channel_count()} rate={s.nominal_srate()} source_id={s.source_id()}")
+                    except Exception:
+                        pass
+            raise RuntimeError("\n".join(msg_lines))
+
+        # Otherwise, resolve by name and filter by type/ch/rate when provided.
+        try:
+            streams = resolve_stream("name", args.stream_name, timeout=LSL_RESOLVE_TIMEOUT)
+        except Exception:
+            streams = []
+        stream_type = getattr(args, "stream_type", None)
+        stream_ch = getattr(args, "stream_ch", None)
+        stream_rate = getattr(args, "stream_rate", None)
+
+        if stream_type:
+            streams = [s for s in streams if (s.type() == stream_type)]
+        if stream_ch:
+            try:
+                target_ch = int(stream_ch)
+                streams = [s for s in streams if (int(s.channel_count()) == target_ch)]
+            except Exception:
+                pass
+        if stream_rate:
+            try:
+                target = float(stream_rate)
+                streams = [s for s in streams if abs(float(s.nominal_srate()) - target) < 1e-3]
+            except Exception:
+                pass
+        return streams
+
     def _score_stream(info_obj) -> float:
         sid = ""
         try:
@@ -680,12 +774,14 @@ def _run_recording(args: argparse.Namespace) -> int:
             score += 1e12
         if desired_source_id and sid == desired_source_id:
             score += 5e11
+
         # Parse trailing epoch-ms if present: muse2-<rand>-<epochms>
         try:
             tail = sid.split("-")[-1]
             score += float(int(tail))
         except Exception:
             pass
+
         try:
             score += 1e4 * float(info_obj.channel_count())
         except Exception:
@@ -695,112 +791,6 @@ def _run_recording(args: argparse.Namespace) -> int:
         except Exception:
             pass
         return score
-
-    def _list_candidates():
-        # Resolve ALL streams, then filter. This is more robust than resolve_byprop/resolve_stream
-        # (which require exact matches and can miss streams during startup or when stale streams exist).
-        all_streams = resolve_streams(wait_time=LSL_RESOLVE_TIMEOUT)
-        def norm(s: str) -> str:
-            return (s or "").strip()
-        want_name = norm(args.stream_name)
-        want_type = norm(args.stream_type)
-        want_source_id = norm(desired_source_id)  # may be '', exact match preferred when user provided it
-        env_sid = norm(env_source_id)
-        def stream_ok(info: StreamInfo) -> bool:
-            # Basic sanity
-            try:
-                ch = int(info.channel_count())
-            except Exception:
-                ch = 0
-            if ch <= 0:
-                return False
-
-            if want_name and norm(info.name()) != want_name:
-                return False
-            if want_type and norm(info.type()) != want_type:
-                return False
-            if stream_requirements.expected_channels and ch < int(stream_requirements.expected_channels):
-                return False
-
-            expected_srate = getattr(stream_requirements, "expected_srate", None)
-            if expected_srate is None:
-                expected_srate = SAMPLING_RATE if SAMPLING_RATE else None
-            if expected_srate:
-                try:
-                    sr = float(info.nominal_srate())
-                except Exception:
-                    return False
-                if sr <= 0:
-                    return False
-                tol = max(0.5, float(expected_srate) * 0.05)
-                if abs(sr - float(expected_srate)) > tol:
-                    return False
-            return True
-        # Candidate pre-filter
-        candidates = [s for s in all_streams if stream_ok(s)]
-        # If user/environment requested a specific source_id and it exists, prefer it.
-        # Otherwise, prefer any stream whose source_id contains "muse2" (case-insensitive),
-        # which matches Muse connector-generated IDs like "muse2-....".
-        muse2_substr = "muse2"
-        def sid(info: StreamInfo) -> str:
-
-            try:
-                return norm(info.source_id())
-            except Exception:
-                return ""
-        # If no candidates by name/type, fall back to "any Muse2 EEG-like stream"
-        if not candidates:
-            loose = []
-            for s in all_streams:
-                try:
-                    if norm(s.type()) != want_type and want_type:
-                        continue
-                    if int(s.channel_count()) < int(stream_requirements.expected_channels or 4):
-                        continue
-                    if muse2_substr not in sid(s).lower():
-                        continue
-                    loose.append(s)
-                except Exception:
-                    continue
-            candidates = loose
-
-        # Emit a helpful debug dump when desired
-        if args.verbose:
-            print("[lsl] resolve_streams found:", len(all_streams))
-            for s in all_streams:
-                try:
-                    print(f"  - name={s.name()} type={s.type()} ch={s.channel_count()} sr={s.nominal_srate()} source_id={sid(s)}")
-                except Exception:
-                    pass
-            print("[lsl] candidates:", len(candidates))
-            for s in candidates[:10]:
-                print(f"  * name={s.name()} type={s.type()} ch={s.channel_count()} sr={s.nominal_srate()} source_id={sid(s)}")
-
-        streams = candidates
-
-        # Optional label check (only enforced when required_labels provided).
-        # When the stream has >4 channels, we still only select the required labels or the first 4.
-        if stream_requirements.required_labels:
-            def get_stream_labels(stream):
-                labels = []
-                try:
-                    ch = stream.desc().child("channels").child("channel")
-                    for _ in range(stream.channel_count()):
-                        labels.append(ch.child_value("label") or "")
-                        ch = ch.next_sibling()
-                except Exception:
-                    labels = []
-                return [lab.strip() for lab in labels if lab is not None]
-
-            labeled = []
-            for s in streams:
-                labels = get_stream_labels(s)
-                if labels and all(lab in labels for lab in stream_requirements.required_labels):
-                    labeled.append(s)
-            if labeled:
-                streams = labeled
-
-        return streams
 
     candidates = _list_candidates()
     if not candidates:
@@ -840,7 +830,8 @@ def _run_recording(args: argparse.Namespace) -> int:
     for s in candidates_sorted:
         try:
             test_inlet = StreamInlet(s, max_buflen=LSL_INLET_MAX_BUFLEN_SEC, max_chunklen=LSL_INLET_MAX_CHUNKLEN)
-            sample, ts = test_inlet.pull_sample(timeout=1.0)
+            ch_count = int(s.channel_count() or 0)
+            sample, ts = _pull_sample_compat(test_inlet, 1.0, ch_count)
             if sample is None or ts is None:
                 errors.append(f"{s.source_id()}: no sample within 1s")
                 continue
@@ -863,10 +854,8 @@ def _run_recording(args: argparse.Namespace) -> int:
         info.nominal_srate(),
         info.source_id(),
     )
-
-
-
-    inlet = StreamInlet(info, max_buflen=2, max_chunklen=32)
+    # Recreate inlet with the configured buffer settings (the test inlet is intentionally tiny).
+    inlet = StreamInlet(info, max_buflen=LSL_MAX_BUFLEN, max_chunklen=LSL_MAX_CHUNKLEN)
     channel_count = int(info.channel_count())
     channel_labels = [f"ch{i + 1}" for i in range(channel_count)]
     nominal_srate = float(info.nominal_srate() or SAMPLING_RATE)
@@ -1161,8 +1150,9 @@ def _run_recording(args: argparse.Namespace) -> int:
             if writer_exc:
                 raise RuntimeError("Writer thread crashed") from writer_exc
 
-            sample, lsl_ts = inlet.pull_sample(timeout=0.1)
-            if sample is None:
+            ch_count = int(info.channel_count() or 0)
+            sample, lsl_ts = _pull_sample_compat(inlet, 0.1, ch_count)
+            if sample is None or lsl_ts is None:
                 continue
             lsl_ts_raw = float(lsl_ts)
             lsl_ts_mono, clamped = clamp_monotonic(lsl_ts_raw, last_lsl_ts_mono)
@@ -1172,14 +1162,6 @@ def _run_recording(args: argparse.Namespace) -> int:
 
             local_ts = time.time()
             sample_arr = np.asarray(sample, dtype=float)
-            # Enforce exactly CHANNELS samples written downstream (1b_extract_windows expects 4 EEG channels).
-            if sample_arr.ndim == 0:
-                sample_arr = np.asarray([float(sample_arr)], dtype=float)
-            if sample_arr.size >= CHANNELS:
-                sample_arr = sample_arr[:CHANNELS]
-            else:
-                # pad missing channels with NaN to keep shape stable
-                sample_arr = np.concatenate([sample_arr, np.full(CHANNELS - sample_arr.size, np.nan, dtype=float)])
             flags = _raw_flags_for_sample(sample_arr)
             packet = SamplePacket(
                 seq=seq,
@@ -1356,7 +1338,6 @@ def main() -> int:
     parser.add_argument("--mode", type=str, default="train_record")
     parser.add_argument("--init-only", action="store_true", default=False)
     parser.add_argument("--force-new-session", action="store_true", default=False)
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose output for debugging.")
 
     args = parser.parse_args()
     defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}

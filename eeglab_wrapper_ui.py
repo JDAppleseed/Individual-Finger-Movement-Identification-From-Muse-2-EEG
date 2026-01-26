@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import subprocess
 import sys
-import os
+if sys.version_info[:2] != (3, 11):
+    raise RuntimeError(f"Wrong Python. Expected 3.11, got {sys.version.split()[0]} at {sys.executable}")
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
+    QDesktopServices,
     QFontMetrics,
     QPainter,
     QPainterPath,
@@ -89,6 +94,8 @@ from app.paths import (
 )
 from app.process_runner import ProcessRunner
 from app.repo_probe import discover_scripts
+from app.ui_config_validation import validate_step_settings
+from muse_streaming.config import DEFAULT_STREAM_NAME, DEFAULT_STREAM_TYPE
 from muse_streaming.healthcheck import run_healthcheck
 from visualization.live_viz import LiveHiddenMagnitudePlot, parse_viz_line
 from visualization.replay_viz import ReplayVisualizer
@@ -124,12 +131,194 @@ class ArgSpec:
     description: str
 
 
+class MuseConnectorController(QObject):
+    log_line = Signal(str)
+    status_changed = Signal(str)
+    device_changed = Signal(str)
+    stream_changed = Signal(str)
+    process_exited = Signal(int)
+    error = Signal(str)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[subprocess.Popen[str]] = None
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._status = "idle"
+        self._device = "-"
+        self._stream = "-"
+        self._alive = True
+        self.destroyed.connect(self._mark_dead)
+
+    def _mark_dead(self, *_args: object) -> None:
+        self._alive = False
+        self._stop_event.set()
+
+    def _safe_emit(self, signal: Signal, *args: object) -> bool:
+        if not self._alive:
+            return False
+        try:
+            signal.emit(*args)
+            return True
+        except RuntimeError:
+            self._alive = False
+            self._stop_event.set()
+            return False
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.poll() is None
+
+    def start(
+        self,
+        args: list[str],
+        cwd: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+    ) -> None:
+        with self._lock:
+            if self.is_running():
+                self.error.emit("Connector already running.")
+                return
+            merged_env = os.environ.copy()
+            merged_env["PYTHONUNBUFFERED"] = "1"
+            if env:
+                merged_env.update(env)
+            self._stop_event.clear()
+            try:
+                self._process = subprocess.Popen(
+                    args,
+                    cwd=cwd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                    env=merged_env,
+                )
+            except Exception as exc:
+                self._process = None
+                self._set_status("error")
+                self._safe_emit(self.error, f"Failed to start connector: {exc}")
+                return
+            self._set_status("scanning")
+            if self._process.stdout is not None:
+                threading.Thread(
+                    target=self._read_stream,
+                    args=(self._process.stdout, ""),
+                    daemon=True,
+                ).start()
+            if self._process.stderr is not None:
+                threading.Thread(
+                    target=self._read_stream,
+                    args=(self._process.stderr, "[stderr] "),
+                    daemon=True,
+                ).start()
+            threading.Thread(target=self._wait_for_exit, daemon=True).start()
+
+    def stop(self) -> None:
+        with self._lock:
+            proc = self._process
+        if proc is None:
+            return
+
+        def _stopper() -> None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2.0)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_stopper, daemon=True).start()
+
+    def _set_status(self, status: str) -> None:
+        if status == self._status:
+            return
+        self._status = status
+        self._safe_emit(self.status_changed, status)
+
+    def _read_stream(self, stream, prefix: str) -> None:
+        try:
+            for line in iter(stream.readline, ""):
+                if self._stop_event.is_set() or not self._alive:
+                    break
+                clean = line.rstrip()
+                if clean:
+                    if not self._safe_emit(self.log_line, prefix + clean):
+                        break
+                    self._parse_status(clean)
+        except Exception as exc:
+            if self._alive:
+                self._safe_emit(self.error, f"Connector stream read failed: {exc}")
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    def _parse_status(self, line: str) -> None:
+        lowered = line.lower()
+        if "scanning for muse 2" in lowered or "ble scan round" in lowered:
+            self._set_status("scanning")
+            return
+        if "selected ble device" in lowered:
+            self._set_status("connected")
+            parts = line.split(":", 1)
+            if len(parts) == 2:
+                self._safe_emit(self.device_changed, parts[1].strip())
+            return
+        if "muse 2 connected" in lowered:
+            self._set_status("connected")
+            return
+        if "lsl outlet started" in lowered or "simulated lsl outlet started" in lowered:
+            self._set_status("streaming")
+            name = self._extract_stream_name(line)
+            if name:
+                self._safe_emit(self.stream_changed, name)
+            return
+        if "no muse device found" in lowered or line.startswith("❌"):
+            self._set_status("error")
+            return
+
+    def _extract_stream_name(self, line: str) -> Optional[str]:
+        if "name=" not in line:
+            return None
+        try:
+            after = line.split("name=", 1)[1]
+            return after.split(",", 1)[0].strip()
+        except Exception:
+            return None
+
+    def _wait_for_exit(self) -> None:
+        proc = self._process
+        if proc is None:
+            return
+        try:
+            code = proc.wait()
+        except Exception:
+            code = -1
+        finally:
+            self._stop_event.set()
+            with self._lock:
+                self._process = None
+            if code != 0:
+                self._set_status("error")
+            else:
+                self._set_status("idle")
+            self._safe_emit(self.process_exited, int(code))
+
+
 TOOLTIPS: Dict[str, str] = {
+    "MODE": "Runtime mode (train_record for lossless capture, live_infer for deployment).",
+    "ALLOW_DROP": "Allow queue eviction in live_infer (never allowed in train_record).",
     "TRAINING_MODE": "Enable training capture mode (no live inference).",
     "DEMO_MODE": "Enable demo/inference mode during streaming.",
     "ENABLE_PLOT": "Show live plots during streaming.",
     "SAVE_TO_DISK": "Write features/events to disk during run.",
     "SAVE_RAW": "Write raw EEG CSV.",
+    "ENABLE_FEATURES": "Write feature CSVs (disabled in train_record).",
+    "ENABLE_INFERENCE": "Enable live inference (live_infer mode only).",
     "ENABLE_ICA": "Enable ICA preprocessing during streaming.",
     "ICA_WARMUP_S": "Seconds of warmup before ICA fitting.",
     "ICA_MIN_SAMPLES": "Minimum samples required for ICA fit.",
@@ -139,6 +328,11 @@ TOOLTIPS: Dict[str, str] = {
     "LOG_ICA_DIAGNOSTICS": "Log ICA diagnostics when skipped.",
     "DATA_STREAM_TIMEOUT_S": "Seconds before stream stall disables event marking.",
     "DATA_STREAM_CHECK_INTERVAL_S": "Stream health check interval in seconds.",
+    "PROCESSING_QUEUE_MAXSIZE": "Max size of processing queue (advanced).",
+    "RAW_QUEUE_MAXSIZE": "Max size of raw queue (advanced).",
+    "MAX_BACKPRESSURE_S": "Seconds of sustained backpressure before abort (train_record).",
+    "QUEUE_PUT_TIMEOUT_S": "Queue put timeout seconds (train_record).",
+    "RAW_SHARD_SAMPLES": "Samples per raw shard file (train_record).",
     "SAMPLING_RATE": "Expected sampling rate (Hz).",
     "CHANNELS": "Number of EEG channels (read-only).",
     "TIMEBASE_VERSION": "Enforced absolute timebase (absolute_v1).",
@@ -150,8 +344,10 @@ TOOLTIPS: Dict[str, str] = {
     "BASE_CONF_THRESH": "Base confidence threshold (0-1).",
     "UNCERTAINTY_WEIGHT": "Uncertainty weighting (0-1).",
     "STABILITY_FRAMES": "Frames required for stable prediction.",
-    "ENABLE_ACTUATION": "Allow actuation output.",
     "MC_DROPOUT_PASSES": "MC dropout passes for uncertainty estimation.",
+    "PLOT_SCALE_MODE": "Plot scaling mode for event marking (fixed or robust auto-scale).",
+    "PLOT_FIXED_UV": "Fixed plot range in microvolts (± value, uV).",
+    "PLOT_REFERENCE_LINES": "Show faint reference lines at ±25/±50/±100 uV in fixed mode.",
     "EVENT_MARKING_ENABLED": "Enable event stamping during streaming.",
     "EVENTS_CSV_PATH": "Events CSV output path.",
     "EVENTS_AUTOSAVE_PATH": "Autosave events CSV path.",
@@ -167,6 +363,21 @@ TOOLTIPS: Dict[str, str] = {
     "STREAMER_STREAM_NAME": "Internal streamer LSL name.",
     "STREAMER_STREAM_TYPE": "Internal streamer LSL type.",
     "LABEL_CHECK_ACKNOWLEDGED": "Operator acknowledged label mismatch.",
+    "model_path": "Model path for live inference.",
+    "scaler_path": "Scaler path for live inference.",
+    "stream_name": "LSL stream name for live inference.",
+    "stream_type": "LSL stream type for live inference.",
+    "hop_sec": "Window hop length in seconds.",
+    "target_fs": "Target sampling rate for live inference.",
+    "allow_drop": "Allow dropping windows in live inference.",
+    "latency_threshold_ms": "Latency p95 threshold (ms).",
+    "latency_policy": "Latency policy when threshold is exceeded.",
+    "log_every": "Live inference log interval (s).",
+    "enable_actuation": "Enable robot hand actuation (explicit opt-in, requires confirmation).",
+    "bluetooth_target": "Bluetooth device name/address for actuation.",
+    "record_raw": "Record raw EEG during live inference.",
+    "raw_dir": "Session root for raw recording.",
+    "session_id": "Session ID for raw recording.",
 }
 
 EEGLAB_STYLE = """
@@ -530,27 +741,36 @@ class MainWindow(QMainWindow):
         self.runner.failed.connect(self._append_log)
         self.active_step: Optional[str] = None
 
-        self.streamer_runner = ProcessRunner(self)
-        self.streamer_runner.line_ready.connect(self._on_streamer_line)
-        self.streamer_runner.started.connect(
-            lambda: self._append_log("[streamer] process started")
-        )
-        self.streamer_runner.finished.connect(self._on_streamer_finished)
-        self.streamer_runner.failed.connect(
-            lambda msg: self._append_log(f"[streamer] {msg}")
+        self.muse_connector = MuseConnectorController(self)
+        self.muse_connector.log_line.connect(self._on_connector_log)
+        self.muse_connector.status_changed.connect(self._on_connector_status)
+        self.muse_connector.device_changed.connect(self._on_connector_device)
+        self.muse_connector.stream_changed.connect(self._on_connector_stream)
+        self.muse_connector.process_exited.connect(self._on_connector_finished)
+        self.muse_connector.error.connect(
+            lambda msg: self._append_log(f"[connector] {msg}")
         )
 
         self.live_stream_ready = False
         self.live_label_acknowledged = False
         self.live_label_details: Dict[str, Any] = {}
-        self.live_stream_name = "Muse2-EEG"
-        self.live_stream_type = "EEG"
+        self.live_stream_name = DEFAULT_STREAM_NAME
+        self.live_stream_type = DEFAULT_STREAM_TYPE
+        self.live_lsl_source_id: Optional[str] = None
         self.hard_stop_locked = False
+        self._legacy_warnings: set[str] = set()
+        self._auto_scan_active = False
+        self._auto_scan_wants_healthcheck = False
+        self._healthcheck_pending = False
+        self._auto_scan_timer = QTimer(self)
+        self._auto_scan_timer.setInterval(1500)
+        self._auto_scan_timer.timeout.connect(self._auto_scan_lsl_streams)
 
         self.live_hidden_plot: Optional[LiveHiddenMagnitudePlot] = None
         self.replay_viz: Optional[ReplayVisualizer] = None
         self.model_views_window: Optional[QDialog] = None
         self._model_views_root: Optional[QWidget] = None
+        self.log_entries: list[str] = []
 
         self._build_ui()
 
@@ -577,31 +797,37 @@ class MainWindow(QMainWindow):
             "QListWidget::item:selected { background: rgb(110,130,170); }"
         )
         for item in [
+            "Pipeline Overview",
+            "1) Record (Lossless)",
+            "2) Events: Mark/Edit (Optional)",
+            "3) Validate Session",
+            "4) Extract Windows",
+            "5) Train Model",
+            "6) Evaluate",
+            "7) Live Infer + Actuate",
+            "Logs & Diagnostics",
             "Project",
             "Subject",
             "Stream Setup",
-            "Step 1: Record + Events",
-            "Events: Mark/Edit",
-            "Step 1b: Windowing",
-            "Step 3: Train",
-            "Step 4: Live Inference",
             "Export",
-            "Logs & Diagnostics",
         ]:
             QListWidgetItem(item, self.workflow_list)
         self.workflow_list.currentRowChanged.connect(self._switch_page)
 
         self.stack = QStackedWidget()
+        self.stack.addWidget(self._wrap_scroll(self._build_pipeline_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_step1_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_event_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_session_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_step1b_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_train_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_evaluate_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_infer_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_logs_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_project_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_subject_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_stream_page(), "CentralWorkspace"))
-        self.stack.addWidget(self._wrap_scroll(self._build_step1_page(), "CentralWorkspace"))
-        self.stack.addWidget(self._wrap_scroll(self._build_event_page(), "CentralWorkspace"))
-        self.stack.addWidget(self._wrap_scroll(self._build_step1b_page(), "CentralWorkspace"))
-        self.stack.addWidget(self._wrap_scroll(self._build_train_page(), "CentralWorkspace"))
-        self.stack.addWidget(self._wrap_scroll(self._build_infer_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_export_page(), "CentralWorkspace"))
-        self.stack.addWidget(self._wrap_scroll(self._build_logs_page(), "CentralWorkspace"))
         self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         splitter.addWidget(self.workflow_list)
@@ -619,6 +845,7 @@ class MainWindow(QMainWindow):
         self.health_timer.timeout.connect(self._refresh_health_indicator)
         self.health_timer.start(1000)
         self._set_live_buttons_state()
+        self._set_connector_stream(self.live_stream_name)
         self.workflow_list.setCurrentRow(0)
 
     def _build_step_arg_specs(self) -> Dict[str, list[ArgSpec]]:
@@ -634,21 +861,57 @@ class MainWindow(QMainWindow):
                 ),
             ],
             "infer": [
-                ArgSpec("subject_id", "--subject-id", "text", "Override subject ID."),
-                ArgSpec("init_only", "--init-only", "bool", "Initialize session then exit."),
+                ArgSpec("model_path", "--model-path", "text", "Model path."),
+                ArgSpec("scaler_path", "--scaler-path", "text", "Scaler path."),
+                ArgSpec("stream_name", "--stream-name", "text", "LSL stream name."),
+                ArgSpec("stream_type", "--stream-type", "text", "LSL stream type."),
+                ArgSpec("window_sec", "--window-sec", "float", "Window length (s)."),
+                ArgSpec("hop_sec", "--hop-sec", "float", "Window hop (s)."),
+                ArgSpec("target_fs", "--target-fs", "float", "Target FS for resampling."),
+                ArgSpec("allow_drop", "--allow-drop", "bool", "Allow dropping windows."),
                 ArgSpec(
-                    "force_new_session",
-                    "--force-new-session",
-                    "bool",
-                    "Force a new session (ignore resume).",
+                    "latency_threshold_ms",
+                    "--latency-threshold-ms",
+                    "float",
+                    "Latency p95 threshold (ms).",
                 ),
+                ArgSpec(
+                    "latency_policy",
+                    "--latency-policy",
+                    "text",
+                    "Latency policy (warn/drop/degrade).",
+                ),
+                ArgSpec("log_every", "--log-every", "float", "Log interval (s)."),
+                ArgSpec(
+                    "enable_actuation",
+                    "--enable-actuation",
+                    "bool",
+                    "Enable robot hand actuation.",
+                ),
+                ArgSpec(
+                    "bluetooth_target",
+                    "--bluetooth-target",
+                    "text",
+                    "Bluetooth target name/address.",
+                ),
+                ArgSpec("record_raw", "--record-raw", "bool", "Record raw EEG."),
+                ArgSpec("raw_dir", "--raw-dir", "text", "Raw session root."),
+                ArgSpec("subject_id", "--subject-id", "text", "Subject ID for raw recording."),
+                ArgSpec("session_id", "--session-id", "text", "Session ID for raw recording."),
             ],
             "step1b": [
+                ArgSpec("session_dir", "--session-dir", "text", "Session directory path."),
                 ArgSpec("features", "--features", "text", "Override features path."),
                 ArgSpec("events", "--events", "text", "Override events path."),
                 ArgSpec("subject_id", "--subject-id", "text", "Subject ID override."),
                 ArgSpec("target_fs", "--target-fs", "float", "Target resample rate."),
                 ArgSpec("allow_gaps", "--allow-gaps", "bool", "Allow gaps in windows."),
+                ArgSpec(
+                    "allow_partial",
+                    "--allow-partial",
+                    "bool",
+                    "Allow partial sessions (skip strict manifest validation).",
+                ),
                 ArgSpec(
                     "ignore_misalignment",
                     "--ignore-misalignment",
@@ -735,39 +998,64 @@ class MainWindow(QMainWindow):
     def _build_menu(self) -> None:
         menu = self.menuBar()
         file_menu = menu.addMenu("File")
-        file_menu.addAction("Project Manager", lambda: self.workflow_list.setCurrentRow(0))
-        file_menu.addAction("Subject Manager", lambda: self.workflow_list.setCurrentRow(1))
+        file_menu.addAction(
+            "Project Manager", lambda: self.workflow_list.setCurrentRow(9)
+        )
+        file_menu.addAction(
+            "Subject Manager", lambda: self.workflow_list.setCurrentRow(10)
+        )
         file_menu.addSeparator()
         file_menu.addAction("Quit", self.close)
 
         edit_menu = menu.addMenu("Edit")
-        edit_menu.addAction("Session Settings", lambda: self.workflow_list.setCurrentRow(2))
+        edit_menu.addAction(
+            "Validate Session", lambda: self.workflow_list.setCurrentRow(3)
+        )
 
         tools_menu = menu.addMenu("Tools")
-        tools_menu.addAction("Stream Setup", lambda: self.workflow_list.setCurrentRow(2))
-        tools_menu.addAction("Event Review", lambda: self.workflow_list.setCurrentRow(4))
-        tools_menu.addAction("Diagnostics", lambda: self.workflow_list.setCurrentRow(9))
+        tools_menu.addAction(
+            "Stream Setup", lambda: self.workflow_list.setCurrentRow(11)
+        )
+        tools_menu.addAction(
+            "Validate Session", lambda: self.workflow_list.setCurrentRow(3)
+        )
+        tools_menu.addAction("Event Review", lambda: self.workflow_list.setCurrentRow(2))
+        tools_menu.addAction("Diagnostics", lambda: self.workflow_list.setCurrentRow(8))
         model_views_action = tools_menu.addAction("Model Views", self._open_model_views_window)
         model_views_action.setShortcut("Ctrl+M")
 
         plot_menu = menu.addMenu("Plot")
-        plot_menu.addAction("Live Plot (Step 1)", lambda: self.workflow_list.setCurrentRow(3))
+        plot_menu.addAction(
+            "Record (Lossless)", lambda: self.workflow_list.setCurrentRow(1)
+        )
 
         study_menu = menu.addMenu("Study")
-        study_menu.addAction("Windowing", lambda: self.workflow_list.setCurrentRow(5))
-        study_menu.addAction("Training", lambda: self.workflow_list.setCurrentRow(6))
+        study_menu.addAction("Windowing", lambda: self.workflow_list.setCurrentRow(4))
+        study_menu.addAction("Training", lambda: self.workflow_list.setCurrentRow(5))
+        study_menu.addAction("Evaluate", lambda: self.workflow_list.setCurrentRow(6))
 
         datasets_menu = menu.addMenu("Datasets")
-        datasets_menu.addAction("Export", lambda: self.workflow_list.setCurrentRow(8))
+        datasets_menu.addAction("Export", lambda: self.workflow_list.setCurrentRow(12))
 
         run_menu = menu.addMenu("Run")
-        run_menu.addAction("Run Step 1", lambda: self._run_step("step1", "step1"))
-        run_menu.addAction("Run Step 1b", lambda: self._run_step("step1b", "step1b"))
-        run_menu.addAction("Run Train", lambda: self._run_step("train", "train"))
-        run_menu.addAction("Run Inference", lambda: self._run_step("infer", "step1"))
+        run_menu.addAction(
+            "Run Record (Lossless)", lambda: self._run_step("step1", "step1")
+        )
+        run_menu.addAction(
+            "Run Extract Windows", lambda: self._run_step("step1b", "step1b")
+        )
+        run_menu.addAction("Run Train Model", lambda: self._run_step("train", "train"))
+        run_menu.addAction("Run Evaluate", self._run_evaluate_all)
+        run_menu.addAction(
+            "Run Live Infer + Actuate", lambda: self._run_step("infer", "live_infer")
+        )
 
         help_menu = menu.addMenu("Help")
-        help_menu.addAction("Logs", lambda: self.workflow_list.setCurrentRow(9))
+        help_menu.addAction("Logs", lambda: self.workflow_list.setCurrentRow(8))
+        help_menu.addAction("Open README.md", lambda: self._open_doc("README.md"))
+        help_menu.addAction(
+            "Open DATA_CONTRACT.md", lambda: self._open_doc("DATA_CONTRACT.md")
+        )
 
     def _build_status_bar(self) -> QWidget:
         bar = QFrame()
@@ -831,6 +1119,18 @@ class MainWindow(QMainWindow):
         container.setObjectName("BottomBar")
         layout = QVBoxLayout(container)
         layout.setContentsMargins(4, 4, 4, 4)
+        filter_row = QHBoxLayout()
+        filter_label = QLabel("Filter")
+        self.log_filter_combo = QComboBox()
+        self.log_filter_combo.addItems(["All", "Warnings", "Errors"])
+        self.log_filter_combo.currentTextChanged.connect(self._refresh_log_display)
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(self._clear_logs)
+        filter_row.addWidget(filter_label)
+        filter_row.addWidget(self.log_filter_combo)
+        filter_row.addStretch(1)
+        filter_row.addWidget(clear_btn)
+        layout.addLayout(filter_row)
         self.hard_stop_banner = QLabel("HARD STOP — Stream Unhealthy")
         self.hard_stop_banner.setStyleSheet(
             "background-color: #b71c1c; color: white; font-weight: 700; padding: 6px;"
@@ -851,19 +1151,41 @@ class MainWindow(QMainWindow):
         stream_layout.addWidget(self.stream_status_dock)
         self.health_indicator = QLabel("Health: unknown")
         stream_layout.addWidget(self.health_indicator)
+        connector_header = QLabel("Muse Connector")
+        self._apply_text_outline_effect(connector_header)
+        stream_layout.addWidget(connector_header)
+        self.connector_status_dock = QLabel("Connector: idle")
+        self.connector_device_dock = QLabel("Muse device: -")
+        self.connector_stream_dock = QLabel("LSL stream: -")
+        self.connector_log_dock = QLabel("Last connector log: -")
+        self.connector_log_dock.setWordWrap(True)
+        for label in (
+            self.connector_status_dock,
+            self.connector_device_dock,
+            self.connector_stream_dock,
+            self.connector_log_dock,
+        ):
+            self._apply_text_outline_effect(label)
+            stream_layout.addWidget(label)
+        self.live_connect_btn = QPushButton("Connect Muse (BLE → LSL)")
+        self.live_connect_btn.clicked.connect(self._connect_muse)
+        self.live_disconnect_btn = QPushButton("Disconnect Muse")
+        self.live_disconnect_btn.clicked.connect(self._disconnect_muse)
+        stream_layout.addWidget(self.live_connect_btn)
+        stream_layout.addWidget(self.live_disconnect_btn)
         quick_actions = QLabel("Quick Actions")
         self._apply_text_outline_effect(quick_actions)
         stream_layout.addWidget(quick_actions)
         self._apply_text_outline_effect(self.stream_status_dock)
         self._apply_text_outline_effect(self.health_indicator)
-        detect_btn = QPushButton("Detect LSL Streams")
+        detect_btn = QPushButton("Scan LSL Streams")
         detect_btn.clicked.connect(self._detect_lsl_streams)
         test_btn = QPushButton("Test Connection")
         test_btn.clicked.connect(self._test_lsl)
         stream_layout.addWidget(detect_btn)
         stream_layout.addWidget(test_btn)
         open_stream_btn = QPushButton("Open Stream Setup")
-        open_stream_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(2))
+        open_stream_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(11))
         stream_layout.addWidget(open_stream_btn)
         stream_layout.addStretch(1)
         stream_dock = QDockWidget("Stream Control", self)
@@ -881,28 +1203,29 @@ class MainWindow(QMainWindow):
         pipeline_header = QLabel("Pipeline Controls")
         self._apply_text_outline_effect(pipeline_header)
         pipeline_layout.addWidget(pipeline_header)
-        run_step1_btn = QPushButton("Run Step 1")
+        run_step1_btn = QPushButton("Run Record (Lossless)")
         run_step1_btn.clicked.connect(lambda: self._run_step("step1", "step1"))
         pipeline_layout.addWidget(run_step1_btn)
-        run_step1b_btn = QPushButton("Run Step 1b")
+        open_events_btn = QPushButton("Open Events: Mark/Edit (Optional)")
+        open_events_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(2))
+        pipeline_layout.addWidget(open_events_btn)
+        validate_btn = QPushButton("Validate Session")
+        validate_btn.clicked.connect(self._run_validate_session)
+        pipeline_layout.addWidget(validate_btn)
+        run_step1b_btn = QPushButton("Run Extract Windows")
         run_step1b_btn.clicked.connect(lambda: self._run_step("step1b", "step1b"))
         pipeline_layout.addWidget(run_step1b_btn)
-        run_train_btn = QPushButton("Run Train")
+        run_train_btn = QPushButton("Run Train Model")
         run_train_btn.clicked.connect(lambda: self._run_step("train", "train"))
         pipeline_layout.addWidget(run_train_btn)
-        run_infer_btn = QPushButton("Run Inference")
-        run_infer_btn.clicked.connect(lambda: self._run_step("infer", "step1"))
+        run_eval_btn = QPushButton("Run Evaluate")
+        run_eval_btn.clicked.connect(self._run_evaluate_all)
+        pipeline_layout.addWidget(run_eval_btn)
+        run_infer_btn = QPushButton("Run Live Infer + Actuate")
+        run_infer_btn.clicked.connect(lambda: self._run_step("infer", "live_infer"))
         pipeline_layout.addWidget(run_infer_btn)
-        self.live_connect_btn = QPushButton("Connect Muse 2")
-        self.live_connect_btn.clicked.connect(self._connect_muse)
-        pipeline_layout.addWidget(self.live_connect_btn)
-        self.live_start_btn = QPushButton("Start Recording")
-        self.live_start_btn.clicked.connect(self._start_live_recording)
-        self.live_start_btn.setEnabled(False)
-        pipeline_layout.addWidget(self.live_start_btn)
-        self.live_stop_btn = QPushButton("Stop Live (Hard Stop)")
-        self.live_stop_btn.clicked.connect(self._stop_live_hard)
-        pipeline_layout.addWidget(self.live_stop_btn)
+        self.dry_run_checkbox = QCheckBox("Dry run (print CLI only)")
+        pipeline_layout.addWidget(self.dry_run_checkbox)
         stop_btn = QPushButton("Stop Active Run")
         stop_btn.clicked.connect(self._stop_process)
         pipeline_layout.addWidget(stop_btn)
@@ -932,7 +1255,7 @@ class MainWindow(QMainWindow):
         event_validate_btn.clicked.connect(self._run_event_validate)
         event_layout.addWidget(event_validate_btn)
         open_event_btn = QPushButton("Open Event Tools")
-        open_event_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(4))
+        open_event_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(2))
         event_layout.addWidget(open_event_btn)
         event_layout.addStretch(1)
         event_dock = QDockWidget("Events", self)
@@ -953,12 +1276,6 @@ class MainWindow(QMainWindow):
         self.ica_toggle_dock = QCheckBox("Enable ICA")
         self._bind_checkbox(self.ica_toggle_dock, "step1", "ENABLE_ICA")
         model_layout.addWidget(self.ica_toggle_dock)
-        self.demo_toggle_dock = QCheckBox("Demo mode")
-        self._bind_checkbox(self.demo_toggle_dock, "step1", "DEMO_MODE")
-        model_layout.addWidget(self.demo_toggle_dock)
-        self.training_toggle_dock = QCheckBox("Training mode")
-        self._bind_checkbox(self.training_toggle_dock, "step1", "TRAINING_MODE")
-        model_layout.addWidget(self.training_toggle_dock)
         self.plot_toggle_dock = QCheckBox("Enable plot")
         self._bind_checkbox(self.plot_toggle_dock, "step1", "ENABLE_PLOT")
         model_layout.addWidget(self.plot_toggle_dock)
@@ -998,10 +1315,10 @@ class MainWindow(QMainWindow):
         session_layout.addWidget(self.subject_label_dock)
         session_layout.addWidget(self.session_label_dock)
         project_btn = QPushButton("Project Page")
-        project_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(0))
+        project_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(9))
         session_layout.addWidget(project_btn)
         subject_btn = QPushButton("Subject Page")
-        subject_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(1))
+        subject_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(10))
         session_layout.addWidget(subject_btn)
         session_layout.addStretch(1)
         session_dock = QDockWidget("Session", self)
@@ -1211,6 +1528,42 @@ class MainWindow(QMainWindow):
         if hasattr(self, "stream_status_dock") and self.stream_status_dock is not None:
             self.stream_status_dock.setText(text)
 
+    def _set_connector_status(self, status: str) -> None:
+        text = f"Connector: {status}"
+        for label in (
+            getattr(self, "connector_status_dock", None),
+            getattr(self, "connector_status_page", None),
+        ):
+            if isinstance(label, QLabel):
+                label.setText(text)
+
+    def _set_connector_device(self, device: str) -> None:
+        text = f"Muse device: {device}"
+        for label in (
+            getattr(self, "connector_device_dock", None),
+            getattr(self, "connector_device_page", None),
+        ):
+            if isinstance(label, QLabel):
+                label.setText(text)
+
+    def _set_connector_stream(self, stream_name: str) -> None:
+        text = f"LSL stream: {stream_name}"
+        for label in (
+            getattr(self, "connector_stream_dock", None),
+            getattr(self, "connector_stream_page", None),
+        ):
+            if isinstance(label, QLabel):
+                label.setText(text)
+
+    def _set_connector_log(self, line: str) -> None:
+        text = f"Last connector log: {line}"
+        for label in (
+            getattr(self, "connector_log_dock", None),
+            getattr(self, "connector_log_page", None),
+        ):
+            if isinstance(label, QLabel):
+                label.setText(text)
+
     def _set_project_label(self, text: str) -> None:
         self.project_label.setText(text)
         if hasattr(self, "project_label_dock") and self.project_label_dock is not None:
@@ -1336,103 +1689,265 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
 
-        # Top status line (short, human-friendly)
         self.stream_status = QLabel("")
-        self.stream_status.setWordWrap(True)
-
-        # Configuration / prerequisites
+        connector_box = QGroupBox("Muse Connector (BLE → LSL)")
+        connector_layout = QFormLayout(connector_box)
+        self.stream_name_input = OutlineLineEdit()
+        self.stream_name_input.setPlaceholderText("Auto (Muse2-EEG-<subject>)")
+        self.stream_name_input.textChanged.connect(self._on_stream_name_input)
+        self.live_connect_btn_page = QPushButton("Connect Muse (BLE → LSL)")
+        self.live_connect_btn_page.clicked.connect(self._connect_muse)
+        self.live_disconnect_btn_page = QPushButton("Disconnect Muse")
+        self.live_disconnect_btn_page.clicked.connect(self._disconnect_muse)
+        connector_buttons = QHBoxLayout()
+        connector_buttons.addWidget(self.live_connect_btn_page)
+        connector_buttons.addWidget(self.live_disconnect_btn_page)
+        connector_buttons_widget = QWidget()
+        connector_buttons_widget.setLayout(connector_buttons)
+        self.connector_status_page = QLabel("Connector: idle")
+        self.connector_device_page = QLabel("Muse device: -")
+        self.connector_stream_page = QLabel("LSL stream: -")
+        self.connector_log_page = QLabel("Last connector log: -")
+        self.connector_log_page.setWordWrap(True)
+        connector_layout.addRow("Stream name", self.stream_name_input)
+        connector_layout.addRow("Controls", connector_buttons_widget)
+        connector_layout.addRow(self.connector_status_page)
+        connector_layout.addRow(self.connector_device_page)
+        connector_layout.addRow(self.connector_stream_page)
+        connector_layout.addRow(self.connector_log_page)
+        layout.addWidget(connector_box)
         form = QFormLayout()
+
         self.input_source = QComboBox()
-        self.input_source.addItems(["Muse 2 (BLE → LSL)"])
-        form.addRow(QLabel("EEG Input Source:"), self.input_source)
+        self.input_source.addItems(["Muse 2 (LSL)", "Any LSL Stream", "CSV Offline"])
+        self.input_source.currentTextChanged.connect(self._update_stream_controls)
 
-        self.stream_name = QLineEdit("Muse2-EEG")
-        form.addRow(QLabel("LSL Stream Name:"), self.stream_name)
+        self.lsl_combo = QComboBox()
+        self.lsl_combo.currentTextChanged.connect(self._on_lsl_stream_changed)
+        self.detect_btn = QPushButton("Scan LSL Streams")
+        self.detect_btn.clicked.connect(self._detect_lsl_streams)
 
-        self.sample_rate = QSpinBox()
-        self.sample_rate.setRange(1, 2048)
-        self.sample_rate.setValue(256)
-        form.addRow(QLabel("Sample Rate (Hz):"), self.sample_rate)
-
-        self.channel_labels = QLineEdit("TP9,AF7,AF8,TP10")
-        form.addRow(QLabel("Channel Labels (comma-separated):"), self.channel_labels)
-
-        self.device_hint = QLineEdit("Muse")
-        self.device_hint.setPlaceholderText("Optional: partial BLE name, e.g. Muse-2FD3 (leave as 'Muse' for auto)")
-        form.addRow(QLabel("BLE Device Hint:"), self.device_hint)
-
-        # Controls (ordered as they should be pressed)
-        btn_row = QHBoxLayout()
-        self.connect_btn = QPushButton("1) Connect Muse + Start LSL")
-        self.connect_btn.clicked.connect(self._connect_muse)
-        btn_row.addWidget(self.connect_btn)
-
-        self.stream_health_btn = QPushButton("2) Stream Health")
-        self.stream_health_btn.clicked.connect(self._run_stream_health)
-        self.stream_health_btn.setEnabled(False)
-        btn_row.addWidget(self.stream_health_btn)
-
-        self.stop_stream_btn = QPushButton("Stop Streamer")
-        self.stop_stream_btn.clicked.connect(self._stop_streamer)
-        self.stop_stream_btn.setEnabled(False)
-        btn_row.addWidget(self.stop_stream_btn)
-
-        # Readouts (kept off the log console)
-        readouts = QFormLayout()
-        self.readout_ble = QLabel("—")
-        self.readout_lsl = QLabel("—")
-        self.readout_batt = QLabel("—")
-        self.readout_rssi = QLabel("—")
-        self.readout_packets = QLabel("—")
-        self.readout_timebase = QLabel("—")
-        self.readout_partial = QLabel("—")
-
-        readouts.addRow(QLabel("BLE Status:"), self.readout_ble)
-        readouts.addRow(QLabel("LSL Status:"), self.readout_lsl)
-        readouts.addRow(QLabel("Battery:"), self.readout_batt)
-        readouts.addRow(QLabel("RSSI:"), self.readout_rssi)
-        readouts.addRow(QLabel("Packets / Chunks:"), self.readout_packets)
-        readouts.addRow(QLabel("Timebase Err:"), self.readout_timebase)
-        readouts.addRow(QLabel("Partial Packets:"), self.readout_partial)
-
-        # Options
-        opt_row = QHBoxLayout()
-        self.verbose_streamer_logs = QCheckBox("Show verbose streamer logs")
-        self.verbose_streamer_logs.setChecked(False)
-        opt_row.addWidget(self.verbose_streamer_logs)
-        opt_row.addStretch(1)
-
-        checklist = QLabel(
-            "Prereqs: Muse 2 powered on • Bluetooth enabled • Good electrode contact • Mind Monitor not connected to Muse."
+        self.csv_path = OutlineLineEdit()
+        csv_btn = QPushButton("Browse")
+        csv_btn.clicked.connect(
+            lambda: self._browse_path(
+                self.csv_path, "CSV (*.csv)", "Select CSV", mode="open"
+            )
         )
-        checklist.setWordWrap(True)
+        csv_row = QHBoxLayout()
+        csv_row.addWidget(self.csv_path)
+        csv_row.addWidget(csv_btn)
+        csv_widget = QWidget()
+        csv_widget.setLayout(csv_row)
 
-        layout.addWidget(QLabel("<b>Stream Setup</b>"))
+        self.sample_rate_display = QLabel("-")
+        self.test_btn = QPushButton("Test Connection")
+        self.test_btn.clicked.connect(self._test_lsl)
+
+        form.addRow("Input Source", self.input_source)
+        form.addRow("LSL Stream", self.lsl_combo)
+        form.addRow("CSV Offline", csv_widget)
+        form.addRow("Sampling Rate", self.sample_rate_display)
         layout.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.detect_btn)
+        btn_row.addWidget(self.test_btn)
         layout.addLayout(btn_row)
-        layout.addLayout(readouts)
-        layout.addLayout(opt_row)
-        layout.addWidget(checklist)
         layout.addWidget(self.stream_status)
+
+        if not LSL_AVAILABLE:
+            self.lsl_combo.hide()
+            self.detect_btn.hide()
+            self.test_btn.hide()
+            self.input_source.clear()
+            self.input_source.addItems(["CSV Offline"])
+            self.input_source.setCurrentIndex(0)
+            self.csv_path.setEnabled(True)
+            self.live_connect_btn_page.setEnabled(False)
+            self.live_disconnect_btn_page.setEnabled(False)
+            self._set_stream_status(
+                "pylsl not installed; LSL controls hidden (CSV offline only)."
+            )
+        else:
+            self._update_stream_controls()
+
         layout.addStretch(1)
         return page
+
+    def _build_pipeline_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        header = QLabel("Pipeline Overview")
+        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        layout.addWidget(header)
+        intro = QLabel(
+            "Use the navigation on the left to walk through the lossless pipeline. "
+            "Record (lossless) captures raw shards + events only (no inference). "
+            "Window extraction and training are offline, and live inference is a separate script."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        for label, row in [
+            ("1) Record (Lossless)", 1),
+            ("2) Events: Mark/Edit (Optional)", 2),
+            ("3) Validate Session", 3),
+            ("4) Extract Windows", 4),
+            ("5) Train Model", 5),
+            ("6) Evaluate", 6),
+            ("7) Live Infer + Actuate", 7),
+        ]:
+            box = QGroupBox(label)
+            box_layout = QVBoxLayout(box)
+            go_btn = QPushButton(f"Open {label}")
+            go_btn.clicked.connect(lambda _=None, r=row: self.workflow_list.setCurrentRow(r))
+            box_layout.addWidget(go_btn)
+            layout.addWidget(box)
+
+        layout.addStretch(1)
+        return page
+
+    def _build_session_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        header = QLabel("Step 3: Validate Session")
+        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        layout.addWidget(header)
+
+        form = QFormLayout()
+        self.session_root_input = OutlineLineEdit()
+        root_btn = QPushButton("Browse")
+        root_btn.clicked.connect(
+            lambda: self._browse_dir(self.session_root_input, "Select Session Root")
+        )
+        root_row = QHBoxLayout()
+        root_row.setContentsMargins(0, 0, 0, 0)
+        root_row.addWidget(self.session_root_input)
+        root_row.addWidget(root_btn)
+        root_widget = QWidget()
+        root_widget.setLayout(root_row)
+        form.addRow("Session Root", root_widget)
+
+        self.session_dir_input = OutlineLineEdit()
+        session_btn = QPushButton("Browse")
+        session_btn.clicked.connect(
+            lambda: self._browse_dir(self.session_dir_input, "Select Session Directory")
+        )
+        session_row = QHBoxLayout()
+        session_row.setContentsMargins(0, 0, 0, 0)
+        session_row.addWidget(self.session_dir_input)
+        session_row.addWidget(session_btn)
+        session_widget = QWidget()
+        session_widget.setLayout(session_row)
+        form.addRow("Session Dir", session_widget)
+        layout.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        new_btn = QPushButton("Create New Session")
+        new_btn.clicked.connect(self._create_new_session)
+        load_btn = QPushButton("Load Session")
+        load_btn.clicked.connect(self._load_session_summary)
+        validate_btn = QPushButton("Validate Session")
+        validate_btn.clicked.connect(self._run_validate_session)
+        self.allow_partial_checkbox = QCheckBox("Allow partial validation")
+        btn_row.addWidget(new_btn)
+        btn_row.addWidget(load_btn)
+        btn_row.addWidget(validate_btn)
+        btn_row.addWidget(self.allow_partial_checkbox)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        summary = QGroupBox("Session Summary")
+        summary_layout = QFormLayout(summary)
+        self.session_summary_labels = {
+            "session_id": QLabel("-"),
+            "created_at": QLabel("-"),
+            "mode": QLabel("-"),
+            "termination_reason": QLabel("-"),
+            "seq_range": QLabel("-"),
+            "missing_seq": QLabel("-"),
+            "shards": QLabel("-"),
+            "total_samples": QLabel("-"),
+            "timebase_ranges": QLabel("-"),
+            "events": QLabel("-"),
+        }
+        summary_layout.addRow("Session ID", self.session_summary_labels["session_id"])
+        summary_layout.addRow("Created at", self.session_summary_labels["created_at"])
+        summary_layout.addRow("Mode", self.session_summary_labels["mode"])
+        summary_layout.addRow(
+            "Termination", self.session_summary_labels["termination_reason"]
+        )
+        summary_layout.addRow("Seq range", self.session_summary_labels["seq_range"])
+        summary_layout.addRow("Missing seq", self.session_summary_labels["missing_seq"])
+        summary_layout.addRow("Shards", self.session_summary_labels["shards"])
+        summary_layout.addRow("Total samples", self.session_summary_labels["total_samples"])
+        summary_layout.addRow(
+            "Timebase ranges", self.session_summary_labels["timebase_ranges"]
+        )
+        summary_layout.addRow("Event count", self.session_summary_labels["events"])
+        layout.addWidget(summary)
+
+        layout.addStretch(1)
+        return page
+
+    def _build_evaluate_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        header = QLabel("Step 6: Evaluate")
+        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        layout.addWidget(header)
+        note = QLabel(
+            "Run evaluation scripts (3b/3c/4) on trained models and extracted windows."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        btn_row = QHBoxLayout()
+        deepchecks_btn = QPushButton("Run 3b Deepchecks")
+        deepchecks_btn.clicked.connect(
+            lambda: self._run_eval_script("evaluate_deepchecks")
+        )
+        figures_btn = QPushButton("Run 3c Paper Figures")
+        figures_btn.clicked.connect(lambda: self._run_eval_script("evaluate_figures"))
+        reports_btn = QPushButton("Run 4 Generate Reports")
+        reports_btn.clicked.connect(lambda: self._run_eval_script("evaluate_reports"))
+        btn_row.addWidget(deepchecks_btn)
+        btn_row.addWidget(figures_btn)
+        btn_row.addWidget(reports_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+        layout.addStretch(1)
+        return page
+
     def _build_step1_page(self) -> QWidget:
+        lossless_banner = QLabel(
+            "LOSSLESS RECORD — raw EEG + events only. No inference. No drops allowed."
+        )
+        lossless_banner.setStyleSheet(
+            "background: #263238; color: #fff; padding: 6px; font-weight: 700;"
+        )
         return self._build_step_page(
             step_id="step1",
-            title="Step 1: Record + Events",
+            title="Step 1: Record (Lossless)",
             defaults=default_step1_settings(),
             script_key="step1",
             include_event_tools=True,
+            custom_controls=lossless_banner,
         )
 
     def _build_event_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
 
+        header = QLabel("Step 2: Events: Mark/Edit (Optional)")
+        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        layout.addWidget(header)
         info = QLabel("Post-hoc event review/edit tools for the current session.")
         layout.addWidget(info)
         note = QLabel(
-            "Live graph + event labeling run inside Step 1 (1_stream_and_record.py). "
+            "Live graph + event labeling run inside Step 1: Record (Lossless) "
+            "(1_stream_and_record.py). "
             "This page is for review/repair after capture."
         )
         note.setWordWrap(True)
@@ -1487,12 +2002,18 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_step1b_page(self) -> QWidget:
+        note = QLabel(
+            "Extract windows from a lossless session directory (raw/ + events.jsonl). "
+            "Use the Session Dir field or select a session in Validate Session."
+        )
+        note.setWordWrap(True)
         return self._build_step_page(
             step_id="step1b",
-            title="Step 1b: Windowing",
+            title="Step 4: Extract Windows",
             defaults=default_step1b_settings(),
             script_key="step1b",
             include_event_tools=False,
+            custom_controls=note,
         )
 
     def _build_preprocess_page(self) -> QWidget:
@@ -1509,55 +2030,37 @@ class MainWindow(QMainWindow):
     def _build_train_page(self) -> QWidget:
         return self._build_step_page(
             step_id="train",
-            title="Step 3: Train",
+            title="Step 5: Train Model",
             defaults=default_train_settings(),
             script_key="train",
             include_event_tools=False,
         )
 
     def _build_infer_page(self) -> QWidget:
-        live_controls = self._build_live_controls()
+        live_controls = self._build_live_infer_controls()
         return self._build_step_page(
             step_id="infer",
-            title="Step 4: Live Inference",
+            title="Step 7: Live Infer + Actuate",
             defaults=default_infer_settings(),
-            script_key="step1",
+            script_key="live_infer",
             include_event_tools=False,
-            include_run_controls=False,
+            include_run_controls=True,
             custom_controls=live_controls,
         )
 
-    def _build_live_controls(self) -> QWidget:
-        g = QGroupBox("Live Controls")
-        f = QFormLayout(g)
-
+    def _build_live_infer_controls(self) -> QWidget:
+        box = QGroupBox("Live Inference Notes")
+        layout = QVBoxLayout(box)
         note = QLabel(
-            "Step order: (1) Connect Muse + start LSL on the Stream Setup page, "
-            "(2) run Stream Health, (3) start recording here."
+            "Live inference runs in 7_live_infer_and_actuate.py. "
+            "Set model/scaler paths, stream name/type, and windowing parameters. "
+            "Allow-drop is OFF by default; enable only if you accept latency-driven drops. "
+            "Actuation is opt-in and requires confirmation before running."
         )
         note.setWordWrap(True)
-        f.addRow(note)
+        layout.addWidget(note)
+        return box
 
-        goto_btn = QPushButton("Open Stream Setup")
-        goto_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(2))
-        f.addRow(goto_btn)
-
-        self.live_start_btn = QPushButton("3) Start Recording")
-        self.live_start_btn.clicked.connect(self._start_live)
-        self.live_start_btn.setEnabled(False)
-
-        self.live_stop_btn = QPushButton("Stop Recording")
-        self.live_stop_btn.clicked.connect(self._stop_live)
-        self.live_stop_btn.setEnabled(False)
-
-        row = QHBoxLayout()
-        row.addWidget(self.live_start_btn)
-        row.addWidget(self.live_stop_btn)
-        f.addRow(row)
-
-        self.live_state = QLabel("Idle")
-        f.addRow(QLabel("Recorder Status:"), self.live_state)
-        return g
     def _build_export_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1619,6 +2122,20 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return page
 
+    def _step_description(self, step_id: str) -> str:
+        descriptions = {
+            "step1": (
+                "Raw lossless session capture (raw shards + events). No inference."
+            ),
+            "step1b": (
+                "Offline window extraction from a session directory; validates manifest "
+                "continuity by default."
+            ),
+            "train": "Offline model training from extracted windows.",
+            "infer": "Live inference with optional actuation (opt-in) and latency guardrails.",
+        }
+        return descriptions.get(step_id, "")
+
     def _build_step_page(
         self,
         step_id: str,
@@ -1637,6 +2154,11 @@ class MainWindow(QMainWindow):
         header = QLabel(title)
         header.setStyleSheet("font-weight: 600; font-size: 16px;")
         layout.addWidget(header)
+        description = self._step_description(step_id)
+        if description:
+            desc_label = QLabel(description)
+            desc_label.setWordWrap(True)
+            layout.addWidget(desc_label)
 
         status_row = QHBoxLayout()
         status_label = QLabel("Status: Idle")
@@ -1673,6 +2195,18 @@ class MainWindow(QMainWindow):
         self._populate_basic_fields(step_id, form)
         layout.addLayout(form)
 
+        if step_id == "infer":
+            warning = QLabel(
+                "⚠️ Actuation enabled. Confirm the hand is safe and clear before running."
+            )
+            warning.setStyleSheet("color: #f5d76e; font-weight: 700;")
+            warning.setVisible(False)
+            enable_widget = self.fields.get(step_id, {}).get("enable_actuation")
+            if isinstance(enable_widget, QCheckBox):
+                warning.setVisible(enable_widget.isChecked())
+                enable_widget.toggled.connect(warning.setVisible)
+            layout.addWidget(warning)
+
         advanced_group = QGroupBox("Advanced")
         advanced_group.setCheckable(True)
         advanced_group.setChecked(False)
@@ -1697,6 +2231,9 @@ class MainWindow(QMainWindow):
         dropdown_row.addStretch(1)
         layout.addLayout(dropdown_row)
 
+        if custom_controls is not None:
+            layout.addWidget(custom_controls)
+
         if include_run_controls:
             buttons = QHBoxLayout()
             run_btn = QPushButton("Run")
@@ -1713,8 +2250,6 @@ class MainWindow(QMainWindow):
             if script_key not in self.scripts:
                 run_btn.setEnabled(False)
                 status_label.setText("Status: Missing script")
-        elif custom_controls is not None:
-            layout.addWidget(custom_controls)
 
         self._build_checklist(step_id, layout)
 
@@ -1903,24 +2438,52 @@ class MainWindow(QMainWindow):
 
     def _populate_basic_fields(self, step_id: str, form: QFormLayout) -> None:
         defaults = self.defaults[step_id]
-        if step_id in {"step1", "infer"}:
-            self._add_checkbox(
-                step_id, form, "TRAINING_MODE", "Training mode", defaults
-            )
-            self._add_checkbox(step_id, form, "DEMO_MODE", "Demo mode", defaults)
+        if step_id == "step1":
+            self._add_text(step_id, form, "MODE", "Mode", defaults, read_only=True)
             self._add_checkbox(step_id, form, "ENABLE_PLOT", "Enable plot", defaults)
-            self._add_checkbox(step_id, form, "SAVE_TO_DISK", "Save to disk", defaults)
+            self._add_choice_dropdown(
+                step_id,
+                form,
+                "PLOT_SCALE_MODE",
+                "Plot scale mode",
+                defaults,
+                ["fixed", "robust_auto"],
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "PLOT_FIXED_UV",
+                "Fixed plot range (±uV)",
+                defaults,
+                10,
+                5000,
+                is_float=True,
+            )
+            self._add_checkbox(
+                step_id,
+                form,
+                "PLOT_REFERENCE_LINES",
+                "Reference overlay (±25/50/100 uV)",
+                defaults,
+            )
             self._add_checkbox(step_id, form, "SAVE_RAW", "Save raw", defaults)
+            save_raw_widget = self.fields[step_id].get("SAVE_RAW")
+            if isinstance(save_raw_widget, QCheckBox):
+                save_raw_widget.setEnabled(False)
+            self._add_checkbox(
+                step_id, form, "EVENT_MARKING_ENABLED", "Event marking", defaults
+            )
             self._add_spin(
                 step_id, form, "SAMPLING_RATE", "Sampling rate", defaults, 1, 4096
             )
             self._add_spin(
                 step_id, form, "CHANNELS", "Channels", defaults, 1, 64, read_only=True
             )
+        elif step_id == "infer":
             self._add_file_picker(
                 step_id,
                 form,
-                "MODEL_PATH",
+                "model_path",
                 "Model path",
                 defaults,
                 "Model (*.pt *.pth);;All Files (*)",
@@ -1928,14 +2491,53 @@ class MainWindow(QMainWindow):
             self._add_file_picker(
                 step_id,
                 form,
-                "SCALER_PATH",
+                "scaler_path",
                 "Scaler path",
                 defaults,
                 "Scaler (*.save *.pkl);;All Files (*)",
             )
-            self._add_checkbox(
-                step_id, form, "EVENT_MARKING_ENABLED", "Event marking", defaults
+            self._add_text(step_id, form, "stream_name", "Stream name", defaults)
+            self._add_text(step_id, form, "stream_type", "Stream type", defaults)
+            self._add_spin(
+                step_id,
+                form,
+                "window_sec",
+                "Window sec",
+                defaults,
+                0,
+                10,
+                is_float=True,
             )
+            self._add_spin(
+                step_id,
+                form,
+                "hop_sec",
+                "Hop sec",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "target_fs",
+                "Target FS",
+                defaults,
+                1,
+                4096,
+                is_float=True,
+            )
+            self._add_checkbox(step_id, form, "allow_drop", "Allow drop", defaults)
+            self._add_checkbox(
+                step_id,
+                form,
+                "enable_actuation",
+                "Enable Robot Hand Actuation (DANGEROUS)",
+                defaults,
+            )
+            self._add_checkbox(step_id, form, "record_raw", "Record raw", defaults)
+            self._add_text(step_id, form, "raw_dir", "Raw dir", defaults)
         elif step_id == "step1b":
             self._add_spin(
                 step_id,
@@ -1947,6 +2549,7 @@ class MainWindow(QMainWindow):
                 10,
                 is_float=True,
             )
+            self._add_text(step_id, form, "session_dir", "Session dir", defaults)
             self._add_file_picker(
                 step_id,
                 form,
@@ -1975,6 +2578,9 @@ class MainWindow(QMainWindow):
                 is_float=True,
             )
             self._add_checkbox(step_id, form, "allow_gaps", "Allow gaps", defaults)
+            self._add_checkbox(
+                step_id, form, "allow_partial", "Allow partial sessions", defaults
+            )
             self._add_checkbox(
                 step_id, form, "ignore_misalignment", "Ignore misalignment", defaults
             )
@@ -2039,12 +2645,59 @@ class MainWindow(QMainWindow):
 
     def _populate_advanced_fields(self, step_id: str, form: QFormLayout) -> None:
         defaults = self.defaults[step_id]
-        if step_id in {"step1", "infer"}:
+        if step_id == "step1":
             self._add_spin(
                 step_id,
                 form,
                 "WINDOW_SEC",
                 "Window sec",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "RAW_SHARD_SAMPLES",
+                "Raw shard samples",
+                defaults,
+                256,
+                16384,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "PROCESSING_QUEUE_MAXSIZE",
+                "Processing queue max",
+                defaults,
+                128,
+                100000,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "RAW_QUEUE_MAXSIZE",
+                "Raw queue max",
+                defaults,
+                128,
+                100000,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "MAX_BACKPRESSURE_S",
+                "Backpressure abort (s)",
+                defaults,
+                0,
+                60,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "QUEUE_PUT_TIMEOUT_S",
+                "Queue put timeout (s)",
                 defaults,
                 0,
                 10,
@@ -2082,9 +2735,6 @@ class MainWindow(QMainWindow):
                 "Stability frames",
                 defaults,
                 [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20],
-            )
-            self._add_checkbox(
-                step_id, form, "ENABLE_ACTUATION", "Enable actuation", defaults
             )
             self._add_checkbox(step_id, form, "ENABLE_ICA", "Enable ICA", defaults)
             self._add_spin(
@@ -2256,6 +2906,33 @@ class MainWindow(QMainWindow):
                 defaults,
                 read_only=True,
             )
+        elif step_id == "infer":
+            self._add_spin(
+                step_id,
+                form,
+                "latency_threshold_ms",
+                "Latency threshold (ms)",
+                defaults,
+                0,
+                5000,
+                is_float=True,
+            )
+            self._add_text(step_id, form, "latency_policy", "Latency policy", defaults)
+            self._add_spin(
+                step_id,
+                form,
+                "log_every",
+                "Log every (s)",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
+            self._add_text(
+                step_id, form, "bluetooth_target", "Bluetooth target", defaults
+            )
+            self._add_text(step_id, form, "subject_id", "Subject ID", defaults)
+            self._add_text(step_id, form, "session_id", "Session ID", defaults)
         elif step_id == "step1b":
             self._add_spin(
                 step_id,
@@ -2393,6 +3070,7 @@ class MainWindow(QMainWindow):
             "PROJECT_ROOT",
             "SESSION_STATE_DIR",
             "config",
+            "ENABLE_ACTUATION",
         }
         existing = self.fields.get(step_id, {})
         for name, value in sorted(info.constants.items()):
@@ -2725,6 +3403,7 @@ class MainWindow(QMainWindow):
             ensure_subject_dirs(subject_dir)
             self._ensure_default_configs(subject_dir)
         self._auto_fill_paths()
+        self._seed_stream_name_input()
 
     def _edit_subject(self) -> None:
         if not self.current_project:
@@ -2905,19 +3584,119 @@ class MainWindow(QMainWindow):
             return
         streams = pylsl.resolve_streams() if pylsl else []
         items = []
+        previous = self._selected_stream_name()
         for stream in streams:
             try:
                 items.append(StreamInfo(name=stream.name(), stype=stream.type()))
             except Exception:
                 continue
         self.lsl_combo.clear()
+        self.lsl_combo.addItem("-")
         if not items:
-            self.lsl_combo.addItem("-")
             self._set_stream_status("No LSL streams detected.")
             return
         for info in items:
             self.lsl_combo.addItem(f"{info.name} ({info.stype})")
+        if previous:
+            idx = self._find_stream_index(previous)
+            if idx is not None:
+                self.lsl_combo.setCurrentIndex(idx)
         self._set_stream_status(f"Detected {len(items)} LSL stream(s).")
+
+    def _on_lsl_stream_changed(self, _text: str) -> None:
+        name = self._selected_stream_name()
+        stype = self._selected_stream_type()
+        if name:
+            self.live_stream_name = name
+            self._set_connector_stream(name)
+        if stype:
+            self.live_stream_type = stype
+        if self._auto_scan_active and name:
+            self._stop_auto_scan()
+            if self._auto_scan_wants_healthcheck:
+                self._auto_scan_wants_healthcheck = False
+                self._schedule_healthcheck()
+
+    def _on_stream_name_input(self, text: str) -> None:
+        cleaned = text.strip()
+        if cleaned:
+            self.live_stream_name = cleaned
+            self._set_connector_stream(cleaned)
+
+    def _default_stream_name(self) -> str:
+        if self.current_subject:
+            return f"Muse2-EEG-{self.current_subject}"
+        return DEFAULT_STREAM_NAME
+
+    def _seed_stream_name_input(self) -> None:
+        if not getattr(self, "stream_name_input", None):
+            return
+        if self.stream_name_input.text().strip():
+            return
+        seeded = self._default_stream_name()
+        self.stream_name_input.setText(seeded)
+        self.live_stream_name = seeded
+        self._set_connector_stream(seeded)
+
+    def _effective_stream_name(self) -> str:
+        if getattr(self, "stream_name_input", None):
+            text = self.stream_name_input.text().strip()
+            if text:
+                return text
+        return self._default_stream_name()
+
+    def _start_auto_scan(self, wants_healthcheck: bool = False) -> None:
+        if not LSL_AVAILABLE:
+            return
+        self._auto_scan_active = True
+        self._auto_scan_wants_healthcheck = wants_healthcheck
+        if not self._auto_scan_timer.isActive():
+            self._auto_scan_timer.start()
+        self._auto_scan_lsl_streams()
+
+    def _stop_auto_scan(self) -> None:
+        self._auto_scan_active = False
+        self._auto_scan_wants_healthcheck = False
+        if self._auto_scan_timer.isActive():
+            self._auto_scan_timer.stop()
+
+    def _auto_scan_lsl_streams(self) -> None:
+        if not self._auto_scan_active or not LSL_AVAILABLE:
+            return
+        if self.input_source.currentText() == "CSV Offline":
+            self._stop_auto_scan()
+            return
+        self._detect_lsl_streams()
+        if self._selected_stream_name():
+            self._stop_auto_scan()
+            if self._auto_scan_wants_healthcheck:
+                self._auto_scan_wants_healthcheck = False
+                self._schedule_healthcheck()
+            return
+        expected = self._effective_stream_name()
+        idx = self._find_stream_index(expected)
+        if idx is None and expected:
+            idx = self._find_stream_index(None)
+        if idx is not None:
+            self.lsl_combo.setCurrentIndex(idx)
+
+    def _find_stream_index(self, expected_name: Optional[str]) -> Optional[int]:
+        expected = expected_name.lower().strip() if expected_name else ""
+        for i in range(self.lsl_combo.count()):
+            raw = self.lsl_combo.itemText(i)
+            if not raw or raw == "-":
+                continue
+            name = raw.split("(")[0].strip()
+            stype = ""
+            if "(" in raw and ")" in raw:
+                stype = raw.split("(", 1)[1].split(")", 1)[0].strip()
+            if expected:
+                if name.lower() == expected or expected in name.lower():
+                    return i
+                continue
+            if "muse" in name.lower() and stype.lower() == "eeg":
+                return i
+        return None
 
     def _update_stream_controls(self) -> None:
         if not LSL_AVAILABLE:
@@ -2928,6 +3707,8 @@ class MainWindow(QMainWindow):
         self.detect_btn.setEnabled(not csv_mode)
         self.test_btn.setEnabled(not csv_mode)
         self.csv_path.setEnabled(csv_mode)
+        if csv_mode:
+            self._stop_auto_scan()
         self._refresh_status_summary()
 
     def _test_lsl(self) -> None:
@@ -2969,6 +3750,18 @@ class MainWindow(QMainWindow):
         if path:
             widget.setText(path)
 
+    def _browse_dir(self, widget: QLineEdit, title: str) -> None:
+        path = QFileDialog.getExistingDirectory(self, title, "")
+        if path:
+            widget.setText(path)
+
+    def _open_doc(self, rel_path: str) -> None:
+        path = self.repo_root / rel_path
+        if not path.exists():
+            self._append_log(f"Doc not found: {path}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
     def _run_step(self, step_id: str, script_key: str) -> None:
         if self.hard_stop_locked:
             self._show_blocking_notice(
@@ -2996,8 +3789,26 @@ class MainWindow(QMainWindow):
 
         settings = self._collect_settings(step_id)
         settings["TIMEBASE_VERSION"] = TIMEBASE_VERSION
+        if step_id == "step1":
+            settings["MODE"] = "train_record"
+            settings["ALLOW_DROP"] = False
+            settings["SAVE_RAW"] = True
+            settings["ENABLE_FEATURES"] = False
+            settings["ENABLE_INFERENCE"] = False
+            session_root_value = self.session_root_input.text().strip()
+            if session_root_value:
+                settings["raw_dir"] = session_root_value
+            if self.current_project and self.current_subject:
+                subject_dir = subject_root(self.current_project, self.current_subject)
+                settings["processed_dir"] = str(subject_dir / "processed")
         if step_id == "infer":
-            settings["STREAMER_INTERNAL"] = self.streamer_runner.is_running()
+            stream_name = self._selected_stream_name() or self.live_stream_name
+            stream_type = self._selected_stream_type() or self.live_stream_type
+            if stream_name:
+                self.live_stream_name = stream_name
+            if stream_type:
+                self.live_stream_type = stream_type
+            settings["STREAMER_INTERNAL"] = self.muse_connector.is_running()
             settings["STREAMER_STREAM_NAME"] = self.live_stream_name
             settings["STREAMER_STREAM_TYPE"] = self.live_stream_type
             settings["LSL_STREAM_NAME"] = self.live_stream_name
@@ -3005,6 +3816,8 @@ class MainWindow(QMainWindow):
             settings["LABEL_CHECK_ACKNOWLEDGED"] = self.live_label_acknowledged
             settings["LABEL_CHECK_FOUND_LABELS"] = self.live_label_details.get("labels")
             settings["LABEL_CHECK_EXPECTED_LABELS"] = settings.get("REQUIRED_LSL_LABELS")
+            if not settings.get("session_id") and self.current_session_backend:
+                settings["session_id"] = self.current_session_backend
         if (
             step_id in {"step1", "infer"}
             and self.input_source.currentText() == "CSV Offline"
@@ -3041,6 +3854,9 @@ class MainWindow(QMainWindow):
 
         if step_id == "step1b":
             settings["subject_id"] = settings.get("subject_id") or self.current_subject
+            session_dir_value = self.session_dir_input.text().strip()
+            if session_dir_value:
+                settings["session_dir"] = session_dir_value
             if settings.get("WINDOW_SEC") is not None:
                 settings["WINDOW_SEC_DEFAULT"] = settings.get("WINDOW_SEC")
             if not settings.get("features"):
@@ -3067,6 +3883,22 @@ class MainWindow(QMainWindow):
                 if latest_npz:
                     settings["npz"] = str(latest_npz)
 
+        validation = validate_step_settings(step_id, settings)
+        if not validation.ok:
+            QMessageBox.warning(
+                self,
+                "Invalid Settings",
+                "\n".join(validation.errors),
+            )
+            return
+        for warning in validation.warnings:
+            self._append_log(f"⚠️ {warning}")
+
+        if step_id == "infer" and settings.get("enable_actuation"):
+            if not self._confirm_actuation():
+                self._append_log("Actuation confirmation cancelled; run aborted.")
+                return
+
         if backend_session:
             self.current_session_backend = backend_session
             self.current_session_ui = ui_session_id(
@@ -3074,6 +3906,8 @@ class MainWindow(QMainWindow):
             )
             self._set_session_label(f"Session: {self.current_session_ui}")
 
+        if step_id == "step1":
+            settings["LSL_STREAM_NAME"] = DEFAULT_STREAM_NAME
         config_path = subject_dir / "config" / f"{step_id}.json"
         config = build_config(
             project_name=self.current_project,
@@ -3087,6 +3921,14 @@ class MainWindow(QMainWindow):
         self._write_session_snapshot(subject_dir, config.to_dict(), step_id)
 
         args = [str(script_info.path), "--config", str(config_path)]
+        if step_id == "step1":
+            args.extend(["--mode", "train_record"])
+        if step_id == "step1b":
+            session_dir_value = self.session_dir_input.text().strip()
+            if session_dir_value:
+                args.extend(["--session-dir", session_dir_value])
+                if self.allow_partial_checkbox.isChecked():
+                    args.append("--allow-partial")
         args.extend(self._collect_step_args(step_id))
         cwd = str(self.repo_root)
         if step_id == "step1b" and self.current_session_ui:
@@ -3100,6 +3942,19 @@ class MainWindow(QMainWindow):
         self.active_settings = dict(settings)
         self._set_step_status(step_id, "Running")
         self._append_log(f"Running: {args} (cwd={cwd})")
+        if getattr(self, "dry_run_checkbox", None) and self.dry_run_checkbox.isChecked():
+            self._append_log("Dry run enabled; command not executed.")
+            return
+        # Export LSL source-id (captured from the connector) so downstream steps can resolve
+        # the exact stream instance even if multiple similarly-named streams are present.
+        if getattr(self, "live_lsl_source_id", None):
+            os.environ["LSL_SOURCE_ID"] = str(self.live_lsl_source_id)
+        # Also export stream name/type as a convenience for scripts that support env overrides.
+        if getattr(self, "live_stream_name", None):
+            os.environ.setdefault("LSL_STREAM_NAME", str(self.live_stream_name))
+        if getattr(self, "live_stream_type", None):
+            os.environ.setdefault("LSL_STREAM_TYPE", str(self.live_stream_type))
+
         self.runner.start(sys.executable, args, cwd=cwd)
 
     def _write_session_snapshot(
@@ -3141,7 +3996,136 @@ class MainWindow(QMainWindow):
             defaults["LSL_STREAM_NAME"] = self._selected_stream_name()
             defaults["LSL_STREAM_TYPE"] = self._selected_stream_type()
         defaults["CSV_OFFLINE_PATH"] = self.csv_path.text().strip() or None
-        return defaults
+        return self._migrate_legacy_settings(step_id, defaults)
+
+    def _migrate_legacy_settings(
+        self, step_id: str, settings: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        if "ENABLE_ACTUATION" in settings:
+            if "ENABLE_ACTUATION" not in self._legacy_warnings:
+                self._append_log(
+                    "⚠️ Legacy key ENABLE_ACTUATION detected; mapping to enable_actuation."
+                )
+                self._legacy_warnings.add("ENABLE_ACTUATION")
+            if "enable_actuation" not in settings:
+                settings["enable_actuation"] = bool(settings.get("ENABLE_ACTUATION"))
+            settings.pop("ENABLE_ACTUATION", None)
+        return settings
+
+    def _create_new_session(self) -> None:
+        if not self.current_subject:
+            QMessageBox.warning(self, "Subject Required", "Select a subject first.")
+            return
+        session_root_value = self.session_root_input.text().strip()
+        if not session_root_value:
+            QMessageBox.warning(self, "Session Root Required", "Select a session root.")
+            return
+        session_id = session_backend_id()
+        session_dir = Path(session_root_value) / f"{self.current_subject}_{session_id}"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        self.current_session_backend = session_id
+        self.current_session_ui = ui_session_id(self.current_subject, session_id)
+        self.session_dir_input.setText(str(session_dir))
+        self._set_session_label(f"Session: {self.current_session_ui}")
+        self._append_log(f"Created session dir: {session_dir}")
+        self._load_session_summary()
+
+    def _load_session_summary(self) -> None:
+        session_dir_value = self.session_dir_input.text().strip()
+        if not session_dir_value:
+            return
+        session_dir = Path(session_dir_value)
+        manifest_path = session_dir / "manifest.json"
+        meta_path = session_dir / "meta.json"
+        events_path = session_dir / "events" / "events.jsonl"
+        timebase_path = session_dir / "timebase_report.json"
+        manifest = {}
+        meta = {}
+        timebase = {}
+        try:
+            if manifest_path.exists():
+                manifest = json.loads(manifest_path.read_text())
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text())
+            if timebase_path.exists():
+                timebase = json.loads(timebase_path.read_text())
+        except Exception as exc:
+            self._append_log(f"Failed to read session summary: {exc}")
+            return
+        event_count = 0
+        if events_path.exists():
+            event_count = len([ln for ln in events_path.read_text().splitlines() if ln.strip()])
+        seq_min = manifest.get("seq_min")
+        seq_max = manifest.get("seq_max")
+        seq_range = f"{seq_min}..{seq_max}" if seq_min is not None else "-"
+        shard_list = manifest.get("shard_list") or []
+        total_samples = manifest.get("actual_sample_count")
+        timebase_ranges = timebase.get("ranges") if isinstance(timebase, dict) else None
+        self.session_summary_labels["session_id"].setText(str(meta.get("session_id", "-")))
+        self.session_summary_labels["created_at"].setText(
+            str(meta.get("created_at_utc", "-"))
+        )
+        self.session_summary_labels["mode"].setText(str(meta.get("mode", "-")))
+        self.session_summary_labels["termination_reason"].setText(
+            str(manifest.get("termination_reason", "-"))
+        )
+        self.session_summary_labels["seq_range"].setText(seq_range)
+        self.session_summary_labels["missing_seq"].setText(
+            str(manifest.get("missing_seq_count", "-"))
+        )
+        self.session_summary_labels["shards"].setText(str(len(shard_list)))
+        self.session_summary_labels["total_samples"].setText(str(total_samples or "-"))
+        self.session_summary_labels["timebase_ranges"].setText(
+            str(len(timebase_ranges or []))
+        )
+        self.session_summary_labels["events"].setText(str(event_count))
+
+    def _run_validate_session(self) -> None:
+        if self.runner.is_running():
+            self._append_log("Another process is running; stop it before validation.")
+            return
+        session_dir_value = self.session_dir_input.text().strip()
+        if not session_dir_value:
+            self._append_log("No session directory selected for validation.")
+            return
+        args = [
+            "-m",
+            "muse_streaming.validate_session",
+            "--session",
+            session_dir_value,
+        ]
+        if self.allow_partial_checkbox.isChecked():
+            args.append("--allow-partial")
+        self.active_step = "validate_session"
+        self._append_log(f"Validating session: {args}")
+        if getattr(self, "dry_run_checkbox", None) and self.dry_run_checkbox.isChecked():
+            self._append_log("Dry run enabled; validation command not executed.")
+            return
+        self.runner.start(sys.executable, args, cwd=str(self.repo_root))
+
+    def _run_evaluate_all(self) -> None:
+        self._append_log(
+            "Run evaluate pipeline: starting 3b (deepchecks). Run 3c/4 manually after completion."
+        )
+        self._run_eval_script("evaluate_deepchecks")
+
+    def _run_eval_script(self, script_key: str) -> None:
+        if self.runner.is_running():
+            self._append_log("Another process is running; stop it before evaluation.")
+            return
+        script_info = self.scripts.get(script_key)
+        if not script_info:
+            self._append_log(f"Evaluation script not found: {script_key}")
+            return
+        args = [str(script_info.path)]
+        if self.current_subject and script_key == "evaluate_reports":
+            args += ["--subject-id", self.current_subject]
+        self.active_step = script_key
+        self._append_log(f"Running: {args} (cwd={self.repo_root})")
+        if getattr(self, "dry_run_checkbox", None) and self.dry_run_checkbox.isChecked():
+            self._append_log("Dry run enabled; command not executed.")
+            return
+        self.runner.start(sys.executable, args, cwd=str(self.repo_root))
 
     def _collect_step_args(self, step_id: str) -> list[str]:
         specs = self.step_arg_specs.get(step_id, [])
@@ -3153,18 +4137,6 @@ class MainWindow(QMainWindow):
             if widget is None:
                 continue
             value = self._widget_value(widget)
-            # If the config/UI uses a placeholder LSL source id (e.g. 'muse2_internal'),
-            # prefer the connector-provided env var, otherwise omit the flag so the recorder
-            # can attach to any matching EEG stream.
-            if spec.flag == "--lsl-source-id":
-                v = (value or "").strip() if isinstance(value, str) else value
-                if v in ("", "auto", "internal", "muse2_internal"):
-                    env_sid = os.environ.get("LSL_SOURCE_ID")
-                    if env_sid:
-                        value = env_sid
-                    else:
-                        continue
-
             if spec.kind == "bool":
                 if bool(value):
                     args.append(spec.flag)
@@ -3261,97 +4233,119 @@ class MainWindow(QMainWindow):
             self.runner.stop_hard()
         self._set_live_buttons_state()
 
-    def _connect_muse(self):
-        """
-        Connect to Muse over BLE, then (after a short delay) start the LSL outlet.
-        Stream health is checked separately via the Stream Health button.
-        """
-        if self.streamer_runner.is_running():
-            self._append_log("⚠️ Streamer already running.")
+    def _connect_muse(self) -> None:
+        if self.hard_stop_locked:
+            self._show_blocking_notice(
+                "HARD STOP — Acknowledgement Required",
+                "You must acknowledge the last hard stop report before restarting live steps.",
+            )
+            return
+        if self.muse_connector.is_running():
+            self._append_log("Connector already running.")
+            return
+        self.live_stream_ready = False
+        self.live_label_acknowledged = False
+        self.live_label_details = {}
+        self._set_connector_status("scanning")
+        labels, rate, _ = self._current_live_config()
+        stream_name = self._effective_stream_name()
+        self.live_stream_name = stream_name
+        if getattr(self, "stream_name_input", None) and not self.stream_name_input.text().strip():
+            self.stream_name_input.setText(stream_name)
+        self._set_connector_stream(stream_name)
+        # Source of truth for Muse BLE -> LSL is muse_streaming/cli.py (start-streamer),
+        # which wraps muse_streaming/muse_lsl_streamer.py.
+        args = [
+            sys.executable,
+            "-u",
+            "-m",
+            "muse_streaming.cli",
+            "start-streamer",
+            "--stream-name",
+            stream_name,
+            "--type",
+            self.live_stream_type,
+            "--rate",
+            str(rate),
+            "--labels",
+            ",".join(labels),
+        ]
+        self.muse_connector.start(args, cwd=str(self.repo_root))
+        self._set_live_buttons_state()
+
+    def _disconnect_muse(self) -> None:
+        if self.muse_connector.is_running():
+            self._append_log("Disconnecting Muse connector...")
+            self.muse_connector.stop()
+        self.live_stream_ready = False
+        self._stop_auto_scan()
+        self._set_live_buttons_state()
+
+    def _on_connector_log(self, line: str) -> None:
+        # Capture exported LSL source-id from the streamer (printed as `LSL_SOURCE_ID=...`).
+        # We persist it and export it into this UI process environment so any subsequently
+        # launched scripts inherit it automatically.
+        m = re.search(r"LSL_SOURCE_ID=([A-Za-z0-9_.:-]+)", line)
+        if m:
+            self.live_lsl_source_id = m.group(1)
+            try:
+                os.environ["LSL_SOURCE_ID"] = self.live_lsl_source_id
+            except Exception:
+                pass
+            self._append_log(f"[connector] {line}")
+            self._append_log(f"[connector] captured LSL_SOURCE_ID={self.live_lsl_source_id}")
+            # Still surface the line in the compact connector status readout.
+            self._set_connector_log(line)
             return
 
-        # Reset readouts
-        self.readout_ble.setText("Connecting…")
-        self.readout_lsl.setText("Starting…")
-        self.readout_packets.setText("—")
-        self.readout_timebase.setText("—")
-        self.readout_partial.setText("—")
+        self._append_log(f"[connector] {line}")
+        clean = line.replace("[stderr] ", "")
+        self._set_connector_log(clean)
+    def _on_connector_status(self, status: str) -> None:
+        self._set_connector_status(status)
+        if status == "streaming":
+            self._start_auto_scan(wants_healthcheck=True)
+        elif status in {"idle", "error"}:
+            self._stop_auto_scan()
+            self.live_stream_ready = False
+        self._set_live_buttons_state()
 
-        stream_name = self.stream_name.text().strip() or "Muse2-EEG"
-        labels = [s.strip() for s in (self.channel_labels.text() or "").split(",") if s.strip()]
-        if not labels:
-            labels = ["TP9", "AF7", "AF8", "TP10"]
+    def _on_connector_device(self, device: str) -> None:
+        if device:
+            self._set_connector_device(device)
 
-        rate = int(self.sample_rate.value())
-        device_hint = (self.device_hint.text() or "").strip() or None
+    def _on_connector_stream(self, stream_name: str) -> None:
+        if not stream_name:
+            return
+        self.live_stream_name = stream_name
+        self._set_connector_stream(stream_name)
+        if getattr(self, "stream_name_input", None) and not self.stream_name_input.text().strip():
+            self.stream_name_input.setText(stream_name)
 
-        payload = {
-            "name": stream_name,
-            "stype": "EEG",
-            "rate": rate,
-            "labels": labels,
-            "device_name": device_hint,
-            "mac_address": None,
-            "start_delay_s": 0.5,
-        }
+    def _schedule_healthcheck(self, delay_ms: int = 1500) -> None:
+        if self._healthcheck_pending:
+            return
+        self._healthcheck_pending = True
+        QTimer.singleShot(delay_ms, self._run_scheduled_healthcheck)
 
-        code = r'''
-import asyncio, json, sys
-from muse_lsl_streamer import MuseLslStreamer, BleakClient
+    def _run_scheduled_healthcheck(self) -> None:
+        self._healthcheck_pending = False
+        self._run_stream_healthcheck()
 
-cfg = json.loads(sys.argv[1])
-s = MuseLslStreamer(
-    name=cfg["name"],
-    stype=cfg.get("stype","EEG"),
-    rate=float(cfg.get("rate",256)),
-    labels=cfg.get("labels"),
-    device_name=cfg.get("device_name"),
-    mac_address=cfg.get("mac_address"),
-)
-
-async def main():
-    device = await s._resolve_device()
-    if device is None:
-        raise RuntimeError("No Muse device found. Check Bluetooth + device power.")
-    s._client = BleakClient(device)
-    await s._client.connect()
-    s._log("✅ Muse 2 connected")
-
-    await asyncio.sleep(float(cfg.get("start_delay_s",0.5)))
-
-    s._outlet = s._build_outlet(s.config)
-    s._log(f"✅ LSL outlet started: name={s.config.name}, type={s.config.stype}, ch={len(s.config.labels)}, rate={s.config.rate}")
-
-    await s._start_streaming()
-    await s._subscribe_eeg_channels()
-    await s._wait_until_stop()
-
-try:
-    asyncio.run(main())
-except KeyboardInterrupt:
-    pass
-'''
-        cmd = [sys.executable, "-c", code, json.dumps(payload)]
-
-        self._append_log("🔌 Connecting to Muse and starting LSL…")
-        self.streamer_runner.start(
-            cmd=cmd,
-            cwd=self.repo_root,
-            on_line=self._on_streamer_line,
-            name="streamer",
-        )
-
-        self.connect_btn.setEnabled(False)
-        self.stop_stream_btn.setEnabled(True)
-        self.stream_health_btn.setEnabled(True)
     def _run_stream_healthcheck(self) -> None:
         if self.hard_stop_locked:
             return
         labels, _rate, require_exact = self._current_live_config()
+        stream_name = self._selected_stream_name() or self.live_stream_name
+        stream_type = self._selected_stream_type() or self.live_stream_type
+        if stream_name:
+            self.live_stream_name = stream_name
+        if stream_type:
+            self.live_stream_type = stream_type
         try:
             result = run_healthcheck(
-                name=self.live_stream_name,
-                stype=self.live_stream_type,
+                stream_name=stream_name,
+                stype=stream_type,
                 required_labels=labels,
                 require_exact_channels=require_exact,
             )
@@ -3419,15 +4413,20 @@ except KeyboardInterrupt:
             return
         self._run_step("infer", "step1")
 
-    def _on_streamer_finished(self, exit_code: int, _exit_status: int) -> None:
-        self._append_log(f"[streamer] process finished with code {exit_code}")
+    def _on_connector_finished(self, exit_code: int) -> None:
+        self._append_log(f"[connector] process finished with code {exit_code}")
         if exit_code != 0:
-            self._update_live_status("Live status: streamer stopped")
-            self.live_stream_ready = False
+            self._set_connector_status("error")
+        else:
+            self._set_connector_status("idle")
+        self.live_stream_ready = False
+        self._stop_auto_scan()
         self._set_live_buttons_state()
 
     def _set_live_buttons_state(self) -> None:
-        connect_enabled = not self.hard_stop_locked and not self.streamer_runner.is_running()
+        connector_running = self.muse_connector.is_running()
+        connect_enabled = not self.hard_stop_locked and not connector_running and LSL_AVAILABLE
+        disconnect_enabled = connector_running
         start_enabled = (
             not self.hard_stop_locked and self.live_stream_ready and not self.runner.is_running()
         )
@@ -3438,6 +4437,12 @@ except KeyboardInterrupt:
         ):
             if isinstance(btn, QPushButton):
                 btn.setEnabled(connect_enabled)
+        for btn in (
+            getattr(self, "live_disconnect_btn", None),
+            getattr(self, "live_disconnect_btn_page", None),
+        ):
+            if isinstance(btn, QPushButton):
+                btn.setEnabled(disconnect_enabled)
         for btn in (
             getattr(self, "live_start_btn", None),
             getattr(self, "live_start_btn_page", None),
@@ -3461,6 +4466,14 @@ except KeyboardInterrupt:
     def _update_live_status(self, text: str) -> None:
         if hasattr(self, "live_status_label") and self.live_status_label is not None:
             self.live_status_label.setText(text)
+
+    def _confirm_actuation(self) -> bool:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Confirm Actuation")
+        dialog.setText("Actuation enabled. Confirm the hand is safe and clear.")
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        return dialog.exec() == QMessageBox.Ok
 
     def _show_blocking_notice(self, title: str, message: str) -> None:
         dialog = QMessageBox(self)
@@ -3496,13 +4509,23 @@ except KeyboardInterrupt:
             self.stream_state_label.setText("Stream: running")
         self._set_live_buttons_state()
 
-    def _on_process_finished(self, exit_code: int, _exit_status: int) -> None:
+    def _on_process_finished(self, exit_code: int, exit_status: int) -> None:
         step = self.active_step
         if not step:
             return
-        status = "Success" if exit_code == 0 else f"Failed ({exit_code})"
+        if exit_status != 0:
+            status = "Crashed"
+        else:
+            status = "Success" if exit_code == 0 else f"Failed ({exit_code})"
         self._set_step_status(step, status)
-        self._append_log(f"Process finished with code {exit_code}")
+        if exit_status != 0:
+            self._append_log(
+                f"Process crashed/aborted (exit_status={exit_status}, code={exit_code})"
+            )
+        elif exit_code == 0:
+            self._append_log("Process completed")
+        else:
+            self._append_log(f"Process finished with code {exit_code}")
         if exit_code == 73:
             self._handle_hard_stop_detected()
         if exit_code == 0:
@@ -3525,55 +4548,32 @@ except KeyboardInterrupt:
             if payload and self.live_hidden_plot:
                 self.live_hidden_plot.update(payload)
             return
-        self.log_console.appendPlainText(line)
+        self.log_entries.append(line)
+        self._refresh_log_display()
         if line.startswith("🛑 HARD STOP"):
             self._handle_hard_stop_detected()
 
-    def _on_streamer_line(self, line: str):
-        s = (line or "").strip()
-        if not s:
-            return
+    def _refresh_log_display(self) -> None:
+        filter_mode = (
+            self.log_filter_combo.currentText()
+            if hasattr(self, "log_filter_combo")
+            else "All"
+        )
+        lines: list[str] = []
+        for line in self.log_entries:
+            if filter_mode == "Errors" and "ERROR" not in line:
+                continue
+            if filter_mode == "Warnings" and not any(
+                token in line for token in ["WARN", "WARNING", "ERROR"]
+            ):
+                continue
+            lines.append(line)
+        self.log_console.setPlainText("\n".join(lines))
 
-        if "[streamer] heartbeat:" in s:
-            try:
-                kv = {}
-                tail = s.split("heartbeat:", 1)[1].strip()
-                for part in tail.replace(",", " ").split():
-                    if "=" in part:
-                        k, v = part.split("=", 1)
-                        kv[k.strip()] = v.strip()
-                chunks = kv.get("chunks", "—")
-                packets = kv.get("packets", "—")
-                partial = kv.get("partial", "—")
-                time_err = kv.get("time_err_s") or kv.get("time_err") or "—"
-                rssi = kv.get("rssi", "—")
-                self.readout_packets.setText(f"packets={packets} • chunks={chunks}")
-                self.readout_partial.setText(f"{partial}")
-                self.readout_timebase.setText(f"{time_err}")
-                self.readout_rssi.setText(f"{rssi}")
-            except Exception:
-                pass
-            if not self.verbose_streamer_logs.isChecked():
-                return
+    def _clear_logs(self) -> None:
+        self.log_entries = []
+        self.log_console.clear()
 
-        if "timebase discontinuity" in s and not self.verbose_streamer_logs.isChecked():
-            self._timebase_warns = getattr(self, "_timebase_warns", 0) + 1
-            if self._timebase_warns in (1, 5, 20, 50, 100) or (self._timebase_warns % 250 == 0):
-                self._append_log(f"⚠️ timebase discontinuities: {self._timebase_warns}")
-            return
-
-        if "partial packet flushed" in s and not self.verbose_streamer_logs.isChecked():
-            self._partial_warns = getattr(self, "_partial_warns", 0) + 1
-            if self._partial_warns in (1, 5, 20, 50, 100) or (self._partial_warns % 250 == 0):
-                self._append_log(f"⚠️ partial packets: {self._partial_warns}")
-            return
-
-        if "✅ Muse 2 connected" in s:
-            self.readout_ble.setText("Connected")
-        if "✅ LSL outlet started" in s:
-            self.readout_lsl.setText("Running")
-
-        self._append_log(f"[streamer] {s}")
     def _handle_hard_stop_detected(self) -> None:
         if self.hard_stop_locked:
             return
@@ -3665,6 +4665,13 @@ except KeyboardInterrupt:
             or not self.current_session_backend
         ):
             return
+        session_dir_value = self.session_dir_input.text().strip()
+        if session_dir_value:
+            self._append_log(
+                "Session dir selected; raw session artifacts remain in session root."
+            )
+            self._auto_fill_paths()
+            return
         subject_dir = subject_root(self.current_project, self.current_subject)
         session_dir = session_root(
             subject_dir,
@@ -3676,29 +4683,42 @@ except KeyboardInterrupt:
 
         subject = self.current_subject
         session = self.current_session_backend
-        features_src = (
-            self.repo_root
-            / "data"
-            / "processed"
-            / f"{subject}_{session}_eeg_features.csv"
-        )
-        events_src = (
-            self.repo_root / "data" / "processed" / f"{subject}_{session}_events.csv"
-        )
-        autosave_src = (
-            self.repo_root
-            / "data"
-            / "processed"
-            / f"{subject}_{session}_events_autosave.csv"
-        )
-        raw_src = self.repo_root / "data" / "raw" / f"{subject}_{session}_raw.csv"
-        meta_src = (
-            self.repo_root
-            / "data"
-            / "processed"
-            / f"{subject}_{session}_session_meta.json"
-        )
         state_src = self.repo_root / "logs" / f"session_state_{subject}.json"
+        state_payload = self._read_session_state_payload()
+        state_session = state_payload.get("session_id") if state_payload else None
+
+        features_src = None
+        events_src = None
+        raw_src = None
+        if state_payload and state_session == session:
+            features_path = state_payload.get("features_path")
+            events_path = state_payload.get("events_path")
+            raw_path = state_payload.get("raw_path")
+            if features_path:
+                features_src = Path(features_path)
+            if events_path:
+                events_src = Path(events_path)
+            if raw_path:
+                raw_src = Path(raw_path)
+
+        if features_src is None:
+            features_src = (
+                self.repo_root
+                / "data"
+                / "processed"
+                / f"{subject}_{session}_eeg_features.csv"
+            )
+        if events_src is None:
+            events_src = (
+                self.repo_root / "data" / "processed" / f"{subject}_{session}_events.csv"
+            )
+        if raw_src is None:
+            raw_src = self.repo_root / "data" / "raw" / f"{subject}_{session}_raw.csv"
+
+        autosave_src = events_src.with_name(
+            events_src.name.replace("_events.csv", "_events_autosave.csv")
+        )
+        meta_src = features_src.parent / f"{subject}_{session}_session_meta.json"
 
         self._safe_copy(
             features_src, subject_dir / "features" / features_src.name, allow_overwrite
@@ -3742,7 +4762,12 @@ except KeyboardInterrupt:
         ):
             return
         subject_dir = subject_root(self.current_project, self.current_subject)
-        session_dir = session_root(subject_dir, self.current_session_ui)
+        session_dir_value = self.session_dir_input.text().strip()
+        session_dir = (
+            Path(session_dir_value)
+            if session_dir_value
+            else session_root(subject_dir, self.current_session_ui)
+        )
         windows_dir = session_dir / "windows"
         if not windows_dir.exists():
             return
@@ -3807,6 +4832,12 @@ except KeyboardInterrupt:
             existing = self._read_session_state()
             if existing:
                 return existing
+        if self.current_session_backend and self.session_dir_input.text().strip():
+            settings["SESSION_ID_OVERRIDE"] = self.current_session_backend
+            widget = self.fields.get(step_id, {}).get("SESSION_ID_OVERRIDE")
+            if isinstance(widget, QLineEdit):
+                widget.setText(self.current_session_backend)
+            return self.current_session_backend
         backend_id = session_backend_id()
         settings["SESSION_ID_OVERRIDE"] = backend_id
         widget = self.fields.get(step_id, {}).get("SESSION_ID_OVERRIDE")
@@ -3887,56 +4918,14 @@ except KeyboardInterrupt:
             return outputs
         subject = self.current_subject
         session = self.current_session_backend
-        outputs.append(
-            (
-                "Features",
-                str(
-                    self.repo_root
-                    / "data"
-                    / "processed"
-                    / f"{subject}_{session}_eeg_features.csv"
-                ),
-            )
-        )
-        outputs.append(
-            (
-                "Events",
-                str(
-                    self.repo_root
-                    / "data"
-                    / "processed"
-                    / f"{subject}_{session}_events.csv"
-                ),
-            )
-        )
-        outputs.append(
-            (
-                "Events autosave",
-                str(
-                    self.repo_root
-                    / "data"
-                    / "processed"
-                    / f"{subject}_{session}_events_autosave.csv"
-                ),
-            )
-        )
-        outputs.append(
-            (
-                "Session meta",
-                str(
-                    self.repo_root
-                    / "data"
-                    / "processed"
-                    / f"{subject}_{session}_session_meta.json"
-                ),
-            )
-        )
-        outputs.append(
-            (
-                "Raw",
-                str(self.repo_root / "data" / "raw" / f"{subject}_{session}_raw.csv"),
-            )
-        )
+        session_root_value = self.session_root_input.text().strip()
+        if session_root_value:
+            session_dir = Path(session_root_value) / f"{subject}_{session}"
+            outputs.append(("Session dir", str(session_dir)))
+            outputs.append(("Manifest", str(session_dir / "manifest.json")))
+            outputs.append(("Timebase report", str(session_dir / "timebase_report.json")))
+            outputs.append(("Raw shards", str(session_dir / "raw")))
+            outputs.append(("Events JSONL", str(session_dir / "events" / "events.jsonl")))
         outputs.append(
             (
                 "Session state",
@@ -3980,17 +4969,14 @@ except KeyboardInterrupt:
 
     def _expected_step1b_outputs(self) -> list[tuple[str, str]]:
         outputs: list[tuple[str, str]] = []
-        if (
-            not self.current_project
-            or not self.current_subject
-            or not self.current_session_ui
-        ):
+        session_dir_value = self.session_dir_input.text().strip()
+        if not session_dir_value:
             return outputs
-        subject_dir = subject_root(self.current_project, self.current_subject)
-        session_dir = session_root(subject_dir, self.current_session_ui)
+        session_dir = Path(session_dir_value)
         outputs.append(("Window CSV", str(session_dir / "windows" / "eeg_windows.csv")))
         outputs.append(("Window NPZ", str(session_dir / "windows" / "eeg_windows.npz")))
-        if self.current_session_backend:
+        if self.current_project and self.current_subject and self.current_session_backend:
+            subject_dir = subject_root(self.current_project, self.current_subject)
             outputs.append(
                 (
                     "Project window CSV",
