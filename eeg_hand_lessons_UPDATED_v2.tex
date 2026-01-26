@@ -1780,6 +1780,26 @@ Run: \texttt{\detokenize{python exercises/ex08_cache_validator_extension.py --sy
 }
 
 % ============================================================
+
+\chapter{Repository and Script Overview}
+The public GitHub repository is the canonical source of truth for code structure, configuration, and usage instructions. \cite{repo_github}
+
+\section{Core workflow scripts}
+This project’s most critical offline pipeline is:
+\begin{enumerate}
+\item \textbf{Step 1: Stream and record} (\texttt{1\_stream\_and\_record.py}) ensures a Muse 2 EEG LSL stream is available, and writes:
+\begin{itemize}
+\item \texttt{\_raw.csv}: raw EEG samples with a consistent timebase, and
+\item \texttt{\_events.csv}: event markers in the same time domain.
+\end{itemize}
+\item \textbf{Step 1b: Extract windows} (\texttt{1b\_extract\_windows.py}) reads the raw/events CSVs, resamples onto a fixed grid, extracts fixed-duration windows aligned to events, and \textbf{drops any windows/events that would contain NaNs} so downstream training is guaranteed NaN-free.
+\item \textbf{Step 2: Train model} (\texttt{2\_train\_model.py}) trains the PyTorch classifier on extracted windows. PyTorch training cannot accept NaNs; therefore Step 1b enforces NaN-free tensors before training begins.
+\end{enumerate}
+
+\section{Where to start}
+If you are new to the codebase, begin with the repository README and then follow the scripts in order (Step 1 $\rightarrow$ Step 1b $\rightarrow$ Step 2). \cite{repo_github}
+
+
 \part{Real-Time Systems and Safety}
 % ============================================================
 
@@ -1794,13 +1814,29 @@ Stability controls (hysteresis, consecutive-frame agreement) convert noisy per-w
 
 \section{Uncertainty (MC Dropout) and Safe Actuation}
 
-Epistemic uncertainty can be estimated by sampling predictions under dropout.
-A safe policy:
+
+Dropout is a regularization technique: during training, we randomly “turn off” a fraction of neurons (or connections) on each forward pass. This reduces overfitting by preventing the network from relying too heavily on any single pathway. In standard inference, dropout is disabled so the model’s output is deterministic.
+
+\textbf{Monte Carlo (MC) Dropout} keeps dropout \emph{enabled during inference} and runs the same input through the network multiple times (e.g., 10--100 forward passes). Each pass uses a different random dropout mask, producing a slightly different prediction. From the resulting set of predictions we compute:
 \begin{itemize}
-\item require mean confidence above threshold,
-\item require uncertainty below threshold,
-\item require stability across $k$ windows.
+\item a \textbf{final prediction} as the mean (or majority vote) across passes, and
+\item an \textbf{uncertainty measure} from the spread (e.g., variance or entropy) of those predictions.
 \end{itemize}
+When the predictions are tightly clustered, uncertainty is low; when they are spread out, uncertainty is high.
+
+\textbf{High-school level (why it matters).} EEG is noisy, and the user’s physiology and headset contact vary over time. Uncertainty helps us detect when the model “isn’t sure,” so we can avoid acting on unreliable predictions.
+
+\textbf{Undergraduate level (ensemble intuition).} MC Dropout behaves like an inexpensive ensemble: each dropout mask creates a different “thinned” subnetwork. Aggregating many subnetworks typically improves calibration versus a single deterministic model, and the disagreement across subnetworks provides a useful confidence signal.
+
+\textbf{Graduate level (Bayesian approximation).} Gal and Ghahramani showed that test-time dropout can be interpreted as approximate Bayesian inference, where each dropout mask corresponds to sampling from an approximate posterior distribution over network weights (a variational distribution implicitly defined by the dropout probability). This yields a practical estimate of \emph{epistemic uncertainty} (uncertainty due to limited data / model knowledge). \cite{gal2016dropout} In many applications, separating epistemic from \emph{aleatoric uncertainty} (inherent noise) is useful; Kendall and Gal provide a widely cited discussion of these uncertainty types and their role in deep learning systems. \cite{kendall2017uncertainties}
+
+\textbf{How we use it for safety.} In the real-time loop, we run $N$ stochastic forward passes with dropout enabled, compute the mean class probability vector, and compute an uncertainty score from the sample distribution. A conservative policy is:
+\begin{itemize}
+\item require mean confidence above a threshold,
+\item require uncertainty below a threshold, and
+\item require stability across $k$ consecutive windows (hysteresis).
+\end{itemize}
+This reduces false positives and makes actuation safer, especially during transient artifacts (motion, blinks, poor electrode contact).
 
 \section{PyTorch Primitives for Realtime Inference}
 PyTorch primitives used in realtime inference:
@@ -2151,6 +2187,7 @@ Christian A. Kothe.
 \bibitem{Muse2spec}
 \emph{Muse 2 EEG technical notes (channels and sampling rate)}.
 \newblock Summary of EEG channels and 256\,Hz sampling commonly used in Muse 2 tooling: \url{https://choosemuse.com/muse-2-specifications/}.
+
 
 \end{thebibliography}
 
