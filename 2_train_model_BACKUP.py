@@ -553,24 +553,6 @@ def main():
         print("No windows available after subject filtering.")
         return 2
 
-
-# ======================
-# NaN / Inf safety filter
-# ======================
-# We must never feed NaNs/Infs into PyTorch. Drop any samples whose feature tensor contains
-# non-finite values. (Window extraction already tries to avoid this, but we harden here.)
-finite_mask = np.isfinite(X).all(axis=tuple(range(1, X.ndim)))
-n_bad = int((~finite_mask).sum())
-if n_bad > 0:
-    print(f"[WARN] Dropping {n_bad}/{len(X)} samples with NaN/Inf in X before training.")
-    X = X[finite_mask]
-    y_action = y_action[finite_mask]
-    y_finger = y_finger[finite_mask]
-    global_indices = global_indices[finite_mask]
-    meta, _ = mask_meta(meta, finite_mask, len(finite_mask))
-    if len(X) == 0:
-        raise RuntimeError("All samples were dropped due to NaN/Inf values. Check upstream data collection.")
-
     def class_counts(y):
         u, c = np.unique(y, return_counts=True)
         return dict(zip(u.tolist(), c.tolist()))

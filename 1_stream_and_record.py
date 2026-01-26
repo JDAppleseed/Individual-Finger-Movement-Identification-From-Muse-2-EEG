@@ -252,17 +252,18 @@ def _raw_header(channel_count: int) -> List[str]:
 def _open_raw_csv(path: Path, channel_count: int = CHANNELS) -> tuple[Any, csv.writer]:
     path.parent.mkdir(parents=True, exist_ok=True)
     exists = path.exists() and path.stat().st_size > 0
-    file_obj = path.open("a", newline="")
+    file_obj = path.open("a", newline="", buffering=1)
     writer = csv.writer(file_obj)
     if not exists:
         writer.writerow(_raw_header(channel_count))
+        file_obj.flush()  # persist header immediately
     return file_obj, writer
 
 
 def _open_events_csv(path: Path) -> tuple[Any, csv.writer]:
     path.parent.mkdir(parents=True, exist_ok=True)
     exists = path.exists() and path.stat().st_size > 0
-    file_obj = path.open("a", newline="")
+    file_obj = path.open("a", newline="", buffering=1)
     writer = csv.writer(file_obj)
     if not exists:
         writer.writerow(
@@ -888,9 +889,11 @@ def _run_recording(args: argparse.Namespace) -> int:
     raw_csv_path = output_root / f"{subject_id}_{session_id}_raw.csv"
     events_csv_path = output_root / f"{subject_id}_{session_id}_events.csv"
     raw_file, raw_writer = _open_raw_csv(raw_csv_path, channel_count=channel_count)
+    raw_flush_interval_s = float(cfg.get('raw_flush_interval_s', 1.0))
+    last_raw_flush_t = time.time()
     events_file, events_writer = _open_events_csv(events_csv_path)
     events_lock = threading.Lock()
-    event_recorder = EventRecorder(events_writer, events_lock)
+    event_recorder = EventRecorder(events_writer, events_lock, events_file)
 
     log_path = session_dir / "run.log"
     _configure_logging(log_path)
@@ -957,6 +960,10 @@ def _run_recording(args: argparse.Namespace) -> int:
                             segment_id=pkt.segment_id,
                         )
                         raw_writer.writerow(row)
+                        now_t = time.time()
+                        if now_t - last_raw_flush_t >= raw_flush_interval_s:
+                            raw_file.flush()
+                            last_raw_flush_t = now_t
                     batch = []
             if batch:
                 session_writer.append_packets(batch)
@@ -972,6 +979,10 @@ def _run_recording(args: argparse.Namespace) -> int:
                         segment_id=pkt.segment_id,
                     )
                     raw_writer.writerow(row)
+                    now_t = time.time()
+                    if now_t - last_raw_flush_t >= raw_flush_interval_s:
+                        raw_file.flush()
+                        last_raw_flush_t = now_t
         # A2: Make writer-thread failures visible and fatal.
         except BaseException as e:
             logger.exception("Writer thread crashed")
@@ -1006,15 +1017,30 @@ def _run_recording(args: argparse.Namespace) -> int:
         except Exception:
             pass
         lines = [ax.plot([], [])[0] for _ in range(channel_count)]
+
+        # Plotting readability: stack channels with a constant vertical offset so traces don't
+        # visually "fill" the plot when overlaid.
+        plot_stack_step_uv = float(cfg.get("plot_stack_step_uv", 250.0))
+        plot_offsets = np.arange(channel_count, dtype=float) * plot_stack_step_uv
+
+        # Y-ticks at channel baselines
+        try:
+            ax.set_yticks(plot_offsets.tolist())
+            ax.set_yticklabels([str(l) for l in selected_labels])
+        except Exception:
+            pass
+
         ax.set_title("EEG (uV)")
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Amplitude (uV)")
         overlay_lines = []
         if plot_reference_overlay:
-            overlay_lines.append(ax.axhline(0.0, color="#888888", alpha=0.25, linewidth=0.8))
-            overlay_lines.append(ax.axhline(0.0, color="#aaaaaa", alpha=0.2, linewidth=0.6))
-            overlay_lines.append(ax.axhline(0.0, color="#aaaaaa", alpha=0.2, linewidth=0.6))
-        ax.set_ylim(plot_fixed_ylim[0], plot_fixed_ylim[1])
+            # Baseline per channel (stacked)
+            for off in plot_offsets:
+                overlay_lines.append(ax.axhline(float(off), color="#888888", alpha=0.2, linewidth=0.6))
+
+        base_half = max(abs(plot_fixed_ylim[0]), abs(plot_fixed_ylim[1]))
+        ax.set_ylim(float(plot_offsets[0] - base_half), float(plot_offsets[-1] + base_half))
         # B2: Add overlay text for disabled event marking.
         disabled_text = ax.text(
             0.5,
@@ -1053,8 +1079,19 @@ def _run_recording(args: argparse.Namespace) -> int:
         values = np.stack([v for _, v in plot_buffer], axis=0)
         t0 = times[-1]
         x = times - t0
-        for idx in range(values.shape[1]):
-            lines[idx].set_data(x, values[:, idx])
+        # Decimate for plotting performance (and to reduce the "solid fill" look)
+        n_pts = len(x)
+        step = max(1, n_pts // int(cfg.get("plot_max_points", 1500)))
+        x_plot = x[::step]
+        values_plot = values[::step, :]
+
+        for idx in range(values_plot.shape[1]):
+            # Stack channels with a baseline offset
+            y_plot = values_plot[:, idx]
+            if 'plot_offsets' in locals() or 'plot_offsets' in globals():
+                y_plot = y_plot + plot_offsets[idx]
+            lines[idx].set_data(x_plot, y_plot)
+
         ax.set_xlim(-plot_window_sec, 0.0)
 
         if plot_scale == "robust":
@@ -1074,11 +1111,15 @@ def _run_recording(args: argparse.Namespace) -> int:
                         (1.0 - alpha) * plot_ylim_ema[1] + alpha * target_high,
                     )
             if plot_ylim_ema is not None:
-                ax.set_ylim(plot_ylim_ema[0], plot_ylim_ema[1])
+                half = max(abs(plot_ylim_ema[0]), abs(plot_ylim_ema[1]))
+                half = float(max(50.0, min(400.0, half)))
+                ax.set_ylim(float(plot_offsets[0] - half), float(plot_offsets[-1] + half))
         else:
-            ax.set_ylim(plot_fixed_ylim[0], plot_fixed_ylim[1])
+            half = max(abs(plot_fixed_ylim[0]), abs(plot_fixed_ylim[1]))
+            half = float(max(50.0, min(400.0, half)))
+            ax.set_ylim(float(plot_offsets[0] - half), float(plot_offsets[-1] + half))
 
-        if overlay_lines:
+        if overlay_lines and len(overlay_lines) == 3:
             flat = values.reshape(-1)
             if flat.size > 0:
                 mean = float(np.mean(flat))

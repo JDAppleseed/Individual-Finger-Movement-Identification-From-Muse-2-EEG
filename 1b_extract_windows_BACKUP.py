@@ -21,16 +21,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-# =========================
-# NaN / Inf Safety Helpers
-# =========================
-def _drop_nonfinite_rows(df, cols):
-    df = df.replace([np.inf, -np.inf], np.nan)
-    return df.dropna(subset=cols)
-
-def _is_finite_array(arr):
-    return np.isfinite(arr).all()
-
 import pandas as pd
 
 from utils.label_schema import (
@@ -1162,9 +1152,6 @@ def main():
     drop_guard_band = 0
     drop_invalid_label = 0
     drop_short_segment = 0
-        # Skip windows with non-finite values
-        if not _is_finite_array(segment):
-            continue
     drop_gap = 0
     drop_ambiguous = 0
     drop_rest_subsample = 0
@@ -1341,9 +1328,6 @@ def main():
             segment[:, ch_idx] = np.interp(grid, times_pad, signal_pad[:, ch_idx])
 
         features = segment.mean(axis=0)
-        # Skip features with non-finite values
-        if not _is_finite_array(np.asarray(features)):
-            continue
 
         # collect
         sequence_windows.append(segment.astype(np.float32))

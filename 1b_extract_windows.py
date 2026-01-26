@@ -21,6 +21,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+# =========================
+# NaN / Inf Safety Helpers
+# =========================
+def _drop_nonfinite_rows(df, cols):
+    df = df.replace([np.inf, -np.inf], np.nan)
+    return df.dropna(subset=cols)
+
+def _is_finite_array(arr):
+    return np.isfinite(arr).all()
+
 import pandas as pd
 
 from utils.label_schema import (
@@ -56,7 +66,7 @@ REST_SUBSAMPLE_PROB = 1.0
 REST_SUBSAMPLE_SEED = 1337
 REST_MAX_WINDOWS: Optional[int] = None
 
-RAW_FILE = "eeg_features.csv"
+RAW_FILE = "raw.csv"  # deprecated: eeg_features.csv
 EVENT_FILE = "events.csv"
 OUT_FILE = "eeg_windows.csv"
 OUT_NPZ = "eeg_windows.npz"
@@ -922,9 +932,30 @@ def main():
     session_manifest = {}
     if session_dir:
         session_dir = session_dir.expanduser().resolve()
-        features_path = session_dir / "raw"
-        events_path = session_dir / "events" / "events.jsonl"
-        session_meta = _read_json(session_dir / "meta.json")
+        # Resolve input files produced by step1.
+        # Preferred: meta.json written by step1, otherwise glob for *_raw.csv and *_events.csv.
+        meta_path = session_dir / "meta.json"
+        raw_csv = None
+        events_csv = None
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text())
+                raw_csv = meta.get('raw_csv_path') or meta.get('raw_path') or meta.get('features_path')
+                events_csv = meta.get('events_csv_path') or meta.get('events_path')
+            except Exception as e:
+                logger.warning(f"Failed to parse meta.json ({meta_path}): {e}")
+        if raw_csv is None:
+            matches = sorted(session_dir.glob("*_raw.csv"))
+            if matches:
+                raw_csv = str(matches[-1])
+        if events_csv is None:
+            matches = sorted(session_dir.glob("*_events.csv"))
+            if matches:
+                events_csv = str(matches[-1])
+        features_path = Path(args.features) if args.features else (Path(raw_csv) if raw_csv else None)
+        events_path = Path(args.events) if args.events else (Path(events_csv) if events_csv else None)
+        if features_path is None or events_path is None:
+            raise FileNotFoundError(f"Could not resolve raw/events CSVs in session_dir={session_dir}")
         session_manifest = _read_json(session_dir / "manifest.json")
         source = "session_dir"
     else:
@@ -1053,6 +1084,40 @@ def main():
             session_dir
         )
         events = _load_events_jsonl(events_path)
+
+    # Drop events with any non-finite required fields to prevent NaNs entering training.
+    # This is intentionally strict: if an event is malformed, we prefer to drop it.
+    before_n = len(events)
+    cleaned = []
+    dropped = 0
+    for ev in events:
+        try:
+            onset = ev.get("onset_s", None)
+            offset = ev.get("offset_s", None)
+            finger = ev.get("finger", None)
+            action = ev.get("action", None)
+
+            def _bad(x):
+                if x is None:
+                    return True
+                # np.isfinite works for ints/floats; treat strings as OK (labels)
+                if isinstance(x, (int, float, np.number)):
+                    return not np.isfinite(float(x))
+                return False
+
+            if _bad(onset) or _bad(offset) or _bad(finger) or _bad(action):
+                dropped += 1
+                continue
+            if float(offset) <= float(onset):
+                dropped += 1
+                continue
+            cleaned.append(ev)
+        except Exception:
+            dropped += 1
+            continue
+    events = cleaned
+    if dropped:
+        logging.warning("Dropped %d/%d events with NaN/inf/missing fields (pre-windowing).", dropped, before_n)
     else:
         times, signal, channel_cols = _load_features(features_path)
         events = _load_events(events_path, session_meta=session_meta)
@@ -1328,6 +1393,9 @@ def main():
             segment[:, ch_idx] = np.interp(grid, times_pad, signal_pad[:, ch_idx])
 
         features = segment.mean(axis=0)
+        # Skip features with non-finite values
+        if not _is_finite_array(np.asarray(features)):
+            continue
 
         # collect
         sequence_windows.append(segment.astype(np.float32))
@@ -1440,7 +1508,9 @@ def main():
         kept_windows = len(action_labels)
 
     # ===== SAVE CSV =====
-    pd.DataFrame(windows).to_csv(OUT_FILE, index=False)
+    windows_df = pd.DataFrame(windows)
+    windows_df = _drop_nonfinite_rows(windows_df, context='windows_df')
+    windows_df.to_csv(OUT_FILE, index=False)
     print(f"✅ Saved {len(windows)} windows → {OUT_FILE}")
 
     action_dist = pd.Series(action_labels).value_counts().sort_index().to_dict()
