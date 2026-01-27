@@ -806,8 +806,7 @@ class MainWindow(QMainWindow):
             "6) Evaluate",
             "7) Live Infer + Actuate",
             "Logs & Diagnostics",
-            "Project",
-            "Subject",
+            "Projects",
             "Stream Setup",
             "Export",
         ]:
@@ -824,8 +823,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self._wrap_scroll(self._build_evaluate_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_infer_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_logs_page(), "CentralWorkspace"))
-        self.stack.addWidget(self._wrap_scroll(self._build_project_page(), "CentralWorkspace"))
-        self.stack.addWidget(self._wrap_scroll(self._build_subject_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_projects_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_stream_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_export_page(), "CentralWorkspace"))
         self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -999,10 +997,7 @@ class MainWindow(QMainWindow):
         menu = self.menuBar()
         file_menu = menu.addMenu("File")
         file_menu.addAction(
-            "Project Manager", lambda: self.workflow_list.setCurrentRow(9)
-        )
-        file_menu.addAction(
-            "Subject Manager", lambda: self.workflow_list.setCurrentRow(10)
+            "Projects", lambda: self.workflow_list.setCurrentRow(9)
         )
         file_menu.addSeparator()
         file_menu.addAction("Quit", self.close)
@@ -1014,7 +1009,7 @@ class MainWindow(QMainWindow):
 
         tools_menu = menu.addMenu("Tools")
         tools_menu.addAction(
-            "Stream Setup", lambda: self.workflow_list.setCurrentRow(11)
+            "Stream Setup", lambda: self.workflow_list.setCurrentRow(10)
         )
         tools_menu.addAction(
             "Validate Session", lambda: self.workflow_list.setCurrentRow(3)
@@ -1035,7 +1030,7 @@ class MainWindow(QMainWindow):
         study_menu.addAction("Evaluate", lambda: self.workflow_list.setCurrentRow(6))
 
         datasets_menu = menu.addMenu("Datasets")
-        datasets_menu.addAction("Export", lambda: self.workflow_list.setCurrentRow(12))
+        datasets_menu.addAction("Export", lambda: self.workflow_list.setCurrentRow(11))
 
         run_menu = menu.addMenu("Run")
         run_menu.addAction(
@@ -1171,22 +1166,17 @@ class MainWindow(QMainWindow):
         self.live_connect_btn.clicked.connect(self._connect_muse)
         self.live_disconnect_btn = QPushButton("Disconnect Muse")
         self.live_disconnect_btn.clicked.connect(self._disconnect_muse)
+
+        # Keep Stream Control buttons from stretching vertically when dock content changes.
+        for _btn in (self.live_connect_btn, self.live_disconnect_btn):
+            _btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            _btn.setMinimumHeight(34)
+            _btn.setMaximumHeight(34)
         stream_layout.addWidget(self.live_connect_btn)
         stream_layout.addWidget(self.live_disconnect_btn)
-        quick_actions = QLabel("Quick Actions")
-        self._apply_text_outline_effect(quick_actions)
-        stream_layout.addWidget(quick_actions)
+        # Quick Actions removed (use Stream Setup page for diagnostics)
         self._apply_text_outline_effect(self.stream_status_dock)
         self._apply_text_outline_effect(self.health_indicator)
-        detect_btn = QPushButton("Scan LSL Streams")
-        detect_btn.clicked.connect(self._detect_lsl_streams)
-        test_btn = QPushButton("Test Connection")
-        test_btn.clicked.connect(self._test_lsl)
-        stream_layout.addWidget(detect_btn)
-        stream_layout.addWidget(test_btn)
-        open_stream_btn = QPushButton("Open Stream Setup")
-        open_stream_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(11))
-        stream_layout.addWidget(open_stream_btn)
         stream_layout.addStretch(1)
         stream_dock = QDockWidget("Stream Control", self)
         stream_dock.setWidget(self._wrap_scroll(stream_widget, "Sidebar"))
@@ -1314,12 +1304,9 @@ class MainWindow(QMainWindow):
         session_layout.addWidget(self.project_label_dock)
         session_layout.addWidget(self.subject_label_dock)
         session_layout.addWidget(self.session_label_dock)
-        project_btn = QPushButton("Project Page")
-        project_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(9))
-        session_layout.addWidget(project_btn)
-        subject_btn = QPushButton("Subject Page")
-        subject_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(10))
-        session_layout.addWidget(subject_btn)
+        projects_btn = QPushButton("Projects")
+        projects_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(9))
+        session_layout.addWidget(projects_btn)
         session_layout.addStretch(1)
         session_dock = QDockWidget("Session", self)
         session_dock.setWidget(self._wrap_scroll(session_widget, "Sidebar"))
@@ -1682,6 +1669,66 @@ class MainWindow(QMainWindow):
         edit_btn = QPushButton("Create / Edit Subject")
         edit_btn.clicked.connect(self._edit_subject)
         layout.addWidget(edit_btn)
+        layout.addStretch(1)
+        return page
+
+
+    def _build_projects_page(self) -> QWidget:
+        """
+        Combined Project + Subject management page.
+
+        Top: project selection / creation.
+        Bottom: subject selection / create/edit (within selected project).
+        """
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        # --- Project controls ---
+        project_box = QGroupBox("Project")
+        project_layout = QVBoxLayout(project_box)
+        project_form = QFormLayout()
+
+        self.project_combo = QComboBox()
+        # Populate without triggering open until the user selects
+        self._refresh_projects()
+        self.project_combo.currentTextChanged.connect(self._open_project)
+
+        self.project_name_input = OutlineLineEdit()
+
+        open_project_label = QLabel("Open Project")
+        open_project_label.setStyleSheet("color: white;")
+        project_form.addRow(open_project_label, self.project_combo)
+        project_form.addRow("New Project", self.project_name_input)
+        project_layout.addLayout(project_form)
+
+        project_btn_row = QHBoxLayout()
+        create_btn = QPushButton("Create / Open")
+        create_btn.clicked.connect(self._create_project)
+        project_btn_row.addWidget(create_btn)
+        project_btn_row.addStretch(1)
+        project_layout.addLayout(project_btn_row)
+
+        layout.addWidget(project_box)
+
+        # --- Subject controls ---
+        subject_box = QGroupBox("Subject")
+        subject_layout = QVBoxLayout(subject_box)
+        subject_form = QFormLayout()
+
+        self.subject_combo = QComboBox()
+        self.subject_combo.currentTextChanged.connect(self._select_subject)
+        subject_form.addRow("Subject", self.subject_combo)
+        subject_layout.addLayout(subject_form)
+
+        edit_btn = QPushButton("Create / Edit Subject")
+        edit_btn.clicked.connect(self._edit_subject)
+        subject_layout.addWidget(edit_btn)
+
+        layout.addWidget(subject_box)
+
+        # Ensure subject list reflects current project selection (if any)
+        self._refresh_subjects()
+
         layout.addStretch(1)
         return page
 
@@ -3507,6 +3554,54 @@ class MainWindow(QMainWindow):
         candidates = sorted(base.glob(pattern))
         return candidates[-1] if candidates else None
 
+
+    def _resolve_session_dir_for_current(self, subject_dir: Path) -> Optional[Path]:
+        """Best-effort resolve the session directory that the UI is currently targeting."""
+        # 1) Explicit textbox
+        v = self.session_dir_input.text().strip() if hasattr(self, "session_dir_input") else ""
+        if v:
+            p = Path(v).expanduser()
+            if p.exists():
+                return p
+        # 2) Current session label (ui session id)
+        if getattr(self, "current_session_ui", None):
+            p = session_root(subject_dir, self.current_session_ui)
+            if p.exists():
+                return p
+        return None
+
+    def _resolve_windows_npz_for_current(self, subject_dir: Path) -> Optional[Path]:
+        """Resolve the correct windows NPZ for the currently selected session/subject."""
+        # Prefer canonical per-subject windows file (subject/windows/<subject>_<backend>_eeg_windows.npz)
+        if getattr(self, "current_session_backend", None):
+            p = subject_dir / "windows" / f"{self.current_subject}_{self.current_session_backend}_eeg_windows.npz"
+            if p.exists():
+                return p
+        # Next: session-local windows (sessions/<id>/windows/eeg_windows.npz)
+        sdir = self._resolve_session_dir_for_current(subject_dir)
+        if sdir:
+            p = sdir / "windows" / "eeg_windows.npz"
+            if p.exists():
+                return p
+        # Fallback: most recent NPZ in subject/windows matching subject prefix
+        latest = self._latest_subject_file(subject_dir / "windows", f"{self.current_subject}_*_eeg_windows.npz")
+        return latest
+
+    def _resolve_latest_model_artifacts(self, subject_dir: Path) -> Tuple[Optional[str], Optional[Path], Optional[Path]]:
+        """Resolve latest (exp_hash, model_path, scaler_path) for the selected subject."""
+        models_root = self.repo_root / "data" / "models" / str(self.current_subject or "UNKNOWN")
+        if not models_root.exists():
+            return None, None, None
+        runs = [p for p in models_root.iterdir() if p.is_dir()]
+        if not runs:
+            return None, None, None
+        # Choose by most-recent modification time
+        runs.sort(key=lambda p: p.stat().st_mtime)
+        run_dir = runs[-1]
+        exp_hash = run_dir.name
+        model_path = run_dir / "finger_action_model.pt"
+        scaler_path = run_dir / "scaler.save"
+        return exp_hash, (model_path if model_path.exists() else None), (scaler_path if scaler_path.exists() else None)
     def _update_resume_ui(self) -> None:
         if not hasattr(self, "resume_status_label") or not hasattr(
             self, "resume_checkbox"
@@ -3906,6 +4001,15 @@ class MainWindow(QMainWindow):
             )
             self._set_session_label(f"Session: {self.current_session_ui}")
 
+        
+        # Ensure downstream steps that rely on model/scaler defaults don't accidentally pick up
+        # stale root-level files. Prefer latest artifacts for the selected subject.
+        if step_id in {"infer"}:
+            exp_hash, model_path, scaler_path = self._resolve_latest_model_artifacts(subject_dir)
+            if model_path and not settings.get("MODEL_PATH"):
+                settings["MODEL_PATH"] = str(model_path)
+            if scaler_path and not settings.get("SCALER_PATH"):
+                settings["SCALER_PATH"] = str(scaler_path)
         if step_id == "step1":
             settings["LSL_STREAM_NAME"] = DEFAULT_STREAM_NAME
         config_path = subject_dir / "config" / f"{step_id}.json"
@@ -3925,11 +4029,34 @@ class MainWindow(QMainWindow):
             args.extend(["--mode", "train_record"])
         if step_id == "step1b":
             session_dir_value = self.session_dir_input.text().strip()
+            # If the user hasn't manually provided a session dir, default to the currently selected session.
+            if not session_dir_value and self.current_session_ui:
+                session_dir_value = str(session_root(subject_dir, self.current_session_ui))
+                self.session_dir_input.setText(session_dir_value)
             if session_dir_value:
                 args.extend(["--session-dir", session_dir_value])
                 if self.allow_partial_checkbox.isChecked():
                     args.append("--allow-partial")
+        # Enforce correct handoff between Step 1b → Step 2:
+        # - always train on the selected subject (avoids argparse default filtering to an unrelated subject)
+        # - prefer the windows NPZ produced for the current session to avoid stale ./eeg_windows.npz
+        if step_id == "train":
+            args.extend(["--subject-id", str(self.current_subject)])
+            preferred_npz = None
+            if self.current_session_backend:
+                candidate = subject_dir / "windows" / f"{self.current_subject}_{self.current_session_backend}_eeg_windows.npz"
+                if candidate.exists():
+                    preferred_npz = str(candidate)
+            if not preferred_npz and self.current_session_ui:
+                windows_npz = session_root(subject_dir, self.current_session_ui) / "windows" / "eeg_windows.npz"
+                if windows_npz.exists():
+                    preferred_npz = str(windows_npz)
+            if preferred_npz:
+                args.extend(["--npz", preferred_npz])
+
+
         args.extend(self._collect_step_args(step_id))
+
         cwd = str(self.repo_root)
         if step_id == "step1b" and self.current_session_ui:
             session_dir = session_root(subject_dir, self.current_session_ui)
@@ -4117,9 +4244,37 @@ class MainWindow(QMainWindow):
         if not script_info:
             self._append_log(f"Evaluation script not found: {script_key}")
             return
+
+        subject_dir = subject_root(self.current_project, self.current_subject)
+        npz_path = self._resolve_windows_npz_for_current(subject_dir)
+        exp_hash, model_path, scaler_path = self._resolve_latest_model_artifacts(subject_dir)
+
         args = [str(script_info.path)]
-        if self.current_subject and script_key == "evaluate_reports":
-            args += ["--subject-id", self.current_subject]
+
+        # Always prefer explicit, subject-scoped inputs to avoid "latest global" mixups.
+        if script_key in {"evaluate_deepchecks", "evaluate_fast", "evaluate"}:
+            if npz_path:
+                args += ["--npz", str(npz_path)]
+            if model_path:
+                args += ["--model", str(model_path)]
+            if scaler_path:
+                args += ["--scaler", str(scaler_path)]
+
+        if script_key == "evaluate_reports":
+            if self.current_subject:
+                args += ["--subject-id", str(self.current_subject)]
+            # Force report generation for the subject's latest experiment if we can resolve it.
+            if exp_hash:
+                args += ["--exp-hash", str(exp_hash)]
+
+        # 3c has no CLI args in this repo; best-effort steer it via env vars that
+        # downstream utilities may honor.
+        if script_key == "evaluate_figures":
+            if exp_hash:
+                os.environ["EXP_HASH"] = str(exp_hash)
+            if self.current_subject:
+                os.environ["SUBJECT_ID"] = str(self.current_subject)
+
         self.active_step = script_key
         self._append_log(f"Running: {args} (cwd={self.repo_root})")
         if getattr(self, "dry_run_checkbox", None) and self.dry_run_checkbox.isChecked():

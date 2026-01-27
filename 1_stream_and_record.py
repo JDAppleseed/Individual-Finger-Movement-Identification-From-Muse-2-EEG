@@ -113,27 +113,165 @@ class EventRecorder:
         self._lock = lock
 
     def record(self, event: EventRecord) -> None:
-        payload = {
-            "event_time_s": float(event.event_time_s),
-            "lsl_ts_mono": float(event.lsl_ts_mono),
-            "local_ts": float(event.local_ts),
-            "label": str(event.label),
-            "metadata": event.metadata,
-        }
-        metadata_json = json.dumps(payload["metadata"], sort_keys=True)
+        """
+        Write one row to the legacy events.csv schema (primary inspection artifact).
+        """
+        md = dict(event.metadata or {})
+        onset_s = float(event.event_time_s)
+        duration_s = float(md.get("duration_s") or md.get("duration") or 0.0)
+        ev_type = str(event.label)
+
+        channel = md.get("channel", "n/a")
+        confidence = md.get("confidence", "")
+        notes = md.get("notes", "")
+
+        finger_id = md.get("finger_id", md.get("finger", ""))
+        action_id = md.get("action_id", md.get("action", ""))
+        trial_id = md.get("trial_id", md.get("trial", ""))
+        block_id = md.get("block_id", md.get("block", ""))
+        source = md.get("source", "keyboard")
+
+        # Keep the CSV human-friendly; avoid dumping huge JSON blobs here.
         with self._lock:
             self._writer.writerow(
                 [
-                    payload["event_time_s"],
-                    payload["lsl_ts_mono"],
-                    payload["local_ts"],
-                    payload["label"],
-                    metadata_json,
+                    onset_s,
+                    duration_s,
+                    ev_type,
+                    channel,
+                    confidence,
+                    notes,
+                    finger_id,
+                    action_id,
+                    trial_id,
+                    block_id,
+                    source,
                 ]
             )
 
 
-# === Test helpers / legacy hooks ===
+
+class SidecarNewFormatWriter:
+    """
+    Writes the "new-format" session artifacts expected by validate_session.py and downstream steps:
+      - raw/eeg_raw_shard_*.npy  (dtype includes seq, lsl_ts_mono, sample)
+      - events/events.jsonl
+      - meta.json
+      - manifest.json (written on finalize)
+
+    This writer is intentionally independent of the CSV inspection artifacts.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_dir: Path,
+        subject_id: str,
+        session_id: str,
+        channel_labels: List[str],
+        sampling_rate: float,
+        timebase_version: str,
+        shard_size_samples: int,
+    ) -> None:
+        self.session_dir = session_dir
+        self.subject_id = subject_id
+        self.session_id = session_id
+        self.channel_labels = list(channel_labels)
+        self.sampling_rate = float(sampling_rate)
+        self.timebase_version = str(timebase_version)
+        self.shard_size_samples = int(shard_size_samples)
+
+        self.raw_dir = self.session_dir / "raw"
+        self.events_dir = self.session_dir / "events"
+        self.raw_dir.mkdir(parents=True, exist_ok=True)
+        self.events_dir.mkdir(parents=True, exist_ok=True)
+
+        self.events_path = self.events_dir / "events.jsonl"
+        self._events_f = self.events_path.open("a", encoding="utf-8")
+
+        self._dtype = np.dtype(
+            [
+                ("seq", "<i8"),
+                ("lsl_ts_mono", "<f8"),
+                ("sample", "<f4", (len(self.channel_labels),)),
+            ]
+        )
+        self._buf = np.empty(self.shard_size_samples, dtype=self._dtype)
+        self._buf_n = 0
+        self._seq_out = 0
+        self._shard_start_seq = 0
+        self._shard_paths: List[Path] = []
+
+        self._t0_mono: Optional[float] = None
+        self._tN_mono: Optional[float] = None
+        self._created_utc = datetime.now(timezone.utc).isoformat()
+
+        self._write_meta(initial=True)
+
+    def _write_meta(self, *, initial: bool) -> None:
+        meta = {
+            "schema_version": 1,
+            "subject_id": self.subject_id,
+            "session_id": self.session_id,
+            "timebase_version": self.timebase_version,
+            "channel_labels": self.channel_labels,
+            "sampling_rate_hz": self.sampling_rate,
+            "created_utc": self._created_utc,
+            "complete": False if initial else True,
+            "sample_count": int(self._seq_out),
+            "lsl_ts_mono_start": self._t0_mono,
+            "lsl_ts_mono_end": self._tN_mono,
+        }
+        (self.session_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+
+    def append_sample(self, *, lsl_ts_mono: float, sample: Iterable[float]) -> None:
+        if self._t0_mono is None:
+            self._t0_mono = float(lsl_ts_mono)
+        self._tN_mono = float(lsl_ts_mono)
+
+        i = self._buf_n
+        self._buf["seq"][i] = int(self._seq_out)
+        self._buf["lsl_ts_mono"][i] = float(lsl_ts_mono)
+        self._buf["sample"][i] = np.asarray(list(sample), dtype=np.float32)
+        self._buf_n += 1
+        self._seq_out += 1
+
+        if self._buf_n >= self.shard_size_samples:
+            self._flush_shard()
+
+    def append_event(self, event: Dict[str, Any]) -> None:
+        # ensure JSON-serializable; write one JSON per line
+        self._events_f.write(json.dumps(event, sort_keys=False) + "\n")
+        self._events_f.flush()
+
+    def _flush_shard(self) -> None:
+        if self._buf_n <= 0:
+            return
+        shard_path = self.raw_dir / f"eeg_raw_shard_{self._shard_start_seq:06d}.npy"
+        np.save(shard_path, self._buf[: self._buf_n].copy())
+        self._shard_paths.append(shard_path)
+        self._shard_start_seq = int(self._seq_out)
+        self._buf_n = 0
+
+    def finalize(self, *, termination_reason: str, missing_seq_count: int = 0) -> None:
+        self._flush_shard()
+        self._events_f.close()
+
+        manifest = {
+            "schema_version": 1,
+            "subject_id": self.subject_id,
+            "session_id": self.session_id,
+            "timebase_version": self.timebase_version,
+            "termination_reason": str(termination_reason),
+            "missing_seq_count": int(missing_seq_count),
+            "shard_list": [
+                {"path": str(p.relative_to(self.session_dir))} for p in self._shard_paths
+            ],
+        }
+        (self.session_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        self._write_meta(initial=False)
+
+# === Test helpers / legacy hooks === / legacy hooks ===
 
 def _build_session_state_payload(state_obj: StreamState) -> Dict[str, Any]:
     return {
@@ -261,6 +399,14 @@ def _open_raw_csv(path: Path, channel_count: int = CHANNELS) -> tuple[Any, csv.w
 
 
 def _open_events_csv(path: Path) -> tuple[Any, csv.writer]:
+    """
+    Legacy human-readable events.csv (primary inspection artifact).
+
+    Schema (matches legacy sessions):
+      onset_s,duration_s,type,channel,confidence,notes,finger_id,action_id,trial_id,block_id,source
+
+    NOTE: The new-format events/events.jsonl is written separately for pipeline steps.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     exists = path.exists() and path.stat().st_size > 0
     file_obj = path.open("a", newline="", buffering=1)
@@ -268,11 +414,17 @@ def _open_events_csv(path: Path) -> tuple[Any, csv.writer]:
     if not exists:
         writer.writerow(
             [
-                "event_time_s",
-                "lsl_ts_mono",
-                "local_ts",
-                "label",
-                "optional_metadata_json",
+                "onset_s",
+                "duration_s",
+                "type",
+                "channel",
+                "confidence",
+                "notes",
+                "finger_id",
+                "action_id",
+                "trial_id",
+                "block_id",
+                "source",
             ]
         )
     return file_obj, writer
@@ -886,6 +1038,17 @@ def _run_recording(args: argparse.Namespace) -> int:
     session_id = session_writer.session_id
     session_dir = session_writer.paths.session_dir
 
+    # New-format session artifacts (required by validate_session.py and steps 1b+).
+    sidecar_writer = SidecarNewFormatWriter(
+        session_dir=session_dir,
+        subject_id=subject_id,
+        session_id=session_id,
+        channel_labels=channel_labels,
+        sampling_rate=nominal_srate,
+        timebase_version=TIMEBASE_VERSION,
+        shard_size_samples=int(args.raw_shard_samples),
+    )
+
     raw_csv_path = output_root / f"{subject_id}_{session_id}_raw.csv"
     events_csv_path = output_root / f"{subject_id}_{session_id}_events.csv"
     raw_file, raw_writer = _open_raw_csv(raw_csv_path, channel_count=channel_count)
@@ -907,6 +1070,7 @@ def _run_recording(args: argparse.Namespace) -> int:
         raw_file.close()
         events_file.close()
         session_writer.finalize("init_only")
+        sidecar_writer.finalize(termination_reason="init_only", missing_seq_count=0)
         return 0
 
     plot_scale = _normalize_scale_mode(args.plot_scale)
@@ -960,6 +1124,7 @@ def _run_recording(args: argparse.Namespace) -> int:
                             segment_id=pkt.segment_id,
                         )
                         raw_writer.writerow(row)
+                        sidecar_writer.append_sample(lsl_ts_mono=pkt.lsl_ts_mono, sample=pkt.sample)
                         now_t = time.time()
                         if now_t - last_raw_flush_t >= raw_flush_interval_s:
                             raw_file.flush()
@@ -979,6 +1144,7 @@ def _run_recording(args: argparse.Namespace) -> int:
                         segment_id=pkt.segment_id,
                     )
                     raw_writer.writerow(row)
+                        sidecar_writer.append_sample(lsl_ts_mono=pkt.lsl_ts_mono, sample=pkt.sample)
                     now_t = time.time()
                     if now_t - last_raw_flush_t >= raw_flush_interval_s:
                         raw_file.flush()
@@ -1171,6 +1337,16 @@ def _run_recording(args: argparse.Namespace) -> int:
             }
         )
 
+        sidecar_writer.append_event(
+            {
+                "event_time_s": event_time_s,
+                "lsl_ts_mono": lsl_ts_mono,
+                "local_ts": payload.local_ts,
+                "label": label,
+                "metadata": payload.metadata,
+            }
+        )
+
     listener = None
     if event_marking_config_enabled:
         try:
@@ -1316,6 +1492,7 @@ def _run_recording(args: argparse.Namespace) -> int:
         else:
             termination_reason_final = termination_reason
         session_writer.finalize(termination_reason_final)
+        sidecar_writer.finalize(termination_reason=termination_reason_final, missing_seq_count=0)
 
         _link_or_copy(raw_csv_path, session_dir / "raw.csv")
         _link_or_copy(events_csv_path, session_dir / "events.csv")
