@@ -39,7 +39,7 @@ python eeglab_wrapper_ui.py
 - Connect Muse: `python eeglab_wrapper_ui.py` → click **Connect Muse 2** (Step 0), or run `python muse_lsl_streamer.py --name Muse2-EEG`.
 - Record: `python 1_stream_and_record.py --enable-plot --plot-scale fixed --plot-fixed-ylim -200 200` (writes raw.csv + events.csv for inspection, plus session artifacts: `manifest.json`, `meta.json`, `raw/eeg_raw_shard_*.npy`, `events/events.jsonl`).
 - Extract/Train/Evaluate: `python 1b_extract_windows.py --session-dir <session_dir>` (consumes session artifacts and produces `eeg_windows.npz`) → `python 2_train_model.py` → `python 3_evaluate_model.py` (prefer the UI or pass explicit `--subject-id` and `--npz/--model/--scaler` paths to avoid defaults).
-- Live infer: `python 7_live_infer_and_actuate.py --model-path <model.pt> --scaler-path <scaler.save> --stream-name Muse2-EEG` (safe mode). Use the UI to resolve model/scaler paths (typically `data/models/<subject>/<exp_hash>/`). Add `--enable-actuation --i-understand-this-moves-the-hand` to actuate.
+Live infer: `python 7_live_infer_and_actuate.py --model-path data/models/<subject>/<exp_hash>/finger_action_model.pt --scaler-path data/models/<subject>/<exp_hash>/scaler.save --stream-name Muse2-EEG` (safe mode). Use the UI to resolve model/scaler paths (typically `data/models/<subject>/<exp_hash>/`). Add `--enable-actuation --i-understand-this-moves-the-hand` to actuate.
 
 ## Quick Start
 
