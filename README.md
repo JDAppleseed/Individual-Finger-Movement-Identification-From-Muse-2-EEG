@@ -114,8 +114,9 @@ Launch the desktop UI and use the new live workflow (production path):
 python eeglab_wrapper_ui.py
 ```
 2) Use **Step 0: Connect Muse / LSL Status** to connect and verify LSL health.
-3) Run **Step 1: Record** to capture raw EEG + events to the session directory.
-4) Validate the session, then extract windows, train, evaluate, and run live inference.
+3) Create a Project and Subject to get the correct metadata for the steps to pull from.
+4) Run **Step 1: Record** to capture raw EEG + events to the session directory.
+5) Validate the session, then extract windows, train, evaluate, and run live inference.
 
 The UI gates Start Recording until the LSL stream is healthy (or operator-acknowledged).
 
@@ -297,3 +298,18 @@ pyinstaller --noconfirm --onefile --windowed eeglab_wrapper_ui.py
 - launch event marker
 - confirm config JSON written
 - confirm session folder created
+
+### Notes:
+- Everything here is a preliminary overview that will be updated to be more accurate when I get around to it
+- This project is usually constantly changing
+- For a simple pipeline run-through, use the ui (eeglab_wrapper_ui.py) and stick to the defaults
+- raw.csv and events.csv are for human observation, we save metadata in a different stack and that is what gets fed to the rest of the pipeline
+- Don't break confidentiality on any subjects, thats a big No-No
+- Please use this ethically and whenever possible credit me for the usage
+- Don't sell this code to other people, thats mean
+- More information can be found in the eeg_hand_lessons.tex, compile that for a full 50ish pages of lessons on how everything works, exercisies, answer keys, and diagrams shouold be there when compiled into a pdf through LaTex
+- Research Paper soon with more documentation and science heavy specifics
+- Any questions can be answered by me (Jonathan Davanzo) just send me over an email or whatever you can find or prefer
+- For anyone wanting to try this for themselves, good luck, recommended minimum hardware is a new-ish macbook air with minimum 16gb ram, its not gonna crash or mess anything up, one issue we ran into with those specs was write speed for when we had a more heavy stack of csvs being written at hundreds of thousands of lines with maybe 10-20 columns depending on what point we look back at
+- Csv writing was optimized and is minimal now, look for and stay vigilant with the health checks and logs, stuff can go wrong pretty quick and usually if you pause it and the resume it fixes itself and the hardware/software catches up
+- oh you also need a Muse 2 or equivalent EEG, but that's probably pretty obvious
