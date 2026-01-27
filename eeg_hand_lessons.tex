@@ -38,6 +38,7 @@
 % Code Listings (UTF-8 SAFE)
 % =====================================================
 \usepackage{listings}
+\newcommand{\SafeListing}[1]{\IfFileExists{#1}{\lstinputlisting{#1}}{\textit{(Listing not found: #1)}}}
 \usepackage{xcolor}
 \usepackage{shellesc}
 
@@ -1147,6 +1148,63 @@ We define a few invariants that the system must maintain:
 
 \todofig{End-to-end pipeline overview (data acquisition $\rightarrow$ features $\rightarrow$ windows $\rightarrow$ train $\rightarrow$ eval $\rightarrow$ realtime).}{figs/pipeline_overview.pdf}
 
+
+\section{Project pipeline: streaming, labeling, windowing, and training}
+
+This project is organized around three scripts that must interoperate correctly:
+
+\begin{enumerate}
+  \item \textbf{Step 1 --- \texttt{1\_stream\_and\_record.py}:} Connects to a Muse 2 over BLE, publishes an EEG stream over Lab Streaming Layer (LSL), and simultaneously records two CSV files:
+  \begin{itemize}
+    \item \texttt{*\_raw.csv}: the continuous EEG time series (4 channels; only the first four channels are used for modeling).
+    \item \texttt{*\_events.csv}: event markers (labels) with timestamps in the same timebase as the EEG samples.
+  \end{itemize}
+  \item \textbf{Step 1b --- \texttt{1b\_extract\_windows.py}:} Loads \texttt{*\_raw.csv} and \texttt{*\_events.csv}, resamples onto a fixed time grid, and extracts fixed-length windows aligned to each event. Any event/window that would contain NaNs (or non-finite values) is dropped to guarantee safe downstream training.
+  \item \textbf{Step 2 --- \texttt{2\_train\_model.py}:} Trains the PyTorch model on the extracted windows. This step assumes \emph{no NaNs} are present in the input tensors; therefore Step 1b is responsible for filtering/dropping problematic windows.
+\end{enumerate}
+
+\subsection{Why LSL and why timestamps matter}
+LSL provides a common clock domain for synchronizing streamed biosignals and event markers across processes and machines \cite{LSL, pylsl}. In this pipeline:
+
+\begin{itemize}
+  \item Each EEG sample is associated with an LSL timestamp.
+  \item Event times are stored using the same LSL timebase so that Step 1b can align events and EEG samples precisely.
+\end{itemize}
+
+\subsection{Recorded data formats}
+
+\paragraph{Raw EEG CSV (\texttt{*\_raw.csv}).}
+Step 1 writes a CSV with at least the following columns:
+\begin{itemize}
+  \item \texttt{time\_s}: session-relative time in seconds (derived from the LSL sample timestamps).
+  \item \texttt{lsl\_ts}: the absolute LSL timestamp for each sample.
+  \item \texttt{local\_ts}: the local clock timestamp for each sample (for debugging/health checks).
+  \item Four EEG channel columns. With Muse 2, the canonical four EEG channels are typically labeled \texttt{TP9}, \texttt{AF7}, \texttt{AF8}, \texttt{TP10} and the sample rate is 256\,Hz \cite{Muse2spec}.
+\end{itemize}
+
+\paragraph{Events CSV (\texttt{*\_events.csv}).}
+Step 1 writes a CSV with an \texttt{event\_time\_s} column and a \texttt{label} column (and may include additional metadata such as an \texttt{action} or \texttt{note}). Step 1b loads these rows and aligns each event to a time window in the raw EEG.
+
+\subsection{NaN safety invariant}
+PyTorch training in Step 2 must never receive NaNs. The project enforces the invariant:
+
+\begin{quote}
+\textbf{No NaNs enter Step 2.} If Step 1b encounters NaNs (or non-finite values) in EEG samples, resampling, labels, or window assembly, the affected event/window is dropped before serialization.
+\end{quote}
+
+\subsection{End-to-end checklist}
+Before collecting important data, verify:
+
+\begin{enumerate}
+  \item Step 1 connects to the Muse 2 reliably via BLE (Python BLE support is typically provided by \texttt{bleak} \cite{Bleak}).
+  \item Step 1 is writing \texttt{*\_raw.csv} and \texttt{*\_events.csv} continuously during the session (not only at shutdown).
+  \item Step 1b resolves input files from \texttt{meta.json} (preferred) or by globbing \texttt{*\_raw.csv} and \texttt{*\_events.csv} in the session directory.
+  \item Step 1b drops any NaN/non-finite windows and reports counts.
+  \item Step 2 starts training without NaN-related crashes.
+\end{enumerate}
+
+
+
 \section{Exercises}
 
 \exercise{1 (Conceptual)}{
@@ -1722,6 +1780,26 @@ Run: \texttt{\detokenize{python exercises/ex08_cache_validator_extension.py --sy
 }
 
 % ============================================================
+
+\chapter{Repository and Script Overview}
+The public GitHub repository is the canonical source of truth for code structure, configuration, and usage instructions. \cite{repo_github}
+
+\section{Core workflow scripts}
+This project’s most critical offline pipeline is:
+\begin{enumerate}
+\item \textbf{Step 1: Stream and record} (\texttt{1\_stream\_and\_record.py}) ensures a Muse 2 EEG LSL stream is available, and writes:
+\begin{itemize}
+\item \texttt{\_raw.csv}: raw EEG samples with a consistent timebase, and
+\item \texttt{\_events.csv}: event markers in the same time domain.
+\end{itemize}
+\item \textbf{Step 1b: Extract windows} (\texttt{1b\_extract\_windows.py}) reads the raw/events CSVs, resamples onto a fixed grid, extracts fixed-duration windows aligned to events, and \textbf{drops any windows/events that would contain NaNs} so downstream training is guaranteed NaN-free.
+\item \textbf{Step 2: Train model} (\texttt{2\_train\_model.py}) trains the PyTorch classifier on extracted windows. PyTorch training cannot accept NaNs; therefore Step 1b enforces NaN-free tensors before training begins.
+\end{enumerate}
+
+\section{Where to start}
+If you are new to the codebase, begin with the repository README and then follow the scripts in order (Step 1 $\rightarrow$ Step 1b $\rightarrow$ Step 2). \cite{repo_github}
+
+
 \part{Real-Time Systems and Safety}
 % ============================================================
 
@@ -1736,13 +1814,29 @@ Stability controls (hysteresis, consecutive-frame agreement) convert noisy per-w
 
 \section{Uncertainty (MC Dropout) and Safe Actuation}
 
-Epistemic uncertainty can be estimated by sampling predictions under dropout.
-A safe policy:
+
+Dropout is a regularization technique: during training, we randomly “turn off” a fraction of neurons (or connections) on each forward pass. This reduces overfitting by preventing the network from relying too heavily on any single pathway. In standard inference, dropout is disabled so the model’s output is deterministic.
+
+\textbf{Monte Carlo (MC) Dropout} keeps dropout \emph{enabled during inference} and runs the same input through the network multiple times (e.g., 10--100 forward passes). Each pass uses a different random dropout mask, producing a slightly different prediction. From the resulting set of predictions we compute:
 \begin{itemize}
-\item require mean confidence above threshold,
-\item require uncertainty below threshold,
-\item require stability across $k$ windows.
+\item a \textbf{final prediction} as the mean (or majority vote) across passes, and
+\item an \textbf{uncertainty measure} from the spread (e.g., variance or entropy) of those predictions.
 \end{itemize}
+When the predictions are tightly clustered, uncertainty is low; when they are spread out, uncertainty is high.
+
+\textbf{High-school level (why it matters).} EEG is noisy, and the user’s physiology and headset contact vary over time. Uncertainty helps us detect when the model “isn’t sure,” so we can avoid acting on unreliable predictions.
+
+\textbf{Undergraduate level (ensemble intuition).} MC Dropout behaves like an inexpensive ensemble: each dropout mask creates a different “thinned” subnetwork. Aggregating many subnetworks typically improves calibration versus a single deterministic model, and the disagreement across subnetworks provides a useful confidence signal.
+
+\textbf{Graduate level (Bayesian approximation).} Gal and Ghahramani showed that test-time dropout can be interpreted as approximate Bayesian inference, where each dropout mask corresponds to sampling from an approximate posterior distribution over network weights (a variational distribution implicitly defined by the dropout probability). This yields a practical estimate of \emph{epistemic uncertainty} (uncertainty due to limited data / model knowledge). \cite{gal2016dropout} In many applications, separating epistemic from \emph{aleatoric uncertainty} (inherent noise) is useful; Kendall and Gal provide a widely cited discussion of these uncertainty types and their role in deep learning systems. \cite{kendall2017uncertainties}
+
+\textbf{How we use it for safety.} In the real-time loop, we run $N$ stochastic forward passes with dropout enabled, compute the mean class probability vector, and compute an uncertainty score from the sample distribution. A conservative policy is:
+\begin{itemize}
+\item require mean confidence above a threshold,
+\item require uncertainty below a threshold, and
+\item require stability across $k$ consecutive windows (hysteresis).
+\end{itemize}
+This reduces false positives and makes actuation safer, especially during transient artifacts (motion, blinks, poor electrode contact).
 
 \section{PyTorch Primitives for Realtime Inference}
 PyTorch primitives used in realtime inference:
@@ -2072,3 +2166,27 @@ Correctness, discipline, and humility matter more than model complexity.
 \end{quote}
 
 \end{document}
+
+
+\section{References}
+\begin{thebibliography}{9}
+
+\bibitem{LSL}
+Christian A. Kothe.
+\newblock \emph{Lab Streaming Layer (LSL)}.
+\newblock Project documentation and source: \url{https://github.com/sccn/labstreaminglayer}.
+
+\bibitem{pylsl}
+\emph{pylsl: Python bindings for Lab Streaming Layer}.
+\newblock Source and documentation: \url{https://github.com/labstreaminglayer/pylsl}.
+
+\bibitem{Bleak}
+\emph{bleak: A cross-platform Python BLE library}.
+\newblock Source and documentation: \url{https://github.com/hbldh/bleak}.
+
+\bibitem{Muse2spec}
+\emph{Muse 2 EEG technical notes (channels and sampling rate)}.
+\newblock Summary of EEG channels and 256\,Hz sampling commonly used in Muse 2 tooling: \url{https://choosemuse.com/muse-2-specifications/}.
+
+
+\end{thebibliography}
