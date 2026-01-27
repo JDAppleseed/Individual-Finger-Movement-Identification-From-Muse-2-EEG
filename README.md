@@ -37,9 +37,9 @@ python eeglab_wrapper_ui.py
 ## What changed / How to run
 
 - Connect Muse: `python eeglab_wrapper_ui.py` → click **Connect Muse 2** (Step 0), or run `python muse_lsl_streamer.py --name Muse2-EEG`.
-- Record: `python 1_stream_and_record.py --enable-plot --plot-scale fixed --plot-fixed-ylim -200 200` (outputs raw.csv + events.csv).
-- Extract/Train/Evaluate: `python 1b_extract_windows.py --session-dir <session_dir>` → `python 2_train_model.py` → `python 3_evaluate_model.py`.
-- Live infer: `python 7_live_infer_and_actuate.py --model-path models/finger_action_model.pt --scaler-path scaler.save --stream-name Muse2-EEG` (safe mode). Add `--enable-actuation --i-understand-this-moves-the-hand` to actuate.
+- Record: `python 1_stream_and_record.py --enable-plot --plot-scale fixed --plot-fixed-ylim -200 200` (writes raw.csv + events.csv for inspection, plus session artifacts: `manifest.json`, `meta.json`, `raw/eeg_raw_shard_*.npy`, `events/events.jsonl`).
+- Extract/Train/Evaluate: `python 1b_extract_windows.py --session-dir <session_dir>` (consumes session artifacts and produces `eeg_windows.npz`) → `python 2_train_model.py` → `python 3_evaluate_model.py` (prefer the UI or pass explicit `--subject-id` and `--npz/--model/--scaler` paths to avoid defaults).
+- Live infer: `python 7_live_infer_and_actuate.py --model-path <model.pt> --scaler-path <scaler.save> --stream-name Muse2-EEG` (safe mode). Use the UI to resolve model/scaler paths (typically `data/models/<subject>/<exp_hash>/`). Add `--enable-actuation --i-understand-this-moves-the-hand` to actuate.
 
 ## Quick Start
 
@@ -49,7 +49,7 @@ python eeglab_wrapper_ui.py
 source .venv/bin/activate
 ```
 
-2) Record-only (raw + events):
+2) Record-only (raw + events + session artifacts):
 ```
 python 1_stream_and_record.py --enable-plot --plot-scale fixed --plot-fixed-ylim -200 200
 ```
@@ -60,13 +60,13 @@ python 5_review_events.py
 python 5_validate_events.py --apply
 ```
 
-4) Validate the session, then extract windows:
+4) Validate the session (requires `manifest.json`), then extract windows:
 ```
 python -m muse_streaming.validate_session --session <session_dir>
 python 1b_extract_windows.py --session-dir <session_dir>
 ```
 
-5) Train + evaluate:
+5) Train + evaluate (prefer UI or pass explicit `--subject-id` and `--npz/--model/--scaler` paths to avoid defaults):
 ```
 python 2_train_model.py
 python 3_evaluate_model.py
@@ -116,7 +116,7 @@ python eeglab_wrapper_ui.py
 2) Use **Step 0: Connect Muse / LSL Status** to connect and verify LSL health.
 3) Create a Project and Subject to get the correct metadata for the steps to pull from.
 4) Run **Step 1: Record** to capture raw EEG + events to the session directory.
-5) Validate the session, then extract windows, train, evaluate, and run live inference.
+5) Validate the session (requires `manifest.json`), then extract windows, train, evaluate, and run live inference.
 
 The UI gates Start Recording until the LSL stream is healthy (or operator-acknowledged).
 
@@ -125,7 +125,7 @@ The UI gates Start Recording until the LSL stream is healthy (or operator-acknow
 Event marking happens inside `1_stream_and_record.py` via keyboard:
 - `space` / `1–5` / `o` / `c` / `r` record events (configurable via `EVENT_KEYMAP`)
 
-Events are saved to `events.csv` during capture.
+Events are saved to `events.csv` during capture and mirrored to `events/events.jsonl` for pipeline steps.
 
 ## Live Inference (Dedicated Script)
 
@@ -133,8 +133,8 @@ Run live inference/actuation in a separate process:
 
 ```
 python 7_live_infer_and_actuate.py \
-  --model-path models/finger_action_model.pt \
-  --scaler-path scaler.save \
+  --model-path <model.pt> \
+  --scaler-path <scaler.save> \
   --stream-name Muse2-EEG \
   --stream-type EEG
 ```
@@ -145,7 +145,7 @@ Allow-drop is opt-in and logs dropped windows:
 python 7_live_infer_and_actuate.py --allow-drop --latency-policy drop
 ```
 
-See `DATA_CONTRACT.md` for session layout and validation requirements.
+See `DATA_CONTRACT.md` for session layout and validation requirements. Prefer the UI so the correct subject/session NPZ, model, and scaler paths are resolved automatically.
 
 Legacy script output directories can be customized via:
 - `--processed-dir` and `--raw-dir` flags, or
@@ -176,9 +176,14 @@ During training, finger loss is masked when action == REST.
 
 ## Data Artifacts
 
-- `data/raw/*.csv` raw EEG
-- `eeg_features.csv` streamed feature frames
-- `events.csv` event annotations
+- `data/raw/*.csv` raw EEG (legacy inspection)
+- `eeg_features.csv` streamed feature frames (legacy/CLI)
+- `events.csv` event annotations (legacy inspection)
+- CSVs above are for inspection/debug; pipeline steps consume session artifacts.
+- `Projects/<project>/subjects/<subject>/sessions/<session>/manifest.json` authoritative session manifest (required for validation)
+- `Projects/<project>/subjects/<subject>/sessions/<session>/meta.json` session metadata
+- `Projects/<project>/subjects/<subject>/sessions/<session>/raw/eeg_raw_shard_*.npy` raw EEG shards (pipeline input)
+- `Projects/<project>/subjects/<subject>/sessions/<session>/events/events.jsonl` event stream (pipeline input)
 - `eeg_windows.npz` sequence window dataset (primary)
 - `eeg_windows.csv` window summary (diagnostics)
 - `scaler.save` (per-channel normalizer), `finger_action_model.pt`
@@ -206,15 +211,16 @@ python 1_stream_and_record.py --config Projects/Test1/subjects/Har/config/step1.
 
 All sessions use a single LSL-aligned timebase (`absolute_v1`).
 
-Features CSV:
-- `lsl_timestamp`: absolute LSL timestamp for each feature row (seconds, LSL domain)
-- `time_s`: relative seconds since stream start
-- `time_s = lsl_timestamp - stream_start_lsl_ts`
+Raw CSV (`raw.csv`):
+- `lsl_ts_raw`: absolute LSL timestamp for each sample (seconds, LSL domain)
+- `lsl_ts_mono`: monotonic LSL timestamp after clamping
+- `timebase`: `time_s := lsl_ts_mono - stream_start_lsl_ts` (derived; not written)
 
-Events CSV:
-- `onset_lsl`, `onset_s`, `duration_s`, `end_lsl`, `end_s`
-- `onset_s = onset_lsl - stream_start_lsl_ts`
-- `end_s = end_lsl - stream_start_lsl_ts`
+Events CSV (`events.csv`, legacy inspection schema):
+- `onset_s,duration_s,type,channel,confidence,notes,finger_id,action_id,trial_id,block_id,source`
+- `onset_s` is relative to `stream_start_lsl_ts` (LSL-aligned timebase)
+
+Events are mirrored to `events/events.jsonl` for pipeline steps.
 
 A per-session metadata JSON is written to `data/processed/*_session_meta.json` with:
 `timebase_version`, `stream_start_lsl_ts`, `local_clock_at_start`, `clock_offset`, and output paths.
@@ -285,6 +291,9 @@ python eeglab_wrapper_ui.py
 
 The GUI creates projects under `Projects/<ProjectName>/subjects/<subject_id>/` and writes per-step configs
 to `config/` plus a session snapshot in `sessions/<session_id>/session_config.json`.
+
+The **Projects** window combines project selection (top) and subject selection (below). Use the UI to avoid
+wrong subject / wrong NPZ / wrong model mistakes when running Steps 2+.
 
 Packaging hint (PyInstaller):
 ```
