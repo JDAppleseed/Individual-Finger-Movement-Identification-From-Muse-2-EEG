@@ -52,8 +52,19 @@ to audit timebase continuity.
 
 ## Events
 
-`events/events.jsonl` is newline-delimited JSON. Each line is a single event
-with onset/duration, action/finger IDs, and optional metadata.
+`events/events.jsonl` is newline-delimited JSON. Each line is a single event.
+Preferred fields (when available):
+
+* `onset_s` (float) — session-relative onset (seconds)
+* `duration_s` (float, optional) — duration in seconds (0.0 if unknown)
+* `event_time_s` (float, legacy alias of `onset_s`)
+* `type` / `label` (string) — event label (e.g., `thumb`, `index`, `rest`)
+* `lsl_ts_mono` (float) — monotonic LSL timestamp
+* `local_ts` (float) — local wall clock timestamp
+* `metadata` (object, optional) — extra fields (finger/action IDs, notes, etc.)
+
+If event marking is disabled or no labels are recorded, `events.jsonl` may be
+empty; this is expected and should be reported in logs/diagnostics.
 
 ## Lossless Invariants
 

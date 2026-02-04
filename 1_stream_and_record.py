@@ -13,6 +13,7 @@ import os
 import sys
 import queue
 import shutil
+import signal
 import threading
 import time
 from collections import deque
@@ -56,6 +57,13 @@ RAW_QUEUE_MAXSIZE = 4096
 RAW_SHARD_SAMPLES = 2048
 MAX_BACKPRESSURE_S = 3.0
 QUEUE_PUT_TIMEOUT_S = 0.1
+
+HEARTBEAT_INTERVAL_S = 5.0
+NO_SAMPLE_TIMEOUT_S = 5.0
+WRITE_STALL_TIMEOUT_S = 5.0
+WARMUP_SAMPLE_COUNT = 3
+WARMUP_TIMEOUT_S = 3.0
+EVENT_FLUSH_INTERVAL_S = 1.0
 
 MODE = "train_record"
 ALLOW_DROP = False
@@ -151,6 +159,8 @@ class EventRecorder:
 
 
 
+# NOTE: Legacy writer retained for historical reference; Step 1 now uses SessionWriter
+# as the single source of truth for lossless session artifacts.
 class SidecarNewFormatWriter:
     """
     Writes the "new-format" session artifacts expected by validate_session.py and downstream steps:
@@ -530,6 +540,47 @@ def _parse_keymap(text: str) -> Dict[str, str]:
     return mapping
 
 
+def _normalize_label_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.split(",")]
+        return [part for part in parts if part]
+    if isinstance(value, (list, tuple)):
+        out = []
+        for item in value:
+            item_str = str(item).strip()
+            if item_str:
+                out.append(item_str)
+        return out
+    return []
+
+
+def _format_stream_info(info_obj) -> str:
+    parts = []
+    try:
+        parts.append(f"name={info_obj.name()}")
+    except Exception:
+        parts.append("name=?")
+    try:
+        parts.append(f"type={info_obj.type()}")
+    except Exception:
+        parts.append("type=?")
+    try:
+        parts.append(f"ch={info_obj.channel_count()}")
+    except Exception:
+        parts.append("ch=?")
+    try:
+        parts.append(f"rate={info_obj.nominal_srate()}")
+    except Exception:
+        parts.append("rate=?")
+    try:
+        parts.append(f"source_id={info_obj.source_id()}")
+    except Exception:
+        pass
+    return ", ".join(parts)
+
+
 def _key_to_name(key) -> Optional[str]:
     try:
         if hasattr(key, "char") and key.char:
@@ -581,6 +632,33 @@ def _configure_logging(log_path: Path) -> None:
             logging.FileHandler(log_path),
         ],
     )
+
+
+def _attach_session_log(session_log_path: Path, previous_log_path: Optional[Path] = None) -> None:
+    session_log_path.parent.mkdir(parents=True, exist_ok=True)
+    if previous_log_path and previous_log_path.exists() and not session_log_path.exists():
+        try:
+            shutil.copy2(previous_log_path, session_log_path)
+        except Exception:
+            pass
+
+    root_logger = logging.getLogger()
+    for handler in list(root_logger.handlers):
+        if isinstance(handler, logging.FileHandler):
+            existing = Path(getattr(handler, "baseFilename", "")).resolve()
+            if existing == session_log_path.resolve():
+                return
+            if previous_log_path and existing == previous_log_path.resolve():
+                root_logger.removeHandler(handler)
+                try:
+                    handler.close()
+                except Exception:
+                    pass
+
+    session_handler = logging.FileHandler(session_log_path)
+    session_handler.setLevel(logging.INFO)
+    session_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    root_logger.addHandler(session_handler)
 
 
 def _force_interactive_matplotlib_backend(logger: logging.Logger) -> None:
@@ -716,8 +794,15 @@ def _apply_config_to_args(args_obj, settings: Dict[str, Any], defaults: Dict[str
         "RAW_QUEUE_MAXSIZE": "raw_queue_maxsize",
         "RAW_SHARD_SAMPLES": "raw_shard_samples",
         "SESSION_ID_OVERRIDE": "session_id",
+        "SESSION_NAME": "session_id",
         "subject_id": "subject_id",
         "MODE": "mode",
+        "OUTPUT_DIR": "output_dir",
+        "OUT_DIR": "output_dir",
+        "DURATION_S": "duration_s",
+        "DRY_RUN": "dry_run",
+        "STREAM_CH": "stream_ch",
+        "STREAM_RATE": "stream_rate",
     }
     normalized: Dict[str, Any] = {}
     for key, val in settings.items():
@@ -755,6 +840,10 @@ def _apply_config_to_args(args_obj, settings: Dict[str, Any], defaults: Dict[str
 
 
 def _run_recording(args: argparse.Namespace) -> int:
+    global termination_reason
+    stop_event.clear()
+    termination_reason = "normal"
+    _reset_segment_state(state)
     try:
         from pylsl import StreamInlet, local_clock, resolve_streams
         try:
@@ -784,31 +873,84 @@ def _run_recording(args: argparse.Namespace) -> int:
 
     session_id = _unique_session_id(output_root, subject_id, session_id)
 
+    session_dir_guess = output_root / f"{subject_id}_{session_id}"
+    bootstrap_log_path = output_root / "run.log"
+    _configure_logging(bootstrap_log_path)
+    logger.info("Session: %s", session_id)
+    logger.info("Output root: %s", output_root)
+    logger.info("Session dir (planned): %s", session_dir_guess)
+
+    def _handle_signal(sig, _frame) -> None:
+        global termination_reason
+        if stop_event.is_set():
+            return
+        name = getattr(sig, "name", str(sig))
+        termination_reason = f"signal_{name}"
+        logger.info("Received %s; stopping recording.", name)
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _handle_signal)
+        except Exception:
+            pass
+
     stream_name = args.stream_name
     stream_type = args.stream_type
     source_id = args.lsl_source_id
 
-    def _format_stream(candidate) -> str:
-        parts = [
-            f"name={candidate.name()}",
-            f"type={candidate.type()}",
-            f"ch={candidate.channel_count()}",
-        ]
-        if hasattr(candidate, "source_id"):
-            try:
-                value = candidate.source_id()
-                if value:
-                    parts.append(f"source_id={value}")
-            except Exception:
-                pass
-        if hasattr(candidate, "uid"):
-            try:
-                value = candidate.uid()
-                if value:
-                    parts.append(f"uid={value}")
-            except Exception:
-                pass
-        return ", ".join(parts)
+    resolve_timeout_s = float(cfg.get("LSL_RESOLVE_TIMEOUT", LSL_RESOLVE_TIMEOUT))
+    inlet_max_buflen_sec = int(cfg.get("LSL_INLET_MAX_BUFLEN_SEC", LSL_INLET_MAX_BUFLEN_SEC))
+    inlet_max_chunklen = int(cfg.get("LSL_INLET_MAX_CHUNKLEN", LSL_INLET_MAX_CHUNKLEN))
+    heartbeat_interval_s = float(cfg.get("HEARTBEAT_INTERVAL_S", HEARTBEAT_INTERVAL_S))
+    no_sample_timeout_s = float(cfg.get("NO_SAMPLE_TIMEOUT_S", NO_SAMPLE_TIMEOUT_S))
+    write_stall_timeout_s = float(cfg.get("WRITE_STALL_TIMEOUT_S", WRITE_STALL_TIMEOUT_S))
+    warmup_sample_count = int(cfg.get("WARMUP_SAMPLE_COUNT", WARMUP_SAMPLE_COUNT))
+    warmup_timeout_s = float(cfg.get("WARMUP_TIMEOUT_S", WARMUP_TIMEOUT_S))
+    event_flush_interval_s = float(cfg.get("EVENT_FLUSH_INTERVAL_S", EVENT_FLUSH_INTERVAL_S))
+    duration_s = cfg.get("DURATION_S", None)
+    if duration_s is None:
+        duration_s = getattr(args, "duration_s", None)
+    if duration_s is not None:
+        try:
+            duration_s = float(duration_s)
+        except Exception:
+            duration_s = None
+    if duration_s is not None:
+        logger.info("Max duration enabled: %.2fs", duration_s)
+
+    required_labels = _normalize_label_list(cfg.get("REQUIRED_LSL_LABELS"))
+    if not required_labels:
+        required_labels = list(stream_requirements.required_labels)
+    require_exact = bool(cfg.get("REQUIRE_EXACTLY_4_CHANNELS", stream_requirements.require_exact_channels))
+    expected_channels = int(cfg.get("EXPECTED_CHANNELS", args.stream_ch or stream_requirements.expected_channels))
+    expected_srate = float(cfg.get("EXPECTED_SAMPLING_RATE", args.stream_rate or SAMPLING_RATE))
+    requirements = StreamRequirements(
+        required_labels=required_labels,
+        require_exact_channels=require_exact,
+        expected_channels=int(expected_channels),
+    )
+
+    logger.info(
+        "Stream selector: name=%s type=%s source_id=%s expected_ch=%s expected_rate=%s required_labels=%s require_exact=%s",
+        stream_name,
+        stream_type,
+        source_id,
+        expected_channels,
+        expected_srate,
+        required_labels,
+        require_exact,
+    )
+    logger.info(
+        "Timing: resolve_timeout=%.2fs inlet_buflen=%ss inlet_chunklen=%s heartbeat=%.2fs no_sample_timeout=%.2fs write_stall_timeout=%.2fs",
+        resolve_timeout_s,
+        inlet_max_buflen_sec,
+        inlet_max_chunklen,
+        heartbeat_interval_s,
+        no_sample_timeout_s,
+        write_stall_timeout_s,
+    )
+
     # --------------------------
     # Resolve LSL stream robustly
     # --------------------------
@@ -853,7 +995,7 @@ def _run_recording(args: argparse.Namespace) -> int:
     def _list_candidates():
         # Resolve ALL streams, then filter. This is more robust than resolve_byprop/resolve_stream
         # (which require exact matches and can miss streams during startup or when stale streams exist).
-        all_streams = resolve_streams(wait_time=LSL_RESOLVE_TIMEOUT)
+        all_streams = resolve_streams(wait_time=resolve_timeout_s)
         def norm(s: str) -> str:
             return (s or "").strip()
         want_name = norm(args.stream_name)
@@ -873,12 +1015,9 @@ def _run_recording(args: argparse.Namespace) -> int:
                 return False
             if want_type and norm(info.type()) != want_type:
                 return False
-            if stream_requirements.expected_channels and ch < int(stream_requirements.expected_channels):
+            if requirements.expected_channels and ch < int(requirements.expected_channels):
                 return False
 
-            expected_srate = getattr(stream_requirements, "expected_srate", None)
-            if expected_srate is None:
-                expected_srate = SAMPLING_RATE if SAMPLING_RATE else None
             if expected_srate:
                 try:
                     sr = float(info.nominal_srate())
@@ -909,7 +1048,7 @@ def _run_recording(args: argparse.Namespace) -> int:
                 try:
                     if norm(s.type()) != want_type and want_type:
                         continue
-                    if int(s.channel_count()) < int(stream_requirements.expected_channels or 4):
+                    if int(s.channel_count()) < int(requirements.expected_channels or 4):
                         continue
                     if muse2_substr not in sid(s).lower():
                         continue
@@ -934,7 +1073,7 @@ def _run_recording(args: argparse.Namespace) -> int:
 
         # Optional label check (only enforced when required_labels provided).
         # When the stream has >4 channels, we still only select the required labels or the first 4.
-        if stream_requirements.required_labels:
+        if requirements.required_labels:
             def get_stream_labels(stream):
                 labels = []
                 try:
@@ -949,14 +1088,14 @@ def _run_recording(args: argparse.Namespace) -> int:
             labeled = []
             for s in streams:
                 labels = get_stream_labels(s)
-                if labels and all(lab in labels for lab in stream_requirements.required_labels):
+                if labels and all(lab in labels for lab in requirements.required_labels):
                     labeled.append(s)
             if labeled:
                 streams = labeled
 
-        return streams
+        return streams, all_streams
 
-    candidates = _list_candidates()
+    candidates, all_streams = _list_candidates()
     if not candidates:
         logger.error(
             "No LSL streams found for name=%s type=%s ch=%s rate=%s (requested source_id=%s, env LSL_SOURCE_ID=%s).",
@@ -966,6 +1105,14 @@ def _run_recording(args: argparse.Namespace) -> int:
             args.stream_rate,
             args.lsl_source_id,
             env_source_id,
+        )
+        if all_streams:
+            logger.error("Available LSL streams (%d):", len(all_streams))
+            for s in all_streams:
+                logger.error("  - %s", _format_stream_info(s))
+        logger.error(
+            "Next steps: start the Muse LSL streamer or verify stream name/type. "
+            "Try: `python -m muse_streaming.cli list-streams` or `python -m muse_streaming.cli start-streamer`."
         )
         return 1
 
@@ -993,7 +1140,7 @@ def _run_recording(args: argparse.Namespace) -> int:
     errors = []
     for s in candidates_sorted:
         try:
-            test_inlet = StreamInlet(s, max_buflen=LSL_INLET_MAX_BUFLEN_SEC, max_chunklen=LSL_INLET_MAX_CHUNKLEN)
+            test_inlet = StreamInlet(s, max_buflen=inlet_max_buflen_sec, max_chunklen=inlet_max_chunklen)
             sample, ts = test_inlet.pull_sample(timeout=1.0)
             if sample is None or ts is None:
                 errors.append(f"{s.source_id()}: no sample within 1s")
@@ -1018,12 +1165,38 @@ def _run_recording(args: argparse.Namespace) -> int:
         info.source_id(),
     )
 
+    if inlet is None:
+        inlet = StreamInlet(info, max_buflen=inlet_max_buflen_sec, max_chunklen=inlet_max_chunklen)
+    logger.info(
+        "LSL inlet configured: max_buflen=%ss max_chunklen=%s",
+        inlet_max_buflen_sec,
+        inlet_max_chunklen,
+    )
 
+    if getattr(args, "dry_run", False):
+        logger.info("Dry-run requested; stream resolved successfully. Exiting without recording.")
+        return 0
 
-    inlet = StreamInlet(info, max_buflen=2, max_chunklen=32)
+    def _extract_stream_labels(info_obj) -> List[str]:
+        labels: List[str] = []
+        try:
+            ch = info_obj.desc().child("channels").child("channel")
+            for _ in range(info_obj.channel_count()):
+                labels.append(ch.child_value("label") or "")
+                ch = ch.next_sibling()
+        except Exception:
+            labels = []
+        return [lab.strip() for lab in labels if lab is not None and str(lab).strip()]
     channel_count = int(info.channel_count())
-    channel_labels = [f"ch{i + 1}" for i in range(channel_count)]
     nominal_srate = float(info.nominal_srate() or SAMPLING_RATE)
+    stream_labels = _extract_stream_labels(info)
+    if stream_labels and len(stream_labels) >= channel_count:
+        channel_labels = stream_labels[:channel_count]
+    elif requirements.required_labels and len(requirements.required_labels) == channel_count:
+        channel_labels = list(requirements.required_labels)
+    else:
+        channel_labels = [f"ch{i + 1}" for i in range(channel_count)]
+    logger.info("Channel labels: %s", channel_labels)
 
     session_writer = SessionWriter(
         output_root=output_root,
@@ -1038,17 +1211,9 @@ def _run_recording(args: argparse.Namespace) -> int:
     )
     session_id = session_writer.session_id
     session_dir = session_writer.paths.session_dir
-
-    # New-format session artifacts (required by validate_session.py and steps 1b+).
-    sidecar_writer = SidecarNewFormatWriter(
-        session_dir=session_dir,
-        subject_id=subject_id,
-        session_id=session_id,
-        channel_labels=channel_labels,
-        sampling_rate=nominal_srate,
-        timebase_version=TIMEBASE_VERSION,
-        shard_size_samples=int(args.raw_shard_samples),
-    )
+    _attach_session_log(session_dir / "run.log", previous_log_path=bootstrap_log_path)
+    if session_dir != session_dir_guess:
+        logger.info("Session dir updated: %s", session_dir)
 
     raw_csv_path = output_root / f"{subject_id}_{session_id}_raw.csv"
     events_csv_path = output_root / f"{subject_id}_{session_id}_events.csv"
@@ -1059,19 +1224,13 @@ def _run_recording(args: argparse.Namespace) -> int:
     events_lock = threading.Lock()
     event_recorder = EventRecorder(events_writer, events_lock)
 
-    log_path = session_dir / "run.log"
-    _configure_logging(log_path)
-    logger.info("Session: %s", session_id)
-    logger.info("Output root: %s", output_root)
-    logger.info("Session dir: %s", session_dir)
-    logger.info("Raw CSV: %s", raw_csv_path)
-    logger.info("Events CSV: %s", events_csv_path)
+    logger.info("Raw CSV (legacy inspection): %s", raw_csv_path)
+    logger.info("Events CSV (legacy inspection): %s", events_csv_path)
 
     if args.init_only:
         raw_file.close()
         events_file.close()
         session_writer.finalize("init_only")
-        sidecar_writer.finalize(termination_reason="init_only", missing_seq_count=0)
         return 0
 
     plot_scale = _normalize_scale_mode(args.plot_scale)
@@ -1086,16 +1245,30 @@ def _run_recording(args: argparse.Namespace) -> int:
         logger.warning("[plot] Invalid plot_window_sec=%r; defaulting to 5.0", getattr(args, 'plot_window_sec', None))
         plot_window_sec = 5.0
 
-    # B1: Plot is always enabled for step 1.
-    enable_plot = True
+    enable_plot = _should_enable_plot(args.enable_plot)
     event_marking_config_enabled = bool(args.event_marking_enabled)
     event_keymap = _parse_keymap(args.event_keymap)
+    if event_marking_config_enabled:
+        logger.info("Event marking enabled (keypresses ignored until first sample).")
+    else:
+        logger.info("Event marking disabled; events.jsonl will remain empty.")
 
     raw_queue: queue.Queue[SamplePacket] = queue.Queue(maxsize=int(args.raw_queue_maxsize))
     writer_exc: Optional[BaseException] = None
+    counter_lock = threading.Lock()
+    samples_received = 0
+    samples_written = 0
+    events_received = 0
+    events_written = 0
+    last_sample_wall: Optional[float] = None
+    last_write_wall: Optional[float] = None
+    queue_max_depth = 0
+    start_wall = time.monotonic()
+    last_heartbeat = start_wall
+    last_event_flush_t = time.time()
 
     def _writer_worker() -> None:
-        nonlocal writer_exc, last_raw_flush_t
+        nonlocal writer_exc, last_raw_flush_t, samples_written, last_write_wall
         try:
             batch: List[SamplePacket] = []
             while not stop_event.is_set() or not raw_queue.empty():
@@ -1125,7 +1298,9 @@ def _run_recording(args: argparse.Namespace) -> int:
                             segment_id=pkt.segment_id,
                         )
                         raw_writer.writerow(row)
-                        sidecar_writer.append_sample(lsl_ts_mono=pkt.lsl_ts_mono, sample=pkt.sample)
+                        with counter_lock:
+                            samples_written += 1
+                            last_write_wall = time.monotonic()
                         now_t = time.time()
                         if now_t - last_raw_flush_t >= raw_flush_interval_s:
                             raw_file.flush()
@@ -1145,7 +1320,9 @@ def _run_recording(args: argparse.Namespace) -> int:
                         segment_id=pkt.segment_id,
                     )
                     raw_writer.writerow(row)
-                    sidecar_writer.append_sample(lsl_ts_mono=pkt.lsl_ts_mono, sample=pkt.sample)
+                    with counter_lock:
+                        samples_written += 1
+                        last_write_wall = time.monotonic()
                     now_t = time.time()
                     if now_t - last_raw_flush_t >= raw_flush_interval_s:
                         raw_file.flush()
@@ -1309,7 +1486,7 @@ def _run_recording(args: argparse.Namespace) -> int:
     event_marking_active = False
 
     def _record_event(label: str, metadata: Dict[str, Any]) -> None:
-        nonlocal stream_start_lsl_ts, last_lsl_ts_mono
+        nonlocal stream_start_lsl_ts, last_lsl_ts_mono, events_received, events_written, last_event_flush_t
         if not event_marking_active:
             return
         if stream_start_lsl_ts is None:
@@ -1326,9 +1503,13 @@ def _run_recording(args: argparse.Namespace) -> int:
             metadata={"source": "keyboard", "clamped": clamped, **metadata},
         )
         event_recorder.record(payload)
+        with counter_lock:
+            events_received += 1
         session_writer.append_event(
             {
+                "onset_s": event_time_s,
                 "event_time_s": event_time_s,
+                "duration_s": float(payload.metadata.get("duration_s", 0.0)),
                 "lsl_ts_mono": lsl_ts_mono,
                 "local_ts": payload.local_ts,
                 "type": label,
@@ -1337,16 +1518,12 @@ def _run_recording(args: argparse.Namespace) -> int:
                 "metadata": payload.metadata,
             }
         )
+        with counter_lock:
+            events_written += 1
+        if (time.time() - last_event_flush_t) >= event_flush_interval_s:
+            events_file.flush()
+            last_event_flush_t = time.time()
 
-        sidecar_writer.append_event(
-            {
-                "event_time_s": event_time_s,
-                "lsl_ts_mono": lsl_ts_mono,
-                "local_ts": payload.local_ts,
-                "label": label,
-                "metadata": payload.metadata,
-            }
-        )
 
     listener = None
     if event_marking_config_enabled:
@@ -1378,10 +1555,15 @@ def _run_recording(args: argparse.Namespace) -> int:
         while not stop_event.is_set():
             if writer_exc:
                 raise RuntimeError("Writer thread crashed") from writer_exc
+            if not writer_thread.is_alive():
+                raise RuntimeError("Writer thread stopped unexpectedly")
 
             sample, lsl_ts = inlet.pull_sample(timeout=0.1)
             if sample is None:
                 continue
+            with counter_lock:
+                samples_received += 1
+                last_sample_wall = time.monotonic()
             lsl_ts_raw = float(lsl_ts)
             lsl_ts_mono, clamped = clamp_monotonic(lsl_ts_raw, last_lsl_ts_mono)
             last_lsl_ts_mono = lsl_ts_mono
@@ -1417,8 +1599,88 @@ def _run_recording(args: argparse.Namespace) -> int:
 
             if not _enqueue_with_overflow(raw_queue, packet, label="raw"):
                 break
+            queue_depth = raw_queue.qsize()
+            if queue_depth > queue_max_depth:
+                queue_max_depth = queue_depth
 
             now = time.monotonic()
+            with counter_lock:
+                samples_received_snapshot = samples_received
+                samples_written_snapshot = samples_written
+                events_written_snapshot = events_written
+                last_sample_wall_snapshot = last_sample_wall
+                last_write_wall_snapshot = last_write_wall
+
+            if duration_s is not None and (now - start_wall) >= float(duration_s):
+                termination_reason = "duration_elapsed"
+                logger.info("Max duration reached (%.2fs); stopping.", float(duration_s))
+                stop_event.set()
+                break
+
+            if samples_received_snapshot == 0 and (now - start_wall) > no_sample_timeout_s:
+                termination_reason = "no_samples"
+                logger.error(
+                    "No samples received within %.2fs after start; aborting.",
+                    no_sample_timeout_s,
+                )
+                logger.error(
+                    "Next steps: confirm the Muse LSL streamer is running and producing EEG. "
+                    "Try: `python -m muse_streaming.cli list-streams` or `python -m muse_streaming.cli healthcheck`."
+                )
+                stop_event.set()
+                break
+
+            if warmup_sample_count > 0 and samples_received_snapshot < warmup_sample_count and (now - start_wall) > warmup_timeout_s:
+                termination_reason = "no_samples"
+                logger.error(
+                    "LSL stream did not produce required samples within %.2fs "
+                    "(received %d < %d).",
+                    warmup_timeout_s,
+                    samples_received_snapshot,
+                    warmup_sample_count,
+                )
+                logger.error(
+                    "Next steps: confirm the Muse LSL streamer is running and producing EEG. "
+                    "Try: `python -m muse_streaming.cli healthcheck`."
+                )
+                stop_event.set()
+                break
+
+            if samples_received_snapshot > 0 and samples_written_snapshot == 0:
+                if (now - start_wall) > write_stall_timeout_s:
+                    termination_reason = "write_stall"
+                    logger.error(
+                        "Samples received but none written after %.2fs; "
+                        "writer_alive=%s queue_depth=%s.",
+                        write_stall_timeout_s,
+                        writer_thread.is_alive(),
+                        raw_queue.qsize(),
+                    )
+                    stop_event.set()
+                    break
+
+            if now - last_heartbeat >= heartbeat_interval_s:
+                last_sample_age = (
+                    None
+                    if last_sample_wall_snapshot is None
+                    else float(now - last_sample_wall_snapshot)
+                )
+                last_write_age = (
+                    None
+                    if last_write_wall_snapshot is None
+                    else float(now - last_write_wall_snapshot)
+                )
+                logger.info(
+                    "[alive] recv=%d wrote=%d events=%d queue=%d last_sample_age_s=%s last_write_age_s=%s",
+                    samples_received_snapshot,
+                    samples_written_snapshot,
+                    events_written_snapshot,
+                    raw_queue.qsize(),
+                    "n/a" if last_sample_age is None else f"{last_sample_age:.2f}",
+                    "n/a" if last_write_age is None else f"{last_write_age:.2f}",
+                )
+                last_heartbeat = now
+
             if enable_plot and (now - last_plot_update) >= 0.1 and plot_buffer:
                 _update_plot(plot_buffer[-1][0])
                 last_plot_update = now
@@ -1463,6 +1725,15 @@ def _run_recording(args: argparse.Namespace) -> int:
                         "last_local_ts": local_ts,
                         "packet_rate_hz": packet_rate,
                         "last_sample_age_s": last_age,
+                        "samples_received": samples_received_snapshot,
+                        "samples_written": samples_written_snapshot,
+                        "events_written": events_written_snapshot,
+                        "queue_depth": raw_queue.qsize(),
+                        "queue_max_depth": queue_max_depth,
+                        "writer_alive": writer_thread.is_alive(),
+                        "last_write_age_s": None
+                        if last_write_wall_snapshot is None
+                        else float(now - last_write_wall_snapshot),
                         "termination_reason": termination_reason,
                         "hard_stop_triggered": termination_reason == "backpressure_abort",
                         "event_marking_allowed": event_marking_active,
@@ -1492,35 +1763,60 @@ def _run_recording(args: argparse.Namespace) -> int:
             termination_reason_final = "error"
         else:
             termination_reason_final = termination_reason
-        session_writer.finalize(termination_reason_final)
-        sidecar_writer.finalize(termination_reason=termination_reason_final, missing_seq_count=0)
+        try:
+            session_writer.finalize(termination_reason_final)
+        except Exception:
+            logger.exception("Failed to finalize session writer.")
 
-        _link_or_copy(raw_csv_path, session_dir / "raw.csv")
-        _link_or_copy(events_csv_path, session_dir / "events.csv")
+        try:
+            _link_or_copy(raw_csv_path, session_dir / "raw.csv")
+            _link_or_copy(events_csv_path, session_dir / "events.csv")
+        except Exception:
+            logger.exception("Failed to link/copy legacy CSVs into session dir.")
 
-        _write_run_meta(
-            session_dir,
-            {
-                "subject_id": subject_id,
-                "session_id": session_id,
-                "termination_reason": termination_reason_final,
-                "created_utc": _now_utc_iso(),
-                "raw_csv": str(raw_csv_path),
-                "events_csv": str(events_csv_path),
-            },
-        )
+        try:
+            _write_run_meta(
+                session_dir,
+                {
+                    "subject_id": subject_id,
+                    "session_id": session_id,
+                    "termination_reason": termination_reason_final,
+                    "created_utc": _now_utc_iso(),
+                    "raw_csv": str(raw_csv_path),
+                    "events_csv": str(events_csv_path),
+                    "samples_received": samples_received,
+                    "samples_written": samples_written,
+                    "events_written": events_written,
+                    "queue_max_depth": queue_max_depth,
+                    "stream": {
+                        "name": getattr(info, "name", lambda: None)(),
+                        "type": getattr(info, "type", lambda: None)(),
+                        "source_id": getattr(info, "source_id", lambda: None)(),
+                        "channels": channel_count,
+                        "nominal_srate": nominal_srate,
+                    },
+                },
+            )
+        except Exception:
+            logger.exception("Failed to write run_meta.json.")
 
-        _write_session_state(
-            session_state_path,
-            {
-                "subject_id": subject_id,
-                "session_id": session_id,
-                "updated_utc": _now_utc_iso(),
-                "data_stream_active": False,
-                "termination_reason": termination_reason_final,
-                "hard_stop_triggered": termination_reason_final == "backpressure_abort",
-            },
-        )
+        try:
+            _write_session_state(
+                session_state_path,
+                {
+                    "subject_id": subject_id,
+                    "session_id": session_id,
+                    "updated_utc": _now_utc_iso(),
+                    "data_stream_active": False,
+                    "termination_reason": termination_reason_final,
+                    "hard_stop_triggered": termination_reason_final == "backpressure_abort",
+                    "samples_received": samples_received,
+                    "samples_written": samples_written,
+                    "events_written": events_written,
+                },
+            )
+        except Exception:
+            logger.exception("Failed to write final session_state.")
 
     if writer_exc:
         logger.error("Writer thread failed, returning exit code 1.")
@@ -1535,7 +1831,9 @@ def main() -> int:
     parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
     parser.add_argument("--subject-id", type=str, default=None)
     parser.add_argument("--session-id", type=str, default=None)
+    parser.add_argument("--session-name", dest="session_id", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--out-dir", dest="output_dir", type=str, default=None)
     parser.add_argument("--stream-name", type=str, default="Muse2-EEG")
     parser.add_argument("--stream-type", type=str, default="EEG")
 
@@ -1574,6 +1872,13 @@ def main() -> int:
     parser.add_argument("--raw-shard-samples", type=int, default=RAW_SHARD_SAMPLES)
     parser.add_argument("--mode", type=str, default="train_record")
     parser.add_argument("--init-only", action="store_true", default=False)
+    parser.add_argument("--duration-s", type=float, default=None, help="Stop recording after N seconds.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Resolve LSL stream and exit without writing data.",
+    )
     parser.add_argument("--force-new-session", action="store_true", default=False)
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output for debugging.")
 

@@ -25,6 +25,19 @@ python -c "import json; from pathlib import Path; print('ok')"
 python -c "from utils.timebase import clamp_monotonic_time; print('ok')"
 ```
 
+## Step 1 Recording Smoke Test (No Muse Required)
+
+This uses a mock LSL outlet and runs `1_stream_and_record.py` for a short capture.
+
+```bash
+python scripts/smoke_step1_record.py
+```
+
+Expected:
+- non-empty `*_raw.csv` in the temp output dir
+- `events/events.jsonl` may be empty if no labels were sent (this is OK)
+- log lines with `[alive] recv=... wrote=...`
+
 ## Environment setup (clean clone)
 
 ```bash
