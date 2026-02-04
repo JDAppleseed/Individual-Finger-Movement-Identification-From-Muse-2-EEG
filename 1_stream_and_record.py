@@ -768,6 +768,7 @@ def _run_recording(args: argparse.Namespace) -> int:
     subject_id = args.subject_id or DEFAULT_SUBJECT_ID
     session_id = args.session_id or time.strftime("%Y%m%d_%H%M%S")
     output_root = Path(args.output_dir or default_raw_dir()).expanduser().resolve()
+    cfg = _load_config_payload(getattr(args, "config", None))
 
     def _unique_session_id(root: Path, subject: str, session: str) -> str:
         suffix = 0
@@ -1056,7 +1057,7 @@ def _run_recording(args: argparse.Namespace) -> int:
     last_raw_flush_t = time.time()
     events_file, events_writer = _open_events_csv(events_csv_path)
     events_lock = threading.Lock()
-    event_recorder = EventRecorder(events_writer, events_lock, events_file)
+    event_recorder = EventRecorder(events_writer, events_lock)
 
     log_path = session_dir / "run.log"
     _configure_logging(log_path)
@@ -1094,7 +1095,7 @@ def _run_recording(args: argparse.Namespace) -> int:
     writer_exc: Optional[BaseException] = None
 
     def _writer_worker() -> None:
-        nonlocal writer_exc
+        nonlocal writer_exc, last_raw_flush_t
         try:
             batch: List[SamplePacket] = []
             while not stop_event.is_set() or not raw_queue.empty():
@@ -1144,7 +1145,7 @@ def _run_recording(args: argparse.Namespace) -> int:
                         segment_id=pkt.segment_id,
                     )
                     raw_writer.writerow(row)
-                        sidecar_writer.append_sample(lsl_ts_mono=pkt.lsl_ts_mono, sample=pkt.sample)
+                    sidecar_writer.append_sample(lsl_ts_mono=pkt.lsl_ts_mono, sample=pkt.sample)
                     now_t = time.time()
                     if now_t - last_raw_flush_t >= raw_flush_interval_s:
                         raw_file.flush()

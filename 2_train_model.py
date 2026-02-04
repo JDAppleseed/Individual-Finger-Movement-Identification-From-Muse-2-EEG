@@ -554,278 +554,278 @@ def main():
         return 2
 
 
-# ======================
-# NaN / Inf safety filter
-# ======================
-# We must never feed NaNs/Infs into PyTorch. Drop any samples whose feature tensor contains
-# non-finite values. (Window extraction already tries to avoid this, but we harden here.)
-finite_mask = np.isfinite(X).all(axis=tuple(range(1, X.ndim)))
-n_bad = int((~finite_mask).sum())
-if n_bad > 0:
-    print(f"[WARN] Dropping {n_bad}/{len(X)} samples with NaN/Inf in X before training.")
-    X = X[finite_mask]
-    y_action = y_action[finite_mask]
-    y_finger = y_finger[finite_mask]
-    global_indices = global_indices[finite_mask]
-    meta, _ = mask_meta(meta, finite_mask, len(finite_mask))
-    if len(X) == 0:
-        raise RuntimeError("All samples were dropped due to NaN/Inf values. Check upstream data collection.")
+    # ======================
+    # NaN / Inf safety filter
+    # ======================
+    # We must never feed NaNs/Infs into PyTorch. Drop any samples whose feature tensor contains
+    # non-finite values. (Window extraction already tries to avoid this, but we harden here.)
+    finite_mask = np.isfinite(X).all(axis=tuple(range(1, X.ndim)))
+    n_bad = int((~finite_mask).sum())
+    if n_bad > 0:
+        print(f"[WARN] Dropping {n_bad}/{len(X)} samples with NaN/Inf in X before training.")
+        X = X[finite_mask]
+        y_action = y_action[finite_mask]
+        y_finger = y_finger[finite_mask]
+        global_indices = global_indices[finite_mask]
+        meta, _ = mask_meta(meta, finite_mask, len(finite_mask))
+        if len(X) == 0:
+            raise RuntimeError("All samples were dropped due to NaN/Inf values. Check upstream data collection.")
 
-    def class_counts(y):
-        u, c = np.unique(y, return_counts=True)
-        return dict(zip(u.tolist(), c.tolist()))
+        def class_counts(y):
+            u, c = np.unique(y, return_counts=True)
+            return dict(zip(u.tolist(), c.tolist()))
 
-    print(f"Action class counts: {class_counts(y_action)}")
-    print(f"Finger class counts: {class_counts(y_finger)}")
+        print(f"Action class counts: {class_counts(y_action)}")
+        print(f"Finger class counts: {class_counts(y_finger)}")
 
-    exp_hash = resolve_experiment_hash(meta, len(y_action))
-    log_experiment(subject, exp_hash, "STEP_2_TRAIN")
+        exp_hash = resolve_experiment_hash(meta, len(y_action))
+        log_experiment(subject, exp_hash, "STEP_2_TRAIN")
 
-    run_dir, save_model_path, save_scaler_path, save_preds_path = resolve_output_paths(
-        args, subject, exp_hash
-    )
-    for path in [save_model_path, save_scaler_path, save_preds_path]:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    print(
-        f"Output paths: model={save_model_path}, scaler={save_scaler_path}, preds={save_preds_path}"
-    )
+        run_dir, save_model_path, save_scaler_path, save_preds_path = resolve_output_paths(
+            args, subject, exp_hash
+        )
+        for path in [save_model_path, save_scaler_path, save_preds_path]:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        print(
+            f"Output paths: model={save_model_path}, scaler={save_scaler_path}, preds={save_preds_path}"
+        )
 
-    # ===== SPLIT =====
-    train_idx, test_idx = split_indices(
-        y_action,
-        y_finger,
-        meta=meta if meta else None,
-        test_size=args.test_size,
-        random_state=args.seed,
-    )
+        # ===== SPLIT =====
+        train_idx, test_idx = split_indices(
+            y_action,
+            y_finger,
+            meta=meta if meta else None,
+            test_size=args.test_size,
+            random_state=args.seed,
+        )
 
-    train_idx = np.asarray(train_idx, dtype=np.int64)
-    test_idx = np.asarray(test_idx, dtype=np.int64)
-    n_samples = len(y_action)
-    _validate_indices(train_idx, n_samples, "train")
-    _validate_indices(test_idx, n_samples, "test")
+        train_idx = np.asarray(train_idx, dtype=np.int64)
+        test_idx = np.asarray(test_idx, dtype=np.int64)
+        n_samples = len(y_action)
+        _validate_indices(train_idx, n_samples, "train")
+        _validate_indices(test_idx, n_samples, "test")
 
-    if args.non_rest_only:
-        keep_mask = y_action[train_idx] != ACTION_REST
-        kept = int(keep_mask.sum())
-        total = int(len(train_idx))
-        print(f"Training mode: non-rest-only (kept {kept}/{total})")
-        if kept == 0:
-            print("No non-REST samples available for training; aborting.")
-            return 2
-        train_idx = train_idx[keep_mask]
+        if args.non_rest_only:
+            keep_mask = y_action[train_idx] != ACTION_REST
+            kept = int(keep_mask.sum())
+            total = int(len(train_idx))
+            print(f"Training mode: non-rest-only (kept {kept}/{total})")
+            if kept == 0:
+                print("No non-REST samples available for training; aborting.")
+                return 2
+            train_idx = train_idx[keep_mask]
 
-    # ===== SLICE =====
-    X_train, X_test = X[train_idx], X[test_idx]
-    y_action_train, y_action_test = y_action[train_idx], y_action[test_idx]
-    y_finger_train, y_finger_test = y_finger[train_idx], y_finger[test_idx]
+        # ===== SLICE =====
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_action_train, y_action_test = y_action[train_idx], y_action[test_idx]
+        y_finger_train, y_finger_test = y_finger[train_idx], y_finger[test_idx]
 
-    n_fingers = int(np.max(y_finger)) + 1
-    n_actions = int(np.max(y_action)) + 1
+        n_fingers = int(np.max(y_finger)) + 1
+        n_actions = int(np.max(y_action)) + 1
 
-    # ===== NORMALIZE =====
-    normalizer = fit_channel_normalizer(X_train)
-    X_train = apply_channel_normalizer(X_train, normalizer)
-    X_test = apply_channel_normalizer(X_test, normalizer)
-    joblib.dump(normalizer, str(save_scaler_path))
+        # ===== NORMALIZE =====
+        normalizer = fit_channel_normalizer(X_train)
+        X_train = apply_channel_normalizer(X_train, normalizer)
+        X_test = apply_channel_normalizer(X_test, normalizer)
+        joblib.dump(normalizer, str(save_scaler_path))
 
-    # ===== DATALOADERS =====
-    train_loader = DataLoader(
-        EEGWindowDataset(X_train, y_finger_train, y_action_train),
-        batch_size=args.batch_size,
-        shuffle=True,
-        drop_last=False,
-    )
-    test_loader = DataLoader(
-        EEGWindowDataset(X_test, y_finger_test, y_action_test),
-        batch_size=args.batch_size,
-        shuffle=False,
-        drop_last=False,
-    )
+        # ===== DATALOADERS =====
+        train_loader = DataLoader(
+            EEGWindowDataset(X_train, y_finger_train, y_action_train),
+            batch_size=args.batch_size,
+            shuffle=True,
+            drop_last=False,
+        )
+        test_loader = DataLoader(
+            EEGWindowDataset(X_test, y_finger_test, y_action_test),
+            batch_size=args.batch_size,
+            shuffle=False,
+            drop_last=False,
+        )
 
-    # ===== MODEL =====
-    model = CNNLSTMFingerActionNet(
-        n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions
-    )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+        # ===== MODEL =====
+        model = CNNLSTMFingerActionNet(
+            n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions
+        )
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.to(device)
 
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+        opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    # Finger loss (unweighted by default)
-    loss_f = nn.CrossEntropyLoss()
+        # Finger loss (unweighted by default)
+        loss_f = nn.CrossEntropyLoss()
 
-    # Action loss (REST downweighted)
-    action_weights = torch.ones(n_actions, dtype=torch.float32)
-    if ACTION_REST < n_actions:
-        action_weights[ACTION_REST] = max(0.0, float(args.rest_weight))
-    loss_a = nn.CrossEntropyLoss(weight=action_weights.to(device))
+        # Action loss (REST downweighted)
+        action_weights = torch.ones(n_actions, dtype=torch.float32)
+        if ACTION_REST < n_actions:
+            action_weights[ACTION_REST] = max(0.0, float(args.rest_weight))
+        loss_a = nn.CrossEntropyLoss(weight=action_weights.to(device))
 
-    # ===== TRAIN =====
-    for epoch in range(args.epochs):
-        model.train()
-        total_loss = 0.0
-        total_action = 0
-        total_finger = 0
-        correct_action = 0
-        correct_finger = 0
+        # ===== TRAIN =====
+        for epoch in range(args.epochs):
+            model.train()
+            total_loss = 0.0
+            total_action = 0
+            total_finger = 0
+            correct_action = 0
+            correct_finger = 0
 
-        for Xb, yfb, yab in train_loader:
-            Xb = Xb.to(device)
-            yfb = yfb.to(device)
-            yab = yab.to(device)
+            for Xb, yfb, yab in train_loader:
+                Xb = Xb.to(device)
+                yfb = yfb.to(device)
+                yab = yab.to(device)
 
-            opt.zero_grad()
-            f_out, a_out = model(Xb)
+                opt.zero_grad()
+                f_out, a_out = model(Xb)
 
-            loss_action = loss_a(a_out, yab)
-            mask_nr = yab != ACTION_REST
-            if mask_nr.any():
-                loss_finger = loss_f(f_out[mask_nr], yfb[mask_nr])
-            else:
-                loss_finger = torch.tensor(0.0, device=device)
+                loss_action = loss_a(a_out, yab)
+                mask_nr = yab != ACTION_REST
+                if mask_nr.any():
+                    loss_finger = loss_f(f_out[mask_nr], yfb[mask_nr])
+                else:
+                    loss_finger = torch.tensor(0.0, device=device)
 
-            loss = loss_action + float(args.loss_action_weight) * loss_finger
-            loss.backward()
-            opt.step()
+                loss = loss_action + float(args.loss_action_weight) * loss_finger
+                loss.backward()
+                opt.step()
 
-            total_loss += loss.item() * Xb.size(0)
+                total_loss += loss.item() * Xb.size(0)
 
-            preds_action = torch.argmax(a_out, dim=1)
-            correct_action += (preds_action == yab).sum().item()
-            total_action += yab.numel()
+                preds_action = torch.argmax(a_out, dim=1)
+                correct_action += (preds_action == yab).sum().item()
+                total_action += yab.numel()
 
-            if mask_nr.any():
-                preds_finger = torch.argmax(f_out[mask_nr], dim=1)
-                correct_finger += (preds_finger == yfb[mask_nr]).sum().item()
-                total_finger += yfb[mask_nr].numel()
+                if mask_nr.any():
+                    preds_finger = torch.argmax(f_out[mask_nr], dim=1)
+                    correct_finger += (preds_finger == yfb[mask_nr]).sum().item()
+                    total_finger += yfb[mask_nr].numel()
 
-        avg_loss = total_loss / max(1, len(train_loader.dataset))
-        action_acc = correct_action / max(1, total_action)
-        finger_acc = correct_finger / max(1, total_finger)
+            avg_loss = total_loss / max(1, len(train_loader.dataset))
+            action_acc = correct_action / max(1, total_action)
+            finger_acc = correct_finger / max(1, total_finger)
 
-        if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(
-                f"Epoch {epoch + 1:03d}/{args.epochs} | loss={avg_loss:.4f} "
-                f"action_acc={action_acc:.3f} finger_acc={finger_acc:.3f}"
-            )
+            if (epoch + 1) % 10 == 0 or epoch == 0:
+                print(
+                    f"Epoch {epoch + 1:03d}/{args.epochs} | loss={avg_loss:.4f} "
+                    f"action_acc={action_acc:.3f} finger_acc={finger_acc:.3f}"
+                )
 
-    # ===== SAVE MODEL =====
-    model.eval()
-    torch.save(model.state_dict(), str(save_model_path))
+        # ===== SAVE MODEL =====
+        model.eval()
+        torch.save(model.state_dict(), str(save_model_path))
 
-    train_config = {
-        "seed": args.seed,
-        "batch_size": args.batch_size,
-        "epochs": args.epochs,
-        "learning_rate": args.lr,
-        "loss_action_weight": args.loss_action_weight,
-        "rest_weight": float(args.rest_weight),
-        "test_size": args.test_size,
-        "non_rest_only": bool(args.non_rest_only),
-        "npz_path": str(npz_path),
-        "n_fingers": n_fingers,
-        "n_actions": n_actions,
-        "input_shape": list(X.shape[1:]),
-        "normalizer": {
-            "type": normalizer.get("type", "unknown"),
-            "channels": normalizer.get("channels", None),
-        },
-        "device": str(device),
-        "model": "CNNLSTMFingerActionNet",
-        "subject_id_filter": args.subject_id or "",
-        "save_model_path": str(save_model_path),
-        "save_scaler_path": str(save_scaler_path),
-        "save_preds_path": str(save_preds_path),
-    }
-    train_config_path = save_model_path.parent / "train_config.json"
-    train_config_path.write_text(json.dumps(train_config, indent=2))
+        train_config = {
+            "seed": args.seed,
+            "batch_size": args.batch_size,
+            "epochs": args.epochs,
+            "learning_rate": args.lr,
+            "loss_action_weight": args.loss_action_weight,
+            "rest_weight": float(args.rest_weight),
+            "test_size": args.test_size,
+            "non_rest_only": bool(args.non_rest_only),
+            "npz_path": str(npz_path),
+            "n_fingers": n_fingers,
+            "n_actions": n_actions,
+            "input_shape": list(X.shape[1:]),
+            "normalizer": {
+                "type": normalizer.get("type", "unknown"),
+                "channels": normalizer.get("channels", None),
+            },
+            "device": str(device),
+            "model": "CNNLSTMFingerActionNet",
+            "subject_id_filter": args.subject_id or "",
+            "save_model_path": str(save_model_path),
+            "save_scaler_path": str(save_scaler_path),
+            "save_preds_path": str(save_preds_path),
+        }
+        train_config_path = save_model_path.parent / "train_config.json"
+        train_config_path.write_text(json.dumps(train_config, indent=2))
 
-    log_config_path = Path("logs") / "experiments" / f"{exp_hash}_train_config.json"
-    log_config_path.parent.mkdir(parents=True, exist_ok=True)
-    log_config_path.write_text(json.dumps(train_config, indent=2))
+        log_config_path = Path("logs") / "experiments" / f"{exp_hash}_train_config.json"
+        log_config_path.parent.mkdir(parents=True, exist_ok=True)
+        log_config_path.write_text(json.dumps(train_config, indent=2))
 
-    # ===== INFERENCE ON TEST SET =====
-    all_action_probs = []
-    all_finger_probs = []
-    with torch.no_grad():
-        for Xb, yfb, yab in test_loader:
-            Xb = Xb.to(device)
-            f_out, a_out = model(Xb)
-            all_finger_probs.append(torch.softmax(f_out, dim=1).cpu().numpy())
-            all_action_probs.append(torch.softmax(a_out, dim=1).cpu().numpy())
+        # ===== INFERENCE ON TEST SET =====
+        all_action_probs = []
+        all_finger_probs = []
+        with torch.no_grad():
+            for Xb, yfb, yab in test_loader:
+                Xb = Xb.to(device)
+                f_out, a_out = model(Xb)
+                all_finger_probs.append(torch.softmax(f_out, dim=1).cpu().numpy())
+                all_action_probs.append(torch.softmax(a_out, dim=1).cpu().numpy())
 
-    action_probs = np.concatenate(all_action_probs, axis=0).astype(np.float32)
-    finger_probs = np.concatenate(all_finger_probs, axis=0).astype(np.float32)
+        action_probs = np.concatenate(all_action_probs, axis=0).astype(np.float32)
+        finger_probs = np.concatenate(all_finger_probs, axis=0).astype(np.float32)
 
-    # ===== SAVE PREDICTIONS WITH ROBUST INDEXING + META =====
-    test_indices_local = test_idx.astype(np.int64)
-    test_indices_global = global_indices[test_idx].astype(
-        np.int64
-    )  # maps back to original NPZ index
+        # ===== SAVE PREDICTIONS WITH ROBUST INDEXING + META =====
+        test_indices_local = test_idx.astype(np.int64)
+        test_indices_global = global_indices[test_idx].astype(
+            np.int64
+        )  # maps back to original NPZ index
 
-    # Save *test-set* meta (aligned to prediction rows)
-    n_expected = len(y_action)
-    test_window_start = take_meta(
-        meta, ["window_start", "start_s", "onset_s"], test_idx, n_expected, np.float32
-    )
-    test_window_end = take_meta(
-        meta, ["window_end", "end_s", "offset_s"], test_idx, n_expected, np.float32
-    )
-    test_trial_id = take_meta(
-        meta, ["trial_id", "trial", "event_trial_id"], test_idx, n_expected, np.int64
-    )
-    test_block_id = take_meta(
-        meta, ["block_id", "block", "event_block_id"], test_idx, n_expected, np.int64
-    )
-    test_subject_id = take_meta(meta, ["subject_id"], test_idx, n_expected, "U")
-    test_experiment_hash = take_meta(
-        meta, ["experiment_hash", "exp_hash"], test_idx, n_expected, "U"
-    )
+        # Save *test-set* meta (aligned to prediction rows)
+        n_expected = len(y_action)
+        test_window_start = take_meta(
+            meta, ["window_start", "start_s", "onset_s"], test_idx, n_expected, np.float32
+        )
+        test_window_end = take_meta(
+            meta, ["window_end", "end_s", "offset_s"], test_idx, n_expected, np.float32
+        )
+        test_trial_id = take_meta(
+            meta, ["trial_id", "trial", "event_trial_id"], test_idx, n_expected, np.int64
+        )
+        test_block_id = take_meta(
+            meta, ["block_id", "block", "event_block_id"], test_idx, n_expected, np.int64
+        )
+        test_subject_id = take_meta(meta, ["subject_id"], test_idx, n_expected, "U")
+        test_experiment_hash = take_meta(
+            meta, ["experiment_hash", "exp_hash"], test_idx, n_expected, "U"
+        )
 
-    dataset_info = {
-        "npz_path": safe_resolve(npz_path),
-        "npz_sha256": sha256_file(npz_path) if npz_path.exists() else None,
-        "npz_size_bytes": npz_path.stat().st_size if npz_path.exists() else None,
-        "experiment_hash": str(exp_hash),
-        "n_samples": int(len(y_action)),
-        "filters": {
-            "subject_id": args.subject_id or "",
-            "max_samples": None,
-        },
-        "created_utc": now_utc_iso(),
-    }
+        dataset_info = {
+            "npz_path": safe_resolve(npz_path),
+            "npz_sha256": sha256_file(npz_path) if npz_path.exists() else None,
+            "npz_size_bytes": npz_path.stat().st_size if npz_path.exists() else None,
+            "experiment_hash": str(exp_hash),
+            "n_samples": int(len(y_action)),
+            "filters": {
+                "subject_id": args.subject_id or "",
+                "max_samples": None,
+            },
+            "created_utc": now_utc_iso(),
+        }
 
-    save_dict = dict(
-        action_probs=action_probs,
-        finger_probs=finger_probs,
-        y_action=y_action_test.astype(np.int64),
-        y_finger=y_finger_test.astype(np.int64),
-        test_indices_local=test_indices_local,
-        test_indices_global=test_indices_global,
-        dataset_info=np.array([json.dumps(dataset_info)], dtype="U"),
-    )
+        save_dict = dict(
+            action_probs=action_probs,
+            finger_probs=finger_probs,
+            y_action=y_action_test.astype(np.int64),
+            y_finger=y_finger_test.astype(np.int64),
+            test_indices_local=test_indices_local,
+            test_indices_global=test_indices_global,
+            dataset_info=np.array([json.dumps(dataset_info)], dtype="U"),
+        )
 
-    if test_window_start is not None:
-        save_dict["window_start"] = test_window_start
-    if test_window_end is not None:
-        save_dict["window_end"] = test_window_end
-    if test_trial_id is not None:
-        save_dict["trial_id"] = test_trial_id
-    if test_block_id is not None:
-        save_dict["block_id"] = test_block_id
-    if test_subject_id is not None:
-        save_dict["subject_id"] = test_subject_id
-    if test_experiment_hash is not None:
-        save_dict["experiment_hash"] = test_experiment_hash
+        if test_window_start is not None:
+            save_dict["window_start"] = test_window_start
+        if test_window_end is not None:
+            save_dict["window_end"] = test_window_end
+        if test_trial_id is not None:
+            save_dict["trial_id"] = test_trial_id
+        if test_block_id is not None:
+            save_dict["block_id"] = test_block_id
+        if test_subject_id is not None:
+            save_dict["subject_id"] = test_subject_id
+        if test_experiment_hash is not None:
+            save_dict["experiment_hash"] = test_experiment_hash
 
-    np.savez_compressed(str(save_preds_path), **save_dict)
+        np.savez_compressed(str(save_preds_path), **save_dict)
 
-    log_experiment(subject, exp_hash, "STEP_2_COMPLETE", f"loss={avg_loss:.4f}")
-    print("✅ Training complete")
-    print(f"DECISION: TRAINED (epochs={args.epochs})")
-    print(f"✅ Saved: {save_model_path}, {save_scaler_path}, {save_preds_path}")
-    return 0
+        log_experiment(subject, exp_hash, "STEP_2_COMPLETE", f"loss={avg_loss:.4f}")
+        print("✅ Training complete")
+        print(f"DECISION: TRAINED (epochs={args.epochs})")
+        print(f"✅ Saved: {save_model_path}, {save_scaler_path}, {save_preds_path}")
+        return 0
 
 
 if __name__ == "__main__":
