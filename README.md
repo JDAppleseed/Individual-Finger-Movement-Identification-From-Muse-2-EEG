@@ -37,9 +37,9 @@ python eeglab_wrapper_ui.py
 ## What changed / How to run
 
 - Connect Muse: `python eeglab_wrapper_ui.py` → click **Connect Muse 2** (Step 0), or run `python muse_lsl_streamer.py --name Muse2-EEG`.
-- Record: `python 1_stream_and_record.py --enable-plot --plot-scale fixed --plot-fixed-ylim -200 200` (writes raw.csv + events.csv for inspection, plus session artifacts: `manifest.json`, `meta.json`, `raw/eeg_raw_shard_*.npy`, `events/events.jsonl`).
-- Extract/Train/Evaluate: `python 1b_extract_windows.py --session-dir <session_dir>` (consumes session artifacts and produces `eeg_windows.npz`) → `python 2_train_model.py` → `python 3_evaluate_model.py` (prefer the UI or pass explicit `--subject-id` and `--npz/--model/--scaler` paths to avoid defaults).
-Live infer: `python 7_live_infer_and_actuate.py --model-path data/models/<subject>/<exp_hash>/finger_action_model.pt --scaler-path data/models/<subject>/<exp_hash>/scaler.save --stream-name Muse2-EEG` (safe mode). Use the UI to resolve model/scaler paths (typically `data/models/<subject>/<exp_hash>/`). Add `--enable-actuation --i-understand-this-moves-the-hand` to actuate.
+- Record: `python 1_stream_and_record.py --enable-plot --plot-scale fixed --plot-fixed-ylim -200 200` (writes a canonical session directory under `Projects/<project>/subjects/<subject>/sessions/<session_id>/` including `manifest.json`, `meta.json`, `raw/eeg_raw_shard_*.npy`, `events/events.jsonl`, plus inspection CSVs `raw/raw.csv` and `events/events.csv`).
+- Extract/Train/Evaluate: `python 1b_extract_windows.py --session-dir <session_dir>` → `python 2_train_model.py --session-dir <session_dir>` → `python 3_evaluate_model.py --session-dir <session_dir>` → `python 4_generate_reports.py --session-dir <session_dir>` (outputs live under `<session_dir>/processed/`).
+- Live infer (safe mode): `python 7_live_infer_and_actuate.py --session-dir <session_dir> --stream-name Muse2-EEG --stream-type EEG` (auto-resolves latest model/scaler under `<session_dir>/processed/models/`). Add `--enable-actuation --i-understand-this-moves-the-hand` to actuate.
 
 ## Quick Start
 
@@ -54,6 +54,14 @@ source .venv/bin/activate
 python 1_stream_and_record.py --enable-plot --plot-scale fixed --plot-fixed-ylim -200 200
 ```
 
+Smoke test (no Muse required; uses a mock LSL outlet):
+```
+python scripts/smoke_step1_record.py
+python scripts/smoke_step1_record.py --full
+```
+If `pylsl` cannot find the LSL binary library on macOS, install it via Homebrew:
+`brew install labstreaminglayer/tap/lsl` and set `PYLSL_LIB=/opt/homebrew/Frameworks/lsl.framework/lsl`.
+
 3) Review + validate events (optional but recommended):
 ```
 python 5_review_events.py
@@ -66,17 +74,17 @@ python -m muse_streaming.validate_session --session <session_dir>
 python 1b_extract_windows.py --session-dir <session_dir>
 ```
 
-5) Train + evaluate (prefer UI or pass explicit `--subject-id` and `--npz/--model/--scaler` paths to avoid defaults):
+5) Train + evaluate:
 ```
-python 2_train_model.py
-python 3_evaluate_model.py
-python 3b_deepchecks_evaluate.py
-python 3c_live_paper_figures.py
+python 2_train_model.py --session-dir <session_dir>
+python 3_evaluate_model.py --session-dir <session_dir>
+python 3b_deepchecks_evaluate.py --session-dir <session_dir>
+python 3c_live_paper_figures.py --session-dir <session_dir>
 ```
 
 6) Reports:
 ```
-python 4_generate_reports.py
+python 4_generate_reports.py --session-dir <session_dir>
 ```
 
 You can also use `run_all.py` to orchestrate the full pipeline.
@@ -145,11 +153,9 @@ Allow-drop is opt-in and logs dropped windows:
 python 7_live_infer_and_actuate.py --allow-drop --latency-policy drop
 ```
 
-See `DATA_CONTRACT.md` for session layout and validation requirements. Prefer the UI so the correct subject/session NPZ, model, and scaler paths are resolved automatically.
+See `DATA_CONTRACT.md` for session layout and validation requirements. Prefer the UI so the correct session/run paths are resolved automatically.
 
-Legacy script output directories can be customized via:
-- `--processed-dir` and `--raw-dir` flags, or
-- `MUSE_PROCESSED_DIR` / `MUSE_RAW_DIR` environment variables.
+For deterministic CLI runs, pass `--session-dir` (and optionally `--run-dir`) instead of relying on legacy `data/*` defaults.
 
 ## Label Schema
 
@@ -169,7 +175,7 @@ Finger head (conditional; only valid if action != REST):
 Validity rules:
 - REST + NONE is valid
 - REST + any finger is invalid
-- OPEN/CLOSE + NONE is invalid
+- OPEN/CLOSE + NONE is valid (whole-hand open/close)
 - OPEN/CLOSE + finger 1–5 is valid
 
 During training, finger loss is masked when action == REST.
@@ -184,28 +190,44 @@ During training, finger loss is masked when action == REST.
 - `Projects/<project>/subjects/<subject>/sessions/<session>/meta.json` session metadata
 - `Projects/<project>/subjects/<subject>/sessions/<session>/raw/eeg_raw_shard_*.npy` raw EEG shards (pipeline input)
 - `Projects/<project>/subjects/<subject>/sessions/<session>/events/events.jsonl` event stream (pipeline input)
-- `eeg_windows.npz` sequence window dataset (primary)
-- `eeg_windows.csv` window summary (diagnostics)
-- `scaler.save` (per-channel normalizer), `finger_action_model.pt`
+- `Projects/<project>/subjects/<subject>/sessions/<session>/processed/eeg_windows.npz` sequence window dataset (primary)
+- `Projects/<project>/subjects/<subject>/sessions/<session>/processed/eeg_windows.csv` window summary (diagnostics)
+- `Projects/<project>/subjects/<subject>/sessions/<session>/processed/models/<run_id>/finger_action_model.pt`
+- `Projects/<project>/subjects/<subject>/sessions/<session>/processed/models/<run_id>/scaler.save`
+- `Projects/<project>/subjects/<subject>/sessions/<session>/processed/reports/<run_id>/...`
 - `logs/experiments/*.json` experiment logs
 - `logs/calibration/*` calibration traces
 - `reports/subjects/*` HTML + figures
 
-### Processed/Raw Output Resolution (Step 1)
+### Session Directory Resolution (Step 1)
 
-`1_stream_and_record.py` determines `processed_dir` and `raw_dir` in this order:
-1) CLI flags `--processed-dir` / `--raw-dir`
-2) Config JSON keys `processed_dir` / `processed_path` / `output_dir` (processed) and `raw_dir` (raw)
-3) If the config includes `project_name`, `subject_id`, and `session_id`, defaults to:
-   - `Projects/<project>/subjects/<subject>/sessions/<session>/processed`
-   - `Projects/<project>/subjects/<subject>/sessions/<session>/raw`
-4) Final fallback: `data/processed/<subject>/<session_id>` and `data/raw/<subject>/<session_id>`
+Step 1 writes **all** ground-truth artifacts into a single canonical `session_dir`:
 
-Example:
 ```
-python 1_stream_and_record.py --config Projects/Test1/subjects/Har/config/step1.json
-python 1_stream_and_record.py --config Projects/Test1/subjects/Har/config/step1.json --processed-dir data/processed
+Projects/<project>/subjects/<subject>/sessions/<session_id>/
+  manifest.json
+  meta.json
+  raw/
+    eeg_raw_shard_*.npy
+    raw.csv
+  events/
+    events.jsonl
+    events.csv
+  logs/
+    step1.log
+    resolved_settings.json
 ```
+
+Resolution precedence:
+1) CLI/UI: `--session-dir <session_dir>`
+2) Config JSON payload fields: `project_name`, `subject_id`, `session_id` (UI configs)
+3) Default: `Projects/DEFAULT/subjects/<DEFAULT_SUBJECT_ID>/sessions/<DEFAULT_SUBJECT_ID>_<timestamp>/`
+
+`data/raw` and `data/processed` are legacy inspection/cache paths and are not the default output for new sessions.
+
+### Performance (live plot)
+
+When enabled, live plotting runs **out-of-band** from acquisition (separate process + bounded queue). Acquisition never waits on plotting; plot frames may be dropped under load to protect ingestion latency.
 
 ## Timebase & Latency (absolute_v1)
 
@@ -222,8 +244,7 @@ Events CSV (`events.csv`, legacy inspection schema):
 
 Events are mirrored to `events/events.jsonl` for pipeline steps.
 
-A per-session metadata JSON is written to `data/processed/*_session_meta.json` with:
-`timebase_version`, `stream_start_lsl_ts`, `local_clock_at_start`, `clock_offset`, and output paths.
+A per-session metadata JSON is written to `<session_dir>/meta.json`, and a timebase report is written to `<session_dir>/timebase_report.json`.
 
 ### Timebase invariants
 

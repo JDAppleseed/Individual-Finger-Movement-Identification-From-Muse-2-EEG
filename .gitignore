@@ -15,6 +15,8 @@ logs/
 reports/
 data/raw/
 data/processed/
+# Canonical user project/session outputs (not version-controlled)
+Projects/
 eeg_features.csv
 eeg_windows.csv
 eeg_windows.npz

@@ -3110,6 +3110,7 @@ class MainWindow(QMainWindow):
         info = self.scripts.get(script_key) if script_key else None
         if not info:
             return
+        configured_keys = set(self.defaults.get(step_id, {}).keys())
         ignored = {
             "DEVICE",
             "ROOT_DIR",
@@ -3148,6 +3149,8 @@ class MainWindow(QMainWindow):
 
         for arg in info.args:
             dest = arg.dest
+            if dest not in configured_keys:
+                continue
             if not dest or dest in ignored or dest in existing:
                 continue
             if dest == "config":
@@ -3510,6 +3513,10 @@ class MainWindow(QMainWindow):
         if not self.current_project or not self.current_subject:
             return
         subject_dir = subject_root(self.current_project, self.current_subject)
+        # Default session root to the canonical project layout so Step 1 never falls back to data/raw.
+        sessions_root = subject_dir / "sessions"
+        if getattr(self, "session_root_input", None) and not self.session_root_input.text().strip():
+            self.session_root_input.setText(str(sessions_root))
         events_dir = subject_dir / "events"
         features_dir = subject_dir / "features"
         preferred_events = None
@@ -3572,15 +3579,18 @@ class MainWindow(QMainWindow):
 
     def _resolve_windows_npz_for_current(self, subject_dir: Path) -> Optional[Path]:
         """Resolve the correct windows NPZ for the currently selected session/subject."""
-        # Prefer canonical per-subject windows file (subject/windows/<subject>_<backend>_eeg_windows.npz)
-        if getattr(self, "current_session_backend", None):
-            p = subject_dir / "windows" / f"{self.current_subject}_{self.current_session_backend}_eeg_windows.npz"
-            if p.exists():
-                return p
-        # Next: session-local windows (sessions/<id>/windows/eeg_windows.npz)
+        # Preferred: canonical session-local windows (sessions/<id>/processed/eeg_windows.npz)
         sdir = self._resolve_session_dir_for_current(subject_dir)
         if sdir:
-            p = sdir / "windows" / "eeg_windows.npz"
+            p = sdir / "processed" / "eeg_windows.npz"
+            if p.exists():
+                return p
+            legacy = sdir / "windows" / "eeg_windows.npz"
+            if legacy.exists():
+                return legacy
+        # Fallback: per-subject aggregated windows file (legacy)
+        if getattr(self, "current_session_backend", None):
+            p = subject_dir / "windows" / f"{self.current_subject}_{self.current_session_backend}_eeg_windows.npz"
             if p.exists():
                 return p
         # Fallback: most recent NPZ in subject/windows matching subject prefix
@@ -3589,13 +3599,27 @@ class MainWindow(QMainWindow):
 
     def _resolve_latest_model_artifacts(self, subject_dir: Path) -> Tuple[Optional[str], Optional[Path], Optional[Path]]:
         """Resolve latest (exp_hash, model_path, scaler_path) for the selected subject."""
+        # Preferred: session-local model runs (sessions/<id>/processed/models/<run_id>/)
+        sdir = self._resolve_session_dir_for_current(subject_dir)
+        if sdir:
+            models_root = sdir / "processed" / "models"
+            if models_root.exists():
+                runs = [p for p in models_root.iterdir() if p.is_dir()]
+                if runs:
+                    runs.sort(key=lambda p: p.stat().st_mtime)
+                    run_dir = runs[-1]
+                    run_id = run_dir.name
+                    model_path = run_dir / "finger_action_model.pt"
+                    scaler_path = run_dir / "scaler.save"
+                    return run_id, (model_path if model_path.exists() else None), (scaler_path if scaler_path.exists() else None)
+
+        # Legacy fallback: repo-level models (data/models/<subject>/<exp_hash>/)
         models_root = self.repo_root / "data" / "models" / str(self.current_subject or "UNKNOWN")
         if not models_root.exists():
             return None, None, None
         runs = [p for p in models_root.iterdir() if p.is_dir()]
         if not runs:
             return None, None, None
-        # Choose by most-recent modification time
         runs.sort(key=lambda p: p.stat().st_mtime)
         run_dir = runs[-1]
         exp_hash = run_dir.name
@@ -3890,12 +3914,10 @@ class MainWindow(QMainWindow):
             settings["SAVE_RAW"] = True
             settings["ENABLE_FEATURES"] = False
             settings["ENABLE_INFERENCE"] = False
-            session_root_value = self.session_root_input.text().strip()
-            if session_root_value:
-                settings["raw_dir"] = session_root_value
-            if self.current_project and self.current_subject:
-                subject_dir = subject_root(self.current_project, self.current_subject)
-                settings["processed_dir"] = str(subject_dir / "processed")
+            # Step 1 always writes into a canonical session directory under Projects/<project>/subjects/<subject>/sessions/.
+            session_dir_value = self.session_dir_input.text().strip()
+            if session_dir_value:
+                settings["session_dir"] = session_dir_value
         if step_id == "infer":
             stream_name = self._selected_stream_name() or self.live_stream_name
             stream_type = self._selected_stream_type() or self.live_stream_type
@@ -3903,11 +3925,17 @@ class MainWindow(QMainWindow):
                 self.live_stream_name = stream_name
             if stream_type:
                 self.live_stream_type = stream_type
-            settings["STREAMER_INTERNAL"] = self.muse_connector.is_running()
-            settings["STREAMER_STREAM_NAME"] = self.live_stream_name
-            settings["STREAMER_STREAM_TYPE"] = self.live_stream_type
-            settings["LSL_STREAM_NAME"] = self.live_stream_name
-            settings["LSL_STREAM_TYPE"] = self.live_stream_type
+            if script_key == "live_infer":
+                settings["stream_name"] = self.live_stream_name
+                settings["stream_type"] = self.live_stream_type
+                if getattr(self, "live_lsl_source_id", None):
+                    settings["lsl_source_id"] = str(self.live_lsl_source_id)
+            else:
+                settings["STREAMER_INTERNAL"] = self.muse_connector.is_running()
+                settings["STREAMER_STREAM_NAME"] = self.live_stream_name
+                settings["STREAMER_STREAM_TYPE"] = self.live_stream_type
+                settings["LSL_STREAM_NAME"] = self.live_stream_name
+                settings["LSL_STREAM_TYPE"] = self.live_stream_type
             settings["LABEL_CHECK_ACKNOWLEDGED"] = self.live_label_acknowledged
             settings["LABEL_CHECK_FOUND_LABELS"] = self.live_label_details.get("labels")
             settings["LABEL_CHECK_EXPECTED_LABELS"] = settings.get("REQUIRED_LSL_LABELS")
@@ -3954,23 +3982,29 @@ class MainWindow(QMainWindow):
                 settings["session_dir"] = session_dir_value
             if settings.get("WINDOW_SEC") is not None:
                 settings["WINDOW_SEC_DEFAULT"] = settings.get("WINDOW_SEC")
-            if not settings.get("features"):
-                latest_features = self._latest_subject_file(
-                    subject_dir / "features",
-                    f"{self.current_subject}_*_eeg_features.csv",
-                )
-                if latest_features:
-                    settings["features"] = str(latest_features)
-            if not settings.get("events"):
-                latest_events = self._latest_subject_file(
-                    subject_dir / "events",
-                    f"{self.current_subject}_*_events.csv",
-                )
-                if latest_events:
-                    settings["events"] = str(latest_events)
+            # Legacy mode: only guess CSV paths when no session_dir is provided.
+            if not session_dir_value:
+                if not settings.get("features"):
+                    latest_features = self._latest_subject_file(
+                        subject_dir / "features",
+                        f"{self.current_subject}_*_eeg_features.csv",
+                    )
+                    if latest_features:
+                        settings["features"] = str(latest_features)
+                if not settings.get("events"):
+                    latest_events = self._latest_subject_file(
+                        subject_dir / "events",
+                        f"{self.current_subject}_*_events.csv",
+                    )
+                    if latest_events:
+                        settings["events"] = str(latest_events)
         if step_id == "train":
             settings["subject_id"] = settings.get("subject_id") or self.current_subject
-            if not settings.get("npz"):
+            session_dir_value = self.session_dir_input.text().strip()
+            if session_dir_value:
+                settings["session_dir"] = session_dir_value
+            # Legacy mode: only guess an aggregated subject-level NPZ when no session_dir is selected.
+            if not session_dir_value and not settings.get("npz"):
                 latest_npz = self._latest_subject_file(
                     subject_dir / "windows",
                     f"{self.current_subject}_*_eeg_windows.npz",
@@ -4000,18 +4034,21 @@ class MainWindow(QMainWindow):
                 self.current_subject, backend_session
             )
             self._set_session_label(f"Session: {self.current_session_ui}")
+            # Ensure the session directory exists and becomes the single source of truth for every step.
+            session_dir = session_root(subject_dir, self.current_session_ui)
+            ensure_session_dirs(session_dir)
+            self.session_dir_input.setText(str(session_dir))
+            settings["session_dir"] = str(session_dir)
 
         
         # Ensure downstream steps that rely on model/scaler defaults don't accidentally pick up
         # stale root-level files. Prefer latest artifacts for the selected subject.
         if step_id in {"infer"}:
             exp_hash, model_path, scaler_path = self._resolve_latest_model_artifacts(subject_dir)
-            if model_path and not settings.get("MODEL_PATH"):
-                settings["MODEL_PATH"] = str(model_path)
-            if scaler_path and not settings.get("SCALER_PATH"):
-                settings["SCALER_PATH"] = str(scaler_path)
-        if step_id == "step1":
-            settings["LSL_STREAM_NAME"] = DEFAULT_STREAM_NAME
+            if model_path and not settings.get("model_path"):
+                settings["model_path"] = str(model_path)
+            if scaler_path and not settings.get("scaler_path"):
+                settings["scaler_path"] = str(scaler_path)
         config_path = subject_dir / "config" / f"{step_id}.json"
         config = build_config(
             project_name=self.current_project,
@@ -4027,6 +4064,8 @@ class MainWindow(QMainWindow):
         args = [str(script_info.path), "--config", str(config_path)]
         if step_id == "step1":
             args.extend(["--mode", "train_record"])
+            if settings.get("session_dir"):
+                args.extend(["--session-dir", str(settings["session_dir"])])
         if step_id == "step1b":
             session_dir_value = self.session_dir_input.text().strip()
             # If the user hasn't manually provided a session dir, default to the currently selected session.
@@ -4037,33 +4076,31 @@ class MainWindow(QMainWindow):
                 args.extend(["--session-dir", session_dir_value])
                 if self.allow_partial_checkbox.isChecked():
                     args.append("--allow-partial")
+        if step_id == "infer":
+            session_dir_value = self.session_dir_input.text().strip()
+            if session_dir_value:
+                args.extend(["--session-dir", session_dir_value])
+        if step_id == "train":
+            session_dir_value = self.session_dir_input.text().strip()
+            if session_dir_value:
+                args.extend(["--session-dir", session_dir_value])
         # Enforce correct handoff between Step 1b → Step 2:
         # - always train on the selected subject (avoids argparse default filtering to an unrelated subject)
         # - prefer the windows NPZ produced for the current session to avoid stale ./eeg_windows.npz
         if step_id == "train":
             args.extend(["--subject-id", str(self.current_subject)])
-            preferred_npz = None
-            if self.current_session_backend:
-                candidate = subject_dir / "windows" / f"{self.current_subject}_{self.current_session_backend}_eeg_windows.npz"
-                if candidate.exists():
-                    preferred_npz = str(candidate)
-            if not preferred_npz and self.current_session_ui:
-                windows_npz = session_root(subject_dir, self.current_session_ui) / "windows" / "eeg_windows.npz"
-                if windows_npz.exists():
-                    preferred_npz = str(windows_npz)
-            if preferred_npz:
-                args.extend(["--npz", preferred_npz])
+            preferred_npz_path = self._resolve_windows_npz_for_current(subject_dir)
+            if preferred_npz_path:
+                args.extend(["--npz", str(preferred_npz_path)])
 
 
         args.extend(self._collect_step_args(step_id))
 
         cwd = str(self.repo_root)
-        if step_id == "step1b" and self.current_session_ui:
-            session_dir = session_root(subject_dir, self.current_session_ui)
-            ensure_session_dirs(session_dir)
-            windows_dir = session_dir / "windows"
-            windows_dir.mkdir(parents=True, exist_ok=True)
-            cwd = str(windows_dir)
+        if step_id == "step1b":
+            session_dir_value = self.session_dir_input.text().strip()
+            if session_dir_value:
+                cwd = str(Path(session_dir_value))
 
         self.active_step = step_id
         self.active_settings = dict(settings)
@@ -4246,34 +4283,36 @@ class MainWindow(QMainWindow):
             return
 
         subject_dir = subject_root(self.current_project, self.current_subject)
+        session_dir = self._resolve_session_dir_for_current(subject_dir)
         npz_path = self._resolve_windows_npz_for_current(subject_dir)
         exp_hash, model_path, scaler_path = self._resolve_latest_model_artifacts(subject_dir)
 
         args = [str(script_info.path)]
 
-        # Always prefer explicit, subject-scoped inputs to avoid "latest global" mixups.
-        if script_key in {"evaluate_deepchecks", "evaluate_fast", "evaluate"}:
-            if npz_path:
-                args += ["--npz", str(npz_path)]
-            if model_path:
-                args += ["--model", str(model_path)]
-            if scaler_path:
-                args += ["--scaler", str(scaler_path)]
+        # Preferred: session_dir contract (scripts auto-resolve latest run under processed/models)
+        if session_dir:
+            args += ["--session-dir", str(session_dir)]
+        else:
+            # Legacy fallback: explicit artifacts, scoped to this subject.
+            if script_key in {"evaluate_deepchecks", "evaluate_fast", "evaluate"}:
+                if npz_path:
+                    args += ["--npz", str(npz_path)]
+                if model_path:
+                    args += ["--model", str(model_path)]
+                if scaler_path:
+                    args += ["--scaler", str(scaler_path)]
 
-        if script_key == "evaluate_reports":
-            if self.current_subject:
-                args += ["--subject-id", str(self.current_subject)]
-            # Force report generation for the subject's latest experiment if we can resolve it.
-            if exp_hash:
-                args += ["--exp-hash", str(exp_hash)]
+            if script_key == "evaluate_reports":
+                if self.current_subject:
+                    args += ["--subject-id", str(self.current_subject)]
+                if exp_hash:
+                    args += ["--exp-hash", str(exp_hash)]
 
-        # 3c has no CLI args in this repo; best-effort steer it via env vars that
-        # downstream utilities may honor.
-        if script_key == "evaluate_figures":
-            if exp_hash:
-                os.environ["EXP_HASH"] = str(exp_hash)
-            if self.current_subject:
-                os.environ["SUBJECT_ID"] = str(self.current_subject)
+            if script_key == "evaluate_figures":
+                if exp_hash:
+                    os.environ["EXP_HASH"] = str(exp_hash)
+                if self.current_subject:
+                    os.environ["SUBJECT_ID"] = str(self.current_subject)
 
         self.active_step = script_key
         self._append_log(f"Running: {args} (cwd={self.repo_root})")
@@ -4923,6 +4962,13 @@ class MainWindow(QMainWindow):
             if session_dir_value
             else session_root(subject_dir, self.current_session_ui)
         )
+        # Canonical contract: Step 1b writes outputs into <session_dir>/processed/.
+        processed_dir = session_dir / "processed"
+        if (processed_dir / "eeg_windows.npz").exists() or (processed_dir / "eeg_windows.csv").exists():
+            # Avoid duplicating artifacts into subject-level legacy folders.
+            return
+
+        # Legacy mode: older sessions may still write into <session_dir>/windows/.
         windows_dir = session_dir / "windows"
         if not windows_dir.exists():
             return
@@ -4940,6 +4986,14 @@ class MainWindow(QMainWindow):
     def _sync_train_outputs(self) -> None:
         if not self.current_project or not self.current_subject:
             return
+        session_dir_value = self.session_dir_input.text().strip()
+        if session_dir_value:
+            session_dir = Path(session_dir_value)
+            models_root = session_dir / "processed" / "models"
+            if models_root.exists() and any(p.is_dir() for p in models_root.iterdir()):
+                # Canonical contract keeps model artifacts session-local.
+                return
+
         src_root = self.repo_root / "data" / "models" / self.current_subject
         if not src_root.exists():
             return
@@ -5073,53 +5127,36 @@ class MainWindow(QMainWindow):
             return outputs
         subject = self.current_subject
         session = self.current_session_backend
-        session_root_value = self.session_root_input.text().strip()
-        if session_root_value:
-            session_dir = Path(session_root_value) / f"{subject}_{session}"
+        session_dir = None
+        session_dir_value = self.session_dir_input.text().strip()
+        if session_dir_value:
+            session_dir = Path(session_dir_value)
+        else:
+            session_root_value = self.session_root_input.text().strip()
+            if session_root_value:
+                if self.current_session_ui:
+                    session_dir = Path(session_root_value) / str(self.current_session_ui)
+                else:
+                    session_dir = Path(session_root_value) / f"{subject}_{session}"
+        if session_dir:
             outputs.append(("Session dir", str(session_dir)))
             outputs.append(("Manifest", str(session_dir / "manifest.json")))
+            outputs.append(("Meta", str(session_dir / "meta.json")))
             outputs.append(("Timebase report", str(session_dir / "timebase_report.json")))
+            outputs.append(("Step1 log", str(session_dir / "logs" / "step1.log")))
+            outputs.append(
+                ("Resolved settings", str(session_dir / "logs" / "resolved_settings.json"))
+            )
+            outputs.append(("Raw CSV", str(session_dir / "raw" / "raw.csv")))
             outputs.append(("Raw shards", str(session_dir / "raw")))
             outputs.append(("Events JSONL", str(session_dir / "events" / "events.jsonl")))
+            outputs.append(("Events CSV", str(session_dir / "events" / "events.csv")))
         outputs.append(
             (
                 "Session state",
                 str(self.repo_root / "logs" / f"session_state_{subject}.json"),
             )
         )
-        if self.current_project:
-            subject_dir = subject_root(self.current_project, subject)
-            outputs.append(
-                (
-                    "Project features",
-                    str(
-                        subject_dir
-                        / "features"
-                        / f"{subject}_{session}_eeg_features.csv"
-                    ),
-                )
-            )
-            outputs.append(
-                (
-                    "Project events",
-                    str(subject_dir / "events" / f"{subject}_{session}_events.csv"),
-                )
-            )
-            outputs.append(
-                (
-                    "Project raw",
-                    str(subject_dir / "raw" / f"{subject}_{session}_raw.csv"),
-                )
-            )
-            if self.current_session_ui:
-                session_dir = session_root(subject_dir, self.current_session_ui)
-                outputs.append(
-                    (
-                        "Session events",
-                        str(session_dir / "events" / f"{subject}_{session}_events.csv"),
-                    )
-                )
-                outputs.append(("Session meta", str(session_dir / "session_meta.json")))
         return outputs
 
     def _expected_step1b_outputs(self) -> list[tuple[str, str]]:
@@ -5128,38 +5165,26 @@ class MainWindow(QMainWindow):
         if not session_dir_value:
             return outputs
         session_dir = Path(session_dir_value)
-        outputs.append(("Window CSV", str(session_dir / "windows" / "eeg_windows.csv")))
-        outputs.append(("Window NPZ", str(session_dir / "windows" / "eeg_windows.npz")))
-        if self.current_project and self.current_subject and self.current_session_backend:
-            subject_dir = subject_root(self.current_project, self.current_subject)
-            outputs.append(
-                (
-                    "Project window CSV",
-                    str(
-                        subject_dir
-                        / "windows"
-                        / f"{self.current_subject}_{self.current_session_backend}_eeg_windows.csv"
-                    ),
-                )
+        outputs.append(("Window CSV", str(session_dir / "processed" / "eeg_windows.csv")))
+        outputs.append(("Window NPZ", str(session_dir / "processed" / "eeg_windows.npz")))
+        outputs.append(
+            (
+                "Extraction report",
+                str(session_dir / "processed" / "extraction_report.json"),
             )
-            outputs.append(
-                (
-                    "Project window NPZ",
-                    str(
-                        subject_dir
-                        / "windows"
-                        / f"{self.current_subject}_{self.current_session_backend}_eeg_windows.npz"
-                    ),
-                )
-            )
+        )
         return outputs
 
     def _expected_train_outputs(self) -> list[tuple[str, str]]:
         outputs: list[tuple[str, str]] = []
-        if not self.current_project or not self.current_subject:
-            return outputs
-        subject_dir = subject_root(self.current_project, self.current_subject)
-        outputs.append(("Models", str(subject_dir / "models")))
+        session_dir_value = self.session_dir_input.text().strip()
+        if session_dir_value:
+            session_dir = Path(session_dir_value)
+            outputs.append(("Model runs", str(session_dir / "processed" / "models")))
+            outputs.append(("Reports", str(session_dir / "processed" / "reports")))
+        elif self.current_project and self.current_subject:
+            subject_dir = subject_root(self.current_project, self.current_subject)
+            outputs.append(("Models (legacy)", str(subject_dir / "models")))
         return outputs
 
     def _expected_event_outputs(self) -> list[tuple[str, str]]:

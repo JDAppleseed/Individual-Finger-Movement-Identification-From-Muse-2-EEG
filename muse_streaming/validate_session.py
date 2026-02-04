@@ -54,11 +54,22 @@ def validate_session_dir(session_dir: Path, *, allow_partial: bool = False) -> D
         report["ok"] = False
         report["issues"].append("manifest_missing_or_invalid")
         return report
+    if not meta:
+        report["ok"] = False
+        report["issues"].append("meta_missing_or_invalid")
 
     termination_reason = manifest.get("termination_reason")
     missing_seq_count = int(manifest.get("missing_seq_count") or 0)
     if not allow_partial:
-        if termination_reason != "normal":
+        allowed_termination = {
+            "normal",
+            "duration_elapsed",
+            "user_stop",
+            "init_only",
+            "signal_SIGINT",
+            "signal_SIGTERM",
+        }
+        if termination_reason not in allowed_termination:
             report["ok"] = False
             report["issues"].append(f"termination_reason={termination_reason}")
         if missing_seq_count != 0:
@@ -66,9 +77,17 @@ def validate_session_dir(session_dir: Path, *, allow_partial: bool = False) -> D
             report["issues"].append(f"missing_seq_count={missing_seq_count}")
 
     shard_list = manifest.get("shard_list") or []
-    shard_paths = [
-        Path(item["path"]) for item in shard_list if isinstance(item, dict) and item.get("path")
-    ]
+    shard_paths = []
+    for item in shard_list:
+        if not isinstance(item, dict):
+            continue
+        raw_path = item.get("path")
+        if not raw_path:
+            continue
+        p = Path(str(raw_path))
+        if not p.is_absolute():
+            p = (session_dir / p).resolve()
+        shard_paths.append(p)
     if not shard_paths:
         shard_paths = sorted(raw_dir.glob("eeg_raw_shard_*.npy"))
     if not shard_paths:

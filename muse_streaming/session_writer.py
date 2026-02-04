@@ -87,9 +87,13 @@ class RawShardWriter:
         tmp_path = self.raw_dir / f"{shard_name}.tmp.npy"
         np.save(tmp_path, records)
         tmp_path.replace(final_path)
+        try:
+            rel_path = str(final_path.relative_to(self.raw_dir.parent))
+        except Exception:
+            rel_path = str(final_path)
         self._shard_meta.append(
             {
-                "path": str(final_path),
+                "path": rel_path,
                 "seq_min": int(records["seq"][0]),
                 "seq_max": int(records["seq"][-1]),
                 "count": int(records.shape[0]),
@@ -145,7 +149,9 @@ class SessionWriter:
         self._last_seq: Optional[int] = None
         self._events_handle = None
         self._timebase_ranges: list[dict[str, object]] = []
+        self._meta: dict[str, object] = {}
         self._write_meta()
+        self._ensure_manifest_stub()
 
     @property
     def paths(self) -> SessionDirPaths:
@@ -155,7 +161,11 @@ class SessionWriter:
         self._paths.session_dir.mkdir(parents=True, exist_ok=True)
         self._paths.raw_dir.mkdir(parents=True, exist_ok=True)
         self._paths.events_dir.mkdir(parents=True, exist_ok=True)
+        events_path = self._paths.events_dir / "events.jsonl"
+        if not events_path.exists():
+            events_path.write_text("")
         meta = {
+            "schema_version": 1,
             "subject_id": self.subject_id,
             "session_id": self.session_id,
             "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -163,8 +173,65 @@ class SessionWriter:
             "channel_labels": self.channel_labels,
             "timebase_version": self.timebase_version,
             "mode": self.mode,
+            "complete": False,
         }
+        meta.update(self._meta)
         self._paths.meta_path.write_text(json.dumps(meta, indent=2))
+
+    def update_meta(self, extra: dict[str, object]) -> None:
+        if not extra:
+            return
+        with self._lock:
+            self._meta.update(extra)
+            self._write_meta()
+
+    def update_manifest_files(self, extra_files: dict[str, str]) -> None:
+        """
+        Update/merge the manifest.json 'files' mapping without finalizing the session.
+
+        This lets Step 1 declare auxiliary artifacts (e.g., inspection CSVs) immediately,
+        so the manifest remains a reliable index even for short/aborted sessions.
+        """
+        if not extra_files:
+            return
+        with self._lock:
+            self._ensure_manifest_stub()
+            try:
+                manifest = json.loads(self._paths.manifest_path.read_text())
+            except Exception:
+                manifest = {}
+            files = manifest.get("files")
+            if not isinstance(files, dict):
+                files = {}
+            for k, v in extra_files.items():
+                if not k:
+                    continue
+                files[str(k)] = str(v)
+            manifest["files"] = files
+            _write_json_atomic(self._paths.manifest_path, manifest)
+
+    def _ensure_manifest_stub(self) -> None:
+        if self._paths.manifest_path.exists():
+            return
+        stub = {
+            "schema_version": 1,
+            "subject_id": self.subject_id,
+            "session_id": self.session_id,
+            "seq_min": None,
+            "seq_max": None,
+            "expected_sample_count": 0,
+            "actual_sample_count": 0,
+            "missing_seq_count": 0,
+            "out_of_order_count": 0,
+            "termination_reason": "in_progress",
+            "shard_list": [],
+            "files": {
+                "meta": "meta.json",
+                "events_jsonl": "events/events.jsonl",
+                "timebase_report": "timebase_report.json",
+            },
+        }
+        _write_json_atomic(self._paths.manifest_path, stub)
 
     def append_packets(self, packets: Iterable[object]) -> None:
         if packets is None:
@@ -241,6 +308,7 @@ class SessionWriter:
                 int(self._missing_seq_count), int(max(0, expected - self._total_samples))
             )
             manifest = {
+                "schema_version": 1,
                 "subject_id": self.subject_id,
                 "session_id": self.session_id,
                 "seq_min": self._seq_min,
@@ -251,10 +319,27 @@ class SessionWriter:
                 "out_of_order_count": int(self._out_of_order_count),
                 "termination_reason": termination_reason,
                 "shard_list": self._shard_writer.shard_meta,
+                "files": {
+                    "meta": "meta.json",
+                    "events_jsonl": "events/events.jsonl",
+                    "timebase_report": "timebase_report.json",
+                },
             }
             if extra_manifest:
-                manifest.update(extra_manifest)
+                extra = dict(extra_manifest)
+                files_extra = extra.pop("files", None)
+                if isinstance(files_extra, dict):
+                    merged_files = dict(manifest.get("files") or {})
+                    merged_files.update(files_extra)
+                    manifest["files"] = merged_files
+                elif files_extra is not None:
+                    manifest["files"] = files_extra
+                manifest.update(extra)
             _write_json_atomic(self._paths.manifest_path, manifest)
+
+            self._meta["complete"] = True
+            self._meta["sample_count"] = int(self._total_samples)
+            self._write_meta()
 
             timebase_report = {
                 "subject_id": self.subject_id,

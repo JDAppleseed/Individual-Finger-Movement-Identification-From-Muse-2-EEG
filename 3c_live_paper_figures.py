@@ -3,6 +3,7 @@ STEP 3c — Interactive Evaluation Figures (SDS-aligned)
 Includes confidence & uncertainty visualization
 """
 
+import argparse
 import os
 import json
 import numpy as np
@@ -18,6 +19,7 @@ from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from utils.label_schema import ACTION_REST, ACTION_NAMES, FINGER_NAMES
 from utils.experiment_logger import get_latest_experiment_hash, LOG_DIR
 from utils.per_subject_calibration import plot_subject_calibration
+from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 from utils.sequence_data import (
     load_sequence_npz,
     split_indices,
@@ -36,7 +38,51 @@ SHOW_PLOTS = os.environ.get("SHOW_PLOTS", "0") == "1"
 # ===== LOAD DATA =========
 # =========================
 
-X, y_action, y_finger, meta = load_sequence_npz("eeg_windows.npz")
+parser = argparse.ArgumentParser()
+parser.add_argument("--session-dir", type=str, default=None)
+parser.add_argument("--run-dir", type=str, default=None)
+parser.add_argument("--npz", type=str, default="eeg_windows.npz")
+parser.add_argument("--model", type=str, default="finger_action_model.pt")
+parser.add_argument("--scaler", type=str, default="scaler.save")
+parser.add_argument(
+    "--out-dir",
+    type=str,
+    default=None,
+    help="Directory for figure outputs (defaults to <session_dir>/processed/reports/<run_id>/).",
+)
+args = parser.parse_args()
+
+out_dir_override = Path(args.out_dir).expanduser() if args.out_dir else None
+session_dir_path = resolve_session_dir(args.session_dir) if args.session_dir else None
+run_dir_path = None
+if session_dir_path:
+    if not session_dir_path.exists():
+        raise FileNotFoundError(f"Session dir not found: {session_dir_path}")
+    run_dir_path = (
+        Path(args.run_dir).expanduser() if args.run_dir else resolve_latest_run_dir(session_dir_path)
+    )
+    if run_dir_path is None or not run_dir_path.exists():
+        raise FileNotFoundError(
+            "No model run directory found. Train a model first (Step 2), or pass --run-dir."
+        )
+    layout = SessionLayout(session_dir_path)
+    if args.npz == "eeg_windows.npz":
+        args.npz = str(layout.windows_npz)
+    if args.model == "finger_action_model.pt":
+        args.model = str(run_dir_path / "finger_action_model.pt")
+    if args.scaler == "scaler.save":
+        args.scaler = str(run_dir_path / "scaler.save")
+    if out_dir_override is None:
+        out_dir_override = layout.reports_root / run_dir_path.name
+
+npz_path = Path(args.npz).expanduser()
+model_path = Path(args.model).expanduser()
+scaler_path = Path(args.scaler).expanduser()
+report_dir = out_dir_override or Path("reports/subjects")
+report_dir.mkdir(parents=True, exist_ok=True)
+run_tag = run_dir_path.name if run_dir_path is not None else None
+
+X, y_action, y_finger, meta = load_sequence_npz(str(npz_path))
 
 subject_ids = meta.get("subject_id")
 experiment_hashes = meta.get("experiment_hash")
@@ -57,10 +103,9 @@ y_finger_test = y_finger[test_idx]
 # ===== SCALE (REUSE) =====
 # =========================
 
-scaler_path = "scaler.save"
-if not os.path.exists(scaler_path):
+if not scaler_path.exists():
     raise FileNotFoundError(f"Scaler file not found: {scaler_path}")
-normalizer = joblib.load(scaler_path)
+normalizer = joblib.load(str(scaler_path))
 X_test = apply_channel_normalizer(X_test, normalizer)
 
 # =========================
@@ -73,10 +118,9 @@ n_actions = int(y_action.max()) + 1
 model = CNNLSTMFingerActionNet(
     n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions
 )
-model_path = "finger_action_model.pt"
-if not os.path.exists(model_path):
+if not model_path.exists():
     raise FileNotFoundError(f"Model file not found: {model_path}")
-model.load_state_dict(torch.load(model_path, map_location="cpu"))
+model.load_state_dict(torch.load(str(model_path), map_location="cpu"))
 
 # =========================
 # ===== MC DROPOUT =========
@@ -207,9 +251,8 @@ else:
 
 plt.tight_layout()
 
-report_dir = Path("reports/subjects")
-report_dir.mkdir(parents=True, exist_ok=True)
-fig_path = report_dir / f"mc_eval_{exp_hash}.png"
+tag = run_tag or exp_hash
+fig_path = report_dir / f"mc_eval_{tag}.png"
 plt.savefig(fig_path)
 if SHOW_PLOTS:
     plt.show()
@@ -222,7 +265,7 @@ plt.scatter(action_conf, action_uncertainty, alpha=0.5, s=10)
 plt.xlabel("Action Confidence")
 plt.ylabel("Action Uncertainty")
 plt.title("Confidence vs Uncertainty")
-scatter_path = report_dir / f"mc_scatter_{exp_hash}.png"
+scatter_path = report_dir / f"mc_scatter_{tag}.png"
 plt.tight_layout()
 plt.savefig(scatter_path)
 plt.close()

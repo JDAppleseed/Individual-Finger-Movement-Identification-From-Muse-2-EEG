@@ -49,7 +49,13 @@ def load_test_predictions(path="test_predictions.npz"):
         "finger_probs": data["finger_probs"],
         "y_action": data["y_action"],
         "y_finger": data["y_finger"],
-        "test_indices": data["test_indices"],
+        "test_indices": data["test_indices"]
+        if "test_indices" in data
+        else (
+            data["test_indices_global"]
+            if "test_indices_global" in data
+            else (data["test_indices_local"] if "test_indices_local" in data else None)
+        ),
     }
 
 
@@ -287,6 +293,124 @@ def generate_cross_subject_summary():
 
     print(f"📊 Cross-subject summary saved to {out}")
     return out
+
+
+def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
+    """
+    Session/run-scoped report generator.
+
+    This is the canonical pathing entrypoint used by Step 4 when a session_dir is provided:
+      <session_dir>/processed/reports/<run_id>/report.html
+    """
+    run_dir = Path(run_dir).expanduser().resolve()
+    out_dir = Path(out_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics_path = run_dir / "metrics.json"
+    train_config_path = run_dir / "train_config.json"
+    preds_path = run_dir / "test_predictions.npz"
+
+    metrics = {}
+    if metrics_path.exists():
+        try:
+            metrics = json.loads(metrics_path.read_text())
+        except Exception:
+            metrics = {}
+
+    preds = None
+    if preds_path.exists():
+        try:
+            data = np.load(preds_path)
+            action_probs = np.asarray(data["action_probs"])
+            finger_probs = np.asarray(data["finger_probs"])
+            y_action = np.asarray(data["y_action"]).astype(int)
+            y_finger = np.asarray(data["y_finger"]).astype(int)
+            preds = (action_probs, finger_probs, y_action, y_finger)
+        except Exception:
+            preds = None
+
+    action_acc = None
+    finger_acc_non_rest = None
+    action_cm = None
+    finger_cm = None
+    if preds is not None:
+        action_probs, finger_probs, y_action, y_finger = preds
+        action_pred = np.argmax(action_probs, axis=1).astype(int)
+        finger_pred = np.argmax(finger_probs, axis=1).astype(int)
+        if y_action.size:
+            action_acc = float(accuracy_score(y_action, action_pred))
+            action_cm = confusion_matrix(y_action, action_pred)
+        mask = y_action != 0
+        if np.any(mask):
+            finger_acc_non_rest = float(accuracy_score(y_finger[mask], finger_pred[mask]))
+            finger_cm = confusion_matrix(y_finger[mask], finger_pred[mask])
+
+    confusion_html = ""
+    if action_cm is not None:
+        cm_path = out_dir / "action_confusion.png"
+        plt.figure(figsize=(4, 4))
+        plt.imshow(action_cm, cmap="Blues")
+        plt.title("Action Confusion")
+        plt.xlabel("Predicted")
+        plt.ylabel("True")
+        plt.colorbar()
+        plt.tight_layout()
+        plt.savefig(cm_path)
+        plt.close()
+        confusion_html += f'<img src="{cm_path.name}" width="400"/>'
+
+    if finger_cm is not None:
+        cm_path = out_dir / "finger_confusion.png"
+        plt.figure(figsize=(4, 4))
+        plt.imshow(finger_cm, cmap="Greens")
+        plt.title("Finger Confusion (non-REST)")
+        plt.xlabel("Predicted")
+        plt.ylabel("True")
+        plt.colorbar()
+        plt.tight_layout()
+        plt.savefig(cm_path)
+        plt.close()
+        confusion_html += f'<img src="{cm_path.name}" width="400"/>'
+
+    metrics_pre = json.dumps(metrics, indent=2) if metrics else "{}"
+    html = f"""
+    <html>
+    <head><title>BCI Run Report - {run_dir.name}</title></head>
+    <body>
+    <h1>EEG BCI Run Report</h1>
+
+    <h2>Run</h2>
+    <ul>
+      <li><b>run_dir</b>: {run_dir}</li>
+      <li><b>out_dir</b>: {out_dir}</li>
+      <li><b>generated</b>: {datetime.now(timezone.utc).isoformat()}</li>
+    </ul>
+
+    <h2>Artifacts</h2>
+    <ul>
+      <li><b>metrics</b>: {metrics_path.name if metrics_path.exists() else "missing"}</li>
+      <li><b>train_config</b>: {train_config_path.name if train_config_path.exists() else "missing"}</li>
+      <li><b>test_predictions</b>: {preds_path.name if preds_path.exists() else "missing"}</li>
+    </ul>
+
+    <h2>Performance (from predictions)</h2>
+    <ul>
+      <li>Action accuracy: {_safe_pct(action_acc)}</li>
+      <li>Finger accuracy (non-REST): {_safe_pct(finger_acc_non_rest)}</li>
+    </ul>
+
+    <h2>Confusion Matrices</h2>
+    {confusion_html or "<p><i>Predictions unavailable; skipping matrices.</i></p>"}
+
+    <h2>metrics.json</h2>
+    <pre>{metrics_pre}</pre>
+
+    </body>
+    </html>
+    """
+    report_path = out_dir / "report.html"
+    report_path.write_text(html)
+    return report_path
 
 
 if __name__ == "__main__":

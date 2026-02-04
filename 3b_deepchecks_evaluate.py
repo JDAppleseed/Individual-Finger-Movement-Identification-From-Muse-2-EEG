@@ -27,6 +27,7 @@ from utils.sequence_data import (
     apply_channel_normalizer,
     summarize_windows,
 )
+from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 
 # =========================
 # ===== CONFIG ============
@@ -167,6 +168,18 @@ def _dataset_kwargs():
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
+    "--session-dir",
+    type=str,
+    default=None,
+    help="Canonical session directory (resolves npz + latest model run by default).",
+)
+parser.add_argument(
+    "--run-dir",
+    type=str,
+    default=None,
+    help="Model run directory (defaults to latest under <session_dir>/processed/models/).",
+)
+parser.add_argument(
     "--npz", type=str, default="eeg_windows.npz", help="Sequence npz file"
 )
 parser.add_argument(
@@ -182,6 +195,29 @@ parser.add_argument(
     "--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Inference batch size"
 )
 args = parser.parse_args()
+
+out_dir_override: Optional[Path] = None
+if getattr(args, "session_dir", None):
+    session_dir_path = resolve_session_dir(str(args.session_dir))
+    if not session_dir_path.exists():
+        print(f"Session dir not found: {session_dir_path}")
+        raise SystemExit(2)
+    run_dir_path = (
+        Path(str(args.run_dir)).expanduser()
+        if getattr(args, "run_dir", None)
+        else resolve_latest_run_dir(session_dir_path)
+    )
+    if run_dir_path is None or not run_dir_path.exists():
+        print("No model run directory found. Train a model first (Step 2), or pass --run-dir explicitly.")
+        raise SystemExit(2)
+    layout = SessionLayout(session_dir_path)
+    if args.npz == "eeg_windows.npz":
+        args.npz = str(layout.windows_npz)
+    if args.model == "finger_action_model.pt":
+        args.model = str(run_dir_path / "finger_action_model.pt")
+    if args.scaler == "scaler.save":
+        args.scaler = str(run_dir_path / "scaler.save")
+    out_dir_override = layout.reports_root / run_dir_path.name
 
 X, y_action, y_finger, meta = load_sequence_npz(args.npz, mmap_mode="r")
 if isinstance(X, np.memmap) and X.dtype != np.float32:
@@ -332,18 +368,7 @@ suite = data_integrity().add(train_test_validation()).add(model_evaluation())
 
 result = suite.run(train_ds, test_ds, model=TorchModelWrapper())
 
-session_meta_path = Path("session_meta.json")
-subject_id = "UNKNOWN"
-exp_hash = "UNKNOWN"
-if session_meta_path.exists():
-    try:
-        meta = json.loads(session_meta_path.read_text())
-        subject_id = meta.get("subject_id", subject_id)
-        exp_hash = meta.get("experiment_hash", exp_hash)
-    except Exception:
-        pass
-
-out_dir = Path("reports") / "subjects" / str(subject_id) / str(exp_hash)
+out_dir = out_dir_override or Path("reports") / "subjects" / "UNKNOWN" / "UNKNOWN"
 out_dir.mkdir(parents=True, exist_ok=True)
 out_path = out_dir / "deepchecks_eeg_report.html"
 result.save_as_html(out_path.as_posix(), as_widget=False)

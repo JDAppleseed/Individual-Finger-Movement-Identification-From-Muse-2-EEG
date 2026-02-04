@@ -45,6 +45,7 @@ from utils.postprocess import (
     PostprocessState,
     postprocess_predictions,
 )
+from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 
 # =========================
 # ===== CONFIG ============
@@ -494,6 +495,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
     parser.add_argument(
+        "--session-dir",
+        type=str,
+        default=None,
+        help="Canonical session directory (resolves npz + latest model run by default).",
+    )
+    parser.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="Model run directory (defaults to latest under <session_dir>/processed/models/).",
+    )
+    parser.add_argument(
         "--npz", type=str, default="eeg_windows.npz", help="Sequence npz file"
     )
     parser.add_argument(
@@ -595,6 +608,51 @@ def main():
     else:
         random.seed(split_seed)
         np.random.seed(split_seed)
+
+    plot_dir_override: Optional[Path] = None
+    if getattr(args, "session_dir", None):
+        session_dir_path = resolve_session_dir(str(args.session_dir))
+        if not session_dir_path.exists():
+            print(f"Session dir not found: {session_dir_path}")
+            return 2
+        run_dir_path = (
+            Path(str(args.run_dir)).expanduser()
+            if getattr(args, "run_dir", None)
+            else resolve_latest_run_dir(session_dir_path)
+        )
+        if run_dir_path is None or not run_dir_path.exists():
+            print(
+                "No model run directory found. Train a model first (Step 2), or pass --run-dir explicitly."
+            )
+            return 2
+
+        layout = SessionLayout(session_dir_path)
+        plot_dir_override = layout.reports_root / run_dir_path.name
+        plot_dir_override.mkdir(parents=True, exist_ok=True)
+
+        if args.npz == "eeg_windows.npz":
+            args.npz = str(layout.windows_npz)
+        if args.model == "finger_action_model.pt":
+            args.model = str(run_dir_path / "finger_action_model.pt")
+        if args.scaler == "scaler.save":
+            args.scaler = str(run_dir_path / "scaler.save")
+        if args.pred_npz == "test_predictions.npz":
+            args.pred_npz = str(run_dir_path / "test_predictions.npz")
+        if not args.save_manifest:
+            args.save_manifest = str(plot_dir_override / "eval_manifest.json")
+    elif getattr(args, "run_dir", None):
+        run_dir_path = Path(str(args.run_dir)).expanduser()
+        if args.model == "finger_action_model.pt":
+            args.model = str(run_dir_path / "finger_action_model.pt")
+        if args.scaler == "scaler.save":
+            args.scaler = str(run_dir_path / "scaler.save")
+        if args.pred_npz == "test_predictions.npz":
+            args.pred_npz = str(run_dir_path / "test_predictions.npz")
+        if not args.save_manifest:
+            plot_dir_override = Path("reports") / "runs" / run_dir_path.name
+            plot_dir_override.mkdir(parents=True, exist_ok=True)
+            args.save_manifest = str(plot_dir_override / "eval_manifest.json")
+
     npz_path = Path(args.npz)
     pred_npz_path = Path(args.pred_npz)
     model_path = Path(args.model)
@@ -1194,9 +1252,9 @@ def main():
 
     plt.tight_layout()
 
-    report_dir = Path("reports/subjects")
-    report_dir.mkdir(parents=True, exist_ok=True)
-    out_path = report_dir / f"eval_{exp_hash}.png"
+    plot_dir = plot_dir_override or Path("reports/subjects")
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    out_path = plot_dir / f"eval_{exp_hash}.png"
     plt.savefig(out_path)
 
     if SHOW_PLOTS:

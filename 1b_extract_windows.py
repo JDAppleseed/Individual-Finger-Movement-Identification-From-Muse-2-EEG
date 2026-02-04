@@ -24,9 +24,22 @@ import numpy as np
 # =========================
 # NaN / Inf Safety Helpers
 # =========================
-def _drop_nonfinite_rows(df, cols):
+def _drop_nonfinite_rows(df, cols=None, *, context: str = ""):
     df = df.replace([np.inf, -np.inf], np.nan)
-    return df.dropna(subset=cols)
+    if cols is None:
+        cols = []
+        for c in df.columns:
+            try:
+                if pd.api.types.is_numeric_dtype(df[c]):
+                    cols.append(c)
+            except Exception:
+                continue
+    before = len(df)
+    out = df.dropna(subset=list(cols))
+    dropped = int(before - len(out))
+    if dropped:
+        print(f"⚠️ Dropped {dropped} rows with NaN/inf ({context or 'dataframe'}).")
+    return out
 
 def _is_finite_array(arr):
     return np.isfinite(arr).all()
@@ -929,37 +942,36 @@ def main():
         seed_value = int(SEED)
 
     session_dir = _resolve_path(args.session_dir) if args.session_dir else None
-    session_manifest = {}
+    session_manifest: Dict[str, Any] = {}
+    session_meta: Dict[str, Any] = {}
+    events: List[Dict[str, Any]] = []
+
     if session_dir:
         session_dir = session_dir.expanduser().resolve()
-        # Resolve input files produced by step1.
-        # Preferred: meta.json written by step1, otherwise glob for *_raw.csv and *_events.csv.
-        meta_path = session_dir / "meta.json"
-        raw_csv = None
-        events_csv = None
-        if meta_path.exists():
-            try:
-                meta = json.loads(meta_path.read_text())
-                raw_csv = meta.get('raw_csv_path') or meta.get('raw_path') or meta.get('features_path')
-                events_csv = meta.get('events_csv_path') or meta.get('events_path')
-            except Exception as e:
-                logger.warning(f"Failed to parse meta.json ({meta_path}): {e}")
-        if raw_csv is None:
-            matches = sorted(session_dir.glob("*_raw.csv"))
-            if matches:
-                raw_csv = str(matches[-1])
-        if events_csv is None:
-            matches = sorted(session_dir.glob("*_events.csv"))
-            if matches:
-                events_csv = str(matches[-1])
-        features_path = Path(args.features) if args.features else (Path(raw_csv) if raw_csv else None)
-        events_path = Path(args.events) if args.events else (Path(events_csv) if events_csv else None)
-        if features_path is None or events_path is None:
-            raise FileNotFoundError(f"Could not resolve raw/events CSVs in session_dir={session_dir}")
-        session_manifest = _read_json(session_dir / "manifest.json")
+        features_path = session_dir / "raw"
+        events_path = session_dir / "events" / "events.jsonl"
         source = "session_dir"
+
+        from muse_streaming.validate_session import validate_session_dir
+
+        validation = validate_session_dir(session_dir, allow_partial=bool(args.allow_partial))
+        if not validation.get("ok"):
+            print("Session validation failed:")
+            print(json.dumps(validation, indent=2))
+            raise SystemExit(2)
+
+        times, signal, channel_cols, session_meta, session_manifest = _load_session_raw(session_dir)
+        events = _load_events_jsonl(events_path)
     else:
-        features_path, events_path, session_meta, source = _select_session_paths(args)
+        # Legacy CSV mode: require explicit inputs to avoid silently picking the wrong data.
+        if not args.features:
+            print(
+                "❌ Missing --session-dir. Provide --session-dir (preferred) or explicit --features/--events (legacy CSV mode)."
+            )
+            raise SystemExit(2)
+        features_path = _resolve_path(args.features)
+        events_path = _resolve_path(args.events) if args.events else None
+        source = "legacy_csv"
 
     if not features_path:
         print(
@@ -1070,57 +1082,54 @@ def main():
     print(f"Timebase version: {timebase_version}")
 
     # ===== LOAD DATA =====
-    if session_dir:
-        from muse_streaming.validate_session import validate_session_dir
+    if not session_dir:
+        times, signal, channel_cols = _load_features(features_path)
+        if events_path and events_path.exists():
+            events = _load_events(events_path, session_meta=session_meta)
+        else:
+            events = []
 
-        validation = validate_session_dir(
-            session_dir, allow_partial=bool(args.allow_partial)
-        )
-        if not validation.get("ok"):
-            print("Session validation failed:")
-            print(json.dumps(validation, indent=2))
-            raise SystemExit(2)
-        times, signal, channel_cols, session_meta, session_manifest = _load_session_raw(
-            session_dir
-        )
-        events = _load_events_jsonl(events_path)
-
-    # Drop events with any non-finite required fields to prevent NaNs entering training.
-    # This is intentionally strict: if an event is malformed, we prefer to drop it.
+    # Drop/normalize malformed events to prevent NaNs entering training.
     before_n = len(events)
-    cleaned = []
+    cleaned: List[Dict[str, Any]] = []
     dropped = 0
     for ev in events:
         try:
-            onset = ev.get("onset_s", None)
-            offset = ev.get("offset_s", None)
-            finger = ev.get("finger", None)
-            action = ev.get("action", None)
-
-            def _bad(x):
-                if x is None:
-                    return True
-                # np.isfinite works for ints/floats; treat strings as OK (labels)
-                if isinstance(x, (int, float, np.number)):
-                    return not np.isfinite(float(x))
-                return False
-
-            if _bad(onset) or _bad(offset) or _bad(finger) or _bad(action):
+            onset_s = _safe_float(ev.get("onset_s", np.nan))
+            duration_s = _safe_float(ev.get("duration_s", 0.0), default=0.0)
+            end_s = _safe_float(ev.get("end_s", onset_s + duration_s))
+            if not np.isfinite(onset_s) or not np.isfinite(end_s):
                 dropped += 1
                 continue
-            if float(offset) <= float(onset):
+            if end_s < onset_s:
                 dropped += 1
                 continue
-            cleaned.append(ev)
+
+            action_id = _safe_int(ev.get("action_id", ACTION_REST), int(ACTION_REST))
+            finger_id = _safe_int(ev.get("finger_id", FINGER_NONE), int(FINGER_NONE))
+            if not is_valid_action_finger(int(action_id), int(finger_id)):
+                action_id = int(ACTION_REST)
+                finger_id = int(FINGER_NONE)
+
+            ev_clean = dict(ev)
+            ev_clean["onset_s"] = float(onset_s)
+            ev_clean["end_s"] = float(end_s)
+            ev_clean["duration_s"] = float(max(0.0, end_s - onset_s))
+            ev_clean["action_id"] = int(action_id)
+            ev_clean["finger_id"] = int(finger_id)
+            cleaned.append(ev_clean)
         except Exception:
             dropped += 1
             continue
     events = cleaned
     if dropped:
-        logging.warning("Dropped %d/%d events with NaN/inf/missing fields (pre-windowing).", dropped, before_n)
-    else:
-        times, signal, channel_cols = _load_features(features_path)
-        events = _load_events(events_path, session_meta=session_meta)
+        print(f"⚠️ Dropped {dropped}/{before_n} malformed events (pre-windowing).")
+    if LABEL_GATED and not events:
+        print(
+            "❌ No labeled events found (events.jsonl is empty). "
+            "Enable Step 1 event marking or provide a legacy --events CSV."
+        )
+        raise SystemExit(2)
 
     # Alignment strictness
     if events:
@@ -1507,11 +1516,17 @@ def main():
         windows = _filter_by_mask(windows, keep_mask)
         kept_windows = len(action_labels)
 
+    output_dir = (session_dir / "processed") if session_dir else Path.cwd()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_csv_path = output_dir / OUT_FILE
+    out_npz_path = output_dir / OUT_NPZ
+    report_path = output_dir / "extraction_report.json"
+
     # ===== SAVE CSV =====
     windows_df = pd.DataFrame(windows)
-    windows_df = _drop_nonfinite_rows(windows_df, context='windows_df')
-    windows_df.to_csv(OUT_FILE, index=False)
-    print(f"✅ Saved {len(windows)} windows → {OUT_FILE}")
+    windows_df = windows_df.replace([np.inf, -np.inf], np.nan)
+    windows_df.to_csv(out_csv_path, index=False)
+    print(f"✅ Saved {len(windows_df)} windows → {out_csv_path}")
 
     action_dist = pd.Series(action_labels).value_counts().sort_index().to_dict()
     finger_dist = pd.Series(finger_labels).value_counts().sort_index().to_dict()
@@ -1577,7 +1592,6 @@ def main():
             "missing_seq_count": session_manifest.get("missing_seq_count"),
             "termination_reason": session_manifest.get("termination_reason"),
         }
-    report_path = Path("extraction_report.json")
     report_path.write_text(json.dumps(report_payload, indent=2))
     print(f"✅ Saved extraction report → {report_path}")
 
@@ -1670,21 +1684,12 @@ def main():
         config=config_arr,
     )
 
-    np.savez_compressed(OUT_NPZ, **npz_payload)
-    print(f"✅ Saved sequence windows → {OUT_NPZ} with shape {X.shape}")
+    np.savez_compressed(out_npz_path, **npz_payload)
+    print(f"✅ Saved sequence windows → {out_npz_path} with shape {X.shape}")
 
     u = np.unique(subject_id_arr.astype("U"))
     print(f"[SANITY] unique subject_id saved in NPZ: {u.tolist()}")
     print(f"N windows saved: {n_kept}")
-
-    # Also save per-session NPZ in data/processed
-    if subject_id_value and subject_id_value != "UNKNOWN" and session_id_value:
-        session_dir = ROOT_DIR / "data/processed"
-        session_dir.mkdir(parents=True, exist_ok=True)
-        session_name = f"{subject_id_value}_{session_id_value}_eeg_windows.npz"
-        session_path = _next_available_path(session_dir / session_name)
-        np.savez_compressed(session_path, **npz_payload)
-        print(f"✅ Saved session windows → {session_path}")
 
     return 0
 

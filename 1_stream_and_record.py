@@ -9,7 +9,9 @@ import argparse
 import csv
 import json
 import logging
+import multiprocessing as mp
 import os
+import re
 import sys
 import queue
 import shutil
@@ -29,6 +31,19 @@ from muse_streaming.packets import SamplePacket
 from muse_streaming.session_writer import SessionWriter
 from muse_streaming.timebase import clamp_monotonic
 from utils.stream_runtime import FailedWriters, HardStopPolicy, HealthStopState, StreamRequirements
+from utils.label_schema import (
+    ACTION_CLOSE,
+    ACTION_OPEN,
+    ACTION_REST,
+    FINGER_INDEX,
+    FINGER_MIDDLE,
+    FINGER_NONE,
+    FINGER_PINKY,
+    FINGER_RING,
+    FINGER_THUMB,
+    event_type_for,
+    is_valid_action_finger,
+)
 
 DEFAULT_SUBJECT_ID = "8-M16"
 GENDER = "M"
@@ -38,7 +53,9 @@ TIMEBASE_VERSION = "absolute_v1"
 SAMPLING_RATE = 256
 CHANNELS = 4
 
-PLOT_FPS = 30.0
+PLOT_FPS = 20.0
+PLOT_DISPLAY_FS = 64.0
+PLOT_QUEUE_MAXSIZE = 512
 PLOT_SCALE_MODE = "fixed"
 PLOT_FIXED_YLIM = (-200.0, 200.0)
 PLOT_ROBUST_WINDOW_SEC = 5.0
@@ -371,13 +388,15 @@ def _enqueue_with_overflow(
     packet: SamplePacket,
     *,
     label: str,
+    timeout_s: float,
+    allow_drop: bool,
 ) -> bool:
     global termination_reason
     try:
-        target_queue.put(packet, timeout=float(QUEUE_PUT_TIMEOUT_S))
+        target_queue.put(packet, timeout=float(timeout_s))
         return True
     except queue.Full:
-        if not ALLOW_DROP:
+        if not allow_drop:
             termination_reason = "backpressure_abort"
             stop_event.set()
             logger.error("Backpressure abort on %s queue.", label)
@@ -400,7 +419,7 @@ def _raw_header(channel_count: int) -> List[str]:
 def _open_raw_csv(path: Path, channel_count: int = CHANNELS) -> tuple[Any, csv.writer]:
     path.parent.mkdir(parents=True, exist_ok=True)
     exists = path.exists() and path.stat().st_size > 0
-    file_obj = path.open("a", newline="", buffering=1)
+    file_obj = path.open("a", newline="", buffering=1024 * 1024)
     writer = csv.writer(file_obj)
     if not exists:
         writer.writerow(_raw_header(channel_count))
@@ -736,6 +755,227 @@ def _force_interactive_matplotlib_backend(logger: logging.Logger) -> None:
         logger.info("[plot] Using matplotlib backend=%s", matplotlib.get_backend())
     except Exception:
         logger.info("[plot] Using matplotlib backend=(unknown)")
+
+
+def _plot_process_main(
+    *,
+    sample_queue: mp.Queue,
+    stop_flag: mp.Event,
+    channel_labels: list[str],
+    plot_window_sec: float,
+    plot_fps: float,
+    plot_fixed_ylim: tuple[float, float],
+    plot_scale: str,
+    plot_robust_ema: float,
+    plot_reference_overlay: bool,
+    title: str,
+) -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[logging.StreamHandler()],
+    )
+    plot_logger = logging.getLogger("step1_plot")
+    try:
+        _force_interactive_matplotlib_backend(plot_logger)
+        import matplotlib.pyplot as plt  # noqa: WPS433
+    except Exception as exc:
+        plot_logger.error("[plot] Plot process failed to import matplotlib: %s", exc)
+        return
+
+    channel_count = len(channel_labels)
+    plot_scale = _normalize_scale_mode(plot_scale)
+    plot_window_sec = float(plot_window_sec)
+    plot_fps = float(plot_fps)
+    plot_robust_ema = float(plot_robust_ema)
+    plot_fixed_ylim = _resolve_plot_fixed_ylim(list(plot_fixed_ylim))
+
+    plt.ion()
+    fig, ax = plt.subplots()
+    try:
+        fig.canvas.manager.set_window_title(title)
+    except Exception:
+        pass
+    lines = [ax.plot([], [])[0] for _ in range(channel_count)]
+    plot_stack_step_uv = 250.0
+    plot_offsets = np.arange(channel_count, dtype=float) * plot_stack_step_uv
+    try:
+        ax.set_yticks(plot_offsets.tolist())
+        ax.set_yticklabels([str(l) for l in channel_labels])
+    except Exception:
+        pass
+    ax.set_title("EEG (uV)")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Amplitude (uV)")
+
+    overlay_lines = []
+    if plot_reference_overlay:
+        for off in plot_offsets:
+            overlay_lines.append(
+                ax.axhline(float(off), color="#888888", alpha=0.2, linewidth=0.6)
+            )
+
+    base_half = max(abs(plot_fixed_ylim[0]), abs(plot_fixed_ylim[1]))
+    ax.set_ylim(float(plot_offsets[0] - base_half), float(plot_offsets[-1] + base_half))
+    ax.set_xlim(-plot_window_sec, 0.0)
+
+    times: deque[float] = deque()
+    values: deque[np.ndarray] = deque()
+    plot_ylim_ema: Optional[Tuple[float, float]] = None
+    last_draw = 0.0
+
+    def _trim(now_s: float) -> None:
+        while times and (now_s - float(times[0])) > plot_window_sec:
+            times.popleft()
+            values.popleft()
+
+    def _draw(now_s: float) -> None:
+        nonlocal plot_ylim_ema, last_draw
+        if plot_fps > 0 and (now_s - last_draw) < (1.0 / plot_fps):
+            return
+        last_draw = now_s
+        if not times:
+            return
+        t_arr = np.asarray(times, dtype=float)
+        v_arr = np.stack(values, axis=0) if len(values) > 1 else np.asarray(values[0:1])
+        t0 = float(t_arr[-1])
+        x = t_arr - t0
+
+        for idx in range(v_arr.shape[1]):
+            y = v_arr[:, idx] + plot_offsets[idx]
+            lines[idx].set_data(x, y)
+        ax.set_xlim(-plot_window_sec, 0.0)
+
+        if plot_scale == "robust":
+            flat = v_arr.reshape(-1)
+            if flat.size > 0:
+                low, high = np.percentile(flat, [5, 95])
+                if low == high:
+                    low -= 1.0
+                    high += 1.0
+                target_low, target_high = float(low), float(high)
+                if plot_ylim_ema is None:
+                    plot_ylim_ema = (target_low, target_high)
+                else:
+                    alpha = max(0.0, min(1.0, plot_robust_ema))
+                    plot_ylim_ema = (
+                        (1.0 - alpha) * plot_ylim_ema[0] + alpha * target_low,
+                        (1.0 - alpha) * plot_ylim_ema[1] + alpha * target_high,
+                    )
+            if plot_ylim_ema is not None:
+                half = max(abs(plot_ylim_ema[0]), abs(plot_ylim_ema[1]))
+                half = float(max(50.0, min(400.0, half)))
+                ax.set_ylim(
+                    float(plot_offsets[0] - half), float(plot_offsets[-1] + half)
+                )
+        else:
+            half = max(abs(plot_fixed_ylim[0]), abs(plot_fixed_ylim[1]))
+            half = float(max(50.0, min(400.0, half)))
+            ax.set_ylim(float(plot_offsets[0] - half), float(plot_offsets[-1] + half))
+
+        if overlay_lines:
+            try:
+                for line in overlay_lines:
+                    line.set_alpha(0.2)
+            except Exception:
+                pass
+
+        fig.canvas.draw_idle()
+        plt.pause(0.001)
+
+    while not stop_flag.is_set():
+        try:
+            item = sample_queue.get(timeout=0.1)
+        except queue.Empty:
+            item = None
+        if item is None:
+            if not plt.fignum_exists(fig.number):
+                break
+            continue
+        try:
+            now_s, sample = item
+            now_s = float(now_s)
+            sample_arr = np.asarray(sample, dtype=float)
+            if sample_arr.ndim != 1 or sample_arr.size != channel_count:
+                continue
+            times.append(now_s)
+            values.append(sample_arr)
+            _trim(now_s)
+            _draw(now_s)
+        except Exception:
+            continue
+
+
+class _PlotProcess:
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        channel_labels: list[str],
+        plot_window_sec: float,
+        plot_fps: float,
+        plot_fixed_ylim: tuple[float, float],
+        plot_scale: str,
+        plot_robust_ema: float,
+        plot_reference_overlay: bool,
+        title: str,
+    ) -> None:
+        self.enabled = bool(enabled)
+        self.dropped = 0
+        self._queue: Optional[mp.Queue] = None
+        self._stop: Optional[mp.Event] = None
+        self._proc: Optional[mp.Process] = None
+        if not self.enabled:
+            return
+        ctx = mp.get_context("spawn")
+        self._queue = ctx.Queue(maxsize=int(PLOT_QUEUE_MAXSIZE))
+        self._stop = ctx.Event()
+        self._proc = ctx.Process(
+            target=_plot_process_main,
+            kwargs={
+                "sample_queue": self._queue,
+                "stop_flag": self._stop,
+                "channel_labels": list(channel_labels),
+                "plot_window_sec": float(plot_window_sec),
+                "plot_fps": float(plot_fps),
+                "plot_fixed_ylim": tuple(plot_fixed_ylim),
+                "plot_scale": str(plot_scale),
+                "plot_robust_ema": float(plot_robust_ema),
+                "plot_reference_overlay": bool(plot_reference_overlay),
+                "title": str(title),
+            },
+            daemon=True,
+        )
+        self._proc.start()
+
+    def push(self, *, now_s: float, sample: np.ndarray) -> None:
+        if not self._queue or not self._proc or not self._proc.is_alive():
+            return
+        try:
+            self._queue.put_nowait((float(now_s), np.asarray(sample, dtype=np.float32)))
+        except queue.Full:
+            self.dropped += 1
+        except Exception:
+            return
+
+    def stop(self) -> None:
+        if not self._stop or not self._proc:
+            return
+        try:
+            self._stop.set()
+        except Exception:
+            pass
+        try:
+            self._proc.join(timeout=1.0)
+        except Exception:
+            pass
+        if self._proc.is_alive():
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+
+
 def _resolve_plot_fixed_ylim(value: Optional[List[float]]) -> Tuple[float, float]:
     if not value or len(value) != 2:
         return float(PLOT_FIXED_YLIM[0]), float(PLOT_FIXED_YLIM[1])
@@ -759,56 +999,98 @@ def _should_enable_plot(value: Optional[bool]) -> bool:
     return bool(value)
 
 
-def _load_config_payload(path: Optional[str]) -> Dict[str, Any]:
+def _load_config_file(path: Optional[str]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if not path:
-        return {}
+        return {}, {}
     try:
         payload = json.loads(Path(path).read_text())
     except Exception:
-        return {}
-    return payload.get("settings", payload)
+        return {}, {}
+    if not isinstance(payload, dict):
+        return {}, {}
+    settings = payload.get("settings")
+    if isinstance(settings, dict):
+        return payload, settings
+    return payload, payload
 
 
-def _apply_config_to_args(args_obj, settings: Dict[str, Any], defaults: Dict[str, Any]) -> None:
-    aliases = {
-        "ENABLE_PLOT": "enable_plot",
-        "PLOT_SCALE_MODE": "plot_scale",
-        "PLOT_FIXED_YLIM": "plot_fixed_ylim",
-        "PLOT_FIXED_UV": "plot_fixed_uv",
-        "PLOT_FIXED_YLIM_MIN": "plot_fixed_ylim_min",
-        "PLOT_FIXED_YLIM_MAX": "plot_fixed_ylim_max",
-        "PLOT_ROBUST_WINDOW_SEC": "plot_robust_window_sec",
-        "PLOT_ROBUST_EMA": "plot_robust_ema",
-        "PLOT_REFERENCE_OVERLAY": "plot_reference_overlay",
-        "PLOT_REFERENCE_LINES": "plot_reference_overlay",
-        "PLOT_WINDOW_SEC": "plot_window_sec",
-        "plot-window-sec": "plot_window_sec",
-        "plotWindowSec": "plot_window_sec",
-        "EVENT_MARKING_ENABLED": "event_marking_enabled",
-        "EVENT_KEYMAP": "event_keymap",
-        "LSL_STREAM_NAME": "stream_name",
-        "LSL_STREAM_TYPE": "stream_type",
-        "LSL_SOURCE_ID": "lsl_source_id",
-        "RAW_DIR": "output_dir",
-        "raw_dir": "output_dir",
-        "RAW_QUEUE_MAXSIZE": "raw_queue_maxsize",
-        "RAW_SHARD_SAMPLES": "raw_shard_samples",
-        "SESSION_ID_OVERRIDE": "session_id",
-        "SESSION_NAME": "session_id",
-        "subject_id": "subject_id",
-        "MODE": "mode",
-        "OUTPUT_DIR": "output_dir",
-        "OUT_DIR": "output_dir",
-        "DURATION_S": "duration_s",
-        "DRY_RUN": "dry_run",
-        "STREAM_CH": "stream_ch",
-        "STREAM_RATE": "stream_rate",
+def _apply_config_to_args(
+    args_obj, settings: Dict[str, Any], defaults: Dict[str, Any]
+) -> List[str]:
+    """
+    Merge JSON config settings into argparse args with strict precedence:
+      CLI args > config JSON > defaults
+
+    This intentionally prefers canonical UPPER_CASE config keys (written by the UI) over
+    legacy "shadow" lower-case keys that may exist in older configs (e.g. ENABLE_PLOT
+    vs enable_plot). Conflicts are reported as warnings.
+    """
+
+    # alias key -> (arg dest, priority). Higher priority wins when multiple keys map to same dest.
+    alias_specs: Dict[str, tuple[str, int]] = {
+        "ENABLE_PLOT": ("enable_plot", 100),
+        "EVENT_MARKING_ENABLED": ("event_marking_enabled", 100),
+        "EVENT_KEYMAP": ("event_keymap", 100),
+        "LSL_STREAM_NAME": ("stream_name", 100),
+        "LSL_STREAM_TYPE": ("stream_type", 100),
+        "LSL_SOURCE_ID": ("lsl_source_id", 100),
+        "RAW_QUEUE_MAXSIZE": ("raw_queue_maxsize", 100),
+        "RAW_SHARD_SAMPLES": ("raw_shard_samples", 100),
+        "SESSION_ID_OVERRIDE": ("session_id", 100),
+        "SESSION_NAME": ("session_id", 90),
+        "MODE": ("mode", 100),
+        "OUTPUT_DIR": ("output_dir", 100),
+        "OUT_DIR": ("output_dir", 90),
+        "RAW_DIR": ("output_dir", 90),
+        "raw_dir": ("output_dir", 10),
+        "DURATION_S": ("duration_s", 100),
+        "DRY_RUN": ("dry_run", 100),
+        "STREAM_CH": ("stream_ch", 100),
+        "STREAM_RATE": ("stream_rate", 100),
+        # Plot options (prefer UPPER_CASE keys from UI configs)
+        "PLOT_SCALE_MODE": ("plot_scale", 100),
+        "PLOT_FIXED_YLIM": ("plot_fixed_ylim", 100),
+        "PLOT_FIXED_UV": ("plot_fixed_uv", 100),
+        "PLOT_FIXED_YLIM_MIN": ("plot_fixed_ylim_min", 100),
+        "PLOT_FIXED_YLIM_MAX": ("plot_fixed_ylim_max", 100),
+        "PLOT_ROBUST_WINDOW_SEC": ("plot_robust_window_sec", 100),
+        "PLOT_ROBUST_EMA": ("plot_robust_ema", 100),
+        "PLOT_REFERENCE_OVERLAY": ("plot_reference_overlay", 100),
+        "PLOT_REFERENCE_LINES": ("plot_reference_overlay", 90),
+        "PLOT_WINDOW_SEC": ("plot_window_sec", 100),
+        "plot-window-sec": ("plot_window_sec", 5),
+        "plotWindowSec": ("plot_window_sec", 5),
     }
+
+    chosen: Dict[str, tuple[int, str, Any]] = {}
+    warnings: List[str] = []
     normalized: Dict[str, Any] = {}
-    for key, val in settings.items():
-        dest = aliases.get(key, key)
+
+    for key, val in (settings or {}).items():
+        dest, priority = alias_specs.get(key, (key, 0))
+        # Only apply to known argparse destinations.
+        if dest not in defaults:
+            continue
+        existing = chosen.get(dest)
+        if existing is None:
+            chosen[dest] = (priority, str(key), val)
+        else:
+            existing_priority, existing_key, existing_val = existing
+            if priority > existing_priority:
+                if existing_val != val:
+                    warnings.append(
+                        f"Config key conflict for {dest}: {existing_key}={existing_val!r} overridden by {key}={val!r}"
+                    )
+                chosen[dest] = (priority, str(key), val)
+            elif priority == existing_priority and existing_val != val:
+                warnings.append(
+                    f"Config key conflict for {dest}: {existing_key}={existing_val!r} and {key}={val!r} (keeping {existing_key})"
+                )
+
+    for dest, (_priority, _key, val) in chosen.items():
         normalized[dest] = val
 
+    # Derived plot_fixed_ylim convenience.
     if "plot_fixed_uv" in normalized and "plot_fixed_ylim" not in normalized:
         try:
             uv = float(normalized["plot_fixed_uv"])
@@ -825,21 +1107,29 @@ def _apply_config_to_args(args_obj, settings: Dict[str, Any], defaults: Dict[str
             normalized["plot_fixed_ylim_max"],
         ]
 
-    # Special handling for plot_window_sec to log source
-    if "plot_window_sec" in normalized and normalized["plot_window_sec"] is not None:
-        args_obj.plot_window_sec = float(normalized["plot_window_sec"])
-        logger.info(f"[plot] plot_window_sec={args_obj.plot_window_sec} (source=config)")
-    else:
-        logger.info(f"[plot] plot_window_sec={args_obj.plot_window_sec} (source=cli)")
-
-    for key, default in defaults.items():
-        if key == "plot_window_sec":
+    for dest, default in defaults.items():
+        if dest not in normalized:
             continue
-        if key in normalized and getattr(args_obj, key) == default:
-            setattr(args_obj, key, normalized[key])
+        current = getattr(args_obj, dest)
+        if current != default:
+            # CLI overrides config.
+            continue
+        val = normalized[dest]
+        if val is None and default is not None:
+            # Avoid clobbering non-optional CLI defaults with nulls from older configs.
+            continue
+        setattr(args_obj, dest, val)
+
+    return warnings
 
 
-def _run_recording(args: argparse.Namespace) -> int:
+def _run_recording(
+    args: argparse.Namespace,
+    *,
+    config_payload: Dict[str, Any],
+    config_settings: Dict[str, Any],
+    config_warnings: Optional[List[str]] = None,
+) -> int:
     global termination_reason
     stop_event.clear()
     termination_reason = "normal"
@@ -854,31 +1144,61 @@ def _run_recording(args: argparse.Namespace) -> int:
         logger.error("pylsl is required for recording.")
         return 2
 
-    subject_id = args.subject_id or DEFAULT_SUBJECT_ID
-    session_id = args.session_id or time.strftime("%Y%m%d_%H%M%S")
-    output_root = Path(args.output_dir or default_raw_dir()).expanduser().resolve()
-    cfg = _load_config_payload(getattr(args, "config", None))
+    cfg = dict(config_settings or {})
+    repo_root = Path(__file__).resolve().parent
+    project_name = (
+        config_payload.get("project_name") if isinstance(config_payload, dict) else None
+    )
+    subject_id = args.subject_id or (
+        (config_payload.get("subject_id") if isinstance(config_payload, dict) else None)
+    )
+    subject_id = str(subject_id or DEFAULT_SUBJECT_ID)
 
-    def _unique_session_id(root: Path, subject: str, session: str) -> str:
-        suffix = 0
-        candidate = session
-        while True:
-            session_dir = root / f"{subject}_{candidate}"
-            raw_csv = root / f"{subject}_{candidate}_raw.csv"
-            events_csv = root / f"{subject}_{candidate}_events.csv"
-            if not (session_dir.exists() or raw_csv.exists() or events_csv.exists()):
-                return candidate
-            suffix += 1
-            candidate = f"{session}_{suffix:02d}"
+    session_dir_arg = getattr(args, "session_dir", None)
+    session_dir = Path(session_dir_arg).expanduser().resolve() if session_dir_arg else None
+    if session_dir is None:
+        session_id_cfg = (
+            config_payload.get("session_id") if isinstance(config_payload, dict) else None
+        )
+        session_id_cfg = str(session_id_cfg) if session_id_cfg and session_id_cfg != "PENDING" else None
+        if project_name and session_id_cfg:
+            session_dir = (
+                repo_root
+                / "Projects"
+                / str(project_name)
+                / "subjects"
+                / subject_id
+                / "sessions"
+                / session_id_cfg
+            ).resolve()
+        else:
+            session_root = (
+                repo_root
+                / "Projects"
+                / str(project_name or "DEFAULT")
+                / "subjects"
+                / subject_id
+                / "sessions"
+            ).resolve()
+            session_root.mkdir(parents=True, exist_ok=True)
+            backend_id = args.session_id or time.strftime("%Y%m%d_%H%M%S")
+            backend_id = str(backend_id)
+            session_ui = (
+                backend_id
+                if backend_id.startswith(f"{subject_id}_")
+                else f"{subject_id}_{backend_id}"
+            )
+            session_dir = (session_root / session_ui).resolve()
 
-    session_id = _unique_session_id(output_root, subject_id, session_id)
-
-    session_dir_guess = output_root / f"{subject_id}_{session_id}"
-    bootstrap_log_path = output_root / "run.log"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "logs").mkdir(parents=True, exist_ok=True)
+    bootstrap_log_path = session_dir / "logs" / "step1.log"
     _configure_logging(bootstrap_log_path)
-    logger.info("Session: %s", session_id)
-    logger.info("Output root: %s", output_root)
-    logger.info("Session dir (planned): %s", session_dir_guess)
+    for w in config_warnings or []:
+        logger.warning("[config] %s", w)
+    logger.info("Project: %s", project_name or "DEFAULT")
+    logger.info("Subject: %s", subject_id)
+    logger.info("Session dir (requested): %s", session_dir)
 
     def _handle_signal(sig, _frame) -> None:
         global termination_reason
@@ -916,8 +1236,57 @@ def _run_recording(args: argparse.Namespace) -> int:
             duration_s = float(duration_s)
         except Exception:
             duration_s = None
+    if duration_s is not None and duration_s <= 0.0:
+        duration_s = None
     if duration_s is not None:
         logger.info("Max duration enabled: %.2fs", duration_s)
+
+    # Guard against unsafe config/UI values that can silently break runtime.
+    try:
+        args.raw_queue_maxsize = int(args.raw_queue_maxsize)
+    except Exception:
+        args.raw_queue_maxsize = int(RAW_QUEUE_MAXSIZE)
+    if args.raw_queue_maxsize <= 0:
+        logger.warning(
+            "[config] raw_queue_maxsize=%r invalid; using default=%d",
+            getattr(args, "raw_queue_maxsize", None),
+            RAW_QUEUE_MAXSIZE,
+        )
+        args.raw_queue_maxsize = int(RAW_QUEUE_MAXSIZE)
+
+    try:
+        args.raw_shard_samples = int(args.raw_shard_samples)
+    except Exception:
+        args.raw_shard_samples = int(RAW_SHARD_SAMPLES)
+    if args.raw_shard_samples <= 0:
+        logger.warning(
+            "[config] raw_shard_samples=%r invalid; using default=%d",
+            getattr(args, "raw_shard_samples", None),
+            RAW_SHARD_SAMPLES,
+        )
+        args.raw_shard_samples = int(RAW_SHARD_SAMPLES)
+
+    queue_put_timeout_s = float(cfg.get("QUEUE_PUT_TIMEOUT_S", QUEUE_PUT_TIMEOUT_S))
+    if (not np.isfinite(queue_put_timeout_s)) or queue_put_timeout_s <= 0:
+        logger.warning(
+            "[config] QUEUE_PUT_TIMEOUT_S=%r invalid; using default=%.3fs",
+            cfg.get("QUEUE_PUT_TIMEOUT_S", None),
+            QUEUE_PUT_TIMEOUT_S,
+        )
+        queue_put_timeout_s = float(QUEUE_PUT_TIMEOUT_S)
+
+    allow_drop = bool(cfg.get("ALLOW_DROP", ALLOW_DROP))
+
+    hard_stop_after_unhealthy_s = float(
+        cfg.get("HARD_STOP_AFTER_UNHEALTHY_S", hard_stop_policy.hard_stop_after_unhealthy_s)
+    )
+    if (not np.isfinite(hard_stop_after_unhealthy_s)) or hard_stop_after_unhealthy_s <= 0:
+        logger.warning(
+            "[config] HARD_STOP_AFTER_UNHEALTHY_S=%r invalid; using default=%.2fs",
+            cfg.get("HARD_STOP_AFTER_UNHEALTHY_S", None),
+            hard_stop_policy.hard_stop_after_unhealthy_s,
+        )
+        hard_stop_after_unhealthy_s = float(hard_stop_policy.hard_stop_after_unhealthy_s)
 
     required_labels = _normalize_label_list(cfg.get("REQUIRED_LSL_LABELS"))
     if not required_labels:
@@ -1116,8 +1485,8 @@ def _run_recording(args: argparse.Namespace) -> int:
         )
         return 1
 
-    # Log all candidates for debugging.
-    candidates_sorted = sorted(candidates, key=_score_stream, reverse=True)
+    # Log all candidates for debugging / operator disambiguation.
+    candidates_sorted = list(candidates)
     logger.info("[lsl] Found %d candidate stream(s):", len(candidates_sorted))
     for i, s in enumerate(candidates_sorted):
         try:
@@ -1134,26 +1503,57 @@ def _run_recording(args: argparse.Namespace) -> int:
         except Exception:
             logger.info("[lsl]  #%d (unable to print full stream info)", i)
 
-    # Choose best candidate and verify it actually produces samples (stale/orphan streams do happen).
-    info = None
-    inlet = None
-    errors = []
-    for s in candidates_sorted:
-        try:
-            test_inlet = StreamInlet(s, max_buflen=inlet_max_buflen_sec, max_chunklen=inlet_max_chunklen)
-            sample, ts = test_inlet.pull_sample(timeout=1.0)
-            if sample is None or ts is None:
-                errors.append(f"{s.source_id()}: no sample within 1s")
-                continue
-            info = s
-            inlet = test_inlet
-            break
-        except Exception as e:
-            errors.append(str(e))
-            continue
+    explicit_source_id = str(args.lsl_source_id).strip() if args.lsl_source_id else ""
+    AUTO_TOKENS = {"", "auto", "muse2_internal", "internal"}
+    if explicit_source_id.lower() in AUTO_TOKENS:
+        explicit_source_id = ""
+    preferred_source_id = explicit_source_id or (str(env_source_id).strip() if env_source_id else "")
 
-    if info is None or inlet is None:
-        logger.error("[lsl] Found streams but none produced samples. Details: %s", "; ".join(errors[-6:]))
+    def _sid(stream) -> str:
+        try:
+            return str(stream.source_id()).strip()
+        except Exception:
+            return ""
+
+    filtered = candidates_sorted
+    if preferred_source_id:
+        filtered = [s for s in filtered if _sid(s) == preferred_source_id]
+        if not filtered:
+            logger.error(
+                "[lsl] No candidate matched source_id=%s. Set --lsl-source-id or LSL_SOURCE_ID to one of:",
+                preferred_source_id,
+            )
+            for s in candidates_sorted:
+                logger.error("  - %s", _format_stream_info(s))
+            return 1
+
+    if not preferred_source_id and len(filtered) > 1:
+        logger.error(
+            "[lsl] Multiple streams match name/type/ch/rate. Provide --lsl-source-id or set LSL_SOURCE_ID."
+        )
+        for i, s in enumerate(filtered):
+            logger.error("  #%d %s", i, _format_stream_info(s))
+        return 1
+
+    if len(filtered) > 1:
+        logger.error(
+            "[lsl] Multiple streams matched source_id=%s. Stop duplicates or refine stream-name/type.",
+            preferred_source_id,
+        )
+        for i, s in enumerate(filtered):
+            logger.error("  #%d %s", i, _format_stream_info(s))
+        return 1
+
+    info = filtered[0]
+    try:
+        inlet = StreamInlet(
+            info, max_buflen=inlet_max_buflen_sec, max_chunklen=inlet_max_chunklen
+        )
+        sample, ts = inlet.pull_sample(timeout=1.0)
+        if sample is None or ts is None:
+            raise RuntimeError("no sample within 1s (stale stream?)")
+    except Exception as e:
+        logger.error("[lsl] Selected stream produced no samples: %s", e)
         return 1
 
     logger.info(
@@ -1166,7 +1566,9 @@ def _run_recording(args: argparse.Namespace) -> int:
     )
 
     if inlet is None:
-        inlet = StreamInlet(info, max_buflen=inlet_max_buflen_sec, max_chunklen=inlet_max_chunklen)
+        inlet = StreamInlet(
+            info, max_buflen=inlet_max_buflen_sec, max_chunklen=inlet_max_chunklen
+        )
     logger.info(
         "LSL inlet configured: max_buflen=%ss max_chunklen=%s",
         inlet_max_buflen_sec,
@@ -1198,6 +1600,8 @@ def _run_recording(args: argparse.Namespace) -> int:
         channel_labels = [f"ch{i + 1}" for i in range(channel_count)]
     logger.info("Channel labels: %s", channel_labels)
 
+    output_root = session_dir.parent
+    session_id = session_dir.name
     session_writer = SessionWriter(
         output_root=output_root,
         subject_id=subject_id,
@@ -1207,22 +1611,41 @@ def _run_recording(args: argparse.Namespace) -> int:
         timebase_version=TIMEBASE_VERSION,
         shard_size_samples=int(args.raw_shard_samples),
         resume=False,
-        mode="record_only",
+        mode="train_record",
     )
     session_id = session_writer.session_id
     session_dir = session_writer.paths.session_dir
-    _attach_session_log(session_dir / "run.log", previous_log_path=bootstrap_log_path)
-    if session_dir != session_dir_guess:
+    _attach_session_log(session_dir / "logs" / "step1.log", previous_log_path=bootstrap_log_path)
+    if session_dir != Path(getattr(args, "session_dir", session_dir)).expanduser().resolve():
         logger.info("Session dir updated: %s", session_dir)
 
-    raw_csv_path = output_root / f"{subject_id}_{session_id}_raw.csv"
-    events_csv_path = output_root / f"{subject_id}_{session_id}_events.csv"
+    raw_csv_path = session_dir / "raw" / "raw.csv"
+    events_csv_path = session_dir / "events" / "events.csv"
     raw_file, raw_writer = _open_raw_csv(raw_csv_path, channel_count=channel_count)
-    raw_flush_interval_s = float(cfg.get('raw_flush_interval_s', 1.0))
+    raw_flush_interval_s = float(cfg.get("RAW_FLUSH_INTERVAL_S", cfg.get("raw_flush_interval_s", 1.0)))
     last_raw_flush_t = time.time()
     events_file, events_writer = _open_events_csv(events_csv_path)
     events_lock = threading.Lock()
     event_recorder = EventRecorder(events_writer, events_lock)
+
+    session_writer.update_meta(
+        {
+            "project_name": str(project_name or "DEFAULT"),
+            "raw_csv_path": "raw/raw.csv",
+            "events_csv_path": "events/events.csv",
+            "session_dir": str(session_dir),
+        }
+    )
+    try:
+        session_writer.update_manifest_files(
+            {
+                "raw_csv": "raw/raw.csv",
+                "events_csv": "events/events.csv",
+                "events_jsonl": "events/events.jsonl",
+            }
+        )
+    except Exception:
+        logger.exception("Failed to update manifest files mapping.")
 
     logger.info("Raw CSV (legacy inspection): %s", raw_csv_path)
     logger.info("Events CSV (legacy inspection): %s", events_csv_path)
@@ -1230,7 +1653,16 @@ def _run_recording(args: argparse.Namespace) -> int:
     if args.init_only:
         raw_file.close()
         events_file.close()
-        session_writer.finalize("init_only")
+        session_writer.finalize(
+            "init_only",
+            extra_manifest={
+                "files": {
+                    "raw_csv": "raw/raw.csv",
+                    "events_csv": "events/events.csv",
+                    "events_jsonl": "events/events.jsonl",
+                }
+            },
+        )
         return 0
 
     plot_scale = _normalize_scale_mode(args.plot_scale)
@@ -1246,7 +1678,10 @@ def _run_recording(args: argparse.Namespace) -> int:
         plot_window_sec = 5.0
 
     enable_plot = _should_enable_plot(args.enable_plot)
-    event_marking_config_enabled = bool(args.event_marking_enabled)
+    if args.event_marking_enabled is None:
+        event_marking_config_enabled = bool(EVENT_MARKING_ENABLED)
+    else:
+        event_marking_config_enabled = bool(args.event_marking_enabled)
     event_keymap = _parse_keymap(args.event_keymap)
     if event_marking_config_enabled:
         logger.info("Event marking enabled (keypresses ignored until first sample).")
@@ -1334,148 +1769,64 @@ def _run_recording(args: argparse.Namespace) -> int:
 
     writer_thread = threading.Thread(target=_writer_worker, daemon=True)
     writer_thread.start()
-
-    plot_buffer: deque[Tuple[float, np.ndarray]]
-    plot_buffer = deque()
-    plot_ylim_ema: Optional[Tuple[float, float]] = None
-    plt = None
-    if enable_plot:
-        _force_interactive_matplotlib_backend(logger)
+    plot_display_fs = float(cfg.get("PLOT_DISPLAY_FS", PLOT_DISPLAY_FS))
+    plot_fps = float(cfg.get("PLOT_FPS", PLOT_FPS))
+    plotter = _PlotProcess(
+        enabled=enable_plot,
+        channel_labels=channel_labels,
+        plot_window_sec=plot_window_sec,
+        plot_fps=plot_fps,
+        plot_fixed_ylim=plot_fixed_ylim,
+        plot_scale=plot_scale,
+        plot_robust_ema=plot_robust_ema,
+        plot_reference_overlay=plot_reference_overlay,
+        title=f"Step 1: Recording {subject_id} - {session_id}",
+    )
+    plot_decim = 1
+    if enable_plot and plot_display_fs > 0:
         try:
-            import matplotlib.pyplot as plt
+            plot_decim = max(1, int(round(float(nominal_srate) / float(plot_display_fs))))
         except Exception:
-            enable_plot = False
-            plt = None
-            logger.warning("matplotlib not available; plot disabled.")
+            plot_decim = 1
 
-    disabled_text = None
-    last_plot_draw_s = 0.0
-    if enable_plot and plt is not None:
-        plt.ion()
-        logger.info("[plot] plt.isinteractive()=%s", plt.isinteractive())
-        fig, ax = plt.subplots()
-        try:
-            fig.canvas.manager.set_window_title(f"Step 1: Recording {subject_id} - {session_id}")
-            plt.show(block=False)
-            logger.info("[plot] Figure shown (non-blocking)")
-        except Exception:
-            pass
-        lines = [ax.plot([], [])[0] for _ in range(channel_count)]
-
-        # Plotting readability: stack channels with a constant vertical offset so traces don't
-        # visually "fill" the plot when overlaid.
-        plot_stack_step_uv = float(cfg.get("plot_stack_step_uv", 250.0))
-        plot_offsets = np.arange(channel_count, dtype=float) * plot_stack_step_uv
-
-        # Y-ticks at channel baselines
-        try:
-            ax.set_yticks(plot_offsets.tolist())
-            ax.set_yticklabels([str(l) for l in selected_labels])
-        except Exception:
-            pass
-
-        ax.set_title("EEG (uV)")
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Amplitude (uV)")
-        overlay_lines = []
-        if plot_reference_overlay:
-            # Baseline per channel (stacked)
-            for off in plot_offsets:
-                overlay_lines.append(ax.axhline(float(off), color="#888888", alpha=0.2, linewidth=0.6))
-
-        base_half = max(abs(plot_fixed_ylim[0]), abs(plot_fixed_ylim[1]))
-        ax.set_ylim(float(plot_offsets[0] - base_half), float(plot_offsets[-1] + base_half))
-        # B2: Add overlay text for disabled event marking.
-        disabled_text = ax.text(
-            0.5,
-            0.5,
-            "Event Marking Disabled",
-            transform=ax.transAxes,
-            ha="center",
-            va="center",
-            color="red",
-            fontsize=20,
-            weight="bold",
-            visible=False,
-            zorder=999,
-            bbox=dict(facecolor="black", alpha=0.5, boxstyle="round,pad=0.5"),
+    resolved_settings = {
+        "project_name": str(project_name or "DEFAULT"),
+        "subject_id": str(subject_id),
+        "session_id": str(session_id),
+        "session_dir": str(session_dir),
+        "stream_name": str(stream_name),
+        "stream_type": str(stream_type),
+        "lsl_source_id": str(args.lsl_source_id) if args.lsl_source_id is not None else None,
+        "expected_channels": int(expected_channels),
+        "expected_sampling_rate": float(expected_srate),
+        "enable_plot": bool(enable_plot),
+        "plot_fps": float(plot_fps),
+        "plot_display_fs": float(plot_display_fs),
+        "plot_window_sec": float(plot_window_sec),
+        "plot_decim": int(plot_decim),
+        "plot_scale": str(plot_scale),
+        "plot_fixed_ylim": [float(plot_fixed_ylim[0]), float(plot_fixed_ylim[1])],
+        "plot_reference_overlay": bool(plot_reference_overlay),
+        "event_marking_enabled": bool(event_marking_config_enabled),
+        "event_keymap": str(args.event_keymap),
+        "raw_queue_maxsize": int(args.raw_queue_maxsize),
+        "raw_shard_samples": int(args.raw_shard_samples),
+        "queue_put_timeout_s": float(queue_put_timeout_s),
+        "allow_drop": bool(allow_drop),
+        "duration_s": float(duration_s) if duration_s is not None else None,
+    }
+    try:
+        (session_dir / "logs" / "resolved_settings.json").write_text(
+            json.dumps(resolved_settings, indent=2, sort_keys=True)
         )
-    else:
-        fig = None
-        ax = None
-        lines = []
-        overlay_lines = []
+    except Exception:
+        logger.exception("Failed to write resolved_settings.json")
+    try:
+        session_writer.update_meta({"resolved_settings": resolved_settings})
+    except Exception:
+        logger.exception("Failed to persist resolved_settings into meta.json")
+    logger.info("Resolved settings: %s", json.dumps(resolved_settings, sort_keys=True))
 
-    def _update_plot(now_s: float) -> None:
-        nonlocal plot_ylim_ema, last_plot_draw_s
-        if not enable_plot or plt is None or ax is None or fig is None:
-            return
-
-        if (now_s - last_plot_draw_s) < (1.0 / PLOT_FPS):
-            return
-        last_plot_draw_s = now_s
-
-        while plot_buffer and (now_s - plot_buffer[0][0]) > plot_window_sec:
-            plot_buffer.popleft()
-        if not plot_buffer:
-            return
-        times = np.array([t for t, _ in plot_buffer], dtype=float)
-        values = np.stack([v for _, v in plot_buffer], axis=0)
-        t0 = times[-1]
-        x = times - t0
-        # Decimate for plotting performance (and to reduce the "solid fill" look)
-        n_pts = len(x)
-        step = max(1, n_pts // int(cfg.get("plot_max_points", 1500)))
-        x_plot = x[::step]
-        values_plot = values[::step, :]
-
-        for idx in range(values_plot.shape[1]):
-            # Stack channels with a baseline offset
-            y_plot = values_plot[:, idx]
-            if 'plot_offsets' in locals() or 'plot_offsets' in globals():
-                y_plot = y_plot + plot_offsets[idx]
-            lines[idx].set_data(x_plot, y_plot)
-
-        ax.set_xlim(-plot_window_sec, 0.0)
-
-        if plot_scale == "robust":
-            flat = values.reshape(-1)
-            if flat.size > 0:
-                low, high = np.percentile(flat, [5, 95])
-                if low == high:
-                    low -= 1.0
-                    high += 1.0
-                target_low, target_high = float(low), float(high)
-                if plot_ylim_ema is None:
-                    plot_ylim_ema = (target_low, target_high)
-                else:
-                    alpha = max(0.0, min(1.0, plot_robust_ema))
-                    plot_ylim_ema = (
-                        (1.0 - alpha) * plot_ylim_ema[0] + alpha * target_low,
-                        (1.0 - alpha) * plot_ylim_ema[1] + alpha * target_high,
-                    )
-            if plot_ylim_ema is not None:
-                half = max(abs(plot_ylim_ema[0]), abs(plot_ylim_ema[1]))
-                half = float(max(50.0, min(400.0, half)))
-                ax.set_ylim(float(plot_offsets[0] - half), float(plot_offsets[-1] + half))
-        else:
-            half = max(abs(plot_fixed_ylim[0]), abs(plot_fixed_ylim[1]))
-            half = float(max(50.0, min(400.0, half)))
-            ax.set_ylim(float(plot_offsets[0] - half), float(plot_offsets[-1] + half))
-
-        if overlay_lines and len(overlay_lines) == 3:
-            flat = values.reshape(-1)
-            if flat.size > 0:
-                mean = float(np.mean(flat))
-                std = float(np.std(flat))
-                overlay_lines[0].set_ydata([mean, mean])
-                overlay_lines[1].set_ydata([mean + std, mean + std])
-                overlay_lines[2].set_ydata([mean - std, mean - std])
-
-        fig.canvas.draw_idle()
-        plt.pause(0.001)
-
-    last_plot_update = 0.0
     last_state_update = 0.0
     stream_start_lsl_ts: Optional[float] = None
     last_lsl_ts_mono: Optional[float] = None
@@ -1485,45 +1836,155 @@ def _run_recording(args: argparse.Namespace) -> int:
     timestamps_recent = deque(maxlen=512)
     event_marking_active = False
 
-    def _record_event(label: str, metadata: Dict[str, Any]) -> None:
-        nonlocal stream_start_lsl_ts, last_lsl_ts_mono, events_received, events_written, last_event_flush_t
-        if not event_marking_active:
-            return
+    action_map = {
+        "rest": ACTION_REST,
+        "open": ACTION_OPEN,
+        "close": ACTION_CLOSE,
+    }
+    finger_map = {
+        "none": FINGER_NONE,
+        "thumb": FINGER_THUMB,
+        "index": FINGER_INDEX,
+        "middle": FINGER_MIDDLE,
+        "ring": FINGER_RING,
+        "pinky": FINGER_PINKY,
+    }
+
+    current_action_id = int(ACTION_REST)
+    current_finger_id = int(FINGER_NONE)
+    pending_override_type: Optional[str] = None
+    active_mark: Optional[dict[str, object]] = None
+
+    def _now_event_time_s() -> Optional[tuple[float, float, bool]]:
+        nonlocal last_lsl_ts_mono
         if stream_start_lsl_ts is None:
-            return
+            return None
         lsl_ts_raw = float(local_clock())
         lsl_ts_mono, clamped = clamp_monotonic(lsl_ts_raw, last_lsl_ts_mono)
         last_lsl_ts_mono = lsl_ts_mono
-        event_time_s = lsl_ts_mono - stream_start_lsl_ts
+        return float(lsl_ts_mono - stream_start_lsl_ts), float(lsl_ts_mono), bool(clamped)
+
+    def _emit_event(
+        *,
+        onset_s: float,
+        duration_s: float,
+        action_id: int,
+        finger_id: int,
+        event_type: str,
+        source_key: str,
+        clamped: bool,
+        lsl_ts_mono: float,
+    ) -> None:
+        nonlocal events_received, events_written, last_event_flush_t
+        duration_s = max(0.0, float(duration_s))
+        if not is_valid_action_finger(int(action_id), int(finger_id)):
+            # Fail safe: coerce invalid combos to REST/NONE.
+            action_id = int(ACTION_REST)
+            finger_id = int(FINGER_NONE)
+            event_type = "rest"
+        md = {
+            "duration_s": float(duration_s),
+            "action_id": int(action_id),
+            "finger_id": int(finger_id),
+            "source": "keyboard",
+            "key": str(source_key),
+            "clamped": bool(clamped),
+        }
         payload = EventRecord(
-            event_time_s=event_time_s,
-            lsl_ts_mono=lsl_ts_mono,
+            event_time_s=float(onset_s),
+            lsl_ts_mono=float(lsl_ts_mono),
             local_ts=time.time(),
-            label=label,
-            metadata={"source": "keyboard", "clamped": clamped, **metadata},
+            label=str(event_type),
+            metadata=md,
         )
         event_recorder.record(payload)
         with counter_lock:
             events_received += 1
+            events_written += 1
         session_writer.append_event(
             {
-                "onset_s": event_time_s,
-                "event_time_s": event_time_s,
-                "duration_s": float(payload.metadata.get("duration_s", 0.0)),
-                "lsl_ts_mono": lsl_ts_mono,
-                "local_ts": payload.local_ts,
-                "type": label,
-                "label": label,
+                "onset_s": float(onset_s),
+                "event_time_s": float(onset_s),
+                "duration_s": float(duration_s),
+                "end_s": float(onset_s + duration_s),
+                "lsl_ts_mono": float(lsl_ts_mono),
+                "local_ts": float(payload.local_ts),
+                "type": str(event_type),
+                "action_id": int(action_id),
+                "finger_id": int(finger_id),
                 "source": "keyboard",
-                "metadata": payload.metadata,
             }
         )
-        with counter_lock:
-            events_written += 1
         if (time.time() - last_event_flush_t) >= event_flush_interval_s:
             events_file.flush()
             last_event_flush_t = time.time()
 
+    def _start_mark(source_key: str) -> None:
+        nonlocal active_mark
+        if active_mark is not None:
+            return
+        now = _now_event_time_s()
+        if now is None:
+            return
+        onset_s, lsl_ts_mono, clamped = now
+        action_id = int(current_action_id)
+        finger_id = int(current_finger_id)
+        if action_id == int(ACTION_REST):
+            finger_id = int(FINGER_NONE)
+        override = pending_override_type
+        event_type = (
+            str(override) if override else event_type_for(int(action_id), int(finger_id))
+        )
+        active_mark = {
+            "onset_s": float(onset_s),
+            "lsl_ts_mono": float(lsl_ts_mono),
+            "clamped": bool(clamped),
+            "action_id": int(action_id),
+            "finger_id": int(finger_id),
+            "type": str(event_type),
+            "key": str(source_key),
+        }
+        logger.info(
+            "[event] mark_start onset=%.3fs type=%s action_id=%s finger_id=%s",
+            float(onset_s),
+            str(event_type),
+            int(action_id),
+            int(finger_id),
+        )
+
+    def _end_mark(source_key: str) -> None:
+        nonlocal active_mark, pending_override_type
+        if active_mark is None:
+            return
+        now = _now_event_time_s()
+        if now is None:
+            active_mark = None
+            pending_override_type = None
+            return
+        end_s, lsl_ts_mono, clamped = now
+        onset_s = float(active_mark.get("onset_s", end_s))
+        duration_s = max(0.0, float(end_s - onset_s))
+        action_id = int(active_mark.get("action_id", ACTION_REST))
+        finger_id = int(active_mark.get("finger_id", FINGER_NONE))
+        event_type = str(active_mark.get("type", ""))
+        _emit_event(
+            onset_s=onset_s,
+            duration_s=duration_s,
+            action_id=action_id,
+            finger_id=finger_id,
+            event_type=event_type,
+            source_key=source_key,
+            clamped=bool(clamped),
+            lsl_ts_mono=float(lsl_ts_mono),
+        )
+        logger.info(
+            "[event] mark_end onset=%.3fs dur=%.3fs type=%s",
+            float(onset_s),
+            float(duration_s),
+            str(event_type),
+        )
+        active_mark = None
+        pending_override_type = None
 
     listener = None
     if event_marking_config_enabled:
@@ -1531,24 +1992,59 @@ def _run_recording(args: argparse.Namespace) -> int:
             from pynput import keyboard
 
             def _on_press(key) -> None:
+                nonlocal current_action_id, current_finger_id, pending_override_type
+                global termination_reason
                 name = _key_to_name(key)
                 if not name:
                     return
                 if _should_stop_key(name):
+                    termination_reason = "user_stop"
+                    _end_mark(name)
                     stop_event.set()
                     return
                 label = event_keymap.get(name)
                 if not label:
                     return
-                _record_event(label, {"key": name})
+                label = str(label).strip().lower()
+                if label in action_map:
+                    current_action_id = int(action_map[label])
+                    if current_action_id == int(ACTION_REST):
+                        current_finger_id = int(FINGER_NONE)
+                    logger.info("[event] mode action=%s (action_id=%s)", label, current_action_id)
+                    return
+                if label in finger_map:
+                    current_finger_id = int(finger_map[label])
+                    logger.info("[event] mode finger=%s (finger_id=%s)", label, current_finger_id)
+                    return
+                if label in {"artifact", "calibration"}:
+                    pending_override_type = label
+                    logger.info("[event] override=%s (next mark)", label)
+                    return
+                if label == "mark":
+                    if event_marking_active:
+                        _start_mark(name)
+                    return
 
-            listener = keyboard.Listener(on_press=_on_press)
+            def _on_release(key) -> None:
+                name = _key_to_name(key)
+                if not name:
+                    return
+                label = event_keymap.get(name)
+                if not label:
+                    return
+                if str(label).strip().lower() == "mark":
+                    _end_mark(name)
+
+            listener = keyboard.Listener(on_press=_on_press, on_release=_on_release)
             listener.start()
         except Exception:
             logger.warning("pynput not available; event marking disabled.")
             event_marking_config_enabled = False
 
-    session_state_path = Path(__file__).resolve().parent / "logs" / f"session_state_{subject_id}.json"
+    session_state_paths = [
+        session_dir / "logs" / "session_state.json",
+        repo_root / "logs" / f"session_state_{subject_id}.json",
+    ]
     run_error: Optional[Exception] = None
 
     try:
@@ -1595,9 +2091,16 @@ def _run_recording(args: argparse.Namespace) -> int:
             )
             seq += 1
             timestamps_recent.append(lsl_ts_mono)
-            plot_buffer.append((lsl_ts_mono - stream_start_lsl_ts, sample_arr))
+            if enable_plot and plot_decim > 0 and (packet.seq % plot_decim == 0):
+                plotter.push(now_s=float(lsl_ts_mono - stream_start_lsl_ts), sample=sample_arr)
 
-            if not _enqueue_with_overflow(raw_queue, packet, label="raw"):
+            if not _enqueue_with_overflow(
+                raw_queue,
+                packet,
+                label="raw",
+                timeout_s=queue_put_timeout_s,
+                allow_drop=allow_drop,
+            ):
                 break
             queue_depth = raw_queue.qsize()
             if queue_depth > queue_max_depth:
@@ -1671,19 +2174,16 @@ def _run_recording(args: argparse.Namespace) -> int:
                     else float(now - last_write_wall_snapshot)
                 )
                 logger.info(
-                    "[alive] recv=%d wrote=%d events=%d queue=%d last_sample_age_s=%s last_write_age_s=%s",
+                    "[alive] recv=%d wrote=%d events=%d queue=%d plot_dropped=%d last_sample_age_s=%s last_write_age_s=%s",
                     samples_received_snapshot,
                     samples_written_snapshot,
                     events_written_snapshot,
                     raw_queue.qsize(),
+                    int(getattr(plotter, "dropped", 0)),
                     "n/a" if last_sample_age is None else f"{last_sample_age:.2f}",
                     "n/a" if last_write_age is None else f"{last_write_age:.2f}",
                 )
                 last_heartbeat = now
-
-            if enable_plot and (now - last_plot_update) >= 0.1 and plot_buffer:
-                _update_plot(plot_buffer[-1][0])
-                last_plot_update = now
 
             if now - last_state_update >= 1.0:
                 is_healthy = True
@@ -1698,7 +2198,7 @@ def _run_recording(args: argparse.Namespace) -> int:
                 last_age = None
                 if last_lsl_ts_mono is not None:
                     last_age = float(local_clock() - last_lsl_ts_mono)
-                    if last_age > hard_stop_policy.hard_stop_after_unhealthy_s:
+                    if last_age > hard_stop_after_unhealthy_s:
                         is_healthy = False
                         unhealthy_reason = f"stale LSL data (age: {last_age:.2f}s)"
 
@@ -1709,36 +2209,42 @@ def _run_recording(args: argparse.Namespace) -> int:
                     if not event_marking_config_enabled:
                         reason = "disabled by user config"
                     logger.info("Event marking %s: %s", "enabled" if current_event_marking_active else "disabled", reason)
-                    if disabled_text:
-                        disabled_text.set_visible(not current_event_marking_active)
                 event_marking_active = current_event_marking_active
 
-                _write_session_state(
-                    session_state_path,
-                    {
-                        "subject_id": subject_id,
-                        "session_id": session_id,
-                        "updated_utc": _now_utc_iso(),
-                        "data_stream_active": is_healthy,
-                        "last_lsl_ts_raw": lsl_ts_raw,
-                        "last_lsl_ts_mono": last_lsl_ts_mono,
-                        "last_local_ts": local_ts,
-                        "packet_rate_hz": packet_rate,
-                        "last_sample_age_s": last_age,
-                        "samples_received": samples_received_snapshot,
-                        "samples_written": samples_written_snapshot,
-                        "events_written": events_written_snapshot,
-                        "queue_depth": raw_queue.qsize(),
-                        "queue_max_depth": queue_max_depth,
-                        "writer_alive": writer_thread.is_alive(),
-                        "last_write_age_s": None
-                        if last_write_wall_snapshot is None
-                        else float(now - last_write_wall_snapshot),
-                        "termination_reason": termination_reason,
-                        "hard_stop_triggered": termination_reason == "backpressure_abort",
-                        "event_marking_allowed": event_marking_active,
-                    },
-                )
+                backend_session_id = session_id
+                try:
+                    m = re.search(r"(\\d{8}_\\d{6})(?:_\\d{2})?$", str(session_id))
+                    if m:
+                        backend_session_id = m.group(1)
+                except Exception:
+                    backend_session_id = session_id
+                state_payload = {
+                    "subject_id": subject_id,
+                    "session_id": backend_session_id,
+                    "session_ui_id": session_id,
+                    "session_dir": str(session_dir),
+                    "updated_utc": _now_utc_iso(),
+                    "data_stream_active": is_healthy,
+                    "last_lsl_ts_raw": lsl_ts_raw,
+                    "last_lsl_ts_mono": last_lsl_ts_mono,
+                    "last_local_ts": local_ts,
+                    "packet_rate_hz": packet_rate,
+                    "last_sample_age_s": last_age,
+                    "samples_received": samples_received_snapshot,
+                    "samples_written": samples_written_snapshot,
+                    "events_written": events_written_snapshot,
+                    "queue_depth": raw_queue.qsize(),
+                    "queue_max_depth": queue_max_depth,
+                    "writer_alive": writer_thread.is_alive(),
+                    "last_write_age_s": None
+                    if last_write_wall_snapshot is None
+                    else float(now - last_write_wall_snapshot),
+                    "termination_reason": termination_reason,
+                    "hard_stop_triggered": termination_reason == "backpressure_abort",
+                    "event_marking_allowed": event_marking_active,
+                }
+                for state_path in session_state_paths:
+                    _write_session_state(state_path, state_payload)
                 last_state_update = now
 
     except KeyboardInterrupt:
@@ -1748,6 +2254,7 @@ def _run_recording(args: argparse.Namespace) -> int:
         logger.error("Recording error: %s", exc, exc_info=True)
     finally:
         stop_event.set()
+        plotter.stop()
         if listener is not None:
             try:
                 listener.stop()
@@ -1764,15 +2271,18 @@ def _run_recording(args: argparse.Namespace) -> int:
         else:
             termination_reason_final = termination_reason
         try:
-            session_writer.finalize(termination_reason_final)
+            session_writer.finalize(
+                termination_reason_final,
+                extra_manifest={
+                    "files": {
+                        "raw_csv": "raw/raw.csv",
+                        "events_csv": "events/events.csv",
+                        "events_jsonl": "events/events.jsonl",
+                    }
+                },
+            )
         except Exception:
             logger.exception("Failed to finalize session writer.")
-
-        try:
-            _link_or_copy(raw_csv_path, session_dir / "raw.csv")
-            _link_or_copy(events_csv_path, session_dir / "events.csv")
-        except Exception:
-            logger.exception("Failed to link/copy legacy CSVs into session dir.")
 
         try:
             _write_run_meta(
@@ -1801,20 +2311,28 @@ def _run_recording(args: argparse.Namespace) -> int:
             logger.exception("Failed to write run_meta.json.")
 
         try:
-            _write_session_state(
-                session_state_path,
-                {
-                    "subject_id": subject_id,
-                    "session_id": session_id,
-                    "updated_utc": _now_utc_iso(),
-                    "data_stream_active": False,
-                    "termination_reason": termination_reason_final,
-                    "hard_stop_triggered": termination_reason_final == "backpressure_abort",
-                    "samples_received": samples_received,
-                    "samples_written": samples_written,
-                    "events_written": events_written,
-                },
-            )
+            backend_session_id = session_id
+            try:
+                m = re.search(r"(\\d{8}_\\d{6})(?:_\\d{2})?$", str(session_id))
+                if m:
+                    backend_session_id = m.group(1)
+            except Exception:
+                backend_session_id = session_id
+            final_state = {
+                "subject_id": subject_id,
+                "session_id": backend_session_id,
+                "session_ui_id": session_id,
+                "session_dir": str(session_dir),
+                "updated_utc": _now_utc_iso(),
+                "data_stream_active": False,
+                "termination_reason": termination_reason_final,
+                "hard_stop_triggered": termination_reason_final == "backpressure_abort",
+                "samples_received": samples_received,
+                "samples_written": samples_written,
+                "events_written": events_written,
+            }
+            for state_path in session_state_paths:
+                _write_session_state(state_path, final_state)
         except Exception:
             logger.exception("Failed to write final session_state.")
 
@@ -1832,6 +2350,12 @@ def main() -> int:
     parser.add_argument("--subject-id", type=str, default=None)
     parser.add_argument("--session-id", type=str, default=None)
     parser.add_argument("--session-name", dest="session_id", type=str, default=None)
+    parser.add_argument(
+        "--session-dir",
+        type=str,
+        default=None,
+        help="Canonical session directory (Projects/<project>/subjects/<subject>/sessions/<session_id>/...)",
+    )
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--out-dir", dest="output_dir", type=str, default=None)
     parser.add_argument("--stream-name", type=str, default="Muse2-EEG")
@@ -1842,9 +2366,20 @@ def main() -> int:
     parser.add_argument("--stream-rate", dest="stream_rate", type=float, default=256.0,
                         help="Optional: expected nominal sampling rate for the input LSL stream (used for filtering when auto-selecting).")
     parser.add_argument("--lsl-source-id", type=str, default=None)
-    parser.add_argument("--enable-plot", dest="enable_plot", action="store_true")
-    parser.add_argument("--no-plot", dest="enable_plot", action="store_false")
-    parser.set_defaults(enable_plot=True)
+    # CLI default: no plot (protect ingestion latency). UI/config can enable.
+    parser.add_argument(
+        "--enable-plot",
+        dest="enable_plot",
+        action="store_const",
+        const=True,
+        default=None,
+    )
+    parser.add_argument(
+        "--no-plot",
+        dest="enable_plot",
+        action="store_const",
+        const=False,
+    )
     parser.add_argument(
         "--plot-scale",
         type=str,
@@ -1859,14 +2394,16 @@ def main() -> int:
     parser.add_argument(
         "--event-marking-enabled",
         dest="event_marking_enabled",
-        action="store_true",
+        action="store_const",
+        const=True,
+        default=None,
     )
     parser.add_argument(
         "--no-event-marking",
         dest="event_marking_enabled",
-        action="store_false",
+        action="store_const",
+        const=False,
     )
-    parser.set_defaults(event_marking_enabled=True)
     parser.add_argument("--event-keymap", type=str, default=DEFAULT_EVENT_KEYMAP)
     parser.add_argument("--raw-queue-maxsize", type=int, default=RAW_QUEUE_MAXSIZE)
     parser.add_argument("--raw-shard-samples", type=int, default=RAW_SHARD_SAMPLES)
@@ -1884,12 +2421,14 @@ def main() -> int:
 
     args = parser.parse_args()
     defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
-    settings = _load_config_payload(args.config)
-    _apply_config_to_args(args, settings, defaults)
+    config_payload, config_settings = _load_config_file(args.config)
+    config_warnings = _apply_config_to_args(args, config_settings, defaults)
 
     args.plot_scale = _normalize_scale_mode(args.plot_scale)
 
-    return _run_recording(args)
+    return _run_recording(
+        args, config_payload=config_payload, config_settings=config_settings, config_warnings=config_warnings
+    )
 
 
 if __name__ == "__main__":

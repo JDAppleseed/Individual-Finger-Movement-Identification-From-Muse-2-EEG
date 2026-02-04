@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import time
 from collections import deque
 from itertools import count
 from pathlib import Path
-from typing import Deque, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import joblib
 import numpy as np
@@ -22,6 +23,7 @@ except Exception:
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from muse_streaming.packets import SamplePacket
 from muse_streaming.session_writer import SessionWriter
+from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 
 
 logger = logging.getLogger("live_infer")
@@ -136,8 +138,123 @@ def _resolve_stream(
     return matches[0]
 
 
+def _load_config_file(path: Optional[str]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    if not path:
+        return {}, {}
+    try:
+        payload = json.loads(Path(path).read_text())
+    except Exception:
+        return {}, {}
+    if not isinstance(payload, dict):
+        return {}, {}
+    settings = payload.get("settings")
+    if isinstance(settings, dict):
+        return payload, settings
+    return payload, payload
+
+
+def _apply_config_to_args(
+    args_obj, settings: Dict[str, Any], defaults: Dict[str, Any]
+) -> List[str]:
+    """
+    Merge JSON config settings into argparse args with strict precedence:
+      CLI args > config JSON > defaults
+
+    Supports legacy aliases (e.g., MODEL_PATH vs model_path). Returns warnings.
+    """
+    alias_specs: Dict[str, Tuple[str, int]] = {
+        "SESSION_DIR": ("session_dir", 100),
+        "session_dir": ("session_dir", 50),
+        "RUN_DIR": ("run_dir", 100),
+        "run_dir": ("run_dir", 50),
+        "MODEL_PATH": ("model_path", 100),
+        "model_path": ("model_path", 50),
+        "SCALER_PATH": ("scaler_path", 100),
+        "scaler_path": ("scaler_path", 50),
+        "STREAM_NAME": ("stream_name", 100),
+        "LSL_STREAM_NAME": ("stream_name", 90),
+        "stream_name": ("stream_name", 50),
+        "STREAM_TYPE": ("stream_type", 100),
+        "LSL_STREAM_TYPE": ("stream_type", 90),
+        "stream_type": ("stream_type", 50),
+        "LSL_SOURCE_ID": ("lsl_source_id", 100),
+        "lsl_source_id": ("lsl_source_id", 50),
+        "WINDOW_SEC": ("window_sec", 100),
+        "window_sec": ("window_sec", 50),
+        "HOP_SEC": ("hop_sec", 100),
+        "hop_sec": ("hop_sec", 50),
+        "TARGET_FS": ("target_fs", 100),
+        "target_fs": ("target_fs", 50),
+        "ALLOW_DROP": ("allow_drop", 100),
+        "allow_drop": ("allow_drop", 50),
+        "LATENCY_THRESHOLD_MS": ("latency_threshold_ms", 100),
+        "latency_threshold_ms": ("latency_threshold_ms", 50),
+        "LATENCY_POLICY": ("latency_policy", 100),
+        "latency_policy": ("latency_policy", 50),
+        "ENABLE_ACTUATION": ("enable_actuation", 100),
+        "enable_actuation": ("enable_actuation", 50),
+        "BLUETOOTH_TARGET": ("bluetooth_target", 100),
+        "bluetooth_target": ("bluetooth_target", 50),
+        "RECORD_RAW": ("record_raw", 100),
+        "record_raw": ("record_raw", 50),
+        "RAW_DIR": ("raw_dir", 100),
+        "raw_dir": ("raw_dir", 50),
+        "SUBJECT_ID": ("subject_id", 100),
+        "subject_id": ("subject_id", 50),
+        "LOG_EVERY": ("log_every", 100),
+        "log_every": ("log_every", 50),
+    }
+
+    chosen: Dict[str, Tuple[int, str, Any]] = {}
+    warnings: List[str] = []
+
+    for key, val in (settings or {}).items():
+        dest, priority = alias_specs.get(key, (key, 0))
+        if dest not in defaults:
+            continue
+        existing = chosen.get(dest)
+        if existing is None:
+            chosen[dest] = (priority, str(key), val)
+            continue
+        existing_priority, existing_key, existing_val = existing
+        if priority > existing_priority:
+            if existing_val != val:
+                warnings.append(
+                    f"Config key conflict for {dest}: {existing_key}={existing_val!r} overridden by {key}={val!r}"
+                )
+            chosen[dest] = (priority, str(key), val)
+        elif priority == existing_priority and existing_val != val:
+            warnings.append(
+                f"Config key conflict for {dest}: {existing_key}={existing_val!r} and {key}={val!r} (keeping {existing_key})"
+            )
+
+    for dest, (_priority, _key, val) in chosen.items():
+        current = getattr(args_obj, dest)
+        default = defaults.get(dest)
+        if current != default:
+            continue  # CLI overrides config
+        if val is None and default is not None:
+            continue
+        setattr(args_obj, dest, val)
+
+    return warnings
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
+    parser.add_argument(
+        "--session-dir",
+        type=str,
+        default=None,
+        help="Canonical session directory (auto-resolves latest model/scaler unless explicitly provided).",
+    )
+    parser.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="Model run directory (defaults to latest under <session_dir>/processed/models/).",
+    )
     parser.add_argument("--model-path", type=str, default="models/finger_action_model.pt")
     parser.add_argument("--scaler-path", type=str, default="scaler.save")
     parser.add_argument("--stream-name", type=str, default=None)
@@ -203,6 +320,29 @@ def main() -> int:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
+    _payload, config_settings = _load_config_file(getattr(args, "config", None))
+    for w in _apply_config_to_args(args, config_settings, defaults):
+        logger.warning("[config] %s", w)
+
+    if getattr(args, "session_dir", None):
+        session_dir_path = resolve_session_dir(str(args.session_dir))
+        if not session_dir_path.exists():
+            raise SystemExit(f"Session dir not found: {session_dir_path}")
+        run_dir_path = (
+            Path(str(args.run_dir)).expanduser()
+            if getattr(args, "run_dir", None)
+            else resolve_latest_run_dir(session_dir_path)
+        )
+        if run_dir_path is None or not run_dir_path.exists():
+            raise SystemExit(
+                "No model run directory found. Train a model first (Step 2), or pass --run-dir."
+            )
+        if args.model_path == "models/finger_action_model.pt":
+            args.model_path = str(run_dir_path / "finger_action_model.pt")
+        if args.scaler_path == "scaler.save":
+            args.scaler_path = str(run_dir_path / "scaler.save")
 
     if args.enable_actuation and not args.i_understand_this_moves_the_hand:
         logger.warning(

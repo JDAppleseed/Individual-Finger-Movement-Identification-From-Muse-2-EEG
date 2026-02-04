@@ -72,16 +72,33 @@ def _ensure_unique_session_id(output_root: Path, subject_id: str, session_id: st
 
 
 def _ensure_unique_session_dir(output_root: Path, subject_id: str, session_id: str) -> str:
+    def _has_files(path: Path) -> bool:
+        if not path.exists():
+            return False
+        try:
+            return any(p.is_file() for p in path.rglob("*"))
+        except Exception:
+            # Be conservative: treat unreadable dirs as collisions.
+            return True
+
     suffix = 0
     candidate = session_id
-    while (output_root / f"{subject_id}_{candidate}").exists():
+    while _has_files(output_root / _session_dir_name(subject_id, candidate)):
         suffix += 1
         candidate = f"{session_id}_{suffix:02d}"
     return candidate
 
 
+def _session_dir_name(subject_id: str, session_id: str) -> str:
+    subject_id = str(subject_id)
+    session_id = str(session_id)
+    if session_id.startswith(f"{subject_id}_"):
+        return session_id
+    return f"{subject_id}_{session_id}"
+
+
 def build_session_dir_paths(output_root: Path, subject_id: str, session_id: str) -> SessionDirPaths:
-    session_dir = output_root / f"{subject_id}_{session_id}"
+    session_dir = output_root / _session_dir_name(subject_id, session_id)
     raw_dir = session_dir / "raw"
     events_dir = session_dir / "events"
     return SessionDirPaths(
@@ -96,11 +113,12 @@ def build_session_dir_paths(output_root: Path, subject_id: str, session_id: str)
 
 
 def build_session_paths(output_root: Path, subject_id: str, session_id: str) -> SessionPaths:
+    prefix = _session_dir_name(subject_id, session_id)
     return SessionPaths(
         session_id=session_id,
-        raw_path=output_root / f"{subject_id}_{session_id}_raw.csv",
-        features_path=output_root / f"{subject_id}_{session_id}_features.csv",
-        events_path=output_root / f"{subject_id}_{session_id}_events.csv",
+        raw_path=output_root / f"{prefix}_raw.csv",
+        features_path=output_root / f"{prefix}_features.csv",
+        events_path=output_root / f"{prefix}_events.csv",
     )
 
 

@@ -31,6 +31,7 @@ from utils.sequence_data import (
 )
 from utils.experiment_logger import log_experiment, get_latest_experiment_hash
 from utils.label_schema import ACTION_REST
+from utils.session_layout import SessionLayout, resolve_session_dir
 
 SEED = 42
 BATCH_SIZE = 64
@@ -160,6 +161,18 @@ def resolve_experiment_hash(meta: Dict[str, Any], n_expected: int) -> str:
 def build_arg_parser():
     p = argparse.ArgumentParser(description="Train CNN+LSTM EEG multi-head model")
     p.add_argument("--config", type=str, default=None, help="Path to JSON config")
+    p.add_argument(
+        "--session-dir",
+        type=str,
+        default=None,
+        help="Canonical session directory (defaults to <session_dir>/processed/eeg_windows.npz and writes outputs under <session_dir>/processed/models/<run_id>/).",
+    )
+    p.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="Explicit model run output directory (overrides --session-dir default).",
+    )
     p.add_argument(
         "--npz", type=str, default=DEFAULT_NPZ, help="Path to window dataset"
     )
@@ -405,14 +418,39 @@ def _subject_from_root_meta() -> Optional[str]:
     return str(subject) if subject else None
 
 
-def resolve_output_paths(args, subject: str, exp_hash: str):
-    subject_safe = subject or "UNKNOWN"
-    run_dir = ROOT_DIR / "data/models" / subject_safe / exp_hash
+def _next_available_dir(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for i in range(2, 1000):
+        candidate = path.with_name(f"{path.name}_{i:02d}")
+        if not candidate.exists():
+            return candidate
+    return path
+
+
+def resolve_output_paths(
+    args, subject: str, exp_hash: str, *, session_dir: Optional[Path] = None
+):
+    if getattr(args, "run_dir", None):
+        run_dir = Path(str(args.run_dir)).expanduser()
+    elif session_dir is not None:
+        models_root = SessionLayout(session_dir).models_root
+        models_root.mkdir(parents=True, exist_ok=True)
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        run_dir = _next_available_dir(models_root / run_id)
+    else:
+        subject_safe = subject or "UNKNOWN"
+        run_dir = ROOT_DIR / "data/models" / subject_safe / exp_hash
+
+    run_dir.mkdir(parents=True, exist_ok=True)
 
     def _resolve(path_str: str, default_name: str) -> Path:
         if path_str == default_name:
             return run_dir / default_name
-        return Path(path_str)
+        candidate = Path(path_str)
+        if not candidate.is_absolute() and candidate.parent == Path("."):
+            return run_dir / candidate.name
+        return candidate
 
     model_path = _resolve(args.save_model, DEFAULT_MODEL)
     scaler_path = _resolve(args.save_scaler, DEFAULT_SCALER)
@@ -436,6 +474,15 @@ def main():
     settings = _load_config(args.config)
     _apply_config_to_args(args, settings, defaults)
     set_seed(args.seed)
+
+    session_dir_path: Optional[Path] = None
+    if getattr(args, "session_dir", None):
+        session_dir_path = resolve_session_dir(str(args.session_dir))
+        if not session_dir_path.exists():
+            print(f"Session dir not found: {session_dir_path}")
+            return 2
+        if args.npz in (DEFAULT_NPZ, f"./{DEFAULT_NPZ}"):
+            args.npz = str(SessionLayout(session_dir_path).windows_npz)
 
     try:
         npz_path = resolve_npz_path(args.npz)
@@ -479,6 +526,20 @@ def main():
     y_finger = y_finger_full
     n_full = len(y_action_full)
     subject = None
+
+    # When running from a canonical session dir, avoid applying an unrelated default subject_id filter.
+    if session_dir_path and args.subject_id == "8-M16":
+        inferred = infer_subject_id_from_meta(meta, n_full)
+        if inferred and inferred != args.subject_id:
+            print(
+                f"[session-dir] Overriding default --subject-id={args.subject_id!r} with inferred subject_id={inferred!r}"
+            )
+            args.subject_id = inferred
+        elif inferred is None:
+            print(
+                "[session-dir] No single subject_id detected in NPZ meta; disabling default subject_id filter."
+            )
+            args.subject_id = ""
 
     if args.subject_id:
         if "subject_id" not in meta:
@@ -561,15 +622,19 @@ def main():
     # non-finite values. (Window extraction already tries to avoid this, but we harden here.)
     finite_mask = np.isfinite(X).all(axis=tuple(range(1, X.ndim)))
     n_bad = int((~finite_mask).sum())
-    if n_bad > 0:
-        print(f"[WARN] Dropping {n_bad}/{len(X)} samples with NaN/Inf in X before training.")
-        X = X[finite_mask]
-        y_action = y_action[finite_mask]
-        y_finger = y_finger[finite_mask]
-        global_indices = global_indices[finite_mask]
-        meta, _ = mask_meta(meta, finite_mask, len(finite_mask))
-        if len(X) == 0:
-            raise RuntimeError("All samples were dropped due to NaN/Inf values. Check upstream data collection.")
+    # Continue training after optionally dropping bad samples.
+    if n_bad >= 0:
+        if n_bad > 0:
+            print(f"[WARN] Dropping {n_bad}/{len(X)} samples with NaN/Inf in X before training.")
+            X = X[finite_mask]
+            y_action = y_action[finite_mask]
+            y_finger = y_finger[finite_mask]
+            global_indices = global_indices[finite_mask]
+            meta, _ = mask_meta(meta, finite_mask, len(finite_mask))
+            if len(X) == 0:
+                raise RuntimeError(
+                    "All samples were dropped due to NaN/Inf values. Check upstream data collection."
+                )
 
         def class_counts(y):
             u, c = np.unique(y, return_counts=True)
@@ -582,7 +647,7 @@ def main():
         log_experiment(subject, exp_hash, "STEP_2_TRAIN")
 
         run_dir, save_model_path, save_scaler_path, save_preds_path = resolve_output_paths(
-            args, subject, exp_hash
+            args, subject, exp_hash, session_dir=session_dir_path
         )
         for path in [save_model_path, save_scaler_path, save_preds_path]:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -724,6 +789,8 @@ def main():
             "test_size": args.test_size,
             "non_rest_only": bool(args.non_rest_only),
             "npz_path": str(npz_path),
+            "session_dir": str(session_dir_path) if session_dir_path else None,
+            "run_dir": str(run_dir),
             "n_fingers": n_fingers,
             "n_actions": n_actions,
             "input_shape": list(X.shape[1:]),
@@ -757,6 +824,45 @@ def main():
 
         action_probs = np.concatenate(all_action_probs, axis=0).astype(np.float32)
         finger_probs = np.concatenate(all_finger_probs, axis=0).astype(np.float32)
+
+        test_action_pred = np.argmax(action_probs, axis=1).astype(np.int64)
+        test_action_acc = float(np.mean(test_action_pred == y_action_test.astype(np.int64)))
+        test_finger_acc = None
+        test_non_rest = (y_action_test.astype(np.int64) != int(ACTION_REST))
+        if bool(np.any(test_non_rest)):
+            test_finger_pred = np.argmax(finger_probs[test_non_rest], axis=1).astype(np.int64)
+            test_finger_acc = float(np.mean(test_finger_pred == y_finger_test[test_non_rest].astype(np.int64)))
+
+        metrics = {
+            "schema_version": 1,
+            "created_utc": now_utc_iso(),
+            "npz_path": safe_resolve(npz_path),
+            "run_dir": safe_resolve(run_dir),
+            "train": {
+                "avg_loss": float(avg_loss),
+                "action_acc": float(action_acc),
+                "finger_acc": float(finger_acc),
+                "epochs": int(args.epochs),
+                "batch_size": int(args.batch_size),
+                "lr": float(args.lr),
+                "seed": int(args.seed),
+            },
+            "test": {
+                "action_acc": float(test_action_acc),
+                "finger_acc_non_rest": test_finger_acc,
+                "n_test": int(len(y_action_test)),
+                "n_test_non_rest": int(np.sum(test_non_rest)),
+            },
+            "artifacts": {
+                "model": str(save_model_path.name),
+                "scaler": str(save_scaler_path.name),
+                "preds": str(save_preds_path.name),
+            },
+        }
+        try:
+            (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+        except Exception:
+            print("⚠️ Failed to write metrics.json")
 
         # ===== SAVE PREDICTIONS WITH ROBUST INDEXING + META =====
         test_indices_local = test_idx.astype(np.int64)
