@@ -154,9 +154,9 @@ Legacy script output directories can be customized via:
 ## Label Schema
 
 Action head (required):
-- 0 = REST
-- 1 = OPEN
-- 2 = CLOSE
+- r = REST
+- o = OPEN
+- c = CLOSE
 
 Finger head (conditional; only valid if action != REST):
 - 0 = NONE
