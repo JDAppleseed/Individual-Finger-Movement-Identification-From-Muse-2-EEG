@@ -103,6 +103,19 @@ class ProcessRunner(QObject):
     def stop_hard(
         self, sigint_timeout_ms: int = 1500, terminate_timeout_ms: int = 1500
     ) -> None:
+        self.stop_staged(
+            sigint_timeout_ms=sigint_timeout_ms,
+            sigterm_timeout_ms=terminate_timeout_ms,
+            sigkill_timeout_ms=terminate_timeout_ms,
+        )
+
+    def stop_staged(
+        self,
+        *,
+        sigint_timeout_ms: int = 1500,
+        sigterm_timeout_ms: int = 1000,
+        sigkill_timeout_ms: int = 1000,
+    ) -> None:
         if not self.is_running():
             return
         pid = int(self._process.processId() or 0)
@@ -111,18 +124,59 @@ class ProcessRunner(QObject):
             try:
                 os.kill(pid, signal.SIGINT)
                 sent_sigint = True
-                self.line_ready.emit(f"⚠️ Sent SIGINT to PID {pid} (hard stop).")
+                self.line_ready.emit(f"⚠️ Sent SIGINT to PID {pid} (staged stop).")
             except Exception as exc:
                 self.line_ready.emit(
                     f"⚠️ Failed to send SIGINT to PID {pid}: {exc}. Falling back to terminate()."
                 )
         if not sent_sigint:
             self._process.terminate()
-            self.line_ready.emit("⚠️ Terminate requested (hard stop).")
+            self.line_ready.emit("⚠️ Terminate requested (staged stop).")
         QTimer.singleShot(
             sigint_timeout_ms,
-            lambda: self._terminate_if_running(terminate_timeout_ms),
+            lambda: self._sigterm_stage(sigterm_timeout_ms, sigkill_timeout_ms),
         )
+
+    def _sigterm_stage(self, sigterm_timeout_ms: int, sigkill_timeout_ms: int) -> None:
+        if not self.is_running():
+            return
+        pid = int(self._process.processId() or 0)
+        sent_sigterm = False
+        if os.name != "nt" and pid:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                sent_sigterm = True
+                self.line_ready.emit(f"⚠️ Sent SIGTERM to PID {pid}.")
+            except Exception as exc:
+                self.line_ready.emit(
+                    f"⚠️ Failed to send SIGTERM to PID {pid}: {exc}. Falling back to terminate()."
+                )
+        if not sent_sigterm:
+            self._process.terminate()
+            self.line_ready.emit("⚠️ Terminate requested after SIGINT timeout.")
+        QTimer.singleShot(sigterm_timeout_ms, lambda: self._sigkill_stage(sigkill_timeout_ms))
+
+    def _sigkill_stage(self, sigkill_timeout_ms: int) -> None:
+        if not self.is_running():
+            return
+        pid = int(self._process.processId() or 0)
+        sent_sigkill = False
+        if os.name != "nt" and pid:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                sent_sigkill = True
+                self.line_ready.emit(f"⚠️ Sent SIGKILL to PID {pid}.")
+            except Exception as exc:
+                self.line_ready.emit(f"⚠️ Failed to send SIGKILL to PID {pid}: {exc}.")
+        if not sent_sigkill:
+            self._process.kill()
+        QTimer.singleShot(sigkill_timeout_ms, self._force_kill_after_sigkill)
+
+    def _force_kill_after_sigkill(self) -> None:
+        if not self.is_running():
+            return
+        self.line_ready.emit("⚠️ Force kill after SIGKILL timeout.")
+        self._process.kill()
 
     def _kill_if_running(self) -> None:
         if self.is_running():

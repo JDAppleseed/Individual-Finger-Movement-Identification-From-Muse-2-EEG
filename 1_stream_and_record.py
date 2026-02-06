@@ -62,6 +62,8 @@ PLOT_ROBUST_WINDOW_SEC = 5.0
 PLOT_ROBUST_EMA = 0.2
 PLOT_REFERENCE_OVERLAY = False
 PLOT_WINDOW_SEC = 5.0
+PLOT_STARTUP_TIMEOUT_S = 0.75
+PLOT_CHANNEL_SPACING_UV = 120.0
 
 EVENT_MARKING_ENABLED = True
 DEFAULT_EVENT_KEYMAP = "space:mark,1:thumb,2:index,3:middle,4:ring,5:pinky,o:open,c:close,r:rest"
@@ -72,6 +74,7 @@ LSL_INLET_MAX_CHUNKLEN = 1
 
 RAW_QUEUE_MAXSIZE = 4096
 RAW_SHARD_SAMPLES = 2048
+RAW_SHARD_FLUSH_INTERVAL_S = 2.0
 MAX_BACKPRESSURE_S = 3.0
 QUEUE_PUT_TIMEOUT_S = 0.1
 
@@ -79,7 +82,7 @@ HEARTBEAT_INTERVAL_S = 5.0
 NO_SAMPLE_TIMEOUT_S = 5.0
 WRITE_STALL_TIMEOUT_S = 5.0
 WARMUP_SAMPLE_COUNT = 3
-WARMUP_TIMEOUT_S = 3.0
+WARMUP_TIMEOUT_S = 8.0
 EVENT_FLUSH_INTERVAL_S = 1.0
 
 MODE = "train_record"
@@ -113,7 +116,7 @@ stream_requirements = StreamRequirements(
 )
 
 hard_stop_policy = HardStopPolicy(
-    hard_stop_after_unhealthy_s=2.0,
+    hard_stop_after_unhealthy_s=8.0,
     failed_write_window_s=5.0,
     failed_dir="data/failed",
     hard_stop_exit_code=2,
@@ -130,6 +133,12 @@ class EventRecord:
     local_ts: float
     label: str
     metadata: Dict[str, Any]
+
+
+@dataclass
+class EventPayload:
+    csv_record: EventRecord
+    json_payload: Dict[str, Any]
 
 
 class EventRecorder:
@@ -459,6 +468,58 @@ def _open_events_csv(path: Path) -> tuple[Any, csv.writer]:
     return file_obj, writer
 
 
+def _rewrite_events_csv_from_jsonl(events_jsonl: Path, events_csv: Path) -> int:
+    if not events_jsonl.exists():
+        return 0
+    events: list[Dict[str, Any]] = []
+    for idx, line in enumerate(events_jsonl.read_text().splitlines()):
+        if not line.strip():
+            continue
+        try:
+            events.append(json.loads(line))
+        except Exception:
+            logger.warning("Failed to parse events.jsonl line %d during CSV rewrite", idx + 1)
+            continue
+    events_csv.parent.mkdir(parents=True, exist_ok=True)
+    with events_csv.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "onset_s",
+                "duration_s",
+                "type",
+                "channel",
+                "confidence",
+                "notes",
+                "finger_id",
+                "action_id",
+                "trial_id",
+                "block_id",
+                "source",
+            ]
+        )
+        for ev in events:
+            onset = ev.get("onset_s", ev.get("event_time_s", 0.0))
+            duration = ev.get("duration_s", 0.0)
+            ev_type = ev.get("type", ev.get("label", ""))
+            writer.writerow(
+                [
+                    float(onset),
+                    float(duration),
+                    str(ev_type),
+                    ev.get("channel", "n/a"),
+                    ev.get("confidence", ""),
+                    ev.get("notes", ""),
+                    ev.get("finger_id", ""),
+                    ev.get("action_id", ""),
+                    ev.get("trial_id", ""),
+                    ev.get("block_id", ""),
+                    ev.get("source", "keyboard"),
+                ]
+            )
+    return len(events)
+
+
 def _raw_flags_for_sample(sample: Iterable[float]) -> int:
     try:
         if not np.all(np.isfinite(sample)):
@@ -680,6 +741,140 @@ def _attach_session_log(session_log_path: Path, previous_log_path: Optional[Path
     root_logger.addHandler(session_handler)
 
 
+def _session_dir_name(subject_id: str, session_id: str) -> str:
+    subject_id = str(subject_id)
+    session_id = str(session_id)
+    if session_id.startswith(f"{subject_id}_"):
+        return session_id
+    return f"{subject_id}_{session_id}"
+
+
+def _dir_has_files(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        return any(p.is_file() for p in path.rglob("*"))
+    except Exception:
+        return True
+
+
+def _resolve_session_dir(
+    *,
+    repo_root: Path,
+    project_name: Optional[str],
+    subject_id: str,
+    session_dir_arg: Optional[str],
+    session_id_arg: Optional[str],
+    session_id_cfg: Optional[str],
+    force_new_session: bool,
+) -> tuple[Path, str, Optional[str]]:
+    if session_dir_arg:
+        requested = Path(session_dir_arg).expanduser().resolve()
+        session_root = requested.parent
+        session_id = _session_dir_name(subject_id, requested.name)
+        session_dir = session_root / session_id
+    else:
+        session_root = (
+            repo_root
+            / "Projects"
+            / str(project_name or "DEFAULT")
+            / "subjects"
+            / subject_id
+            / "sessions"
+        ).resolve()
+        session_root.mkdir(parents=True, exist_ok=True)
+        session_id = session_id_cfg or session_id_arg or time.strftime("%Y%m%d_%H%M%S")
+        session_id = _session_dir_name(subject_id, str(session_id))
+        session_dir = (session_root / session_id).resolve()
+
+    collision_reason = None
+    if session_dir.exists() and (force_new_session or _dir_has_files(session_dir)):
+        suffix = 0
+        base_name = session_id
+        while True:
+            suffix += 1
+            candidate = f"{base_name}_{suffix:02d}"
+            candidate_dir = session_dir.parent / candidate
+            if not candidate_dir.exists() and not _dir_has_files(candidate_dir):
+                session_id = candidate
+                session_dir = candidate_dir
+                collision_reason = f"collision_suffix_{suffix:02d}"
+                break
+
+    return session_dir, session_id, collision_reason
+
+
+def _bootstrap_session_dir(
+    *,
+    session_dir: Path,
+    subject_id: str,
+    session_id: str,
+    expected_channels: int,
+    expected_srate: float,
+    timebase_version: str,
+) -> None:
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "raw").mkdir(parents=True, exist_ok=True)
+    events_dir = session_dir / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir = session_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    events_path = events_dir / "events.jsonl"
+    if not events_path.exists():
+        events_path.write_text("")
+
+    meta_path = session_dir / "meta.json"
+    if not meta_path.exists():
+        meta = {
+            "schema_version": 1,
+            "subject_id": str(subject_id),
+            "session_id": str(session_id),
+            "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "sampling_rate": float(expected_srate),
+            "channel_labels": [f"ch{i + 1}" for i in range(int(expected_channels))],
+            "timebase_version": str(timebase_version),
+            "mode": MODE,
+            "complete": False,
+            "bootstrap": True,
+        }
+        meta_path.write_text(json.dumps(meta, indent=2))
+
+    manifest_path = session_dir / "manifest.json"
+    if not manifest_path.exists():
+        manifest = {
+            "schema_version": 1,
+            "subject_id": str(subject_id),
+            "session_id": str(session_id),
+            "seq_min": None,
+            "seq_max": None,
+            "expected_sample_count": 0,
+            "actual_sample_count": 0,
+            "missing_seq_count": 0,
+            "out_of_order_count": 0,
+            "termination_reason": "in_progress",
+            "shard_list": [],
+            "files": {
+                "meta": "meta.json",
+                "events_jsonl": "events/events.jsonl",
+                "timebase_report": "timebase_report.json",
+            },
+        }
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+
+def _update_manifest_termination(session_dir: Path, reason: str) -> None:
+    manifest_path = session_dir / "manifest.json"
+    if not manifest_path.exists():
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except Exception:
+        manifest = {}
+    if isinstance(manifest, dict):
+        manifest["termination_reason"] = str(reason)
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+
 def _force_interactive_matplotlib_backend(logger: logging.Logger) -> None:
     """Force a GUI-capable Matplotlib backend.
 
@@ -687,8 +882,8 @@ def _force_interactive_matplotlib_backend(logger: logging.Logger) -> None:
     script is launched as a subprocess from a Qt app. QtAgg is typically the most robust.
 
     Behavior:
-      - Prefer QtAgg when available.
-      - Fall back to TkAgg, then MacOSX.
+      - Prefer an existing interactive backend if already set.
+      - Fall back to TkAgg when available, then QtAgg, then MacOSX.
       - Respect an explicit MPLBACKEND unless it is clearly non-interactive.
     """
     try:
@@ -698,7 +893,10 @@ def _force_interactive_matplotlib_backend(logger: logging.Logger) -> None:
         return
 
     env_backend = os.environ.get("MPLBACKEND")
+    preferred_backend = os.environ.get("MUSE_PLOT_BACKEND") or os.environ.get("PLOT_BACKEND")
     logger.info("[plot] env MPLBACKEND=%s", env_backend)
+    if preferred_backend:
+        logger.info("[plot] preferred backend override=%s", preferred_backend)
 
     def _has_qt() -> bool:
         try:
@@ -720,6 +918,21 @@ def _force_interactive_matplotlib_backend(logger: logging.Logger) -> None:
             return False
 
     non_interactive = {"agg", "pdf", "ps", "svg", "cairo", "template"}
+    try:
+        current_backend = matplotlib.get_backend()
+    except Exception:
+        current_backend = None
+
+    if current_backend and str(current_backend).strip().lower() not in non_interactive:
+        try:
+            matplotlib.interactive(True)
+        except Exception:
+            pass
+        try:
+            logger.info("[plot] Using matplotlib backend=%s", matplotlib.get_backend())
+        except Exception:
+            logger.info("[plot] Using matplotlib backend=(unknown)")
+        return
     if env_backend and env_backend.strip().lower() not in non_interactive:
         try:
             matplotlib.interactive(True)
@@ -732,13 +945,14 @@ def _force_interactive_matplotlib_backend(logger: logging.Logger) -> None:
         return
 
     chosen = None
-    if sys.platform == "darwin":
-        if _has_qt():
-            chosen = "QtAgg"
-        elif _has_tk():
-            chosen = "TkAgg"
-        else:
-            chosen = "MacOSX"
+    if preferred_backend:
+        chosen = preferred_backend
+    elif _has_tk():
+        chosen = "TkAgg"
+    elif _has_qt():
+        chosen = "QtAgg"
+    elif sys.platform == "darwin":
+        chosen = "MacOSX"
 
     if chosen:
         try:
@@ -757,17 +971,32 @@ def _force_interactive_matplotlib_backend(logger: logging.Logger) -> None:
         logger.info("[plot] Using matplotlib backend=(unknown)")
 
 
+def _apply_plot_lines(
+    lines: list[Any],
+    t_arr: np.ndarray,
+    y_arr: np.ndarray,
+    offsets: np.ndarray,
+    plot_channels: int,
+) -> None:
+    for idx in range(plot_channels):
+        lines[idx].set_data(t_arr, y_arr[:, idx] + offsets[idx])
+    for idx in range(plot_channels, len(lines)):
+        lines[idx].set_data([], [])
+
+
 def _plot_process_main(
     *,
     sample_queue: mp.Queue,
     stop_flag: mp.Event,
     channel_labels: list[str],
+    expected_channels: int,
     plot_window_sec: float,
     plot_fps: float,
     plot_fixed_ylim: tuple[float, float],
     plot_scale: str,
     plot_robust_ema: float,
     plot_reference_overlay: bool,
+    plot_channel_spacing_uv: float,
     title: str,
 ) -> None:
     logging.basicConfig(
@@ -784,11 +1013,13 @@ def _plot_process_main(
         return
 
     channel_count = len(channel_labels)
+    expected_channels = int(expected_channels or channel_count)
     plot_scale = _normalize_scale_mode(plot_scale)
     plot_window_sec = float(plot_window_sec)
     plot_fps = float(plot_fps)
     plot_robust_ema = float(plot_robust_ema)
     plot_fixed_ylim = _resolve_plot_fixed_ylim(list(plot_fixed_ylim))
+    plot_channel_spacing_uv = float(plot_channel_spacing_uv)
 
     plt.ion()
     fig, ax = plt.subplots()
@@ -796,9 +1027,13 @@ def _plot_process_main(
         fig.canvas.manager.set_window_title(title)
     except Exception:
         pass
-    lines = [ax.plot([], [])[0] for _ in range(channel_count)]
-    plot_stack_step_uv = 250.0
-    plot_offsets = np.arange(channel_count, dtype=float) * plot_stack_step_uv
+    lines: list[Any] = []
+    for _ in range(channel_count):
+        line, = ax.plot([], [], lw=1)
+        lines.append(line)
+    plot_logger.info("[plot] Created %d line(s) for channels=%s", len(lines), channel_labels)
+    spacing_seed = plot_channel_spacing_uv if plot_channel_spacing_uv > 0 and np.isfinite(plot_channel_spacing_uv) else 120.0
+    plot_offsets = np.arange(channel_count, dtype=float) * float(spacing_seed)
     try:
         ax.set_yticks(plot_offsets.tolist())
         ax.set_yticklabels([str(l) for l in channel_labels])
@@ -821,8 +1056,11 @@ def _plot_process_main(
 
     times: deque[float] = deque()
     values: deque[np.ndarray] = deque()
-    plot_ylim_ema: Optional[Tuple[float, float]] = None
+    plot_ylim_ema: Optional[Tuple[np.ndarray, np.ndarray]] = None
     last_draw = 0.0
+    last_diag = 0.0
+    warned_shape = False
+    warned_channel_mismatch = False
 
     def _trim(now_s: float) -> None:
         while times and (now_s - float(times[0])) > plot_window_sec:
@@ -830,55 +1068,102 @@ def _plot_process_main(
             values.popleft()
 
     def _draw(now_s: float) -> None:
-        nonlocal plot_ylim_ema, last_draw
+        nonlocal plot_ylim_ema, last_draw, plot_offsets, warned_shape, warned_channel_mismatch, last_diag
         if plot_fps > 0 and (now_s - last_draw) < (1.0 / plot_fps):
             return
         last_draw = now_s
         if not times:
             return
         t_arr = np.asarray(times, dtype=float)
-        v_arr = np.stack(values, axis=0) if len(values) > 1 else np.asarray(values[0:1])
+        v_arr = np.asarray(values, dtype=float)
+        if v_arr.ndim == 3 and v_arr.shape[-1] == 1:
+            v_arr = v_arr[:, :, 0]
+        if v_arr.ndim == 1:
+            v_arr = v_arr[None, :]
+        if v_arr.ndim == 2 and v_arr.shape[0] == expected_channels and v_arr.shape[1] != expected_channels:
+            v_arr = v_arr.T
+        if v_arr.ndim != 2:
+            if not warned_shape:
+                plot_logger.warning("[plot] Unexpected y shape=%s; skipping draw.", v_arr.shape)
+                warned_shape = True
+            return
+
+        if v_arr.shape[0] != t_arr.shape[0]:
+            n = int(min(v_arr.shape[0], t_arr.shape[0]))
+            if n <= 0:
+                return
+            v_arr = v_arr[:n, :]
+            t_arr = t_arr[:n]
+
+        actual_channels = int(v_arr.shape[1])
+        if actual_channels != expected_channels and not warned_channel_mismatch:
+            plot_logger.warning(
+                "[plot] Channel mismatch: expected=%d actual=%d (plotting min=%d).",
+                expected_channels,
+                actual_channels,
+                min(expected_channels, actual_channels),
+            )
+            warned_channel_mismatch = True
+
+        plot_channels = min(channel_count, actual_channels)
+        if plot_channels <= 0:
+            return
+        if plot_channel_spacing_uv > 0 and np.isfinite(plot_channel_spacing_uv):
+            spacing_uv = float(plot_channel_spacing_uv)
+        else:
+            stds = np.nanstd(v_arr[:, :plot_channels], axis=0)
+            median_std = float(np.nanmedian(stds)) if stds.size else 0.0
+            spacing_uv = max(120.0, 6.0 * median_std)
+            spacing_uv = float(max(80.0, min(400.0, spacing_uv)))
+
+        plot_offsets = np.arange(channel_count, dtype=float) * spacing_uv
+        try:
+            ax.set_yticks(plot_offsets.tolist())
+            ax.set_yticklabels([str(l) for l in channel_labels])
+        except Exception:
+            pass
+
         t0 = float(t_arr[-1])
         x = t_arr - t0
 
-        for idx in range(v_arr.shape[1]):
-            y = v_arr[:, idx] + plot_offsets[idx]
-            lines[idx].set_data(x, y)
+        _apply_plot_lines(lines, x, v_arr, plot_offsets, plot_channels)
         ax.set_xlim(-plot_window_sec, 0.0)
 
         if plot_scale == "robust":
-            flat = v_arr.reshape(-1)
-            if flat.size > 0:
-                low, high = np.percentile(flat, [5, 95])
-                if low == high:
-                    low -= 1.0
-                    high += 1.0
-                target_low, target_high = float(low), float(high)
-                if plot_ylim_ema is None:
-                    plot_ylim_ema = (target_low, target_high)
-                else:
-                    alpha = max(0.0, min(1.0, plot_robust_ema))
-                    plot_ylim_ema = (
-                        (1.0 - alpha) * plot_ylim_ema[0] + alpha * target_low,
-                        (1.0 - alpha) * plot_ylim_ema[1] + alpha * target_high,
-                    )
-            if plot_ylim_ema is not None:
-                half = max(abs(plot_ylim_ema[0]), abs(plot_ylim_ema[1]))
-                half = float(max(50.0, min(400.0, half)))
-                ax.set_ylim(
-                    float(plot_offsets[0] - half), float(plot_offsets[-1] + half)
+            lows = np.nanpercentile(v_arr[:, :plot_channels], 5, axis=0)
+            highs = np.nanpercentile(v_arr[:, :plot_channels], 95, axis=0)
+            if plot_ylim_ema is None:
+                plot_ylim_ema = (lows, highs)
+            else:
+                alpha = max(0.0, min(1.0, plot_robust_ema))
+                plot_ylim_ema = (
+                    (1.0 - alpha) * plot_ylim_ema[0] + alpha * lows,
+                    (1.0 - alpha) * plot_ylim_ema[1] + alpha * highs,
                 )
+            low_off = plot_ylim_ema[0][:plot_channels] + plot_offsets[:plot_channels]
+            high_off = plot_ylim_ema[1][:plot_channels] + plot_offsets[:plot_channels]
+            ax.set_ylim(float(np.min(low_off)), float(np.max(high_off)))
         else:
-            half = max(abs(plot_fixed_ylim[0]), abs(plot_fixed_ylim[1]))
-            half = float(max(50.0, min(400.0, half)))
-            ax.set_ylim(float(plot_offsets[0] - half), float(plot_offsets[-1] + half))
+            lo, hi = float(plot_fixed_ylim[0]), float(plot_fixed_ylim[1])
+            ax.set_ylim(float(lo + plot_offsets[0]), float(hi + plot_offsets[-1]))
 
         if overlay_lines:
             try:
-                for line in overlay_lines:
+                for idx, line in enumerate(overlay_lines):
+                    if idx < len(plot_offsets):
+                        line.set_ydata([plot_offsets[idx], plot_offsets[idx]])
                     line.set_alpha(0.2)
             except Exception:
                 pass
+
+        if (now_s - last_diag) >= 5.0:
+            plot_logger.info(
+                "[plot] y_shape=%s channels=%d offsets=%d",
+                v_arr.shape,
+                plot_channels,
+                len(plot_offsets),
+            )
+            last_diag = now_s
 
         fig.canvas.draw_idle()
         plt.pause(0.001)
@@ -912,12 +1197,14 @@ class _PlotProcess:
         *,
         enabled: bool,
         channel_labels: list[str],
+        expected_channels: int,
         plot_window_sec: float,
         plot_fps: float,
         plot_fixed_ylim: tuple[float, float],
         plot_scale: str,
         plot_robust_ema: float,
         plot_reference_overlay: bool,
+        plot_channel_spacing_uv: float,
         title: str,
     ) -> None:
         self.enabled = bool(enabled)
@@ -936,12 +1223,14 @@ class _PlotProcess:
                 "sample_queue": self._queue,
                 "stop_flag": self._stop,
                 "channel_labels": list(channel_labels),
+                "expected_channels": int(expected_channels or len(channel_labels)),
                 "plot_window_sec": float(plot_window_sec),
                 "plot_fps": float(plot_fps),
                 "plot_fixed_ylim": tuple(plot_fixed_ylim),
                 "plot_scale": str(plot_scale),
                 "plot_robust_ema": float(plot_robust_ema),
                 "plot_reference_overlay": bool(plot_reference_overlay),
+                "plot_channel_spacing_uv": float(plot_channel_spacing_uv),
                 "title": str(title),
             },
             daemon=True,
@@ -974,6 +1263,131 @@ class _PlotProcess:
                 self._proc.terminate()
             except Exception:
                 pass
+
+    def is_alive(self) -> bool:
+        return bool(self._proc and self._proc.is_alive())
+
+
+class _PlotRingBuffer:
+    def __init__(self, maxlen: int) -> None:
+        self._buf: deque[tuple[float, np.ndarray]] = deque(maxlen=max(1, int(maxlen)))
+        self._lock = threading.Lock()
+        self.dropped = 0
+
+    def append(self, now_s: float, sample: np.ndarray) -> None:
+        with self._lock:
+            if len(self._buf) == self._buf.maxlen:
+                self.dropped += 1
+            self._buf.append((float(now_s), np.asarray(sample, dtype=np.float32)))
+
+    def pop_left(self) -> Optional[tuple[float, np.ndarray]]:
+        with self._lock:
+            if not self._buf:
+                return None
+            return self._buf.popleft()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._buf)
+
+
+class _PlotController:
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        startup_timeout_s: float,
+        channel_labels: list[str],
+        expected_channels: int,
+        plot_window_sec: float,
+        plot_fps: float,
+        plot_fixed_ylim: tuple[float, float],
+        plot_scale: str,
+        plot_robust_ema: float,
+        plot_reference_overlay: bool,
+        plot_channel_spacing_uv: float,
+        title: str,
+    ) -> None:
+        self.enabled = bool(enabled)
+        self.startup_timeout_s = float(startup_timeout_s)
+        self.dropped = 0
+        self._plotter: Optional[_PlotProcess] = None
+        self._start_thread: Optional[threading.Thread] = None
+        self._start_time: Optional[float] = None
+        self._start_done = threading.Event()
+        self._disabled_reason: Optional[str] = None
+        self._disable_logged = False
+        self._lock = threading.Lock()
+        self._kwargs = {
+            "enabled": True,
+            "channel_labels": list(channel_labels),
+            "expected_channels": int(expected_channels or len(channel_labels)),
+            "plot_window_sec": float(plot_window_sec),
+            "plot_fps": float(plot_fps),
+            "plot_fixed_ylim": tuple(plot_fixed_ylim),
+            "plot_scale": str(plot_scale),
+            "plot_robust_ema": float(plot_robust_ema),
+            "plot_reference_overlay": bool(plot_reference_overlay),
+            "plot_channel_spacing_uv": float(plot_channel_spacing_uv),
+            "title": str(title),
+        }
+
+    def request_start(self) -> None:
+        if not self.enabled:
+            return
+        if self._start_thread is not None:
+            return
+        self._start_time = time.monotonic()
+        self._start_thread = threading.Thread(target=self._start_worker, daemon=True)
+        self._start_thread.start()
+
+    def _start_worker(self) -> None:
+        try:
+            plotter = _PlotProcess(**self._kwargs)
+            with self._lock:
+                if self._disabled_reason:
+                    plotter.stop()
+                    return
+                self._plotter = plotter
+        except Exception as exc:
+            with self._lock:
+                self._disabled_reason = f"startup_error:{exc}"
+        finally:
+            self._start_done.set()
+
+    def check_startup_timeout(self, now_mono: float, logger: logging.Logger) -> None:
+        if not self.enabled:
+            return
+        if self._disabled_reason:
+            self._log_disabled_once(logger)
+            return
+        if self._start_time is None or self._start_done.is_set():
+            return
+        if (now_mono - self._start_time) < self.startup_timeout_s:
+            return
+        with self._lock:
+            if not self._disabled_reason:
+                self._disabled_reason = "startup_timeout"
+        self._start_done.set()
+        self._log_disabled_once(logger)
+
+    def _log_disabled_once(self, logger: logging.Logger) -> None:
+        if self._disable_logged:
+            return
+        reason = self._disabled_reason or "unknown"
+        logger.warning("[plot] PLOT DISABLED (%s).", reason)
+        self._disable_logged = True
+
+    def get_plotter(self) -> Optional[_PlotProcess]:
+        if not self.enabled or self._disabled_reason:
+            return None
+        return self._plotter
+
+    def stop(self) -> None:
+        with self._lock:
+            self._disabled_reason = self._disabled_reason or "stop"
+        if self._plotter is not None:
+            self._plotter.stop()
 
 
 def _resolve_plot_fixed_ylim(value: Optional[List[float]]) -> Tuple[float, float]:
@@ -1058,6 +1472,7 @@ def _apply_config_to_args(
         "PLOT_REFERENCE_OVERLAY": ("plot_reference_overlay", 100),
         "PLOT_REFERENCE_LINES": ("plot_reference_overlay", 90),
         "PLOT_WINDOW_SEC": ("plot_window_sec", 100),
+        "PLOT_CHANNEL_SPACING_UV": ("plot_channel_spacing_uv", 100),
         "plot-window-sec": ("plot_window_sec", 5),
         "plotWindowSec": ("plot_window_sec", 5),
     }
@@ -1134,15 +1549,6 @@ def _run_recording(
     stop_event.clear()
     termination_reason = "normal"
     _reset_segment_state(state)
-    try:
-        from pylsl import StreamInlet, local_clock, resolve_streams
-        try:
-            from pylsl import resolve_byprop
-        except Exception:
-            resolve_byprop = None
-    except Exception:
-        logger.error("pylsl is required for recording.")
-        return 2
 
     cfg = dict(config_settings or {})
     repo_root = Path(__file__).resolve().parent
@@ -1154,44 +1560,42 @@ def _run_recording(
     )
     subject_id = str(subject_id or DEFAULT_SUBJECT_ID)
 
-    session_dir_arg = getattr(args, "session_dir", None)
-    session_dir = Path(session_dir_arg).expanduser().resolve() if session_dir_arg else None
-    if session_dir is None:
-        session_id_cfg = (
-            config_payload.get("session_id") if isinstance(config_payload, dict) else None
-        )
-        session_id_cfg = str(session_id_cfg) if session_id_cfg and session_id_cfg != "PENDING" else None
-        if project_name and session_id_cfg:
-            session_dir = (
-                repo_root
-                / "Projects"
-                / str(project_name)
-                / "subjects"
-                / subject_id
-                / "sessions"
-                / session_id_cfg
-            ).resolve()
-        else:
-            session_root = (
-                repo_root
-                / "Projects"
-                / str(project_name or "DEFAULT")
-                / "subjects"
-                / subject_id
-                / "sessions"
-            ).resolve()
-            session_root.mkdir(parents=True, exist_ok=True)
-            backend_id = args.session_id or time.strftime("%Y%m%d_%H%M%S")
-            backend_id = str(backend_id)
-            session_ui = (
-                backend_id
-                if backend_id.startswith(f"{subject_id}_")
-                else f"{subject_id}_{backend_id}"
-            )
-            session_dir = (session_root / session_ui).resolve()
+    session_id_cfg = (
+        config_payload.get("session_id") if isinstance(config_payload, dict) else None
+    )
+    session_id_cfg = str(session_id_cfg) if session_id_cfg and session_id_cfg != "PENDING" else None
 
-    session_dir.mkdir(parents=True, exist_ok=True)
-    (session_dir / "logs").mkdir(parents=True, exist_ok=True)
+    expected_channels = int(cfg.get("EXPECTED_CHANNELS", args.stream_ch or stream_requirements.expected_channels))
+    expected_srate = float(cfg.get("EXPECTED_SAMPLING_RATE", args.stream_rate or SAMPLING_RATE))
+    if expected_channels <= 0:
+        expected_channels = int(stream_requirements.expected_channels)
+    if (not np.isfinite(expected_srate)) or expected_srate <= 0:
+        expected_srate = float(SAMPLING_RATE)
+
+    requested_session_dir = (
+        Path(getattr(args, "session_dir", None)).expanduser().resolve()
+        if getattr(args, "session_dir", None)
+        else None
+    )
+    session_dir, session_id, collision_reason = _resolve_session_dir(
+        repo_root=repo_root,
+        project_name=str(project_name) if project_name else None,
+        subject_id=subject_id,
+        session_dir_arg=getattr(args, "session_dir", None),
+        session_id_arg=getattr(args, "session_id", None),
+        session_id_cfg=session_id_cfg,
+        force_new_session=bool(getattr(args, "force_new_session", False)),
+    )
+
+    _bootstrap_session_dir(
+        session_dir=session_dir,
+        subject_id=subject_id,
+        session_id=session_id,
+        expected_channels=expected_channels,
+        expected_srate=expected_srate,
+        timebase_version=TIMEBASE_VERSION,
+    )
+
     bootstrap_log_path = session_dir / "logs" / "step1.log"
     _configure_logging(bootstrap_log_path)
     for w in config_warnings or []:
@@ -1199,6 +1603,10 @@ def _run_recording(
     logger.info("Project: %s", project_name or "DEFAULT")
     logger.info("Subject: %s", subject_id)
     logger.info("Session dir (requested): %s", session_dir)
+    if requested_session_dir and requested_session_dir != session_dir:
+        logger.warning("Session dir normalized to %s (requested %s).", session_dir, requested_session_dir)
+    if collision_reason:
+        logger.warning("Session dir collision; using %s (%s).", session_dir, collision_reason)
 
     def _handle_signal(sig, _frame) -> None:
         global termination_reason
@@ -1215,19 +1623,111 @@ def _run_recording(
         except Exception:
             pass
 
+    try:
+        from pylsl import StreamInlet, local_clock, resolve_streams
+        try:
+            from pylsl import resolve_byprop
+        except Exception:
+            resolve_byprop = None
+    except Exception:
+        logger.error("pylsl is required for recording.")
+        _update_manifest_termination(session_dir, "missing_pylsl")
+        return 2
+
     stream_name = args.stream_name
     stream_type = args.stream_type
     source_id = args.lsl_source_id
 
+    def _clamp_positive(name: str, value: float, default: float) -> float:
+        if (not np.isfinite(value)) or value <= 0:
+            logger.warning(
+                "[config] %s=%r invalid; using default=%s",
+                name,
+                cfg.get(name, None),
+                default,
+            )
+            return float(default)
+        return float(value)
+
     resolve_timeout_s = float(cfg.get("LSL_RESOLVE_TIMEOUT", LSL_RESOLVE_TIMEOUT))
+    resolve_timeout_s = _clamp_positive("LSL_RESOLVE_TIMEOUT", resolve_timeout_s, LSL_RESOLVE_TIMEOUT)
     inlet_max_buflen_sec = int(cfg.get("LSL_INLET_MAX_BUFLEN_SEC", LSL_INLET_MAX_BUFLEN_SEC))
     inlet_max_chunklen = int(cfg.get("LSL_INLET_MAX_CHUNKLEN", LSL_INLET_MAX_CHUNKLEN))
-    heartbeat_interval_s = float(cfg.get("HEARTBEAT_INTERVAL_S", HEARTBEAT_INTERVAL_S))
-    no_sample_timeout_s = float(cfg.get("NO_SAMPLE_TIMEOUT_S", NO_SAMPLE_TIMEOUT_S))
-    write_stall_timeout_s = float(cfg.get("WRITE_STALL_TIMEOUT_S", WRITE_STALL_TIMEOUT_S))
+    heartbeat_interval_s = _clamp_positive(
+        "HEARTBEAT_INTERVAL_S",
+        float(cfg.get("HEARTBEAT_INTERVAL_S", HEARTBEAT_INTERVAL_S)),
+        HEARTBEAT_INTERVAL_S,
+    )
+    no_sample_timeout_s = _clamp_positive(
+        "NO_SAMPLE_TIMEOUT_S",
+        float(cfg.get("NO_SAMPLE_TIMEOUT_S", NO_SAMPLE_TIMEOUT_S)),
+        NO_SAMPLE_TIMEOUT_S,
+    )
+    write_stall_timeout_s = _clamp_positive(
+        "WRITE_STALL_TIMEOUT_S",
+        float(cfg.get("WRITE_STALL_TIMEOUT_S", WRITE_STALL_TIMEOUT_S)),
+        WRITE_STALL_TIMEOUT_S,
+    )
     warmup_sample_count = int(cfg.get("WARMUP_SAMPLE_COUNT", WARMUP_SAMPLE_COUNT))
-    warmup_timeout_s = float(cfg.get("WARMUP_TIMEOUT_S", WARMUP_TIMEOUT_S))
-    event_flush_interval_s = float(cfg.get("EVENT_FLUSH_INTERVAL_S", EVENT_FLUSH_INTERVAL_S))
+    warmup_timeout_s = _clamp_positive(
+        "WARMUP_TIMEOUT_S",
+        float(cfg.get("WARMUP_TIMEOUT_S", WARMUP_TIMEOUT_S)),
+        WARMUP_TIMEOUT_S,
+    )
+    event_flush_interval_s = _clamp_positive(
+        "EVENT_FLUSH_INTERVAL_S",
+        float(cfg.get("EVENT_FLUSH_INTERVAL_S", EVENT_FLUSH_INTERVAL_S)),
+        EVENT_FLUSH_INTERVAL_S,
+    )
+    if warmup_sample_count < 0:
+        logger.warning(
+            "[config] WARMUP_SAMPLE_COUNT=%r invalid; using default=%d",
+            cfg.get("WARMUP_SAMPLE_COUNT", None),
+            WARMUP_SAMPLE_COUNT,
+        )
+        warmup_sample_count = int(WARMUP_SAMPLE_COUNT)
+
+    try:
+        inlet_max_buflen_sec = int(inlet_max_buflen_sec)
+    except Exception:
+        inlet_max_buflen_sec = int(LSL_INLET_MAX_BUFLEN_SEC)
+    if inlet_max_buflen_sec <= 0:
+        logger.warning(
+            "[config] LSL_INLET_MAX_BUFLEN_SEC=%r invalid; using default=%d",
+            cfg.get("LSL_INLET_MAX_BUFLEN_SEC", None),
+            LSL_INLET_MAX_BUFLEN_SEC,
+        )
+        inlet_max_buflen_sec = int(LSL_INLET_MAX_BUFLEN_SEC)
+
+    try:
+        inlet_max_chunklen = int(inlet_max_chunklen)
+    except Exception:
+        inlet_max_chunklen = int(LSL_INLET_MAX_CHUNKLEN)
+    if inlet_max_chunklen <= 0:
+        logger.warning(
+            "[config] LSL_INLET_MAX_CHUNKLEN=%r invalid; using default=%d",
+            cfg.get("LSL_INLET_MAX_CHUNKLEN", None),
+            LSL_INLET_MAX_CHUNKLEN,
+        )
+        inlet_max_chunklen = int(LSL_INLET_MAX_CHUNKLEN)
+
+    try:
+        expected_channels = int(expected_channels)
+    except Exception:
+        expected_channels = int(stream_requirements.expected_channels)
+    if expected_channels <= 0:
+        logger.warning(
+            "[config] EXPECTED_CHANNELS=%r invalid; using default=%d",
+            cfg.get("EXPECTED_CHANNELS", None),
+            stream_requirements.expected_channels,
+        )
+        expected_channels = int(stream_requirements.expected_channels)
+
+    expected_srate = _clamp_positive(
+        "EXPECTED_SAMPLING_RATE",
+        float(expected_srate),
+        SAMPLING_RATE,
+    )
     duration_s = cfg.get("DURATION_S", None)
     if duration_s is None:
         duration_s = getattr(args, "duration_s", None)
@@ -1292,8 +1792,8 @@ def _run_recording(
     if not required_labels:
         required_labels = list(stream_requirements.required_labels)
     require_exact = bool(cfg.get("REQUIRE_EXACTLY_4_CHANNELS", stream_requirements.require_exact_channels))
-    expected_channels = int(cfg.get("EXPECTED_CHANNELS", args.stream_ch or stream_requirements.expected_channels))
-    expected_srate = float(cfg.get("EXPECTED_SAMPLING_RATE", args.stream_rate or SAMPLING_RATE))
+    expected_channels = int(expected_channels)
+    expected_srate = float(expected_srate)
     requirements = StreamRequirements(
         required_labels=required_labels,
         require_exact_channels=require_exact,
@@ -1483,6 +1983,7 @@ def _run_recording(
             "Next steps: start the Muse LSL streamer or verify stream name/type. "
             "Try: `python -m muse_streaming.cli list-streams` or `python -m muse_streaming.cli start-streamer`."
         )
+        _update_manifest_termination(session_dir, "lsl_not_found")
         return 1
 
     # Log all candidates for debugging / operator disambiguation.
@@ -1525,6 +2026,7 @@ def _run_recording(
             )
             for s in candidates_sorted:
                 logger.error("  - %s", _format_stream_info(s))
+            _update_manifest_termination(session_dir, "lsl_source_id_mismatch")
             return 1
 
     if not preferred_source_id and len(filtered) > 1:
@@ -1533,6 +2035,7 @@ def _run_recording(
         )
         for i, s in enumerate(filtered):
             logger.error("  #%d %s", i, _format_stream_info(s))
+        _update_manifest_termination(session_dir, "lsl_ambiguous")
         return 1
 
     if len(filtered) > 1:
@@ -1542,6 +2045,7 @@ def _run_recording(
         )
         for i, s in enumerate(filtered):
             logger.error("  #%d %s", i, _format_stream_info(s))
+        _update_manifest_termination(session_dir, "lsl_ambiguous_source_id")
         return 1
 
     info = filtered[0]
@@ -1554,6 +2058,7 @@ def _run_recording(
             raise RuntimeError("no sample within 1s (stale stream?)")
     except Exception as e:
         logger.error("[lsl] Selected stream produced no samples: %s", e)
+        _update_manifest_termination(session_dir, "lsl_no_samples")
         return 1
 
     logger.info(
@@ -1577,6 +2082,7 @@ def _run_recording(
 
     if getattr(args, "dry_run", False):
         logger.info("Dry-run requested; stream resolved successfully. Exiting without recording.")
+        _update_manifest_termination(session_dir, "dry_run")
         return 0
 
     def _extract_stream_labels(info_obj) -> List[str]:
@@ -1610,7 +2116,7 @@ def _run_recording(
         sampling_rate=nominal_srate,
         timebase_version=TIMEBASE_VERSION,
         shard_size_samples=int(args.raw_shard_samples),
-        resume=False,
+        resume=True,
         mode="train_record",
     )
     session_id = session_writer.session_id
@@ -1622,8 +2128,18 @@ def _run_recording(
     raw_csv_path = session_dir / "raw" / "raw.csv"
     events_csv_path = session_dir / "events" / "events.csv"
     raw_file, raw_writer = _open_raw_csv(raw_csv_path, channel_count=channel_count)
-    raw_flush_interval_s = float(cfg.get("RAW_FLUSH_INTERVAL_S", cfg.get("raw_flush_interval_s", 1.0)))
+    raw_flush_interval_s = _clamp_positive(
+        "RAW_FLUSH_INTERVAL_S",
+        float(cfg.get("RAW_FLUSH_INTERVAL_S", cfg.get("raw_flush_interval_s", 1.0))),
+        1.0,
+    )
+    raw_shard_flush_interval_s = _clamp_positive(
+        "RAW_SHARD_FLUSH_INTERVAL_S",
+        float(cfg.get("RAW_SHARD_FLUSH_INTERVAL_S", RAW_SHARD_FLUSH_INTERVAL_S)),
+        RAW_SHARD_FLUSH_INTERVAL_S,
+    )
     last_raw_flush_t = time.time()
+    last_shard_flush_t = time.monotonic()
     events_file, events_writer = _open_events_csv(events_csv_path)
     events_lock = threading.Lock()
     event_recorder = EventRecorder(events_writer, events_lock)
@@ -1670,6 +2186,15 @@ def _run_recording(
     plot_robust_window_sec = float(args.plot_robust_window_sec)
     plot_robust_ema = float(args.plot_robust_ema)
     plot_reference_overlay = bool(args.plot_reference_overlay)
+    plot_channel_spacing_uv = cfg.get(
+        "PLOT_CHANNEL_SPACING_UV", getattr(args, "plot_channel_spacing_uv", PLOT_CHANNEL_SPACING_UV)
+    )
+    try:
+        plot_channel_spacing_uv = float(plot_channel_spacing_uv)
+    except Exception:
+        plot_channel_spacing_uv = float(PLOT_CHANNEL_SPACING_UV)
+    if not np.isfinite(plot_channel_spacing_uv):
+        plot_channel_spacing_uv = float(PLOT_CHANNEL_SPACING_UV)
     # B2: Add a final safety clamp to prevent non-positive/invalid plot window duration.
     # This guards against config/UI edge cases that can set 0.0 or NaN.
     plot_window_sec = float(getattr(args, 'plot_window_sec', PLOT_WINDOW_SEC) or PLOT_WINDOW_SEC)
@@ -1689,7 +2214,9 @@ def _run_recording(
         logger.info("Event marking disabled; events.jsonl will remain empty.")
 
     raw_queue: queue.Queue[SamplePacket] = queue.Queue(maxsize=int(args.raw_queue_maxsize))
+    events_queue: queue.Queue[EventPayload] = queue.Queue()
     writer_exc: Optional[BaseException] = None
+    events_exc: Optional[BaseException] = None
     counter_lock = threading.Lock()
     samples_received = 0
     samples_written = 0
@@ -1700,10 +2227,12 @@ def _run_recording(
     queue_max_depth = 0
     start_wall = time.monotonic()
     last_heartbeat = start_wall
+    last_heartbeat_samples = 0
+    last_heartbeat_time = start_wall
     last_event_flush_t = time.time()
 
     def _writer_worker() -> None:
-        nonlocal writer_exc, last_raw_flush_t, samples_written, last_write_wall
+        nonlocal writer_exc, last_raw_flush_t, last_shard_flush_t, samples_written, last_write_wall
         try:
             batch: List[SamplePacket] = []
             while not stop_event.is_set() or not raw_queue.empty():
@@ -1721,6 +2250,10 @@ def _run_recording(
                 if len(batch) >= 128 or (packet is None and batch):
                     # NOTE: session_writer is now robust, but we still avoid empty calls.
                     session_writer.append_packets(batch)
+                    now_mono = time.monotonic()
+                    if (now_mono - last_shard_flush_t) >= raw_shard_flush_interval_s:
+                        session_writer.flush()
+                        last_shard_flush_t = now_mono
                     for pkt in batch:
                         row = _build_raw_row(
                             pkt.lsl_ts_raw,
@@ -1743,6 +2276,10 @@ def _run_recording(
                     batch = []
             if batch:
                 session_writer.append_packets(batch)
+                now_mono = time.monotonic()
+                if (now_mono - last_shard_flush_t) >= raw_shard_flush_interval_s:
+                    session_writer.flush()
+                    last_shard_flush_t = now_mono
                 for pkt in batch:
                     row = _build_raw_row(
                         pkt.lsl_ts_raw,
@@ -1766,22 +2303,100 @@ def _run_recording(
         except BaseException as e:
             logger.exception("Writer thread crashed")
             writer_exc = e
+        finally:
+            raw_writer_drained.set()
+
+    raw_writer_drained = threading.Event()
+    events_writer_drained = threading.Event()
 
     writer_thread = threading.Thread(target=_writer_worker, daemon=True)
     writer_thread.start()
-    plot_display_fs = float(cfg.get("PLOT_DISPLAY_FS", PLOT_DISPLAY_FS))
-    plot_fps = float(cfg.get("PLOT_FPS", PLOT_FPS))
-    plotter = _PlotProcess(
-        enabled=enable_plot,
-        channel_labels=channel_labels,
-        plot_window_sec=plot_window_sec,
-        plot_fps=plot_fps,
-        plot_fixed_ylim=plot_fixed_ylim,
-        plot_scale=plot_scale,
-        plot_robust_ema=plot_robust_ema,
-        plot_reference_overlay=plot_reference_overlay,
-        title=f"Step 1: Recording {subject_id} - {session_id}",
+
+    event_writer_thread: Optional[threading.Thread] = None
+
+    def _event_writer_worker() -> None:
+        nonlocal events_exc, events_written, last_event_flush_t
+        try:
+            while not stop_event.is_set() or not events_queue.empty():
+                try:
+                    payload = events_queue.get(timeout=0.1)
+                except queue.Empty:
+                    payload = None
+                if payload is None:
+                    continue
+                try:
+                    event_recorder.record(payload.csv_record)
+                except Exception:
+                    logger.exception("Failed to write events.csv row")
+                try:
+                    session_writer.append_event(payload.json_payload)
+                except Exception:
+                    logger.exception("Failed to write events.jsonl row")
+                with counter_lock:
+                    events_written += 1
+                if (time.time() - last_event_flush_t) >= event_flush_interval_s:
+                    events_file.flush()
+                    last_event_flush_t = time.time()
+        except BaseException as e:
+            logger.exception("Event writer thread crashed")
+            events_exc = e
+        finally:
+            events_writer_drained.set()
+
+    event_writer_thread = threading.Thread(target=_event_writer_worker, daemon=True)
+    event_writer_thread.start()
+    plot_display_fs = _clamp_positive(
+        "PLOT_DISPLAY_FS",
+        float(cfg.get("PLOT_DISPLAY_FS", PLOT_DISPLAY_FS)),
+        PLOT_DISPLAY_FS,
     )
+    plot_fps = _clamp_positive(
+        "PLOT_FPS",
+        float(cfg.get("PLOT_FPS", PLOT_FPS)),
+        PLOT_FPS,
+    )
+    plot_startup_timeout_s = _clamp_positive(
+        "PLOT_STARTUP_TIMEOUT_S",
+        float(cfg.get("PLOT_STARTUP_TIMEOUT_S", PLOT_STARTUP_TIMEOUT_S)),
+        PLOT_STARTUP_TIMEOUT_S,
+    )
+    plot_buffer_len = max(16, int(round(plot_window_sec * plot_display_fs * 2.0)))
+    plot_buffer = _PlotRingBuffer(plot_buffer_len) if enable_plot else None
+    plot_controller = (
+        _PlotController(
+            enabled=enable_plot,
+            startup_timeout_s=plot_startup_timeout_s,
+            channel_labels=channel_labels,
+            expected_channels=int(expected_channels),
+            plot_window_sec=plot_window_sec,
+            plot_fps=plot_fps,
+            plot_fixed_ylim=plot_fixed_ylim,
+            plot_scale=plot_scale,
+            plot_robust_ema=plot_robust_ema,
+            plot_reference_overlay=plot_reference_overlay,
+            plot_channel_spacing_uv=float(plot_channel_spacing_uv),
+            title=f"Step 1: Recording {subject_id} - {session_id}",
+        )
+        if enable_plot
+        else None
+    )
+    plot_feeder_stop = threading.Event()
+    plot_feeder_thread: Optional[threading.Thread] = None
+    if enable_plot and plot_buffer is not None:
+        def _plot_feeder() -> None:
+            while not stop_event.is_set() and not plot_feeder_stop.is_set():
+                item = plot_buffer.pop_left()
+                if item is None:
+                    time.sleep(0.01)
+                    continue
+                plotter = plot_controller.get_plotter() if plot_controller else None
+                if plotter is None or not plotter.is_alive():
+                    continue
+                now_s, sample = item
+                plotter.push(now_s=float(now_s), sample=np.asarray(sample, dtype=np.float32))
+
+        plot_feeder_thread = threading.Thread(target=_plot_feeder, daemon=True)
+        plot_feeder_thread.start()
     plot_decim = 1
     if enable_plot and plot_display_fs > 0:
         try:
@@ -1804,6 +2419,9 @@ def _run_recording(
         "plot_display_fs": float(plot_display_fs),
         "plot_window_sec": float(plot_window_sec),
         "plot_decim": int(plot_decim),
+        "plot_startup_timeout_s": float(plot_startup_timeout_s),
+        "plot_buffer_len": int(plot_buffer_len),
+        "plot_channel_spacing_uv": float(plot_channel_spacing_uv),
         "plot_scale": str(plot_scale),
         "plot_fixed_ylim": [float(plot_fixed_ylim[0]), float(plot_fixed_ylim[1])],
         "plot_reference_overlay": bool(plot_reference_overlay),
@@ -1811,6 +2429,8 @@ def _run_recording(
         "event_keymap": str(args.event_keymap),
         "raw_queue_maxsize": int(args.raw_queue_maxsize),
         "raw_shard_samples": int(args.raw_shard_samples),
+        "raw_shard_flush_interval_s": float(raw_shard_flush_interval_s),
+        "raw_flush_interval_s": float(raw_flush_interval_s),
         "queue_put_timeout_s": float(queue_put_timeout_s),
         "allow_drop": bool(allow_drop),
         "duration_s": float(duration_s) if duration_s is not None else None,
@@ -1835,6 +2455,8 @@ def _run_recording(
     timestamps_recent: deque[float]
     timestamps_recent = deque(maxlen=512)
     event_marking_active = False
+    plot_start_requested = False
+    warmup_warned = False
 
     action_map = {
         "rest": ACTION_REST,
@@ -1875,7 +2497,7 @@ def _run_recording(
         clamped: bool,
         lsl_ts_mono: float,
     ) -> None:
-        nonlocal events_received, events_written, last_event_flush_t
+        nonlocal events_received
         duration_s = max(0.0, float(duration_s))
         if not is_valid_action_finger(int(action_id), int(finger_id)):
             # Fail safe: coerce invalid combos to REST/NONE.
@@ -1897,27 +2519,24 @@ def _run_recording(
             label=str(event_type),
             metadata=md,
         )
-        event_recorder.record(payload)
-        with counter_lock:
-            events_received += 1
-            events_written += 1
-        session_writer.append_event(
-            {
-                "onset_s": float(onset_s),
-                "event_time_s": float(onset_s),
-                "duration_s": float(duration_s),
-                "end_s": float(onset_s + duration_s),
-                "lsl_ts_mono": float(lsl_ts_mono),
-                "local_ts": float(payload.local_ts),
-                "type": str(event_type),
-                "action_id": int(action_id),
-                "finger_id": int(finger_id),
-                "source": "keyboard",
-            }
-        )
-        if (time.time() - last_event_flush_t) >= event_flush_interval_s:
-            events_file.flush()
-            last_event_flush_t = time.time()
+        event_json = {
+            "onset_s": float(onset_s),
+            "event_time_s": float(onset_s),
+            "duration_s": float(duration_s),
+            "end_s": float(onset_s + duration_s),
+            "lsl_ts_mono": float(lsl_ts_mono),
+            "local_ts": float(payload.local_ts),
+            "type": str(event_type),
+            "action_id": int(action_id),
+            "finger_id": int(finger_id),
+            "source": "keyboard",
+        }
+        try:
+            events_queue.put_nowait(EventPayload(csv_record=payload, json_payload=event_json))
+            with counter_lock:
+                events_received += 1
+        except Exception:
+            logger.exception("Failed to enqueue event payload")
 
     def _start_mark(source_key: str) -> None:
         nonlocal active_mark
@@ -2053,6 +2672,10 @@ def _run_recording(
                 raise RuntimeError("Writer thread crashed") from writer_exc
             if not writer_thread.is_alive():
                 raise RuntimeError("Writer thread stopped unexpectedly")
+            if events_exc:
+                raise RuntimeError("Event writer thread crashed") from events_exc
+            if event_writer_thread is None or not event_writer_thread.is_alive():
+                raise RuntimeError("Event writer thread stopped unexpectedly")
 
             sample, lsl_ts = inlet.pull_sample(timeout=0.1)
             if sample is None:
@@ -2091,8 +2714,10 @@ def _run_recording(
             )
             seq += 1
             timestamps_recent.append(lsl_ts_mono)
-            if enable_plot and plot_decim > 0 and (packet.seq % plot_decim == 0):
-                plotter.push(now_s=float(lsl_ts_mono - stream_start_lsl_ts), sample=sample_arr)
+            if enable_plot and plot_decim > 0 and plot_buffer is not None and (packet.seq % plot_decim == 0):
+                plot_buffer.append(
+                    now_s=float(lsl_ts_mono - stream_start_lsl_ts), sample=sample_arr
+                )
 
             if not _enqueue_with_overflow(
                 raw_queue,
@@ -2133,21 +2758,31 @@ def _run_recording(
                 stop_event.set()
                 break
 
-            if warmup_sample_count > 0 and samples_received_snapshot < warmup_sample_count and (now - start_wall) > warmup_timeout_s:
-                termination_reason = "no_samples"
-                logger.error(
-                    "LSL stream did not produce required samples within %.2fs "
-                    "(received %d < %d).",
+            warmup_met = warmup_sample_count <= 0 or samples_received_snapshot >= warmup_sample_count
+            if (
+                warmup_sample_count > 0
+                and samples_received_snapshot > 0
+                and not warmup_met
+                and (now - start_wall) > warmup_timeout_s
+                and not warmup_warned
+            ):
+                logger.warning(
+                    "Warmup still in progress after %.2fs (received %d < %d). "
+                    "Continuing recording; plot will start after warmup completes.",
                     warmup_timeout_s,
                     samples_received_snapshot,
                     warmup_sample_count,
                 )
-                logger.error(
-                    "Next steps: confirm the Muse LSL streamer is running and producing EEG. "
-                    "Try: `python -m muse_streaming.cli healthcheck`."
+                warmup_warned = True
+
+            if enable_plot and plot_controller and (not plot_start_requested) and warmup_met and samples_received_snapshot > 0:
+                plot_controller.request_start()
+                plot_start_requested = True
+                logger.info(
+                    "[plot] Warmup met (%d/%d); starting plotter out-of-band.",
+                    samples_received_snapshot,
+                    warmup_sample_count,
                 )
-                stop_event.set()
-                break
 
             if samples_received_snapshot > 0 and samples_written_snapshot == 0:
                 if (now - start_wall) > write_stall_timeout_s:
@@ -2162,6 +2797,9 @@ def _run_recording(
                     stop_event.set()
                     break
 
+            if plot_controller:
+                plot_controller.check_startup_timeout(now, logger)
+
             if now - last_heartbeat >= heartbeat_interval_s:
                 last_sample_age = (
                     None
@@ -2173,17 +2811,35 @@ def _run_recording(
                     if last_write_wall_snapshot is None
                     else float(now - last_write_wall_snapshot)
                 )
+                elapsed = max(1e-6, float(now - last_heartbeat_time))
+                samples_per_sec = float(samples_received_snapshot - last_heartbeat_samples) / elapsed
+                shard_metrics = session_writer.shard_metrics()
+                shard_count = int(shard_metrics.get("shard_count", 0))
+                last_shard_flush_mono = shard_metrics.get("last_flush_mono")
+                last_shard_flush_age = (
+                    None if last_shard_flush_mono is None else float(now - last_shard_flush_mono)
+                )
+                plotter = plot_controller.get_plotter() if plot_controller else None
+                plot_dropped = int(getattr(plotter, "dropped", 0)) + int(
+                    getattr(plot_buffer, "dropped", 0) if plot_buffer else 0
+                )
                 logger.info(
-                    "[alive] recv=%d wrote=%d events=%d queue=%d plot_dropped=%d last_sample_age_s=%s last_write_age_s=%s",
+                    "[alive] recv=%d wrote=%d events=%d samples_sec=%.1f queue=%d plot_buf=%d plot_dropped=%d shards=%d shard_age_s=%s last_sample_age_s=%s last_write_age_s=%s",
                     samples_received_snapshot,
                     samples_written_snapshot,
                     events_written_snapshot,
+                    samples_per_sec,
                     raw_queue.qsize(),
-                    int(getattr(plotter, "dropped", 0)),
+                    len(plot_buffer) if plot_buffer else 0,
+                    plot_dropped,
+                    shard_count,
+                    "n/a" if last_shard_flush_age is None else f"{last_shard_flush_age:.2f}",
                     "n/a" if last_sample_age is None else f"{last_sample_age:.2f}",
                     "n/a" if last_write_age is None else f"{last_write_age:.2f}",
                 )
                 last_heartbeat = now
+                last_heartbeat_samples = samples_received_snapshot
+                last_heartbeat_time = now
 
             if now - last_state_update >= 1.0:
                 is_healthy = True
@@ -2254,17 +2910,43 @@ def _run_recording(
         logger.error("Recording error: %s", exc, exc_info=True)
     finally:
         stop_event.set()
-        plotter.stop()
+
+        drain_deadline = time.monotonic() + 2.0
+        while time.monotonic() < drain_deadline:
+            if raw_writer_drained.is_set() and events_writer_drained.is_set():
+                break
+            time.sleep(0.01)
+
+        if plot_controller:
+            plot_controller.stop()
+        if plot_feeder_thread is not None:
+            plot_feeder_stop.set()
+            plot_feeder_thread.join(timeout=1.0)
         if listener is not None:
             try:
                 listener.stop()
             except Exception:
                 pass
         writer_thread.join(timeout=2.0)
+        if event_writer_thread is not None:
+            event_writer_thread.join(timeout=2.0)
+        try:
+            session_writer.flush()
+        except Exception:
+            logger.exception("Failed to flush session writer.")
         raw_file.flush()
         raw_file.close()
         events_file.flush()
         events_file.close()
+        rewritten_count = 0
+        events_jsonl_path = session_dir / "events" / "events.jsonl"
+        events_csv_path = session_dir / "events" / "events.csv"
+        try:
+            rewritten_count = _rewrite_events_csv_from_jsonl(
+                events_jsonl_path, events_csv_path
+            )
+        except Exception:
+            logger.exception("Failed to rewrite events.csv from events.jsonl")
 
         if run_error is not None and termination_reason == "normal":
             termination_reason_final = "error"
@@ -2336,6 +3018,29 @@ def _run_recording(
         except Exception:
             logger.exception("Failed to write final session_state.")
 
+        clean_shutdown = (
+            run_error is None
+            and writer_exc is None
+            and events_exc is None
+            and termination_reason_final not in {"error"}
+        )
+        if rewritten_count > 0 and events_written == 0:
+            logger.warning(
+                "events.jsonl contains %d event(s) but runtime counter is zero.",
+                rewritten_count,
+            )
+        logger.info(
+            "Shutdown complete: samples_written=%d events_written_runtime=%d events_rewritten=%d "
+            "events_jsonl_path=%s events_csv_path=%s session_dir=%s clean=%s",
+            samples_written,
+            events_written,
+            rewritten_count,
+            events_jsonl_path,
+            events_csv_path,
+            session_dir,
+            clean_shutdown,
+        )
+
     if writer_exc:
         logger.error("Writer thread failed, returning exit code 1.")
         return 1
@@ -2391,6 +3096,12 @@ def main() -> int:
     parser.add_argument("--plot-robust-ema", type=float, default=PLOT_ROBUST_EMA)
     parser.add_argument("--plot-reference-overlay", action="store_true", default=False)
     parser.add_argument("--plot-window-sec", type=float, default=5.0, help="Seconds of EEG to display in the live plot.")
+    parser.add_argument(
+        "--plot-channel-spacing-uv",
+        type=float,
+        default=PLOT_CHANNEL_SPACING_UV,
+        help="Vertical spacing between channels in microvolts. Set <=0 to auto-scale.",
+    )
     parser.add_argument(
         "--event-marking-enabled",
         dest="event_marking_enabled",

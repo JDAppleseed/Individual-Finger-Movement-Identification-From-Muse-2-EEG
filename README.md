@@ -37,7 +37,7 @@ python eeglab_wrapper_ui.py
 ## What changed / How to run
 
 - Connect Muse: `python eeglab_wrapper_ui.py` → click **Connect Muse 2** (Step 0), or run `python muse_lsl_streamer.py --name Muse2-EEG`.
-- Record: `python 1_stream_and_record.py --enable-plot --plot-scale fixed --plot-fixed-ylim -200 200` (writes a canonical session directory under `Projects/<project>/subjects/<subject>/sessions/<session_id>/` including `manifest.json`, `meta.json`, `raw/eeg_raw_shard_*.npy`, `events/events.jsonl`, plus inspection CSVs `raw/raw.csv` and `events/events.csv`).
+- Record: `python 1_stream_and_record.py --enable-plot --plot-scale fixed --plot-fixed-ylim -200 200` (writes a canonical session directory under `Projects/<project>/subjects/<subject>/sessions/<session_id>/` including `manifest.json`, `meta.json`, `raw/eeg_raw_shard_*.npy`, `events/events.jsonl`, plus inspection CSVs `raw/raw.csv` and `events/events.csv`). Plotting is fully decoupled; if it cannot start quickly it is disabled while recording continues.
 - Extract/Train/Evaluate: `python 1b_extract_windows.py --session-dir <session_dir>` → `python 2_train_model.py --session-dir <session_dir>` → `python 3_evaluate_model.py --session-dir <session_dir>` → `python 4_generate_reports.py --session-dir <session_dir>` (outputs live under `<session_dir>/processed/`).
 - Live infer (safe mode): `python 7_live_infer_and_actuate.py --session-dir <session_dir> --stream-name Muse2-EEG --stream-type EEG` (auto-resolves latest model/scaler under `<session_dir>/processed/models/`). Add `--enable-actuation --i-understand-this-moves-the-hand` to actuate.
 
@@ -223,11 +223,13 @@ Resolution precedence:
 2) Config JSON payload fields: `project_name`, `subject_id`, `session_id` (UI configs)
 3) Default: `Projects/DEFAULT/subjects/<DEFAULT_SUBJECT_ID>/sessions/<DEFAULT_SUBJECT_ID>_<timestamp>/`
 
+If the requested `session_dir` already exists, Step 1 deterministically suffixes `_01`, `_02`, ... and logs once. `manifest.json`, `meta.json`, and `events/events.jsonl` are created immediately on session_dir resolution (before LSL resolution) so partial or failed runs still leave a durable trail.
+
 `data/raw` and `data/processed` are legacy inspection/cache paths and are not the default output for new sessions.
 
 ### Performance (live plot)
 
-When enabled, live plotting runs **out-of-band** from acquisition (separate process + bounded queue). Acquisition never waits on plotting; plot frames may be dropped under load to protect ingestion latency.
+When enabled, live plotting runs **out-of-band** from acquisition (separate process + bounded ring buffer). Acquisition never waits on plotting; plot frames may be dropped under load to protect ingestion latency. If the plotter fails to start quickly, it is disabled automatically while recording continues.
 
 ## Timebase & Latency (absolute_v1)
 

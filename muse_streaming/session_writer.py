@@ -44,10 +44,19 @@ class RawShardWriter:
         self._buffer_count = 0
         self._shard_index = 0
         self._shard_meta: list[dict[str, object]] = []
+        self._last_flush_mono: Optional[float] = None
 
     @property
     def shard_meta(self) -> list[dict[str, object]]:
         return list(self._shard_meta)
+
+    @property
+    def shard_count(self) -> int:
+        return int(len(self._shard_meta))
+
+    @property
+    def last_flush_mono(self) -> Optional[float]:
+        return self._last_flush_mono
 
     def append(self, records: np.ndarray) -> None:
         if records.size == 0:
@@ -103,6 +112,7 @@ class RawShardWriter:
                 "local_ts_end": float(records["local_ts"][-1]),
             }
         )
+        self._last_flush_mono = time.monotonic()
         self._shard_index += 1
 
     def empty_record_array(self, count: int) -> np.ndarray:
@@ -288,6 +298,17 @@ class SessionWriter:
                 os.fsync(self._events_handle.fileno())
             except Exception:
                 pass
+
+    def flush(self) -> None:
+        with self._lock:
+            self._shard_writer.flush()
+
+    def shard_metrics(self) -> dict[str, Optional[float] | int]:
+        with self._lock:
+            return {
+                "shard_count": int(self._shard_writer.shard_count),
+                "last_flush_mono": self._shard_writer.last_flush_mono,
+            }
 
     def finalize(
         self, termination_reason: str = "normal", extra_manifest: Optional[dict[str, object]] = None

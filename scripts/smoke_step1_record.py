@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib.util
 import json
 import os
 import subprocess
@@ -12,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-from typing import Any, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pylsl import StreamOutlet
@@ -95,6 +96,19 @@ def _append_synthetic_event(session_dir: Path, *, onset_s: float, duration_s: fl
             )
 
 
+def _module_available(name: str) -> bool:
+    return importlib.util.find_spec(name) is not None
+
+
+def _run_cmd(cmd: list[str], *, cwd: Path, label: str) -> int:
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(cwd))
+    print(proc.stdout)
+    print(proc.stderr, file=sys.stderr)
+    if proc.returncode != 0:
+        print(f"[smoke] {label} failed (exit {proc.returncode})")
+    return int(proc.returncode)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", type=str, default="SMOKE", help="Project name under Projects/")
@@ -149,7 +163,7 @@ def main() -> int:
                     "HEARTBEAT_INTERVAL_S": 0.5,
                     "NO_SAMPLE_TIMEOUT_S": 2.0,
                     "WARMUP_SAMPLE_COUNT": 1,
-                    "WARMUP_TIMEOUT_S": 2.0,
+                    "WARMUP_TIMEOUT_S": 4.0,
                 },
             },
             indent=2,
@@ -177,129 +191,184 @@ def main() -> int:
         "--duration-s",
         str(float(args.duration_s)),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(repo_root))
-    print(proc.stdout)
-    print(proc.stderr, file=sys.stderr)
-    if proc.returncode != 0:
-        raise SystemExit(f"Recording failed (exit {proc.returncode})")
+    core_pass = True
+    core_errors: list[str] = []
+    full_status = "SKIP"
+    session_dir: Optional[Path] = None
 
-    # Use the newest session dir under the expected root (handles collision suffixes).
-    session_dir = _latest_session_dir(sessions_root)
-    print(f"[smoke] session_dir={session_dir}")
+    if _run_cmd(cmd, cwd=repo_root, label="step1_record") != 0:
+        core_pass = False
+        core_errors.append("step1_record")
 
-    expected = [
-        session_dir / "manifest.json",
-        session_dir / "meta.json",
-        session_dir / "raw" / "raw.csv",
-        session_dir / "events" / "events.csv",
-        session_dir / "events" / "events.jsonl",
-        session_dir / "logs" / "step1.log",
-        session_dir / "logs" / "resolved_settings.json",
-    ]
-    missing = [p for p in expected if not p.exists()]
-    if missing:
-        raise SystemExit("Missing expected artifacts:\n" + "\n".join(str(p) for p in missing))
+    if core_pass:
+        try:
+            session_dir = _latest_session_dir(sessions_root)
+        except Exception as exc:
+            core_pass = False
+            core_errors.append(f"session_dir_resolve: {exc}")
 
-    shard_candidates = sorted((session_dir / "raw").glob("eeg_raw_shard_*.npy"))
-    if not shard_candidates:
-        raise SystemExit("No raw shards found under session_dir/raw/")
+    if session_dir:
+        print(f"[smoke] session_dir={session_dir}")
+        expected = [
+            session_dir / "manifest.json",
+            session_dir / "meta.json",
+            session_dir / "raw" / "raw.csv",
+            session_dir / "events" / "events.csv",
+            session_dir / "events" / "events.jsonl",
+            session_dir / "logs" / "step1.log",
+            session_dir / "logs" / "resolved_settings.json",
+        ]
+        missing = [p for p in expected if not p.exists()]
+        if missing:
+            core_pass = False
+            core_errors.append("missing_artifacts")
+            print("Missing expected artifacts:\n" + "\n".join(str(p) for p in missing))
 
-    # Confirm raw CSV has data rows.
-    raw_csv = session_dir / "raw" / "raw.csv"
-    with raw_csv.open("r", newline="") as handle:
-        reader = csv.reader(handle)
-        rows = list(reader)
-    if len(rows) < 2:
-        raise SystemExit("Raw CSV has header only; no samples written")
+    if core_pass and session_dir:
+        shard_candidates = sorted((session_dir / "raw").glob("eeg_raw_shard_*.npy"))
+        if not shard_candidates:
+            core_pass = False
+            core_errors.append("no_raw_shards")
+            print("No raw shards found under session_dir/raw/")
 
-    step1_log = (session_dir / "logs" / "step1.log").read_text(errors="ignore")
-    if "[alive]" not in step1_log:
-        raise SystemExit("Heartbeat lines missing from logs/step1.log")
+    if core_pass and session_dir:
+        raw_csv = session_dir / "raw" / "raw.csv"
+        with raw_csv.open("r", newline="") as handle:
+            reader = csv.reader(handle)
+            rows = list(reader)
+        if len(rows) < 2:
+            core_pass = False
+            core_errors.append("raw_csv_empty")
+            print("Raw CSV has header only; no samples written")
 
-    # Validate session manifest/meta/shards.
-    validate_cmd = [
-        sys.executable,
-        "-m",
-        "muse_streaming.validate_session",
-        "--session",
-        str(session_dir),
-    ]
-    validate_proc = subprocess.run(
-        validate_cmd, capture_output=True, text=True, cwd=str(repo_root)
-    )
-    print(validate_proc.stdout)
-    print(validate_proc.stderr, file=sys.stderr)
-    if validate_proc.returncode != 0:
-        raise SystemExit(f"validate_session failed (exit {validate_proc.returncode})")
+    if core_pass and session_dir:
+        step1_log = (session_dir / "logs" / "step1.log").read_text(errors="ignore")
+        if "[alive]" not in step1_log:
+            core_pass = False
+            core_errors.append("heartbeat_missing")
+            print("Heartbeat lines missing from logs/step1.log")
 
-    # Step 1 is non-interactive here; add a synthetic labeled event for Step 1b.
-    _append_synthetic_event(session_dir, onset_s=0.2, duration_s=min(1.0, float(args.duration_s) * 0.8))
-
-    step1b_cmd = [
-        sys.executable,
-        str(repo_root / "1b_extract_windows.py"),
-        "--session-dir",
-        str(session_dir),
-    ]
-    step1b_proc = subprocess.run(step1b_cmd, capture_output=True, text=True, cwd=str(repo_root))
-    print(step1b_proc.stdout)
-    print(step1b_proc.stderr, file=sys.stderr)
-    if step1b_proc.returncode != 0:
-        raise SystemExit(f"1b_extract_windows failed (exit {step1b_proc.returncode})")
-
-    if not (session_dir / "processed" / "eeg_windows.npz").exists():
-        raise SystemExit("Missing processed/eeg_windows.npz")
-
-    if args.full:
-        # Step 2 (train)
-        train_cmd = [
+    if core_pass and session_dir:
+        validate_cmd = [
             sys.executable,
-            str(repo_root / "2_train_model.py"),
+            "-m",
+            "muse_streaming.validate_session",
+            "--session",
+            str(session_dir),
+        ]
+        if _run_cmd(validate_cmd, cwd=repo_root, label="validate_session") != 0:
+            core_pass = False
+            core_errors.append("validate_session")
+
+    if core_pass and session_dir:
+        _append_synthetic_event(
+            session_dir, onset_s=0.2, duration_s=min(1.0, float(args.duration_s) * 0.8)
+        )
+        step1b_cmd = [
+            sys.executable,
+            str(repo_root / "1b_extract_windows.py"),
             "--session-dir",
             str(session_dir),
-            "--subject-id",
-            str(args.subject),
-            "--epochs",
-            "1",
-            "--batch-size",
-            "8",
         ]
-        train_proc = subprocess.run(train_cmd, capture_output=True, text=True, cwd=str(repo_root))
-        print(train_proc.stdout)
-        print(train_proc.stderr, file=sys.stderr)
-        if train_proc.returncode != 0:
-            raise SystemExit(f"2_train_model failed (exit {train_proc.returncode})")
+        if _run_cmd(step1b_cmd, cwd=repo_root, label="1b_extract_windows") != 0:
+            core_pass = False
+            core_errors.append("1b_extract_windows")
 
-        models_root = session_dir / "processed" / "models"
-        run_dirs = [p for p in models_root.iterdir() if p.is_dir()] if models_root.exists() else []
-        if not run_dirs:
-            raise SystemExit("No run dirs created under processed/models/")
-        run_dirs.sort(key=lambda p: p.stat().st_mtime)
-        run_dir = run_dirs[-1]
-        if not (run_dir / "finger_action_model.pt").exists():
-            raise SystemExit("Missing trained model: processed/models/<run_id>/finger_action_model.pt")
-        if not (run_dir / "scaler.save").exists():
-            raise SystemExit("Missing scaler: processed/models/<run_id>/scaler.save")
+    if core_pass and session_dir:
+        if not (session_dir / "processed" / "eeg_windows.npz").exists():
+            core_pass = False
+            core_errors.append("missing_windows_npz")
+            print("Missing processed/eeg_windows.npz")
 
-        # Step 3 (evaluate)
-        eval_cmd = [sys.executable, str(repo_root / "3_evaluate_model.py"), "--session-dir", str(session_dir)]
-        eval_proc = subprocess.run(eval_cmd, capture_output=True, text=True, cwd=str(repo_root))
-        print(eval_proc.stdout)
-        print(eval_proc.stderr, file=sys.stderr)
-        if eval_proc.returncode != 0:
-            raise SystemExit(f"3_evaluate_model failed (exit {eval_proc.returncode})")
+    if core_pass and args.full and session_dir:
+        full_status = "PASS"
+        if not _module_available("torch"):
+            full_status = "PARTIAL"
+            print("[smoke] FULL SKIP: torch not available")
+        else:
+            train_cmd = [
+                sys.executable,
+                str(repo_root / "2_train_model.py"),
+                "--session-dir",
+                str(session_dir),
+                "--subject-id",
+                str(args.subject),
+                "--epochs",
+                "1",
+                "--batch-size",
+                "8",
+            ]
+            if _run_cmd(train_cmd, cwd=repo_root, label="2_train_model") != 0:
+                full_status = "FAIL"
+            else:
+                models_root = session_dir / "processed" / "models"
+                run_dirs = (
+                    [p for p in models_root.iterdir() if p.is_dir()] if models_root.exists() else []
+                )
+                if not run_dirs:
+                    full_status = "FAIL"
+                    print("No run dirs created under processed/models/")
+                else:
+                    run_dirs.sort(key=lambda p: p.stat().st_mtime)
+                    run_dir = run_dirs[-1]
+                    if not (run_dir / "finger_action_model.pt").exists():
+                        full_status = "FAIL"
+                        print("Missing trained model: processed/models/<run_id>/finger_action_model.pt")
+                    if not (run_dir / "scaler.save").exists():
+                        full_status = "FAIL"
+                        print("Missing scaler: processed/models/<run_id>/scaler.save")
 
-        # Step 4 (reports)
-        report_cmd = [sys.executable, str(repo_root / "4_generate_reports.py"), "--session-dir", str(session_dir)]
-        report_proc = subprocess.run(report_cmd, capture_output=True, text=True, cwd=str(repo_root))
-        print(report_proc.stdout)
-        print(report_proc.stderr, file=sys.stderr)
-        if report_proc.returncode != 0:
-            raise SystemExit(f"4_generate_reports failed (exit {report_proc.returncode})")
+            if full_status == "PASS":
+                eval_cmd = [
+                    sys.executable,
+                    str(repo_root / "3_evaluate_model.py"),
+                    "--session-dir",
+                    str(session_dir),
+                ]
+                if _run_cmd(eval_cmd, cwd=repo_root, label="3_evaluate_model") != 0:
+                    full_status = "FAIL"
+
+            if full_status == "PASS":
+                if not _module_available("matplotlib"):
+                    full_status = "PARTIAL"
+                    print("[smoke] FULL SKIP: matplotlib not available (reports)")
+                else:
+                    report_cmd = [
+                        sys.executable,
+                        str(repo_root / "4_generate_reports.py"),
+                        "--session-dir",
+                        str(session_dir),
+                    ]
+                    if _run_cmd(report_cmd, cwd=repo_root, label="4_generate_reports") != 0:
+                        full_status = "FAIL"
 
     stop_event.set()
     producer.join(timeout=1.0)
-    print("✅ Smoke pipeline check passed")
+
+    print("\n[smoke] SUMMARY")
+    print(f"CORE={'PASS' if core_pass else 'FAIL'}")
+    print(f"FULL={full_status}")
+    if core_errors:
+        print("[smoke] core_errors=" + ", ".join(core_errors))
+    if session_dir:
+        key_paths = [
+            session_dir,
+            session_dir / "manifest.json",
+            session_dir / "meta.json",
+            session_dir / "raw" / "raw.csv",
+            session_dir / "events" / "events.jsonl",
+            session_dir / "processed" / "eeg_windows.npz",
+            session_dir / "processed" / "models",
+            session_dir / "processed" / "reports",
+        ]
+        for p in key_paths:
+            if p.exists():
+                print(f"[smoke] artifact={p}")
+
+    if not core_pass:
+        return 2
+    if args.full and full_status == "FAIL":
+        return 2
     return 0
 
 

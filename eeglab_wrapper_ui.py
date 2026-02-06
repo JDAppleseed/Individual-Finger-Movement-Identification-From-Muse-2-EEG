@@ -4,11 +4,13 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 if sys.version_info[:2] != (3, 11):
     raise RuntimeError(f"Wrong Python. Expected 3.11, got {sys.version.split()[0]} at {sys.executable}")
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -168,6 +170,16 @@ class MuseConnectorController(QObject):
     def is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
 
+    def process_id(self) -> int:
+        with self._lock:
+            proc = self._process
+        if proc is None:
+            return 0
+        try:
+            return int(proc.pid or 0)
+        except Exception:
+            return 0
+
     def start(
         self,
         args: list[str],
@@ -214,6 +226,15 @@ class MuseConnectorController(QObject):
             threading.Thread(target=self._wait_for_exit, daemon=True).start()
 
     def stop(self) -> None:
+        self.stop_staged()
+
+    def stop_staged(
+        self,
+        *,
+        sigint_timeout_s: float = 1.5,
+        sigterm_timeout_s: float = 1.0,
+        sigkill_timeout_s: float = 1.0,
+    ) -> None:
         with self._lock:
             proc = self._process
         if proc is None:
@@ -221,14 +242,43 @@ class MuseConnectorController(QObject):
 
         def _stopper() -> None:
             try:
-                proc.terminate()
-                proc.wait(timeout=2.0)
-            except Exception:
+                if proc.poll() is not None:
+                    return
                 try:
+                    os.kill(proc.pid, signal.SIGINT)
+                    self._safe_emit(self.log_line, f"[connector] Sent SIGINT to PID {proc.pid}")
+                except Exception as exc:
+                    self._safe_emit(self.log_line, f"[connector] SIGINT failed: {exc}; using terminate()")
+                    proc.terminate()
+                deadline = time.monotonic() + float(sigint_timeout_s)
+                while time.monotonic() < deadline:
+                    if proc.poll() is not None:
+                        return
+                    time.sleep(0.05)
+                try:
+                    os.kill(proc.pid, signal.SIGTERM)
+                    self._safe_emit(self.log_line, f"[connector] Sent SIGTERM to PID {proc.pid}")
+                except Exception as exc:
+                    self._safe_emit(self.log_line, f"[connector] SIGTERM failed: {exc}; using terminate()")
+                    proc.terminate()
+                deadline = time.monotonic() + float(sigterm_timeout_s)
+                while time.monotonic() < deadline:
+                    if proc.poll() is not None:
+                        return
+                    time.sleep(0.05)
+                try:
+                    os.kill(proc.pid, signal.SIGKILL)
+                    self._safe_emit(self.log_line, f"[connector] Sent SIGKILL to PID {proc.pid}")
+                except Exception as exc:
+                    self._safe_emit(self.log_line, f"[connector] SIGKILL failed: {exc}; using kill()")
                     proc.kill()
-                    proc.wait(timeout=1.0)
-                except Exception:
-                    pass
+                deadline = time.monotonic() + float(sigkill_timeout_s)
+                while time.monotonic() < deadline:
+                    if proc.poll() is not None:
+                        return
+                    time.sleep(0.05)
+            except Exception as exc:
+                self._safe_emit(self.error, f"Connector stop failed: {exc}")
 
         threading.Thread(target=_stopper, daemon=True).start()
 
@@ -771,6 +821,10 @@ class MainWindow(QMainWindow):
         self.model_views_window: Optional[QDialog] = None
         self._model_views_root: Optional[QWidget] = None
         self.log_entries: list[str] = []
+        self._stop_requested = False
+        self._stop_waiting_runner = False
+        self._stop_waiting_connector = False
+        self._stop_step_id: Optional[str] = None
 
         self._build_ui()
 
@@ -4414,17 +4468,40 @@ class MainWindow(QMainWindow):
                 widget.setCurrentText(text_val)
 
     def _stop_process(self) -> None:
+        runner_pid = self.runner.process_id() if self.runner.is_running() else 0
+        connector_pid = self.muse_connector.process_id() if self.muse_connector.is_running() else 0
+        self._append_log(
+            f"Stop requested: runner={runner_pid or '-'} connector={connector_pid or '-'} step={self.active_step or '-'}"
+        )
+        stopping_any = False
+        if self.active_step:
+            self._set_step_status(self.active_step, "Stopping...")
+        self._set_stream_status("Stopping...")
+        if self.muse_connector.is_running():
+            self._set_connector_status("stopping")
         if self.runner.is_running():
+            stopping_any = True
             self._append_log("Stopping process...")
-            if self.active_step in {"step1", "infer"}:
-                self.runner.stop_hard()
-            else:
-                self.runner.stop()
+            self._stop_requested = True
+            self._stop_waiting_runner = True
+            self._stop_waiting_connector = self.muse_connector.is_running()
+            self._stop_step_id = self.active_step
+            self.runner.stop_staged()
+        if self.muse_connector.is_running():
+            stopping_any = True
+            self._append_log("Stopping connector...")
+            self._stop_requested = True
+            self._stop_waiting_connector = True
+            if self._stop_step_id is None:
+                self._stop_step_id = self.active_step
+            self.muse_connector.stop_staged()
+        if stopping_any:
+            self._set_live_buttons_state()
 
     def _stop_live_hard(self) -> None:
         if self.runner.is_running():
             self._append_log("⚠️ Hard stop requested for live recording...")
-            self.runner.stop_hard()
+            self.runner.stop_staged()
         self._set_live_buttons_state()
 
     def _connect_muse(self) -> None:
@@ -4470,7 +4547,7 @@ class MainWindow(QMainWindow):
     def _disconnect_muse(self) -> None:
         if self.muse_connector.is_running():
             self._append_log("Disconnecting Muse connector...")
-            self.muse_connector.stop()
+            self.muse_connector.stop_staged()
         self.live_stream_ready = False
         self._stop_auto_scan()
         self._set_live_buttons_state()
@@ -4616,6 +4693,8 @@ class MainWindow(QMainWindow):
         self.live_stream_ready = False
         self._stop_auto_scan()
         self._set_live_buttons_state()
+        self._stop_waiting_connector = False
+        self._maybe_finalize_stop()
 
     def _set_live_buttons_state(self) -> None:
         connector_running = self.muse_connector.is_running()
@@ -4697,6 +4776,9 @@ class MainWindow(QMainWindow):
         return dialog.exec() == QDialog.Accepted
 
     def _on_process_started(self) -> None:
+        self._stop_requested = False
+        self._stop_waiting_runner = False
+        self._stop_step_id = None
         if self.active_step:
             self._set_step_status(self.active_step, "Running")
         if self.active_step == "step1":
@@ -4707,7 +4789,10 @@ class MainWindow(QMainWindow):
         step = self.active_step
         if not step:
             return
-        if exit_status != 0:
+        self._stop_waiting_runner = False
+        if self._stop_requested:
+            status = "Stopping..." if self.muse_connector.is_running() else "Stopped"
+        elif exit_status != 0:
             status = "Crashed"
         else:
             status = "Success" if exit_code == 0 else f"Failed ({exit_code})"
@@ -4730,6 +4815,22 @@ class MainWindow(QMainWindow):
             self._refresh_status_summary()
         self.active_step = None
         self._set_live_buttons_state()
+        self._maybe_finalize_stop()
+
+    def _maybe_finalize_stop(self) -> None:
+        if not self._stop_requested:
+            return
+        if self.runner.is_running() or self.muse_connector.is_running():
+            self._set_stream_status("Stopping...")
+            return
+        self._stop_requested = False
+        self._stop_waiting_runner = False
+        self._stop_waiting_connector = False
+        if self._stop_step_id:
+            self._set_step_status(self._stop_step_id, "Stopped")
+        self._stop_step_id = None
+        self._set_stream_status("Stopped")
+        self._append_log("Stopped")
 
     def _set_step_status(self, step_id: str, text: str) -> None:
         label = self.step_status.get(step_id)
