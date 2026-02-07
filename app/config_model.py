@@ -8,6 +8,7 @@ from typing import Any, Dict
 
 SCHEMA_VERSION = "1.0"
 TIMEBASE_VERSION = "absolute_v1"
+DEFAULT_TARGET_FS = 256.0
 
 
 def now_utc_iso() -> str:
@@ -93,8 +94,8 @@ def default_step1b_settings() -> Dict[str, Any]:
         "session_dir": None,
         "features": None,
         "events": None,
-        "subject_id": "8-M16",
-        "target_fs": None,
+        "subject_id": None,
+        "target_fs": DEFAULT_TARGET_FS,
         "allow_gaps": False,
         "allow_partial": False,
         "ignore_misalignment": False,
@@ -120,7 +121,7 @@ def default_step1b_settings() -> Dict[str, Any]:
 def default_train_settings() -> Dict[str, Any]:
     return {
         "npz": "eeg_windows.npz",
-        "subject_id": "8-M16",
+        "subject_id": None,
         "epochs": 60,
         "batch_size": 64,
         "lr": 0.001,
@@ -145,7 +146,7 @@ def default_infer_settings() -> Dict[str, Any]:
         "stream_type": "EEG",
         "window_sec": 0.25,
         "hop_sec": 0.05,
-        "target_fs": 256.0,
+        "target_fs": DEFAULT_TARGET_FS,
         "allow_drop": False,
         "latency_threshold_ms": 250.0,
         "latency_policy": "warn",
@@ -171,6 +172,28 @@ def build_config(
     settings: Dict[str, Any],
     timebase_version: str = TIMEBASE_VERSION,
 ) -> ConfigFile:
+    settings = dict(settings or {})
+    if subject_id:
+        settings["subject_id"] = subject_id
+        if "DEFAULT_SUBJECT_ID" in settings:
+            settings["DEFAULT_SUBJECT_ID"] = subject_id
+    if "window_sec" in settings and "target_fs" in settings:
+        try:
+            window_sec = float(settings.get("window_sec"))
+            target_fs = float(settings.get("target_fs"))
+            window_samples = int(round(window_sec * target_fs))
+        except Exception:
+            window_samples = 0
+        if window_samples < 1:
+            settings["target_fs"] = DEFAULT_TARGET_FS
+            try:
+                window_sec = float(settings.get("window_sec", 0.0))
+                target_fs = float(settings.get("target_fs"))
+                window_samples = int(round(window_sec * target_fs))
+            except Exception:
+                window_samples = 0
+            if window_samples < 1:
+                settings["window_sec"] = 0.25
     return ConfigFile(
         schema_version=SCHEMA_VERSION,
         created_at=now_utc_iso(),

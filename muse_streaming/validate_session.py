@@ -68,6 +68,7 @@ def validate_session_dir(session_dir: Path, *, allow_partial: bool = False) -> D
             "init_only",
             "signal_SIGINT",
             "signal_SIGTERM",
+            "signal_2",
         }
         if termination_reason not in allowed_termination:
             report["ok"] = False

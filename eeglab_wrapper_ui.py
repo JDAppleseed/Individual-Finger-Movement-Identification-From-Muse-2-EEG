@@ -952,9 +952,24 @@ class MainWindow(QMainWindow):
                 ArgSpec("session_id", "--session-id", "text", "Session ID for raw recording."),
             ],
             "step1b": [
-                ArgSpec("session_dir", "--session-dir", "text", "Session directory path."),
-                ArgSpec("features", "--features", "text", "Override features path."),
-                ArgSpec("events", "--events", "text", "Override events path."),
+                ArgSpec(
+                    "session_dir",
+                    "--session-dir",
+                    "text",
+                    "Session Directory (sessions/<session_id>).",
+                ),
+                ArgSpec(
+                    "features",
+                    "--features",
+                    "text",
+                    "Legacy features CSV path (optional).",
+                ),
+                ArgSpec(
+                    "events",
+                    "--events",
+                    "text",
+                    "Legacy events CSV path (optional).",
+                ),
                 ArgSpec("subject_id", "--subject-id", "text", "Subject ID override."),
                 ArgSpec("target_fs", "--target-fs", "float", "Target resample rate."),
                 ArgSpec("allow_gaps", "--allow-gaps", "bool", "Allow gaps in windows."),
@@ -1894,8 +1909,8 @@ class MainWindow(QMainWindow):
             ("1) Record (Lossless)", 1),
             ("2) Events: Mark/Edit (Optional)", 2),
             ("3) Validate Session", 3),
-            ("4) Extract Windows", 4),
-            ("5) Train Model", 5),
+            ("1b) Extract Windows", 4),
+            ("2) Train Model", 5),
             ("6) Evaluate", 6),
             ("7) Live Infer + Actuate", 7),
         ]:
@@ -2105,7 +2120,7 @@ class MainWindow(QMainWindow):
     def _build_step1b_page(self) -> QWidget:
         note = QLabel(
             "Extract windows from a lossless session directory (raw/ + events.jsonl). "
-            "Use the Session Dir field or select a session in Validate Session."
+            "Use the Session Directory (sessions/<session_id>) field or select a session in Validate Session."
         )
         note.setWordWrap(True)
         return self._build_step_page(
@@ -2181,7 +2196,7 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         self.diag_features_path = OutlineLineEdit()
         self.diag_events_path = OutlineLineEdit()
-        form.addRow("Features CSV", self.diag_features_path)
+        form.addRow("Raw/Features CSV", self.diag_features_path)
         form.addRow("Events CSV", self.diag_events_path)
         layout.addLayout(form)
 
@@ -2650,12 +2665,18 @@ class MainWindow(QMainWindow):
                 10,
                 is_float=True,
             )
-            self._add_text(step_id, form, "session_dir", "Session dir", defaults)
+            self._add_text(
+                step_id,
+                form,
+                "session_dir",
+                "Session Directory (sessions/<session_id>)",
+                defaults,
+            )
             self._add_file_picker(
                 step_id,
                 form,
                 "features",
-                "Features path",
+                "Legacy features CSV",
                 defaults,
                 "CSV (*.csv);;All Files (*)",
             )
@@ -2663,7 +2684,7 @@ class MainWindow(QMainWindow):
                 step_id,
                 form,
                 "events",
-                "Events path",
+                "Legacy events CSV",
                 defaults,
                 "CSV (*.csv);;All Files (*)",
             )
@@ -3709,25 +3730,47 @@ class MainWindow(QMainWindow):
         tb = state.get("timebase_version") or state.get("timebase")
         if tb and tb != TIMEBASE_VERSION:
             return False, f"Timebase mismatch: {tb}"
-        features_path = (
-            Path(state.get("features_path", "")) if state.get("features_path") else None
-        )
-        if not features_path or not features_path.exists():
-            return False, "Features file missing."
-        if not self._csv_has_data_rows(features_path):
-            return False, "Features file empty."
-        header = self._read_csv_header(features_path)
-        required = {"lsl_timestamp", "time_s", "ch1", "ch2", "ch3", "ch4"}
-        if not required.issubset(set(header)):
-            return False, "Features file missing required columns."
-        events_path = (
-            Path(state.get("events_path", "")) if state.get("events_path") else None
-        )
+
+        # Preferred (current) layout: session_dir/raw contains eeg_raw_shard_*.npy and optionally raw.csv
+        session_dir = Path(state.get("session_dir", "")) if state.get("session_dir") else None
+        raw_dir = None
+        if session_dir and session_dir.exists():
+            cand = session_dir / "raw"
+            if cand.exists():
+                raw_dir = cand
+
+        # Backward compatibility: some older states may only store a 'features_path'
+        features_path = Path(state.get("features_path", "")) if state.get("features_path") else None
+
+        has_raw_shards = False
+        if raw_dir and raw_dir.exists():
+            try:
+                has_raw_shards = any(raw_dir.glob("eeg_raw_shard_*.npy")) or (raw_dir / "raw.csv").exists()
+            except Exception:
+                has_raw_shards = False
+
+        has_legacy_features_csv = False
+        if features_path and features_path.exists():
+            # Legacy requirement: basic schema check
+            if self._csv_has_data_rows(features_path):
+                header = self._read_csv_header(features_path)
+                required = {"lsl_timestamp", "time_s", "ch1", "ch2", "ch3", "ch4"}
+                has_legacy_features_csv = required.issubset(set(header))
+
+        if not has_raw_shards and not has_legacy_features_csv:
+            return False, "No raw shards found (session_dir/raw) and no valid legacy features CSV."
+
+        events_path = Path(state.get("events_path", "")) if state.get("events_path") else None
         if events_path and events_path.exists():
             return True, "Resume OK."
-        if features_path.parent.exists():
+
+        # If events are missing, it's still safe to resume: we will create a new events file in the session.
+        if session_dir and session_dir.exists():
+            return True, "Events missing; will create new events file."
+        if features_path and features_path.parent.exists():
             return True, "Events missing; will create new events file."
         return False, "Events path not safe."
+
 
     def _csv_has_data_rows(self, path: Path) -> bool:
         try:

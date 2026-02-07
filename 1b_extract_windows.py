@@ -138,6 +138,22 @@ def _resolve_path(path_str: Optional[str]) -> Optional[Path]:
     return ROOT_DIR / p
 
 
+def _latest_session_dir(sessions_dir: Path) -> Optional[Path]:
+    if not sessions_dir or not sessions_dir.exists() or not sessions_dir.is_dir():
+        return None
+    candidates = [p for p in sessions_dir.iterdir() if p.is_dir()]
+    if not candidates:
+        return None
+
+    def _mtime(p: Path) -> float:
+        try:
+            return float(p.stat().st_mtime)
+        except Exception:
+            return 0.0
+
+    return max(candidates, key=_mtime)
+
+
 def _csv_has_data_rows(path: Optional[Path]) -> bool:
     if not path or not path.exists() or path.stat().st_size == 0:
         return False
@@ -942,6 +958,23 @@ def main():
         seed_value = int(SEED)
 
     session_dir = _resolve_path(args.session_dir) if args.session_dir else None
+    if not session_dir and isinstance(settings, dict):
+        config_session_dir = settings.get("session_dir")
+        if config_session_dir:
+            session_dir = _resolve_path(str(config_session_dir))
+    if not session_dir and isinstance(settings, dict):
+        for key in ("subject_dir", "subject_root", "out_dir"):
+            base = settings.get(key)
+            if not base:
+                continue
+            subject_dir = _resolve_path(str(base))
+            if not subject_dir:
+                continue
+            subject_dir = subject_dir.expanduser().resolve()
+            inferred = _latest_session_dir(subject_dir / "sessions")
+            if inferred:
+                session_dir = inferred
+                break
     session_manifest: Dict[str, Any] = {}
     session_meta: Dict[str, Any] = {}
     events: List[Dict[str, Any]] = []
