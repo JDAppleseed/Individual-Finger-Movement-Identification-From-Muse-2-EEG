@@ -6,10 +6,18 @@ Adds real actuation support for an Arduino-controlled robotic hand via Serial (U
 Protocol sent to Arduino (newline-terminated ASCII):
   "{finger_id},{action_id}\n"
 Where:
-  finger_id: 0=all/none, 1=thumb, 2=index, 3=middle, 4=ring, 5=pinky
+  finger_id: 0=none, 1=thumb, 2=index, 3=middle, 4=ring, 5=pinky
   action_id: 0=rest, 1=open, 2=close
 
 This matches the project conventions used in event logs (rest down-weighting, etc.).
+
+Invariant:
+  finger_id=0 is NONE and is always a no-op; never actuate hardware.
+
+Manual test (serial):
+  - Send "0,1\n" -> should do nothing (no-op).
+  - Send "1,1\n" -> should open thumb.
+  - Send "1,2\n" -> should close thumb.
 """
 
 from __future__ import annotations
@@ -110,6 +118,16 @@ def _safe_float(x: float) -> float:
         return 0.0
 
 
+def _is_noop_decision(finger_id: int, action_id: int) -> bool:
+    """
+    Returns True if the decision represents a guaranteed no-op.
+    Semantics:
+      finger_id == 0 -> NONE
+      action_id == 0 -> REST
+    """
+    return int(finger_id) == 0 or int(action_id) == 0
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Live inference + optional robotic hand actuation")
 
@@ -176,6 +194,12 @@ def _debounced_should_send(
     cooldown_ms: int,
 ) -> bool:
     if decision.prob <= 0.0:
+        return False
+    # Invariant: finger_id=0 is NONE and must never actuate hardware.
+    if int(decision.finger_id) == 0:
+        return False
+    # Invariant: action_id=0 (REST) must never actuate hardware.
+    if int(decision.action_id) == 0:
         return False
     if stable_count < required_stability:
         return False
@@ -331,14 +355,24 @@ def main() -> int:
 
                 p95_latency = float(np.percentile(latency_window, 95)) if latency_window else float(latency_ms)
 
-                logger.info(
-                    "pred_action=%s pred_finger=%s joint_prob=%.3f latency_ms=%.1f dropped_windows=%s",
-                    decision.action_id,
-                    decision.finger_id,
-                    decision.prob,
-                    latency_ms,
-                    dropped_windows,
-                )
+                if _is_noop_decision(decision.finger_id, decision.action_id):
+                    logger.info(
+                        "PREDICT NO-OP finger=%s action=%s joint_prob=%.3f latency_ms=%.1f dropped_windows=%s",
+                        decision.finger_id,
+                        decision.action_id,
+                        decision.prob,
+                        latency_ms,
+                        dropped_windows,
+                    )
+                else:
+                    logger.info(
+                        "PREDICT ACTUATABLE finger=%s action=%s joint_prob=%.3f latency_ms=%.1f dropped_windows=%s",
+                        decision.finger_id,
+                        decision.action_id,
+                        decision.prob,
+                        latency_ms,
+                        dropped_windows,
+                    )
 
                 # Stability / debounce
                 key = (decision.finger_id, decision.action_id)
@@ -351,7 +385,14 @@ def main() -> int:
                 # Decide to actuate
                 if args.enable_actuation and actuator is not None:
                     if decision.prob >= float(args.actuation_min_prob):
-                        if _debounced_should_send(
+                        # Hard safety gate: NEVER actuate on NONE/REST.
+                        if int(decision.finger_id) == 0 or int(decision.action_id) == 0:
+                            logger.info(
+                                "NO-OP decision suppressed (finger=%s action=%s)",
+                                decision.finger_id,
+                                decision.action_id,
+                            )
+                        elif _debounced_should_send(
                             decision=decision,
                             last_sent=last_sent,
                             stable_count=stable_count,

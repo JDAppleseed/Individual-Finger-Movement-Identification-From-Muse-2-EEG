@@ -17,7 +17,7 @@
     "<finger_id>,<action_id>\n"
 
     finger_id:
-      0 = all fingers
+      0 = none (NO-OP)
       1 = thumb
       2 = index
       3 = middle
@@ -31,7 +31,7 @@
       2 = close
 
   Examples:
-    "0,1\n" -> open all fingers
+    "0,1\n" -> NO-OP (never actuate)
     "3,2\n" -> close middle finger
     "6,1\n" -> wrist open (if used)
 
@@ -39,6 +39,12 @@
     - This is intentionally minimal: no IMU/glove/BLE logic, just serial control.
     - If your servos move the wrong direction, swap OPEN_ANGLE/CLOSE_ANGLE
       for that channel in the arrays below.
+    - Invariant: finger_id=0 is NONE and is always a no-op; never actuate hardware.
+
+  Manual test (serial):
+    - Send "0,1\n" -> should do nothing (no-op).
+    - Send "1,1\n" -> should open thumb.
+    - Send "1,2\n" -> should close thumb.
 
 */
 
@@ -90,6 +96,10 @@ void moveServoTo(uint8_t idx, uint8_t target) {
 
 void commandFinger(uint8_t finger_id, uint8_t action_id) {
   // action: 0=rest, 1=open, 2=close
+  // Invariant: finger_id=0 is NONE and is always a no-op; never actuate hardware.
+  if (finger_id == 0) {
+    return;
+  }
   if (action_id == 0) {
     // "rest" = do nothing (hold last position)
     return;
@@ -100,13 +110,6 @@ void commandFinger(uint8_t finger_id, uint8_t action_id) {
     uint8_t target = (action_id == 1) ? OPEN_ANGLE[idx] : CLOSE_ANGLE[idx];
     moveServoTo(idx, target);
   };
-
-  if (finger_id == 0) {
-    // all fingers (exclude wrist by default? include wrist only if you want it)
-    do_one(0); do_one(1); do_one(2); do_one(3); do_one(4);
-    // wrist is idx 5; leave unchanged unless explicitly commanded
-    return;
-  }
 
   // Map ids to indices (1..6 -> 0..5)
   if (finger_id >= 1 && finger_id <= 6) {
