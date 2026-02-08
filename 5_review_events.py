@@ -41,58 +41,82 @@ def latest_subject_file(subject_id, suffix, base_dir):
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
+    "--session-dir",
+    type=str,
+    default=None,
+    help="Session directory (defaults to <session_dir>/events/events.csv and <session_dir>/raw/raw.csv).",
+)
+parser.add_argument(
     "--subject-id",
     type=str,
-    default="8-M16",
-    help="Subject ID to select latest session files",
+    default="",
+    help="(Deprecated) Subject ID lookup is no longer supported without explicit paths.",
 )
 parser.add_argument("--events", type=str, default=None, help="Override events path")
 parser.add_argument("--features", type=str, default=None, help="Override features path")
 args = parser.parse_args()
 
-meta_path = Path("session_meta.json")
 events_candidate = None
 features_candidate = None
+explicit_events = bool(args.events)
+explicit_features = bool(args.features)
+selection_source = "legacy_explicit"
 
-if args.subject_id:
-    events_candidate = latest_subject_file(
-        args.subject_id, "events.csv", "data/processed"
-    )
-    features_candidate = latest_subject_file(
-        args.subject_id, "eeg_features.csv", "data/processed"
-    )
-    if events_candidate is None or features_candidate is None:
+if args.session_dir:
+    session_dir = Path(args.session_dir).expanduser().resolve()
+    if not session_dir.exists():
+        print("Session selection source: session_dir")
+        print(f"Session dir not found: {session_dir}")
+        raise SystemExit(2)
+    if explicit_events or explicit_features:
         print(
-            f"No session files found for subject_id={args.subject_id} in data/processed."
+            "⚠️ Explicit --events/--features provided with --session-dir; using explicit paths."
+        )
+        selection_source = "legacy_explicit"
+    else:
+        selection_source = "session_dir"
+    if explicit_events:
+        events_candidate = Path(args.events)
+    else:
+        events_candidate = session_dir / "events" / "events.csv"
+    if explicit_features:
+        features_candidate = Path(args.features)
+    else:
+        features_candidate = session_dir / "raw" / "raw.csv"
+        if not features_candidate.exists():
+            alt = session_dir / "features" / "eeg_features.csv"
+            if alt.exists():
+                features_candidate = alt
+else:
+    if args.subject_id:
+        print("Session selection source: legacy_explicit")
+        print(
+            "❌ subject-id lookup is not supported without --session-dir. Provide explicit --events/--features."
         )
         raise SystemExit(2)
-
-if args.events:
+    if not explicit_events or not explicit_features:
+        print("Session selection source: legacy_explicit")
+        print(
+            "❌ Missing --session-dir. Provide --session-dir or explicit --events/--features."
+        )
+        raise SystemExit(2)
     events_candidate = Path(args.events)
-if args.features:
     features_candidate = Path(args.features)
 
-if events_candidate is None or features_candidate is None:
-    if meta_path.exists():
-        meta = json.loads(meta_path.read_text())
-        if events_candidate is None:
-            candidate = Path(meta.get("events_path", str(EVENTS_PATH)))
-            if candidate.exists():
-                events_candidate = candidate
-        if features_candidate is None:
-            candidate = Path(meta.get("features_path", str(FEATURES_PATH)))
-            if candidate.exists():
-                features_candidate = candidate
+EVENTS_PATH = events_candidate or EVENTS_PATH
+FEATURES_PATH = features_candidate or FEATURES_PATH
 
-if events_candidate is not None:
-    EVENTS_PATH = events_candidate
-if features_candidate is not None:
-    FEATURES_PATH = features_candidate
+print(f"Session selection source: {selection_source}")
+print(f"Using events file: {EVENTS_PATH}")
+print(f"Using features file: {FEATURES_PATH}")
+print(f"Saving edits to: {EVENTS_PATH}")
 
 if not EVENTS_PATH.exists():
-    raise FileNotFoundError(f"events.csv not found: {EVENTS_PATH}")
+    print(f"events.csv not found: {EVENTS_PATH}")
+    raise SystemExit(2)
 if not FEATURES_PATH.exists():
-    raise FileNotFoundError(f"eeg_features.csv not found: {FEATURES_PATH}")
+    print(f"eeg_features.csv not found: {FEATURES_PATH}")
+    raise SystemExit(2)
 
 events_df = pd.read_csv(EVENTS_PATH)
 

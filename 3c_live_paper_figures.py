@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import joblib
 from pathlib import Path
+from typing import Optional
 
 from sklearn.metrics import confusion_matrix, accuracy_score
 
@@ -52,28 +53,105 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
+def _resolve_path(path_str: str, base_dir: Optional[Path]) -> Path:
+    candidate = Path(path_str).expanduser()
+    if not candidate.is_absolute():
+        base = base_dir if base_dir is not None else Path.cwd()
+        candidate = (base / candidate).resolve()
+    return candidate
+
+
 out_dir_override = Path(args.out_dir).expanduser() if args.out_dir else None
+explicit_npz = args.npz not in ("eeg_windows.npz", "./eeg_windows.npz")
+explicit_model = args.model not in ("finger_action_model.pt", "./finger_action_model.pt")
+explicit_scaler = args.scaler not in ("scaler.save", "./scaler.save")
+explicit_run_dir = bool(args.run_dir)
+explicit_overrides = [
+    name
+    for name, is_explicit in [
+        ("run_dir", explicit_run_dir),
+        ("npz", explicit_npz),
+        ("model", explicit_model),
+        ("scaler", explicit_scaler),
+    ]
+    if is_explicit
+]
+
 session_dir_path = resolve_session_dir(args.session_dir) if args.session_dir else None
 run_dir_path = None
+selection_source = "legacy_explicit"
 if session_dir_path:
     if not session_dir_path.exists():
-        raise FileNotFoundError(f"Session dir not found: {session_dir_path}")
+        print("Session selection source: session_dir")
+        print(f"Session dir not found: {session_dir_path}")
+        raise SystemExit(2)
+    base_dir = session_dir_path
+    if explicit_overrides:
+        print(
+            f"⚠️ Explicit paths provided with --session-dir; using overrides: {explicit_overrides}"
+        )
+        selection_source = "legacy_explicit"
+    else:
+        selection_source = "session_dir"
     run_dir_path = (
-        Path(args.run_dir).expanduser() if args.run_dir else resolve_latest_run_dir(session_dir_path)
+        Path(args.run_dir).expanduser()
+        if explicit_run_dir
+        else resolve_latest_run_dir(session_dir_path)
     )
     if run_dir_path is None or not run_dir_path.exists():
-        raise FileNotFoundError(
+        print("Session selection source: session_dir")
+        print(
             "No model run directory found. Train a model first (Step 2), or pass --run-dir."
         )
+        raise SystemExit(2)
     layout = SessionLayout(session_dir_path)
-    if args.npz == "eeg_windows.npz":
+    if explicit_npz:
+        args.npz = str(_resolve_path(args.npz, base_dir))
+    else:
         args.npz = str(layout.windows_npz)
-    if args.model == "finger_action_model.pt":
+    if explicit_model:
+        args.model = str(_resolve_path(args.model, base_dir))
+    else:
         args.model = str(run_dir_path / "finger_action_model.pt")
-    if args.scaler == "scaler.save":
+    if explicit_scaler:
+        args.scaler = str(_resolve_path(args.scaler, base_dir))
+    else:
         args.scaler = str(run_dir_path / "scaler.save")
     if out_dir_override is None:
         out_dir_override = layout.reports_root / run_dir_path.name
+else:
+    base_dir = Path.cwd()
+    if not explicit_npz:
+        print("Session selection source: legacy_explicit")
+        print("❌ Missing --session-dir. Provide --session-dir or explicit --npz PATH.")
+        raise SystemExit(2)
+    if explicit_run_dir:
+        run_dir_path = Path(args.run_dir).expanduser()
+        if not explicit_model:
+            args.model = str(run_dir_path / "finger_action_model.pt")
+        if not explicit_scaler:
+            args.scaler = str(run_dir_path / "scaler.save")
+    else:
+        if not explicit_model or not explicit_scaler:
+            print("Session selection source: legacy_explicit")
+            print(
+                "❌ Missing --session-dir. Provide explicit --model and --scaler (or --run-dir)."
+            )
+            raise SystemExit(2)
+    args.npz = str(_resolve_path(args.npz, base_dir))
+    if explicit_model:
+        args.model = str(_resolve_path(args.model, base_dir))
+    if explicit_scaler:
+        args.scaler = str(_resolve_path(args.scaler, base_dir))
+
+print(f"Session selection source: {selection_source}")
+print(f"Using NPZ file: {args.npz}")
+print(f"Using model file: {args.model}")
+print(f"Using scaler file: {args.scaler}")
+
+if not Path(args.npz).exists():
+    print(f"NPZ file not found: {args.npz}")
+    raise SystemExit(2)
 
 npz_path = Path(args.npz).expanduser()
 model_path = Path(args.model).expanduser()
@@ -81,6 +159,7 @@ scaler_path = Path(args.scaler).expanduser()
 report_dir = out_dir_override or Path("reports/subjects")
 report_dir.mkdir(parents=True, exist_ok=True)
 run_tag = run_dir_path.name if run_dir_path is not None else None
+print(f"Saving figures to: {report_dir}")
 
 X, y_action, y_finger, meta = load_sequence_npz(str(npz_path))
 
@@ -104,7 +183,8 @@ y_finger_test = y_finger[test_idx]
 # =========================
 
 if not scaler_path.exists():
-    raise FileNotFoundError(f"Scaler file not found: {scaler_path}")
+    print(f"Scaler file not found: {scaler_path}")
+    raise SystemExit(2)
 normalizer = joblib.load(str(scaler_path))
 X_test = apply_channel_normalizer(X_test, normalizer)
 
@@ -119,7 +199,8 @@ model = CNNLSTMFingerActionNet(
     n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions
 )
 if not model_path.exists():
-    raise FileNotFoundError(f"Model file not found: {model_path}")
+    print(f"Model file not found: {model_path}")
+    raise SystemExit(2)
 model.load_state_dict(torch.load(str(model_path), map_location="cpu"))
 
 # =========================

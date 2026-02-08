@@ -30,47 +30,24 @@ def latest_subject_file(subject_id, suffix, base_dir):
     return candidates[-1] if candidates else None
 
 
-def load_session_meta():
-    meta_path = Path("session_meta.json")
-    if not meta_path.exists():
-        return None
-    try:
-        return json.loads(meta_path.read_text())
-    except Exception:
-        return None
-
-
-def resolve_paths(events_override=None, features_override=None):
-    session_meta = load_session_meta()
+def resolve_paths(session_dir=None, events_override=None, features_override=None):
     session_used = False
-    events_path = None
-    features_path = None
+    events_path = Path(events_override) if events_override else None
+    features_path = Path(features_override) if features_override else None
 
-    if events_override:
-        events_path = Path(events_override)
-    if features_override:
-        features_path = Path(features_override)
-
-    if session_meta:
+    if session_dir:
         session_used = True
+        session_path = Path(session_dir).expanduser().resolve()
+        if not session_path.exists():
+            return False, None, None
         if events_path is None:
-            candidate = Path(session_meta.get("events_path", ""))
-            if candidate.exists():
-                events_path = candidate
+            events_path = session_path / "events" / "events.csv"
         if features_path is None:
-            candidate = Path(session_meta.get("features_path", ""))
-            if candidate.exists():
-                features_path = candidate
-
-    if events_path is None:
-        candidate = Path("events.csv")
-        if candidate.exists():
-            events_path = candidate
-
-    if features_path is None:
-        candidate = Path("eeg_features.csv")
-        if candidate.exists():
-            features_path = candidate
+            features_path = session_path / "raw" / "raw.csv"
+            if not features_path.exists():
+                alt = session_path / "features" / "eeg_features.csv"
+                if alt.exists():
+                    features_path = alt
 
     return session_used, events_path, features_path
 
@@ -298,10 +275,16 @@ def main():
         "--features", type=str, default=None, help="Override features path"
     )
     parser.add_argument(
+        "--session-dir",
+        type=str,
+        default=None,
+        help="Session directory (defaults to <session_dir>/events/events.csv and <session_dir>/raw/raw.csv).",
+    )
+    parser.add_argument(
         "--subject-id",
         type=str,
-        default="8-M16",
-        help="Subject ID to select latest session files",
+        default="",
+        help="(Deprecated) Subject ID lookup is no longer supported without explicit paths.",
     )
     parser.add_argument(
         "--strict", action="store_true", help="Exit with code 1 on warnings"
@@ -311,33 +294,42 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.subject_id:
-        if args.events is None:
-            events_path = latest_subject_file(
-                args.subject_id, "events.csv", "data/processed"
-            )
-            if events_path is None:
-                print(
-                    f"No events file found for subject_id={args.subject_id} in data/processed."
-                )
-                raise SystemExit(2)
-            args.events = str(events_path)
-        if args.features is None:
-            features_path = latest_subject_file(
-                args.subject_id, "eeg_features.csv", "data/processed"
-            )
-            if features_path is None:
-                print(
-                    f"No features file found for subject_id={args.subject_id} in data/processed."
-                )
-                raise SystemExit(2)
-            args.features = str(features_path)
+    explicit_events = bool(args.events)
+    explicit_features = bool(args.features)
+    if args.subject_id and not args.session_dir:
+        print("Session selection source: legacy_explicit")
+        print(
+            "❌ subject-id lookup is not supported without --session-dir. Provide explicit --events/--features."
+        )
+        raise SystemExit(2)
+    if not args.session_dir and (not explicit_events or not explicit_features):
+        print("Session selection source: legacy_explicit")
+        print(
+            "❌ Missing --session-dir. Provide --session-dir or explicit --events/--features."
+        )
+        raise SystemExit(2)
 
-    session_used, events_path, features_path = resolve_paths(args.events, args.features)
+    session_used, events_path, features_path = resolve_paths(
+        args.session_dir, args.events, args.features
+    )
+    if args.session_dir and not session_used:
+        print("Session selection source: session_dir")
+        print(f"Session dir not found: {args.session_dir}")
+        raise SystemExit(2)
 
-    print(f"Session meta used: {'YES' if session_used else 'NO'}")
+    selection_source = "session_dir"
+    if explicit_events or explicit_features:
+        selection_source = "legacy_explicit"
+        if args.session_dir:
+            print(
+                "⚠️ Explicit --events/--features provided with --session-dir; using explicit paths."
+            )
+
+    print(f"Session selection source: {selection_source}")
+    if args.json_report:
+        print(f"Saving report to: {args.json_report}")
     if events_path is None or not Path(events_path).exists():
-        print("No events file found (session_meta or repo root).")
+        print("No events file found.")
         raise SystemExit(2)
 
     print(f"Validating events file: {events_path}")

@@ -4072,6 +4072,15 @@ class MainWindow(QMainWindow):
         elif step_id == "train" and not backend_session:
             backend_session = self._guess_backend_session_id()
 
+        if step_id in {"train", "infer"}:
+            session_dir_value = self.session_dir_input.text().strip()
+            if not session_dir_value:
+                QMessageBox.warning(
+                    self,
+                    "Session Dir Required",
+                    "Missing session dir. Select the session folder under subjects/<id>/sessions/<session_id>.",
+                )
+                return
         if step_id == "step1b":
             settings["subject_id"] = settings.get("subject_id") or self.current_subject
             session_dir_value = self.session_dir_input.text().strip()
@@ -4381,6 +4390,13 @@ class MainWindow(QMainWindow):
 
         subject_dir = subject_root(self.current_project, self.current_subject)
         session_dir = self._resolve_session_dir_for_current(subject_dir)
+        if not session_dir:
+            QMessageBox.warning(
+                self,
+                "Session Dir Required",
+                "Missing session dir. Select the session folder under subjects/<id>/sessions/<session_id>.",
+            )
+            return
         npz_path = self._resolve_windows_npz_for_current(subject_dir)
         exp_hash, model_path, scaler_path = self._resolve_latest_model_artifacts(subject_dir)
 
@@ -4389,27 +4405,6 @@ class MainWindow(QMainWindow):
         # Preferred: session_dir contract (scripts auto-resolve latest run under processed/models)
         if session_dir:
             args += ["--session-dir", str(session_dir)]
-        else:
-            # Legacy fallback: explicit artifacts, scoped to this subject.
-            if script_key in {"evaluate_deepchecks", "evaluate_fast", "evaluate"}:
-                if npz_path:
-                    args += ["--npz", str(npz_path)]
-                if model_path:
-                    args += ["--model", str(model_path)]
-                if scaler_path:
-                    args += ["--scaler", str(scaler_path)]
-
-            if script_key == "evaluate_reports":
-                if self.current_subject:
-                    args += ["--subject-id", str(self.current_subject)]
-                if exp_hash:
-                    args += ["--exp-hash", str(exp_hash)]
-
-            if script_key == "evaluate_figures":
-                if exp_hash:
-                    os.environ["EXP_HASH"] = str(exp_hash)
-                if self.current_subject:
-                    os.environ["SUBJECT_ID"] = str(self.current_subject)
 
         self.active_step = script_key
         self._append_log(f"Running: {args} (cwd={self.repo_root})")

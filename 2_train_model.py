@@ -179,7 +179,7 @@ def build_arg_parser():
     p.add_argument(
         "--subject-id",
         type=str,
-        default="8-M16",
+        default="",
         help="Filter training data to a single subject_id",
     )
     p.add_argument(
@@ -238,40 +238,14 @@ def _search_eeg_windows(root: Path, max_depth: int):
     return matches
 
 
-def resolve_npz_path(path_str: str) -> Path:
-    candidate = Path(path_str)
-    if candidate.exists():
-        return candidate
+def resolve_npz_path(path_str: str, *, base_dir: Optional[Path] = None) -> Path:
+    candidate = Path(path_str).expanduser()
     if not candidate.is_absolute():
-        root_candidate = ROOT_DIR / candidate
-        if root_candidate.exists():
-            return root_candidate
-    if path_str not in (DEFAULT_NPZ, f"./{DEFAULT_NPZ}"):
-        raise FileNotFoundError(f"NPZ file not found: {path_str}")
-
-    processed_dir = ROOT_DIR / "data/processed"
-    if processed_dir.exists():
-        latest = _latest_by_mtime(list(processed_dir.glob("*_eeg_windows.npz")))
-        if latest:
-            return latest
-        direct = processed_dir / DEFAULT_NPZ
-        if direct.exists():
-            return direct
-
-    windows_dir = ROOT_DIR / "data/windows"
-    if windows_dir.exists():
-        latest = _latest_by_mtime(list(windows_dir.glob("*_eeg_windows.npz")))
-        if latest:
-            return latest
-
-    deep_matches = _search_eeg_windows(ROOT_DIR, MAX_SEARCH_DEPTH)
-    latest = _latest_by_mtime(deep_matches)
-    if latest:
-        return latest
-
-    raise FileNotFoundError(
-        f"NPZ file not found: {path_str}. Searched default locations under {ROOT_DIR}."
-    )
+        base = base_dir if base_dir is not None else Path.cwd()
+        candidate = (base / candidate).resolve()
+    if not candidate.exists():
+        raise FileNotFoundError(f"NPZ file not found: {candidate}")
+    return candidate
 
 
 def infer_subject_id_from_npz(npz_path: Path) -> Optional[str]:
@@ -467,6 +441,33 @@ def _validate_indices(idx: np.ndarray, n_samples: int, name: str):
         )
 
 
+def _load_session_meta(session_dir: Path) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {}
+    for name in ("meta.json", "manifest.json", "session_meta.json"):
+        path = session_dir / name
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text())
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            meta.update(payload)
+    return meta
+
+
+def _infer_subject_id_from_session_dir(session_dir: Path) -> Optional[str]:
+    meta = _load_session_meta(session_dir)
+    subject = meta.get("subject_id")
+    if subject:
+        return str(subject)
+    name = session_dir.name
+    match = re.match(r"^(?P<subject>.+?)_\d{8}_\d{6}$", name)
+    if match:
+        return match.group("subject")
+    return None
+
+
 def main():
     parser = build_arg_parser()
     args = parser.parse_args()
@@ -476,20 +477,43 @@ def main():
     set_seed(args.seed)
 
     session_dir_path: Optional[Path] = None
+    explicit_npz = args.npz not in (DEFAULT_NPZ, f"./{DEFAULT_NPZ}")
+    selection_source = "legacy_explicit"
+    config_dir = (
+        Path(args.config).expanduser().resolve().parent
+        if getattr(args, "config", None)
+        else None
+    )
+
     if getattr(args, "session_dir", None):
         session_dir_path = resolve_session_dir(str(args.session_dir))
         if not session_dir_path.exists():
+            print("Session selection source: session_dir")
             print(f"Session dir not found: {session_dir_path}")
             return 2
-        if args.npz in (DEFAULT_NPZ, f"./{DEFAULT_NPZ}"):
-            args.npz = str(SessionLayout(session_dir_path).windows_npz)
+        if explicit_npz:
+            print(
+                "⚠️ Both --session-dir and --npz provided; using explicit --npz path."
+            )
+            selection_source = "legacy_explicit"
+            npz_path = resolve_npz_path(args.npz, base_dir=session_dir_path)
+        else:
+            selection_source = "session_dir"
+            npz_path = SessionLayout(session_dir_path).windows_npz
+    else:
+        if not explicit_npz:
+            print("Session selection source: legacy_explicit")
+            print(
+                "❌ Missing --session-dir. Provide --session-dir or explicit --npz PATH."
+            )
+            return 2
+        npz_path = resolve_npz_path(args.npz, base_dir=config_dir or Path.cwd())
 
-    try:
-        npz_path = resolve_npz_path(args.npz)
-    except FileNotFoundError as exc:
-        print(str(exc))
+    if not npz_path.exists():
+        print(f"NPZ file not found: {npz_path}")
         return 2
     args.npz = str(npz_path)
+    print(f"Session selection source: {selection_source}")
     print(f"Using NPZ: {npz_path}")
 
     # ===== LOAD FULL DATA =====
@@ -527,19 +551,18 @@ def main():
     n_full = len(y_action_full)
     subject = None
 
-    # When running from a canonical session dir, avoid applying an unrelated default subject_id filter.
-    if session_dir_path and args.subject_id == "8-M16":
-        inferred = infer_subject_id_from_meta(meta, n_full)
-        if inferred and inferred != args.subject_id:
+    if session_dir_path:
+        inferred = (
+            _infer_subject_id_from_session_dir(session_dir_path)
+            or infer_subject_id_from_meta(meta, n_full)
+            or infer_subject_id_from_npz(npz_path)
+        )
+        if inferred and args.subject_id and args.subject_id != inferred:
             print(
-                f"[session-dir] Overriding default --subject-id={args.subject_id!r} with inferred subject_id={inferred!r}"
+                f"[session-dir] ⚠️ subject_id mismatch: requested={args.subject_id!r} inferred={inferred!r}"
             )
+        if not args.subject_id and inferred:
             args.subject_id = inferred
-        elif inferred is None:
-            print(
-                "[session-dir] No single subject_id detected in NPZ meta; disabling default subject_id filter."
-            )
-            args.subject_id = ""
 
     if args.subject_id:
         if "subject_id" not in meta:
@@ -651,6 +674,7 @@ def main():
         )
         for path in [save_model_path, save_scaler_path, save_preds_path]:
             path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Saving outputs to: {run_dir}")
         print(
             f"Output paths: model={save_model_path}, scaler={save_scaler_path}, preds={save_preds_path}"
         )

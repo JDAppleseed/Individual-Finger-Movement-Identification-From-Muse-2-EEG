@@ -48,6 +48,7 @@ from utils.logging import setup_logger  # type: ignore
 from utils.preprocessing import standardize_window_TxC  # type: ignore
 from utils.resample import _resample_window  # type: ignore
 from utils.sessions import SessionWriter, Packet  # type: ignore
+from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 from utils.modeling import load_model_and_scaler  # type: ignore
 
 
@@ -134,6 +135,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # Existing args (preserved from original file)
     p.add_argument("--config", required=True, type=str, help="Path to step7 config JSON")
     p.add_argument("--device", default=None, type=str, help="torch device override (e.g., cpu, mps, cuda)")
+    p.add_argument(
+        "--session-dir",
+        type=str,
+        default=None,
+        help="Session directory (derives model/scaler + output dir defaults).",
+    )
 
     p.add_argument("--window_sec", type=float, default=1.0)
     p.add_argument("--hop_sec", type=float, default=0.125)
@@ -222,9 +229,73 @@ def main() -> int:
     model_path = cfg.get("model_path")
     scaler_path = cfg.get("scaler_path")
     out_dir = cfg.get("out_dir")
+    session_dir_value = args.session_dir or cfg.get("session_dir")
 
-    if not model_path or not scaler_path or not out_dir:
-        raise RuntimeError("Config must include model_path, scaler_path, out_dir.")
+    def _resolve_path(path_str: str, base_dir: Optional[Path]) -> str:
+        candidate = Path(path_str).expanduser()
+        if not candidate.is_absolute():
+            base = base_dir if base_dir is not None else Path.cwd()
+            candidate = (base / candidate).resolve()
+        return str(candidate)
+
+    selection_source = "legacy_explicit"
+    if session_dir_value:
+        session_dir_path = resolve_session_dir(str(session_dir_value))
+        if not session_dir_path.exists():
+            print("Session selection source: session_dir")
+            print(f"Session dir not found: {session_dir_path}")
+            return 2
+        base_dir = session_dir_path
+        explicit_overrides = []
+        if model_path:
+            explicit_overrides.append("model_path")
+        if scaler_path:
+            explicit_overrides.append("scaler_path")
+        if out_dir:
+            explicit_overrides.append("out_dir")
+        if explicit_overrides:
+            print(
+                f"⚠️ Explicit paths provided with --session-dir; using overrides: {explicit_overrides}"
+            )
+            selection_source = "legacy_explicit"
+        else:
+            selection_source = "session_dir"
+
+        run_dir = resolve_latest_run_dir(session_dir_path)
+        if run_dir is None or not run_dir.exists():
+            print("Session selection source: session_dir")
+            print(
+                "No model run directory found. Train a model first (Step 2), or pass explicit model_path/scaler_path."
+            )
+            return 2
+        if not model_path:
+            model_path = str(run_dir / "finger_action_model.pt")
+        else:
+            model_path = _resolve_path(str(model_path), base_dir)
+        if not scaler_path:
+            scaler_path = str(run_dir / "scaler.save")
+        else:
+            scaler_path = _resolve_path(str(scaler_path), base_dir)
+        if not out_dir:
+            out_dir = str(SessionLayout(session_dir_path).processed_dir / "live_infer")
+        else:
+            out_dir = _resolve_path(str(out_dir), base_dir)
+    else:
+        config_dir = Path(args.config).expanduser().resolve().parent
+        if not model_path or not scaler_path or not out_dir:
+            print("Session selection source: legacy_explicit")
+            print(
+                "Missing --session-dir. Config must include model_path, scaler_path, and out_dir."
+            )
+            return 2
+        model_path = _resolve_path(str(model_path), config_dir)
+        scaler_path = _resolve_path(str(scaler_path), config_dir)
+        out_dir = _resolve_path(str(out_dir), config_dir)
+
+    print(f"Session selection source: {selection_source}")
+    print(f"Using model file: {model_path}")
+    print(f"Using scaler file: {scaler_path}")
+    print(f"Saving outputs to: {out_dir}")
 
     ensure_dir(out_dir)
 

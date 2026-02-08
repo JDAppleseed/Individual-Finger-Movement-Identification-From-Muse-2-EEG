@@ -11,7 +11,6 @@ from utils.report_generator import (
     generate_run_report,
     generate_cross_subject_summary,
 )
-from utils.experiment_logger import get_latest_experiment_hash
 from utils.experiment_logger import LOG_DIR
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 
@@ -31,7 +30,7 @@ def main():
         help="Model run directory (defaults to latest under <session_dir>/processed/models/).",
     )
     parser.add_argument(
-        "--subject-id", type=str, default="8-M16", help="Subject ID to report"
+        "--subject-id", type=str, default="", help="Subject ID to report"
     )
     parser.add_argument(
         "--exp-hash", type=str, default=None, help="Override experiment hash"
@@ -41,25 +40,58 @@ def main():
     if args.session_dir:
         session_dir_path = resolve_session_dir(str(args.session_dir))
         if not session_dir_path.exists():
-            raise SystemExit(f"Session dir not found: {session_dir_path}")
+            print("Session selection source: session_dir")
+            print(f"Session dir not found: {session_dir_path}")
+            raise SystemExit(2)
+        if args.run_dir:
+            print("⚠️ Explicit --run-dir provided with --session-dir; using explicit run dir.")
         run_dir_path = (
             Path(str(args.run_dir)).expanduser()
             if args.run_dir
             else resolve_latest_run_dir(session_dir_path)
         )
         if run_dir_path is None or not run_dir_path.exists():
-            raise SystemExit(
+            print("Session selection source: session_dir")
+            print(
                 "No model run directory found. Train a model first (Step 2), or pass --run-dir."
             )
+            raise SystemExit(2)
         out_dir = SessionLayout(session_dir_path).reports_root / run_dir_path.name
+        print("Session selection source: session_dir")
+        print(f"Using run dir: {run_dir_path}")
         report_path = generate_run_report(run_dir_path, out_dir=out_dir)
+        print(f"Saving report to: {report_path}")
         print(f"✅ Run report generated: {report_path}")
         return
 
-    # Generate reports for all subjects in latest experiment
-    exp_hash = args.exp_hash or get_latest_experiment_hash()
+    if not args.run_dir and not args.exp_hash:
+        print("Session selection source: legacy_explicit")
+        print(
+            "❌ Missing --session-dir. Provide --session-dir or explicit --run-dir/--exp-hash."
+        )
+        raise SystemExit(2)
 
-    logs = json.loads((LOG_DIR / f"{exp_hash}.json").read_text())
+    print("Session selection source: legacy_explicit")
+
+    if args.run_dir:
+        run_dir_path = Path(str(args.run_dir)).expanduser()
+        if not run_dir_path.exists():
+            print(f"Run dir not found: {run_dir_path}")
+            raise SystemExit(2)
+        out_dir = Path("reports") / "runs" / run_dir_path.name
+        report_path = generate_run_report(run_dir_path, out_dir=out_dir)
+        print(f"Saving report to: {report_path}")
+        print(f"✅ Run report generated: {report_path}")
+        return
+
+    # Generate reports for explicit experiment hash
+    exp_hash = args.exp_hash
+
+    log_path = LOG_DIR / f"{exp_hash}.json"
+    if not log_path.exists():
+        print(f"Experiment log not found: {log_path}")
+        raise SystemExit(2)
+    logs = json.loads(log_path.read_text())
     subject_id = args.subject_id or logs.get("subject_id", "UNKNOWN")
 
     print(f"🧪 Generating report for subject {subject_id}")

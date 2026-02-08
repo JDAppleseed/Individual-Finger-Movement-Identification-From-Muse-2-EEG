@@ -49,11 +49,38 @@ def main() -> int:
         help="Eval command to execute",
     )
     parser.add_argument(
+        "--session-dir",
+        type=str,
+        default=None,
+        help="Session directory to append to train/eval commands when missing.",
+    )
+    parser.add_argument(
         "--log-dir", type=str, default="logs/sweep", help="Directory for sweep logs"
     )
     args = parser.parse_args()
 
     log_dir = Path(args.log_dir)
+    if not args.session_dir:
+        if "--session-dir" not in args.train_cmd and "--npz" not in args.train_cmd:
+            print("Session selection source: legacy_explicit")
+            print(
+                "❌ Missing --session-dir. Provide --session-dir or explicit --train-cmd with --npz."
+            )
+            return 2
+        if "--session-dir" not in args.eval_cmd and "--npz" not in args.eval_cmd:
+            print("Session selection source: legacy_explicit")
+            print(
+                "❌ Missing --session-dir. Provide --session-dir or explicit --eval-cmd with --npz."
+            )
+            return 2
+        print("Session selection source: legacy_explicit")
+    else:
+        print("Session selection source: session_dir")
+        session_dir_arg = shlex.quote(str(args.session_dir))
+        if "--session-dir" not in args.train_cmd:
+            args.train_cmd = f"{args.train_cmd} --session-dir {session_dir_arg}"
+        if "--session-dir" not in args.eval_cmd:
+            args.eval_cmd = f"{args.eval_cmd} --session-dir {session_dir_arg}"
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
     for run_idx in range(1, max(1, args.runs) + 1):

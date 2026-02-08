@@ -491,6 +491,14 @@ def _split_with_checks(
     return None, None, MAX_SPLIT_ATTEMPTS
 
 
+def _resolve_path(path_str: str, base_dir: Optional[Path]) -> Path:
+    candidate = Path(path_str).expanduser()
+    if not candidate.is_absolute():
+        base = base_dir if base_dir is not None else Path.cwd()
+        candidate = (base / candidate).resolve()
+    return candidate
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
@@ -609,18 +617,55 @@ def main():
         random.seed(split_seed)
         np.random.seed(split_seed)
 
+    config_dir = (
+        Path(args.config).expanduser().resolve().parent
+        if getattr(args, "config", None)
+        else None
+    )
+    explicit_npz = args.npz not in ("eeg_windows.npz", "./eeg_windows.npz")
+    explicit_model = args.model not in ("finger_action_model.pt", "./finger_action_model.pt")
+    explicit_scaler = args.scaler not in ("scaler.save", "./scaler.save")
+    explicit_pred = args.pred_npz not in ("test_predictions.npz", "./test_predictions.npz")
+    explicit_run_dir = bool(getattr(args, "run_dir", None))
+    explicit_overrides = [
+        name
+        for name, is_explicit in [
+            ("run_dir", explicit_run_dir),
+            ("npz", explicit_npz),
+            ("model", explicit_model),
+            ("scaler", explicit_scaler),
+            ("pred_npz", explicit_pred),
+        ]
+        if is_explicit
+    ]
+
     plot_dir_override: Optional[Path] = None
+    session_dir_path: Optional[Path] = None
+    run_dir_path: Optional[Path] = None
+    selection_source = "legacy_explicit"
+
     if getattr(args, "session_dir", None):
         session_dir_path = resolve_session_dir(str(args.session_dir))
         if not session_dir_path.exists():
+            print("Session selection source: session_dir")
             print(f"Session dir not found: {session_dir_path}")
             return 2
+        base_dir = session_dir_path
+        if explicit_overrides:
+            print(
+                f"⚠️ Explicit paths provided with --session-dir; using overrides: {explicit_overrides}"
+            )
+            selection_source = "legacy_explicit"
+        else:
+            selection_source = "session_dir"
+
         run_dir_path = (
             Path(str(args.run_dir)).expanduser()
-            if getattr(args, "run_dir", None)
+            if explicit_run_dir
             else resolve_latest_run_dir(session_dir_path)
         )
         if run_dir_path is None or not run_dir_path.exists():
+            print("Session selection source: session_dir")
             print(
                 "No model run directory found. Train a model first (Step 2), or pass --run-dir explicitly."
             )
@@ -630,39 +675,78 @@ def main():
         plot_dir_override = layout.reports_root / run_dir_path.name
         plot_dir_override.mkdir(parents=True, exist_ok=True)
 
-        if args.npz == "eeg_windows.npz":
+        if explicit_npz:
+            args.npz = str(_resolve_path(args.npz, base_dir))
+        else:
             args.npz = str(layout.windows_npz)
-        if args.model == "finger_action_model.pt":
+        if explicit_model:
+            args.model = str(_resolve_path(args.model, base_dir))
+        else:
             args.model = str(run_dir_path / "finger_action_model.pt")
-        if args.scaler == "scaler.save":
+        if explicit_scaler:
+            args.scaler = str(_resolve_path(args.scaler, base_dir))
+        else:
             args.scaler = str(run_dir_path / "scaler.save")
-        if args.pred_npz == "test_predictions.npz":
+        if explicit_pred:
+            args.pred_npz = str(_resolve_path(args.pred_npz, base_dir))
+        else:
             args.pred_npz = str(run_dir_path / "test_predictions.npz")
         if not args.save_manifest:
             args.save_manifest = str(plot_dir_override / "eval_manifest.json")
-    elif getattr(args, "run_dir", None):
-        run_dir_path = Path(str(args.run_dir)).expanduser()
-        if args.model == "finger_action_model.pt":
-            args.model = str(run_dir_path / "finger_action_model.pt")
-        if args.scaler == "scaler.save":
-            args.scaler = str(run_dir_path / "scaler.save")
-        if args.pred_npz == "test_predictions.npz":
-            args.pred_npz = str(run_dir_path / "test_predictions.npz")
-        if not args.save_manifest:
-            plot_dir_override = Path("reports") / "runs" / run_dir_path.name
-            plot_dir_override.mkdir(parents=True, exist_ok=True)
-            args.save_manifest = str(plot_dir_override / "eval_manifest.json")
+    else:
+        base_dir = config_dir or Path.cwd()
+        if not explicit_npz:
+            print("Session selection source: legacy_explicit")
+            print(
+                "❌ Missing --session-dir. Provide --session-dir or explicit --npz PATH."
+            )
+            return 2
+        if explicit_run_dir:
+            run_dir_path = Path(str(args.run_dir)).expanduser()
+            if not explicit_model:
+                args.model = str(run_dir_path / "finger_action_model.pt")
+            if not explicit_scaler:
+                args.scaler = str(run_dir_path / "scaler.save")
+            if not explicit_pred:
+                args.pred_npz = str(run_dir_path / "test_predictions.npz")
+            if not args.save_manifest:
+                plot_dir_override = Path("reports") / "runs" / run_dir_path.name
+                plot_dir_override.mkdir(parents=True, exist_ok=True)
+                args.save_manifest = str(plot_dir_override / "eval_manifest.json")
+        else:
+            if not explicit_model or not explicit_scaler:
+                print("Session selection source: legacy_explicit")
+                print(
+                    "❌ Missing --session-dir. Provide explicit --model and --scaler (or --run-dir)."
+                )
+                return 2
+        args.npz = str(_resolve_path(args.npz, base_dir))
+        if explicit_model:
+            args.model = str(_resolve_path(args.model, base_dir))
+        if explicit_scaler:
+            args.scaler = str(_resolve_path(args.scaler, base_dir))
+        if explicit_pred:
+            args.pred_npz = str(_resolve_path(args.pred_npz, base_dir))
+
+    print(f"Session selection source: {selection_source}")
 
     npz_path = Path(args.npz)
     pred_npz_path = Path(args.pred_npz)
     model_path = Path(args.model)
     scaler_path = Path(args.scaler)
+    print(f"Using NPZ file: {npz_path}")
+    print(f"Using model file: {model_path}")
+    print(f"Using scaler file: {scaler_path}")
+    if not npz_path.exists():
+        print(f"NPZ file not found: {npz_path}")
+        return 2
     manifest_enabled = not args.no_manifest
     manifest_path = (
         Path(args.save_manifest)
         if args.save_manifest
         else Path("reports/last_eval_manifest.json")
     )
+    print(f"Saving report/manifest to: {manifest_path}")
 
     def _path_info(path: Path, used: Optional[bool] = None) -> Dict[str, Any]:
         info: Dict[str, Any] = {
@@ -896,11 +980,13 @@ def main():
         y_finger_test = y_finger[test_idx]
 
         if not scaler_path.exists():
-            raise FileNotFoundError(f"Missing scaler/normalizer file: {scaler_path}")
+            print(f"Missing scaler/normalizer file: {scaler_path}")
+            return 2
         normalizer = joblib.load(str(scaler_path))
 
         if not model_path.exists():
-            raise FileNotFoundError(f"Missing model weights: {model_path}")
+            print(f"Missing model weights: {model_path}")
+            return 2
 
         model = CNNLSTMFingerActionNet(
             n_channels=X.shape[2],
