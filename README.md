@@ -34,6 +34,21 @@ source .venv/bin/activate
 python eeglab_wrapper_ui.py
 ```
 
+## Core Concept: Session Directory
+
+A session directory lives at:
+`Projects/<PROJECT>/subjects/<SUBJECT_ID>/sessions/<SESSION_ID>/`
+
+It is the single source of truth for raw data, events, processed windows, models, and reports. All steps after recording operate relative to a session directory and should be run with `--session-dir`.
+
+## Pipeline Overview
+
+- Step 1: Stream & Record → creates a new session directory.
+- Step 1b: Extract Windows → reads `<session_dir>/raw/` + `<session_dir>/events/`, writes to `<session_dir>/processed/`.
+- Step 2: Train Model → reads `<session_dir>/processed/eeg_windows.npz`, writes to `<session_dir>/processed/models/<run_id>/`.
+- Step 3+: Evaluate / Figures / Reports → read from the same session directory and the latest model run.
+- Step 7: Live Infer + Actuate → reads model/scaler from `<session_dir>/processed/models/<run_id>/` unless explicitly overridden.
+
 ## What changed / How to run
 
 - Connect Muse: `python eeglab_wrapper_ui.py` → click **Connect Muse 2** (Step 0), or run `python muse_lsl_streamer.py --name Muse2-EEG`.
@@ -113,6 +128,8 @@ python -m cli healthcheck --stream-name Muse2-EEG --sim --check-timebase
 python -m cli record --sim --output-dir data/muse_streaming --subject-id 8-M16
 ```
 
+This CLI flow writes to `data/*` and is separate from the session-dir pipeline. Prefer the session-dir steps for extraction, training, evaluation, and reports.
+
 ## Live Streaming (Desktop UI)
 
 Launch the desktop UI and use the new live workflow (production path):
@@ -127,6 +144,8 @@ python eeglab_wrapper_ui.py
 5) Validate the session (requires `manifest.json`), then extract windows, train, evaluate, and run live inference.
 
 The UI gates Start Recording until the LSL stream is healthy (or operator-acknowledged).
+Selecting a subject automatically selects the latest session (if any) and displays it on the Projects page.
+Step 2+ requires a valid session directory (auto-filled or manually selected).
 
 ## Event Labeling (live)
 
@@ -137,7 +156,16 @@ Events are saved to `events.csv` during capture and mirrored to `events/events.j
 
 ## Live Inference (Dedicated Script)
 
-Run live inference/actuation in a separate process:
+Preferred:
+
+```
+python 7_live_infer_and_actuate.py \
+  --session-dir <session_dir> \
+  --stream-name Muse2-EEG \
+  --stream-type EEG
+```
+
+Explicit override:
 
 ```
 python 7_live_infer_and_actuate.py \
@@ -152,6 +180,14 @@ Allow-drop is opt-in and logs dropped windows:
 ```
 python 7_live_infer_and_actuate.py --allow-drop --latency-policy drop
 ```
+
+## Defaults & Auto-Resolution
+
+If `--session-dir` is provided:
+- `eeg_windows.npz` is assumed at `<session_dir>/processed/eeg_windows.npz`.
+- The latest model run is resolved from `<session_dir>/processed/models/`.
+
+If both `--session-dir` and explicit paths are provided, explicit paths take precedence (with a warning).
 
 See `DATA_CONTRACT.md` for session layout and validation requirements. Prefer the UI so the correct session/run paths are resolved automatically.
 
@@ -181,6 +217,13 @@ Validity rules:
 During training, finger loss is masked when action == REST.
 
 ## Data Artifacts
+
+Session outputs (canonical):
+- Raw EEG: `<session_dir>/raw/`
+- Events: `<session_dir>/events/`
+- Windowed data: `<session_dir>/processed/eeg_windows.(csv|npz)`
+- Models: `<session_dir>/processed/models/<run_id>/`
+- Reports/Figures: `<session_dir>/processed/reports/<run_id>/`
 
 - `data/raw/*.csv` raw EEG (legacy inspection)
 - `eeg_features.csv` streamed feature frames (legacy/CLI)
@@ -221,10 +264,10 @@ Projects/<project>/subjects/<subject>/sessions/<session_id>/
 Resolution precedence:
 1) CLI/UI: `--session-dir <session_dir>`
 2) Config JSON payload fields: `project_name`, `subject_id`, `session_id` (UI configs)
-3) Default: `Projects/DEFAULT/subjects/<DEFAULT_SUBJECT_ID>/sessions/<DEFAULT_SUBJECT_ID>_<timestamp>/`
 
 If the requested `session_dir` already exists, Step 1 deterministically suffixes `_01`, `_02`, ... and logs once. `manifest.json`, `meta.json`, and `events/events.jsonl` are created immediately on session_dir resolution (before LSL resolution) so partial or failed runs still leave a durable trail.
 
+If no session dir is provided, the UI creates a new canonical session under `Projects/<project>/subjects/<subject>/sessions/`.
 `data/raw` and `data/processed` are legacy inspection/cache paths and are not the default output for new sessions.
 
 ### Performance (live plot)

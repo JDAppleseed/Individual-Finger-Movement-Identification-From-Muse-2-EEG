@@ -99,6 +99,7 @@ from app.repo_probe import discover_scripts
 from app.ui_config_validation import validate_step_settings
 from muse_streaming.config import DEFAULT_STREAM_NAME, DEFAULT_STREAM_TYPE
 from muse_streaming.healthcheck import run_healthcheck
+from utils.session_layout import SessionLayout, resolve_latest_run_dir
 from visualization.live_viz import LiveHiddenMagnitudePlot, parse_viz_line
 from visualization.replay_viz import ReplayVisualizer
 
@@ -131,6 +132,15 @@ class ArgSpec:
     flag: str
     kind: str
     description: str
+
+
+def _latest_dir_by_mtime(root: Path) -> Optional[Path]:
+    if not root.exists():
+        return None
+    dirs = [p for p in root.iterdir() if p.is_dir()]
+    if not dirs:
+        return None
+    return max(dirs, key=lambda p: p.stat().st_mtime)
 
 
 class MuseConnectorController(QObject):
@@ -773,6 +783,7 @@ class MainWindow(QMainWindow):
         self.current_subject: Optional[str] = None
         self.current_session_ui: Optional[str] = None
         self.current_session_backend: Optional[str] = None
+        self._auto_session_dir_value: Optional[str] = None
 
         self.fields: Dict[str, Dict[str, QWidget]] = {}
         self.defaults: Dict[str, Dict[str, Any]] = {}
@@ -1787,6 +1798,9 @@ class MainWindow(QMainWindow):
         self.subject_combo = QComboBox()
         self.subject_combo.currentTextChanged.connect(self._select_subject)
         subject_form.addRow("Subject", self.subject_combo)
+        self.projects_selected_session_value = QLabel("(none)")
+        self.projects_selected_session_value.setWordWrap(True)
+        subject_form.addRow("Selected Session", self.projects_selected_session_value)
         subject_layout.addLayout(subject_form)
 
         edit_btn = QPushButton("Create / Edit Subject")
@@ -1946,6 +1960,7 @@ class MainWindow(QMainWindow):
         form.addRow("Session Root", root_widget)
 
         self.session_dir_input = OutlineLineEdit()
+        self.session_dir_input.textChanged.connect(self._on_session_dir_changed)
         session_btn = QPushButton("Browse")
         session_btn.clicked.connect(
             lambda: self._browse_dir(self.session_dir_input, "Select Session Directory")
@@ -2707,6 +2722,12 @@ class MainWindow(QMainWindow):
                 step_id, form, "ignore_misalignment", "Ignore misalignment", defaults
             )
         elif step_id == "train":
+            self.train_session_dir_input = OutlineLineEdit()
+            self.train_session_dir_input.setPlaceholderText("")
+            self.train_session_dir_input.textChanged.connect(
+                self._on_train_session_dir_changed
+            )
+            form.addRow("Session Dir (Step 2 override)", self.train_session_dir_input)
             self._add_file_picker(
                 step_id,
                 form,
@@ -3527,6 +3548,7 @@ class MainWindow(QMainWindow):
             subject_dir = subject_root(self.current_project, subject_id)
             ensure_subject_dirs(subject_dir)
             self._ensure_default_configs(subject_dir)
+        self._auto_select_latest_session_for_subject()
         self._auto_fill_paths()
         self._seed_stream_name_input()
 
@@ -3637,14 +3659,135 @@ class MainWindow(QMainWindow):
         return candidates[-1] if candidates else None
 
 
+    def _resolve_effective_session_dir(self, step_id: Optional[str] = None) -> Optional[Path]:
+        override_value = ""
+        if step_id == "train" and hasattr(self, "train_session_dir_input"):
+            override_value = self.train_session_dir_input.text().strip()
+        value = override_value or (
+            self.session_dir_input.text().strip() if hasattr(self, "session_dir_input") else ""
+        )
+        if not value:
+            return None
+        p = Path(value).expanduser()
+        if p.exists():
+            try:
+                return p.resolve()
+            except Exception:
+                return p
+        return p
+
+    def _propagate_session_dir_autofill(
+        self, prev_value: Optional[str], new_value: str
+    ) -> None:
+        if not hasattr(self, "train_session_dir_input"):
+            return
+        current = self.train_session_dir_input.text().strip()
+        if not current or (prev_value and current == prev_value):
+            self.train_session_dir_input.setText(new_value)
+
+    def _auto_select_latest_session_for_subject(self) -> None:
+        if not self.current_project or not self.current_subject:
+            return
+        if not hasattr(self, "session_dir_input"):
+            return
+        subject_dir = subject_root(self.current_project, self.current_subject)
+        sessions_root = subject_dir / "sessions"
+        latest = _latest_dir_by_mtime(sessions_root)
+        if latest is None:
+            self._auto_session_dir_value = None
+            self._update_projects_selected_session_label(force_none=True)
+            return
+        prev_auto = self._auto_session_dir_value
+        self.session_dir_input.setText(str(latest))
+        self._auto_session_dir_value = str(latest)
+        self._propagate_session_dir_autofill(prev_value=prev_auto, new_value=str(latest))
+        self._update_projects_selected_session_label()
+        self._autofill_dependent_paths_from_session_dir()
+
+    def _update_projects_selected_session_label(self, force_none: bool = False) -> None:
+        if not hasattr(self, "projects_selected_session_value"):
+            return
+        if force_none:
+            self.projects_selected_session_value.setText("(none)")
+            return
+        effective = self._resolve_effective_session_dir(step_id="train")
+        if not effective:
+            self.projects_selected_session_value.setText("(none)")
+            return
+        display_path = effective.expanduser()
+        if display_path.exists():
+            try:
+                display_path = display_path.resolve()
+            except Exception:
+                pass
+        elif not display_path.is_absolute():
+            try:
+                display_path = display_path.absolute()
+            except Exception:
+                pass
+        self.projects_selected_session_value.setText(str(display_path))
+
+    def _autofill_dependent_paths_from_session_dir(self) -> None:
+        def _maybe_set(
+            widget: Optional[QLineEdit], value: str, legacy_values: set[str]
+        ) -> None:
+            if not isinstance(widget, QLineEdit):
+                return
+            current = widget.text().strip()
+            if not current or current in legacy_values:
+                widget.setText(value)
+
+        global_session = self._resolve_effective_session_dir(step_id=None)
+        train_session = self._resolve_effective_session_dir(step_id="train")
+
+        train_source = None
+        if train_session and train_session.exists():
+            train_source = train_session
+        elif global_session and global_session.exists():
+            train_source = global_session
+
+        if train_source:
+            train_layout = SessionLayout(train_source)
+            train_npz = str(train_layout.windows_npz)
+            train_npz_widget = self.fields.get("train", {}).get("npz")
+            _maybe_set(train_npz_widget, train_npz, {"eeg_windows.npz"})
+
+        if not global_session or not global_session.exists():
+            return
+        layout = SessionLayout(global_session)
+        default_npz = str(layout.windows_npz)
+
+        infer_model_widget = self.fields.get("infer", {}).get("model_path")
+        infer_scaler_widget = self.fields.get("infer", {}).get("scaler_path")
+
+        run_dir = resolve_latest_run_dir(global_session)
+        if run_dir:
+            model_path = str(run_dir / "finger_action_model.pt")
+            scaler_path = str(run_dir / "scaler.save")
+            _maybe_set(infer_model_widget, model_path, {"finger_action_model.pt"})
+            _maybe_set(infer_scaler_widget, scaler_path, {"scaler.save"})
+            if hasattr(self, "replay_model_path"):
+                _maybe_set(self.replay_model_path, model_path, {"finger_action_model.pt"})
+            if hasattr(self, "replay_scaler_path"):
+                _maybe_set(self.replay_scaler_path, scaler_path, {"scaler.save"})
+
+        if hasattr(self, "replay_npz_path"):
+            _maybe_set(self.replay_npz_path, default_npz, {"eeg_windows.npz"})
+
+    def _on_session_dir_changed(self, _text: str) -> None:
+        self._update_projects_selected_session_label()
+        self._autofill_dependent_paths_from_session_dir()
+
+    def _on_train_session_dir_changed(self, _text: str) -> None:
+        self._update_projects_selected_session_label()
+        self._autofill_dependent_paths_from_session_dir()
+
     def _resolve_session_dir_for_current(self, subject_dir: Path) -> Optional[Path]:
         """Best-effort resolve the session directory that the UI is currently targeting."""
-        # 1) Explicit textbox
-        v = self.session_dir_input.text().strip() if hasattr(self, "session_dir_input") else ""
-        if v:
-            p = Path(v).expanduser()
-            if p.exists():
-                return p
+        # 1) Explicit textbox / override
+        p = self._resolve_effective_session_dir(step_id=None)
+        if p and p.exists():
+            return p
         # 2) Current session label (ui session id)
         if getattr(self, "current_session_ui", None):
             p = session_root(subject_dir, self.current_session_ui)
@@ -4012,9 +4155,9 @@ class MainWindow(QMainWindow):
             settings["ENABLE_FEATURES"] = False
             settings["ENABLE_INFERENCE"] = False
             # Step 1 always writes into a canonical session directory under Projects/<project>/subjects/<subject>/sessions/.
-            session_dir_value = self.session_dir_input.text().strip()
-            if session_dir_value:
-                settings["session_dir"] = session_dir_value
+            session_dir_path = self._resolve_effective_session_dir(step_id=None)
+            if session_dir_path:
+                settings["session_dir"] = str(session_dir_path)
         if step_id == "infer":
             stream_name = self._selected_stream_name() or self.live_stream_name
             stream_type = self._selected_stream_type() or self.live_stream_type
@@ -4073,17 +4216,29 @@ class MainWindow(QMainWindow):
             backend_session = self._guess_backend_session_id()
 
         if step_id in {"train", "infer"}:
-            session_dir_value = self.session_dir_input.text().strip()
-            if not session_dir_value:
-                QMessageBox.warning(
-                    self,
-                    "Session Dir Required",
-                    "Missing session dir. Select the session folder under subjects/<id>/sessions/<session_id>.",
-                )
-                return
+            if step_id == "train":
+                session_dir_path = self._resolve_effective_session_dir(step_id="train")
+                if not session_dir_path:
+                    QMessageBox.warning(
+                        self,
+                        "Session Dir Required",
+                        "Missing session dir. Step 2 requires the session folder that contains processed EEG windows\n"
+                        "(produced by Step 1b). Select subjects/<id>/sessions/<session_id>.",
+                    )
+                    return
+            else:
+                session_dir_path = self._resolve_effective_session_dir(step_id=None)
+                if not session_dir_path:
+                    QMessageBox.warning(
+                        self,
+                        "Session Dir Required",
+                        "Missing session dir. Select the session folder under subjects/<id>/sessions/<session_id>.",
+                    )
+                    return
         if step_id == "step1b":
             settings["subject_id"] = settings.get("subject_id") or self.current_subject
-            session_dir_value = self.session_dir_input.text().strip()
+            session_dir_path = self._resolve_effective_session_dir(step_id=None)
+            session_dir_value = str(session_dir_path) if session_dir_path else ""
             if session_dir_value:
                 settings["session_dir"] = session_dir_value
             if settings.get("WINDOW_SEC") is not None:
@@ -4106,9 +4261,11 @@ class MainWindow(QMainWindow):
                         settings["events"] = str(latest_events)
         if step_id == "train":
             settings["subject_id"] = settings.get("subject_id") or self.current_subject
-            session_dir_value = self.session_dir_input.text().strip()
+            session_dir_path = self._resolve_effective_session_dir(step_id="train")
+            session_dir_value = str(session_dir_path) if session_dir_path else ""
             if session_dir_value:
                 settings["session_dir"] = session_dir_value
+                settings["npz"] = "eeg_windows.npz"
             # Legacy mode: only guess an aggregated subject-level NPZ when no session_dir is selected.
             if not session_dir_value and not settings.get("npz"):
                 latest_npz = self._latest_subject_file(
@@ -4173,7 +4330,8 @@ class MainWindow(QMainWindow):
             if settings.get("session_dir"):
                 args.extend(["--session-dir", str(settings["session_dir"])])
         if step_id == "step1b":
-            session_dir_value = self.session_dir_input.text().strip()
+            session_dir_path = self._resolve_effective_session_dir(step_id=None)
+            session_dir_value = str(session_dir_path) if session_dir_path else ""
             # If the user hasn't manually provided a session dir, default to the currently selected session.
             if not session_dir_value and self.current_session_ui:
                 session_dir_value = str(session_root(subject_dir, self.current_session_ui))
@@ -4183,11 +4341,13 @@ class MainWindow(QMainWindow):
                 if self.allow_partial_checkbox.isChecked():
                     args.append("--allow-partial")
         if step_id == "infer":
-            session_dir_value = self.session_dir_input.text().strip()
+            session_dir_path = self._resolve_effective_session_dir(step_id=None)
+            session_dir_value = str(session_dir_path) if session_dir_path else ""
             if session_dir_value:
                 args.extend(["--session-dir", session_dir_value])
         if step_id == "train":
-            session_dir_value = self.session_dir_input.text().strip()
+            session_dir_path = self._resolve_effective_session_dir(step_id="train")
+            session_dir_value = str(session_dir_path) if session_dir_path else ""
             if session_dir_value:
                 args.extend(["--session-dir", session_dir_value])
         # Enforce correct handoff between Step 1b → Step 2:
@@ -4195,16 +4355,26 @@ class MainWindow(QMainWindow):
         # - prefer the windows NPZ produced for the current session to avoid stale ./eeg_windows.npz
         if step_id == "train":
             args.extend(["--subject-id", str(self.current_subject)])
-            preferred_npz_path = self._resolve_windows_npz_for_current(subject_dir)
-            if preferred_npz_path:
-                args.extend(["--npz", str(preferred_npz_path)])
 
-
-        args.extend(self._collect_step_args(step_id))
+        extra_args = self._collect_step_args(step_id)
+        if step_id == "train":
+            cleaned: list[str] = []
+            skip_next = False
+            for item in extra_args:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if item == "--npz":
+                    skip_next = True
+                    continue
+                cleaned.append(item)
+            extra_args = cleaned
+        args.extend(extra_args)
 
         cwd = str(self.repo_root)
         if step_id == "step1b":
-            session_dir_value = self.session_dir_input.text().strip()
+            session_dir_path = self._resolve_effective_session_dir(step_id=None)
+            session_dir_value = str(session_dir_path) if session_dir_path else ""
             if session_dir_value:
                 cwd = str(Path(session_dir_value))
 
