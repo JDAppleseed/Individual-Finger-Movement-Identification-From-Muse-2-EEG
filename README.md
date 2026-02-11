@@ -41,6 +41,15 @@ A session directory lives at:
 
 It is the single source of truth for raw data, events, processed windows, models, and reports. All steps after recording operate relative to a session directory and should be run with `--session-dir`.
 
+## Finding Session Data + Reviewing Events
+
+Session data is stored in the session directory above. If you record via the UI, the log shows a line like `Session artifacts saved to: ...` with the exact path. From the CLI, the session directory is printed in the Step 1 logs and persisted in `manifest.json` under that folder.
+
+Event review with a session directory:
+```
+python 5_review_events.py --session-dir <session_dir>
+```
+
 ## Pipeline Overview
 
 - Step 1: Stream & Record → creates a new session directory.
