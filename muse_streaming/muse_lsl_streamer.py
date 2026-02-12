@@ -7,6 +7,7 @@ import logging
 import signal
 import sys
 import time
+import traceback
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional
@@ -115,7 +116,17 @@ class MuseLslStreamer:
         self._last_packet_index: Optional[int] = None
         self._max_pending_packets = max(16, int(max_pending_packets))
         self._packets_dropped_overflow = 0
+        self._packet_arrival_order = deque()
         self._notify_uuids: List[str] = []
+        self._notify_active: Dict[str, bool] = {}
+        self._device_ref = None
+        self._restart_lock = asyncio.Lock()
+        self._restart_in_progress = False
+        self._restart_seq = 0
+        self._notify_error_last_log = 0.0
+        self._last_lsl_backpressure_log = 0.0
+        self._startup_notify_grace_s = 5.0
+        self._startup_notify_deadline_mono: Optional[float] = None
         self._log_throttle_interval_s = 1.0
         self._log_throttle_state: Dict[str, Dict[str, float]] = {}
         self._timebase_discontinuities = 0
@@ -191,6 +202,12 @@ class MuseLslStreamer:
         suffix = f" (x{count})" if count > 1 else ""
         self._log(f"{message}{suffix}")
 
+    def _log_kv(self, event: str, **fields: object) -> None:
+        parts = [f"event={event}"]
+        for key, value in fields.items():
+            parts.append(f"{key}={value}")
+        self._log("[streamer] " + " ".join(parts))
+
     def _start_outlet(self) -> None:
         self._outlet = self._build_outlet(self.config)
         print(f"LSL_SOURCE_ID={self._source_id}", flush=True)
@@ -200,6 +217,31 @@ class MuseLslStreamer:
             f"✅ LSL outlet started: name={self.config.name}, type={self.config.stype}, "
             f"ch={len(self.config.labels)}, rate={self.config.rate}"
         )
+
+    def _eeg_channels(self) -> Dict[str, str]:
+        return {
+            "TP9": MUSE_GATT_ATTR_TP9,
+            "AF7": MUSE_GATT_ATTR_AF7,
+            "AF8": MUSE_GATT_ATTR_AF8,
+            "TP10": MUSE_GATT_ATTR_TP10,
+        }
+
+    def _notify_targets(self) -> List[tuple[str, str]]:
+        channels = self._eeg_channels()
+        targets: List[tuple[str, str]] = []
+        for label in self.config.labels:
+            uuid = channels.get(label)
+            if uuid is None:
+                raise RuntimeError(
+                    f"Unsupported EEG label: {label}. Supported: {sorted(channels.keys())}"
+                )
+            targets.append((label, uuid))
+            self._notify_active.setdefault(uuid, False)
+        return targets
+
+    def _reset_notify_state(self) -> None:
+        self._notify_active = {}
+        self._notify_uuids = []
 
     async def run(self) -> None:
         if self.simulate:
@@ -216,9 +258,14 @@ class MuseLslStreamer:
         if not self.connect_first:
             self._start_outlet()
 
-        device = await self._resolve_device()
-        self._client = BleakClient(device)
+        self._device_ref = await self._resolve_device()
+        self._client = BleakClient(self._device_ref)
+        self._log_kv("connect_begin", stage="initial")
         await self._client.connect()
+        self._log_kv("connect_ok", stage="initial")
+        self._startup_notify_deadline_mono = (
+            time.monotonic() + self._startup_notify_grace_s
+        )
         self._log("✅ Muse 2 connected")
 
         if self.connect_first:
@@ -278,12 +325,8 @@ class MuseLslStreamer:
             except asyncio.CancelledError:
                 pass
         if self._client and getattr(self._client, "is_connected", False):
-            for uuid in list(self._notify_uuids):
-                try:
-                    await self._client.stop_notify(uuid)
-                except Exception:
-                    pass
-            await self._client.disconnect()
+            await self._stop_notifications(reason="shutdown")
+            await self._safe_disconnect(reason="shutdown")
         if self._outlet is not None:
             close_fn = getattr(self._outlet, "close_stream", None)
             if callable(close_fn):
@@ -440,30 +483,118 @@ class MuseLslStreamer:
         if not self._client:
             raise RuntimeError("Muse client not connected.")
 
-        channels = {
-            "TP9": MUSE_GATT_ATTR_TP9,
-            "AF7": MUSE_GATT_ATTR_AF7,
-            "AF8": MUSE_GATT_ATTR_AF8,
-            "TP10": MUSE_GATT_ATTR_TP10,
-        }
-
-        self._notify_uuids = []
-        for label in self.config.labels:
-            uuid = channels.get(label)
-            if uuid is None:
-                raise RuntimeError(
-                    f"Unsupported EEG label: {label}. Supported: {sorted(channels.keys())}"
+        targets = self._notify_targets()
+        self._notify_uuids = [uuid for _, uuid in targets]
+        started = 0
+        skipped = 0
+        for label, uuid in targets:
+            if self._notify_active.get(uuid, False):
+                skipped += 1
+                self._log_kv(
+                    "notify_start_skip",
+                    uuid=uuid,
+                    label=label,
+                    reason="already_active",
                 )
+                continue
+            self._log_kv("notify_start", uuid=uuid, label=label)
             await self._client.start_notify(uuid, self._make_notify_handler(label))
-            self._notify_uuids.append(uuid)
+            self._notify_active[uuid] = True
+            started += 1
+            self._log_kv("notify_started", uuid=uuid, label=label)
 
-        self._log("✅ EEG notifications enabled")
+        if started:
+            self._log("✅ EEG notifications enabled")
+        elif skipped:
+            self._log("✅ EEG notifications already active")
 
     def _make_notify_handler(self, label: str):
         def _handler(_sender: int, data: bytearray) -> None:
-            self._handle_eeg_packet(label, data)
+            try:
+                self._handle_eeg_packet(label, data)
+            except Exception:
+                now = time.monotonic()
+                if (now - self._notify_error_last_log) >= 1.0:
+                    self._notify_error_last_log = now
+                    self._log(
+                        "⚠️ [streamer] notify handler error:\n"
+                        + traceback.format_exc()
+                    )
 
         return _handler
+
+    async def _stop_notifications(self, *, reason: str) -> None:
+        if not self._client:
+            return
+        try:
+            targets = self._notify_targets()
+        except Exception:
+            return
+        for label, uuid in targets:
+            if not self._notify_active.get(uuid, False):
+                self._log_kv(
+                    "notify_stop_skip",
+                    uuid=uuid,
+                    label=label,
+                    reason="not_active",
+                )
+                continue
+            try:
+                self._log_kv(
+                    "notify_stop",
+                    uuid=uuid,
+                    label=label,
+                    reason=reason,
+                )
+                await self._client.stop_notify(uuid)
+                self._notify_active[uuid] = False
+                self._log_kv(
+                    "notify_stopped",
+                    uuid=uuid,
+                    label=label,
+                    reason=reason,
+                )
+            except Exception as exc:
+                self._log_kv(
+                    "notify_stop_error",
+                    uuid=uuid,
+                    label=label,
+                    reason=reason,
+                    error=str(exc),
+                    exc_type=type(exc).__name__,
+                )
+
+    async def _safe_disconnect(self, *, reason: str) -> None:
+        if not self._client:
+            return
+        try:
+            if getattr(self._client, "is_connected", False):
+                self._log_kv("disconnect_begin", reason=reason)
+                await self._client.disconnect()
+                self._log_kv("disconnect_ok", reason=reason)
+            else:
+                self._log_kv("disconnect_skip", reason=reason, detail="not_connected")
+        except Exception as exc:
+            self._log_kv(
+                "disconnect_error",
+                reason=reason,
+                error=str(exc),
+                exc_type=type(exc).__name__,
+            )
+
+    async def _reconnect_client(self, *, reason: str) -> None:
+        device = self._device_ref
+        if device is None:
+            device = await self._resolve_device()
+            self._device_ref = device
+        self._log_kv("connect_begin", reason=reason, stage="reconnect")
+        self._client = BleakClient(device)
+        self._reset_notify_state()
+        await self._client.connect()
+        self._log_kv("connect_ok", reason=reason, stage="reconnect")
+        self._startup_notify_deadline_mono = (
+            time.monotonic() + self._startup_notify_grace_s
+        )
 
     def _handle_eeg_packet(self, label: str, data: bytearray) -> None:
         if self._outlet is None:
@@ -485,6 +616,7 @@ class MuseLslStreamer:
         if packet_index not in self._packet_first_seen:
             now = float(local_clock()) if local_clock is not None else time.time()
             self._packet_first_seen[packet_index] = now
+            self._packet_arrival_order.append(packet_index)
 
         if len(self._packet_buffer) > self._max_pending_packets:
             if self._packet_arrival_order:
@@ -549,6 +681,14 @@ class MuseLslStreamer:
 
         self._packet_buffer.pop(packet_index, None)
         self._packet_first_seen.pop(packet_index, None)
+        if self._packet_arrival_order:
+            if self._packet_arrival_order[0] == packet_index:
+                self._packet_arrival_order.popleft()
+            while (
+                self._packet_arrival_order
+                and self._packet_arrival_order[0] not in self._packet_buffer
+            ):
+                self._packet_arrival_order.popleft()
         self._last_packet_index = packet_index
 
     def _flush_stale_packets(self, now_time: Optional[float] = None) -> None:
@@ -685,32 +825,95 @@ class MuseLslStreamer:
             await asyncio.sleep(0.2)
 
     async def _maybe_reconnect(self, now_mono: float) -> None:
-        if self._last_notify_monotonic is None:
+        notify_stall = False
+        push_stall = False
+        last_notify_age_s = None
+        last_push_age_s = None
+        if self._last_notify_monotonic is not None:
+            last_notify_age_s = float(now_mono - self._last_notify_monotonic)
+            notify_stall = last_notify_age_s >= self._notify_stall_s
+        if self._last_push_monotonic is not None:
+            last_push_age_s = float(now_mono - self._last_push_monotonic)
+            push_stall = last_push_age_s >= self._notify_stall_s
+        if (
+            self._last_notify_monotonic is None
+            and self._startup_notify_deadline_mono is not None
+            and now_mono >= self._startup_notify_deadline_mono
+        ):
+            notify_stall = True
+        if not notify_stall and not push_stall:
             return
-        if (now_mono - self._last_notify_monotonic) < self._notify_stall_s:
+        if push_stall and not notify_stall:
+            if (
+                now_mono - self._last_lsl_backpressure_log
+            ) >= self._log_throttle_interval_s:
+                self._last_lsl_backpressure_log = now_mono
+                self._log(
+                    "⚠️ [streamer] LSL push stall while BLE notifications active; "
+                    "skipping BLE restart"
+                )
+                self._log_kv(
+                    "lsl_backpressure",
+                    last_notify_age_s=(
+                        f"{last_notify_age_s:.3f}"
+                        if last_notify_age_s is not None
+                        else "n/a"
+                    ),
+                    last_push_age_s=(
+                        f"{last_push_age_s:.3f}" if last_push_age_s is not None else "n/a"
+                    ),
+                )
             return
         if (now_mono - self._last_reconnect_attempt) < self._reconnect_cooldown_s:
             return
+        if self._restart_lock.locked():
+            return
         self._last_reconnect_attempt = now_mono
-        self._log("⚠️ [streamer] no BLE notifications; attempting restart")
+        reason = "notify_stall" if notify_stall else "push_stall"
+        if notify_stall:
+            self._log("⚠️ [streamer] no BLE notifications; attempting restart")
+        else:
+            self._log("⚠️ [streamer] no LSL pushes; attempting restart")
+        async with self._restart_lock:
+            self._restart_in_progress = True
+            self._restart_seq += 1
+            seq = self._restart_seq
+            self._log_kv("restart_begin", reason=reason, seq=seq)
+            try:
+                await self._restart_streaming(reason=reason, seq=seq)
+            finally:
+                self._restart_in_progress = False
+
+    async def _restart_streaming(self, *, reason: str, seq: int) -> None:
         if self._client is None:
+            self._log_kv("restart_skip", reason=reason, seq=seq, detail="no_client")
             return
+        await self._stop_notifications(reason=reason)
+        await self._safe_disconnect(reason=reason)
+        stage = "reconnect"
         try:
+            await self._reconnect_client(reason=reason)
+            stage = "start_streaming"
+            self._log_kv("stream_start_begin", reason=reason, seq=seq)
             await self._start_streaming()
+            self._log_kv("stream_start_ok", reason=reason, seq=seq)
+            stage = "subscribe"
             await self._subscribe_eeg_channels()
-            self._log("✅ [streamer] streaming restart attempted")
-            return
+            self._log_kv("restart_complete", reason=reason, seq=seq)
         except Exception as exc:
-            self._log(f"⚠️ [streamer] restart failed: {exc}")
-        try:
-            if getattr(self._client, "is_connected", False):
-                await self._client.disconnect()
-            await self._client.connect()
-            await self._start_streaming()
-            await self._subscribe_eeg_channels()
-            self._log("✅ [streamer] reconnected after notification stall")
-        except Exception as exc:
-            self._log(f"⚠️ [streamer] reconnect failed: {exc}")
+            if stage == "reconnect":
+                self._log(f"⚠️ [streamer] reconnect failed: {exc}")
+                self._device_ref = None
+            else:
+                self._log(f"⚠️ [streamer] restart failed: {exc}")
+            self._log_kv(
+                "restart_error",
+                reason=reason,
+                seq=seq,
+                stage=stage,
+                error=str(exc),
+                exc_type=type(exc).__name__,
+            )
 
     def _emit_heartbeat(self, now_mono: float) -> None:
         if (now_mono - self._last_heartbeat_monotonic) < self._heartbeat_interval_s:
@@ -724,9 +927,33 @@ class MuseLslStreamer:
             dt_min_ms = float(min(mins) * 1000.0)
             dt_max_ms = float(max(maxs) * 1000.0)
 
+        last_notify_age_s = None
+        if self._last_notify_monotonic is not None:
+            last_notify_age_s = float(now_mono - self._last_notify_monotonic)
+
         no_push_for = None
         if self._last_push_monotonic is not None:
             no_push_for = float(now_mono - self._last_push_monotonic)
+
+        last_push_age_s = None
+        if self._last_push_monotonic is not None:
+            last_push_age_s = float(now_mono - self._last_push_monotonic)
+
+        is_connected = bool(self._client and getattr(self._client, "is_connected", False))
+        notify_active_count = sum(1 for active in self._notify_active.values() if active)
+        self._log_kv(
+            "heartbeat",
+            is_connected=is_connected,
+            restart_in_progress=self._restart_in_progress,
+            last_notify_age_s=(
+                f"{last_notify_age_s:.3f}" if last_notify_age_s is not None else "n/a"
+            ),
+            last_push_age_s=(
+                f"{last_push_age_s:.3f}" if last_push_age_s is not None else "n/a"
+            ),
+            notify_active_count=notify_active_count,
+            restart_seq=self._restart_seq,
+        )
 
         rssi = self._device_rssi
         last_ts = self._last_push_ts
