@@ -1674,20 +1674,11 @@ class MainWindow(QMainWindow):
             f"ICA: {'on' if ica_enabled else 'off'}",
         )
         runtime_note = ""
-        if self.current_subject:
-            state_path = (
-                self.repo_root / "logs" / f"session_state_{self.current_subject}.json"
-            )
-            if state_path.exists():
-                try:
-                    data = json.loads(state_path.read_text())
-                    runtime_allowed = data.get("event_marking_allowed")
-                    if runtime_allowed is not None:
-                        runtime_note = (
-                            f" (runtime: {'on' if runtime_allowed else 'off'})"
-                        )
-                except Exception:
-                    runtime_note = ""
+        payload = self._read_session_state_payload()
+        if payload:
+            runtime_allowed = payload.get("event_marking_allowed")
+            if runtime_allowed is not None:
+                runtime_note = f" (runtime: {'on' if runtime_allowed else 'off'})"
         self._set_status_semantic(
             self.events_state_label,
             "green" if event_enabled else "yellow",
@@ -3859,15 +3850,9 @@ class MainWindow(QMainWindow):
     def _resume_available(self) -> Tuple[bool, str]:
         if not self.current_subject:
             return False, "Select a subject to evaluate resume."
-        state_path = (
-            self.repo_root / "logs" / f"session_state_{self.current_subject}.json"
-        )
-        if not state_path.exists():
+        state = self._read_session_state_payload()
+        if not state:
             return False, "No session state found."
-        try:
-            state = json.loads(state_path.read_text())
-        except Exception:
-            return False, "Failed to read session state."
         if state.get("subject_id") and state.get("subject_id") != self.current_subject:
             return False, "Session state subject mismatch."
         tb = state.get("timebase_version") or state.get("timebase")
@@ -5161,6 +5146,14 @@ class MainWindow(QMainWindow):
         elif step_id == "event_tools":
             self._sync_event_outputs()
 
+    def _log_session_artifacts(self, session_dir: Path) -> None:
+        if not session_dir:
+            return
+        self._append_log(f"Session artifacts saved to: {session_dir}")
+        self._append_log(f"raw.csv: {session_dir / 'raw' / 'raw.csv'}")
+        self._append_log(f"events.csv: {session_dir / 'events' / 'events.csv'}")
+        self._append_log(f"events.jsonl: {session_dir / 'events' / 'events.jsonl'}")
+
     def _sync_step1_outputs(self) -> None:
         if (
             not self.current_project
@@ -5170,9 +5163,7 @@ class MainWindow(QMainWindow):
             return
         session_dir_value = self.session_dir_input.text().strip()
         if session_dir_value:
-            self._append_log(
-                "Session dir selected; raw session artifacts remain in session root."
-            )
+            self._log_session_artifacts(Path(session_dir_value))
             self._auto_fill_paths()
             return
         subject_dir = subject_root(self.current_project, self.current_subject)
@@ -5186,7 +5177,11 @@ class MainWindow(QMainWindow):
 
         subject = self.current_subject
         session = self.current_session_backend
-        state_src = self.repo_root / "logs" / f"session_state_{subject}.json"
+        state_src = None
+        for candidate in self._session_state_candidates():
+            if candidate.exists():
+                state_src = candidate
+                break
         state_payload = self._read_session_state_payload()
         state_session = state_payload.get("session_id") if state_payload else None
 
@@ -5233,9 +5228,10 @@ class MainWindow(QMainWindow):
             autosave_src, subject_dir / "events" / autosave_src.name, allow_overwrite
         )
         self._safe_copy(raw_src, subject_dir / "raw" / raw_src.name, allow_overwrite)
-        self._safe_copy(
-            state_src, subject_dir / "logs" / state_src.name, allow_overwrite
-        )
+        if state_src:
+            self._safe_copy(
+                state_src, subject_dir / "logs" / state_src.name, allow_overwrite
+            )
         if meta_src.exists():
             self._safe_copy(
                 meta_src, session_dir / "session_meta.json", allow_overwrite
@@ -5251,10 +5247,12 @@ class MainWindow(QMainWindow):
             autosave_src, session_dir / "events" / autosave_src.name, allow_overwrite
         )
         self._safe_copy(raw_src, session_dir / "raw" / raw_src.name, allow_overwrite)
-        self._safe_copy(
-            state_src, session_dir / "logs" / state_src.name, allow_overwrite
-        )
+        if state_src:
+            self._safe_copy(
+                state_src, session_dir / "logs" / state_src.name, allow_overwrite
+            )
         self._auto_fill_paths()
+        self._log_session_artifacts(session_dir)
 
     def _sync_step1b_outputs(self) -> None:
         if (
@@ -5363,32 +5361,44 @@ class MainWindow(QMainWindow):
             widget.setText(backend_id)
         return backend_id
 
+    def _session_state_candidates(self) -> list[Path]:
+        candidates: list[Path] = []
+        session_dir = self._resolve_effective_session_dir(step_id=None)
+        if session_dir is None and self.current_project and self.current_subject:
+            subject_dir = subject_root(self.current_project, self.current_subject)
+            session_dir = self._resolve_session_dir_for_current(subject_dir)
+        if session_dir:
+            candidates.append(session_dir / "logs" / "session_state.json")
+        if self.current_subject:
+            candidates.append(
+                self.repo_root / "logs" / f"session_state_{self.current_subject}.json"
+            )
+        return candidates
+
     def _read_session_state(self) -> Optional[str]:
         if not self.current_subject:
             return None
-        state_path = (
-            self.repo_root / "logs" / f"session_state_{self.current_subject}.json"
-        )
-        if not state_path.exists():
-            return None
-        try:
-            data = json.loads(state_path.read_text())
-            return data.get("session_id")
-        except Exception:
-            return None
+        for state_path in self._session_state_candidates():
+            if not state_path.exists():
+                continue
+            try:
+                data = json.loads(state_path.read_text())
+                return data.get("session_id")
+            except Exception:
+                continue
+        return None
 
     def _read_session_state_payload(self) -> Optional[Dict[str, Any]]:
         if not self.current_subject:
             return None
-        state_path = (
-            self.repo_root / "logs" / f"session_state_{self.current_subject}.json"
-        )
-        if not state_path.exists():
-            return None
-        try:
-            return json.loads(state_path.read_text())
-        except Exception:
-            return None
+        for state_path in self._session_state_candidates():
+            if not state_path.exists():
+                continue
+            try:
+                return json.loads(state_path.read_text())
+            except Exception:
+                continue
+        return None
 
     def _guess_backend_session_id(self) -> Optional[str]:
         if not self.current_project or not self.current_subject:
@@ -5453,6 +5463,7 @@ class MainWindow(QMainWindow):
             outputs.append(("Meta", str(session_dir / "meta.json")))
             outputs.append(("Timebase report", str(session_dir / "timebase_report.json")))
             outputs.append(("Step1 log", str(session_dir / "logs" / "step1.log")))
+            outputs.append(("Session state", str(session_dir / "logs" / "session_state.json")))
             outputs.append(
                 ("Resolved settings", str(session_dir / "logs" / "resolved_settings.json"))
             )
@@ -5460,12 +5471,6 @@ class MainWindow(QMainWindow):
             outputs.append(("Raw shards", str(session_dir / "raw")))
             outputs.append(("Events JSONL", str(session_dir / "events" / "events.jsonl")))
             outputs.append(("Events CSV", str(session_dir / "events" / "events.csv")))
-        outputs.append(
-            (
-                "Session state",
-                str(self.repo_root / "logs" / f"session_state_{subject}.json"),
-            )
-        )
         return outputs
 
     def _expected_step1b_outputs(self) -> list[tuple[str, str]]:
