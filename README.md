@@ -1,6 +1,6 @@
 # EEG Finger Classification BCI (Muse 2)
 
-Real-time EEG-based finger + action (rest/open/close) classification with uncertainty-aware gating, calibrated confidence, and experiment reporting. Pipeline is aligned to the SDS: streaming, event labeling, window extraction, training, evaluation, calibration, and reporting, presentational website is live at [alphahand.org].
+Real-time EEG-based finger + action (rest/open/close) classification with uncertainty-aware gating, calibrated confidence, and experiment reporting. Pipeline is aligned to the SDS: streaming, event labeling, window extraction, training, evaluation, calibration, and reporting, presentational website is live at (alphahand.org)[alphahand.org].
 
 ## Python support (macOS)
 
