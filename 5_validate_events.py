@@ -6,6 +6,7 @@ Use --apply to fix issues in-place and write edit logs.
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -283,7 +284,7 @@ def main():
     parser.add_argument(
         "--subject-id",
         type=str,
-        default="",
+        default="2-M16",
         help="(Deprecated) Subject ID lookup is no longer supported without explicit paths.",
     )
     parser.add_argument(
@@ -293,10 +294,11 @@ def main():
         "--json-report", type=str, default=None, help="Write JSON report to path"
     )
     args = parser.parse_args()
+    subject_id_provided = "--subject-id" in sys.argv
 
     explicit_events = bool(args.events)
     explicit_features = bool(args.features)
-    if args.subject_id and not args.session_dir:
+    if subject_id_provided and not args.session_dir:
         print("Session selection source: legacy_explicit")
         print(
             "❌ subject-id lookup is not supported without --session-dir. Provide explicit --events/--features."

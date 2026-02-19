@@ -30,7 +30,7 @@ def main():
         help="Model run directory (defaults to latest under <session_dir>/processed/models/).",
     )
     parser.add_argument(
-        "--subject-id", type=str, default="", help="Subject ID to report"
+        "--subject-id", type=str, default="2-M16", help="Subject ID to report"
     )
     parser.add_argument(
         "--exp-hash", type=str, default=None, help="Override experiment hash"

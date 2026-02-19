@@ -179,7 +179,7 @@ def build_arg_parser():
     p.add_argument(
         "--subject-id",
         type=str,
-        default="",
+        default="2-M16",
         help="Filter training data to a single subject_id",
     )
     p.add_argument(

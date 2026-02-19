@@ -83,7 +83,7 @@ RAW_FILE = "raw.csv"  # deprecated: eeg_features.csv
 EVENT_FILE = "events.csv"
 OUT_FILE = "eeg_windows.csv"
 OUT_NPZ = "eeg_windows.npz"
-DEFAULT_SUBJECT_ID = "8-M16"
+DEFAULT_SUBJECT_ID = "2-M16"
 ROOT_DIR = Path(__file__).resolve().parent
 
 
@@ -208,7 +208,7 @@ def _features_prefix_from_events(events_path: Path) -> Optional[str]:
 
 def _select_events_for_prefix(prefix: str, base_dir: Path) -> Optional[Path]:
     """
-    prefix example: "8-M16_20260103_153353"
+    prefix example: "2-M16_20260103_153353"
     Preference order:
       1) shifted (highest name sort)
       2) exact "{prefix}_events.csv"
@@ -243,8 +243,8 @@ def infer_subject_session_from_features_path(path: Path):
       <subject_id>_<YYYYMMDD>_<HHMMSS>_eeg_features.csv
 
     Example:
-      8-M16_20260103_153353_eeg_features.csv
-      subject_id = "8-M16"
+      2-M16_20260103_153353_eeg_features.csv
+      subject_id = "2-M16"
       session_id = "20260103_153353"
     """
     if not path:
@@ -525,11 +525,39 @@ def _load_features(path: Path):
     return times, signal, channel_cols
 
 
+def _sorted_raw_shards(raw_dir: Path) -> List[Path]:
+    shard_paths = list(raw_dir.glob("eeg_raw_shard_*.npy"))
+    if not shard_paths:
+        return []
+
+    def _key(path: Path) -> Tuple[int, str]:
+        match = re.search(r"eeg_raw_shard_(\d+)\.npy$", path.name)
+        if match:
+            return int(match.group(1)), path.name
+        return (10**12, path.name)
+
+    return sorted(shard_paths, key=_key)
+
+
 def _load_session_raw(session_dir: Path):
     meta = _read_json(session_dir / "meta.json")
     manifest = _read_json(session_dir / "manifest.json")
     raw_dir = session_dir / "raw"
-    shard_paths = sorted(raw_dir.glob("eeg_raw_shard_*.npy"))
+    shard_paths: List[Path] = []
+    if isinstance(manifest, dict):
+        shard_list = manifest.get("shard_list") or []
+        for item in shard_list:
+            if not isinstance(item, dict):
+                continue
+            raw_path = item.get("path")
+            if not raw_path:
+                continue
+            p = Path(str(raw_path))
+            if not p.is_absolute():
+                p = (session_dir / p).resolve()
+            shard_paths.append(p)
+    if not shard_paths:
+        shard_paths = _sorted_raw_shards(raw_dir)
     if not shard_paths:
         raise RuntimeError(f"No raw shards found in {raw_dir}")
     records = [np.load(path) for path in shard_paths]

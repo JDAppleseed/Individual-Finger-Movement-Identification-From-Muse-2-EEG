@@ -13,6 +13,7 @@ Keyboard controls:
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -49,12 +50,13 @@ parser.add_argument(
 parser.add_argument(
     "--subject-id",
     type=str,
-    default="",
+    default="2-M16",
     help="(Deprecated) Subject ID lookup is no longer supported without explicit paths.",
 )
 parser.add_argument("--events", type=str, default=None, help="Override events path")
 parser.add_argument("--features", type=str, default=None, help="Override features path")
 args = parser.parse_args()
+subject_id_provided = "--subject-id" in sys.argv
 
 events_candidate = None
 features_candidate = None
@@ -88,7 +90,7 @@ if args.session_dir:
             if alt.exists():
                 features_candidate = alt
 else:
-    if args.subject_id:
+    if subject_id_provided:
         print("Session selection source: legacy_explicit")
         print(
             "❌ subject-id lookup is not supported without --session-dir. Provide explicit --events/--features."

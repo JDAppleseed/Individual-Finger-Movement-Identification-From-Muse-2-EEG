@@ -45,7 +45,7 @@ from utils.label_schema import (
     is_valid_action_finger,
 )
 
-DEFAULT_SUBJECT_ID = "8-M16"
+DEFAULT_SUBJECT_ID = "2-M16"
 GENDER = "M"
 AGE = 16
 TIMEBASE_VERSION = "absolute_v1"

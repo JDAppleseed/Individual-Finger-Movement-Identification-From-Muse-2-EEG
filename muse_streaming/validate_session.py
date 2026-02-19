@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -90,7 +91,15 @@ def validate_session_dir(session_dir: Path, *, allow_partial: bool = False) -> D
             p = (session_dir / p).resolve()
         shard_paths.append(p)
     if not shard_paths:
-        shard_paths = sorted(raw_dir.glob("eeg_raw_shard_*.npy"))
+        shard_paths = list(raw_dir.glob("eeg_raw_shard_*.npy"))
+        if shard_paths:
+            def _key(path: Path) -> tuple[int, str]:
+                match = re.search(r"eeg_raw_shard_(\d+)\.npy$", path.name)
+                if match:
+                    return int(match.group(1)), path.name
+                return (10**12, path.name)
+
+            shard_paths = sorted(shard_paths, key=_key)
     if not shard_paths:
         report["ok"] = False
         report["issues"].append("no_raw_shards_found")
