@@ -1,6 +1,6 @@
 # EEG Finger Classification BCI (Muse 2)
 
-Real-time EEG-based finger + action (rest/open/close) classification with uncertainty-aware gating, calibrated confidence, and experiment reporting. Pipeline is aligned to the SDS: streaming, event labeling, window extraction, training, evaluation, calibration, and reporting.
+Real-time EEG-based finger + action (rest/open/close) classification with uncertainty-aware gating, calibrated confidence, and experiment reporting. Pipeline is aligned to the SDS: streaming, event labeling, window extraction, training, evaluation, calibration, and reporting, presentational website is live at [alphahand.org].
 
 ## Python support (macOS)
 
@@ -387,7 +387,7 @@ pyinstaller --noconfirm --onefile --windowed eeglab_wrapper_ui.py
 - Everything here is a preliminary overview that will be updated to be more accurate when I get around to it
 - This project is usually constantly changing
 - For a simple pipeline run-through, use the ui (eeglab_wrapper_ui.py) and stick to the defaults
-- raw.csv and events.csv are for human observation, we save metadata in a different stack and that is what gets fed to the rest of the pipeline
+- raw.csv and events.csv are for human observation, we save metadata in a different stack (npys, json) and that is what gets fed to the rest of the pipeline
 - Don't break confidentiality on any subjects, thats a big No-No
 - Please use this ethically and whenever possible credit me for the usage
 - Don't sell this code to other people, thats mean
