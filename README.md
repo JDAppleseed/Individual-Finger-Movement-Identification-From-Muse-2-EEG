@@ -63,7 +63,7 @@ python 5_review_events.py --session-dir <session_dir>
 - Connect Muse: `python eeglab_wrapper_ui.py` → click **Connect Muse 2** (Step 0), or run `python muse_lsl_streamer.py --name Muse2-EEG`.
 - Record: `python 1_stream_and_record.py --enable-plot --plot-scale fixed --plot-fixed-ylim -200 200` (writes a canonical session directory under `Projects/<project>/subjects/<subject>/sessions/<session_id>/` including `manifest.json`, `meta.json`, `raw/eeg_raw_shard_*.npy`, `events/events.jsonl`, plus inspection CSVs `raw/raw.csv` and `events/events.csv`). Plotting is fully decoupled; if it cannot start quickly it is disabled while recording continues.
 - Extract/Train/Evaluate: `python 1b_extract_windows.py --session-dir <session_dir>` → `python 2_train_model.py --session-dir <session_dir>` → `python 3_evaluate_model.py --session-dir <session_dir>` → `python 4_generate_reports.py --session-dir <session_dir>` (outputs live under `<session_dir>/processed/`).
-- Live infer (safe mode): `python 7_live_infer_and_actuate.py --session-dir <session_dir> --stream-name Muse2-EEG --stream-type EEG` (auto-resolves latest model/scaler under `<session_dir>/processed/models/`). Add `--enable-actuation --i-understand-this-moves-the-hand` to actuate.
+- Live infer (safe mode): `python 7_live_infer_and_actuate.py --config Projects/<project>/subjects/<subject>/config/infer.json --session-dir <session_dir>` (auto-resolves latest model/scaler under `<session_dir>/processed/models/`). Add `--enable_actuation` (plus serial args) to actuate.
 
 ## Quick Start
 
@@ -88,8 +88,8 @@ If `pylsl` cannot find the LSL binary library on macOS, install it via Homebrew:
 
 3) Review + validate events (optional but recommended):
 ```
-python 5_review_events.py
-python 5_validate_events.py --apply
+python 5_review_events.py --session-dir <session_dir>
+python 5_validate_events.py --session-dir <session_dir> --apply
 ```
 
 4) Validate the session (requires `manifest.json`), then extract windows:
@@ -110,8 +110,6 @@ python 3c_live_paper_figures.py --session-dir <session_dir>
 ```
 python 4_generate_reports.py --session-dir <session_dir>
 ```
-
-You can also use `run_all.py` to orchestrate the full pipeline.
 
 ## Muse Streaming CLI Quickstart
 
@@ -134,7 +132,7 @@ python -m cli healthcheck --stream-name Muse2-EEG --sim --check-timebase
 
 4) Record data:
 ```
-python -m cli record --sim --output-dir data/muse_streaming --subject-id 8-M16
+python -m cli record --sim --output-dir data/muse_streaming --subject-id <subject_id>
 ```
 
 This CLI flow writes to `data/*` and is separate from the session-dir pipeline. Prefer the session-dir steps for extraction, training, evaluation, and reports.
@@ -169,25 +167,22 @@ Preferred:
 
 ```
 python 7_live_infer_and_actuate.py \
+  --config Projects/<project>/subjects/<subject>/config/infer.json \
   --session-dir <session_dir> \
-  --stream-name Muse2-EEG \
-  --stream-type EEG
 ```
 
 Explicit override:
 
 ```
 python 7_live_infer_and_actuate.py \
-  --model-path <model.pt> \
-  --scaler-path <scaler.save> \
-  --stream-name Muse2-EEG \
-  --stream-type EEG
+  --config <infer_config.json>
 ```
+When `--session-dir` is omitted, `7_live_infer_and_actuate.py` requires `model_path`, `scaler_path`, and `out_dir` in the config JSON.
 
 Allow-drop is opt-in and logs dropped windows:
 
 ```
-python 7_live_infer_and_actuate.py --allow-drop --latency-policy drop
+python 7_live_infer_and_actuate.py --config <infer_config.json> --session-dir <session_dir> --allow_drop --latency_policy drop
 ```
 
 ## Defaults & Auto-Resolution
@@ -338,23 +333,24 @@ Resume gating:
 
 Validate alignment after a run:
 ```
-python tools/check_time_alignment.py --features data/processed/<subject>_<session>_eeg_features.csv --events data/processed/<subject>_<session>_events.csv
+python tools/check_time_alignment.py --features <legacy_features_csv> --events <legacy_events_csv>
 ```
+(`tools/check_time_alignment.py` expects legacy feature/event CSV schemas.)
 
 Legacy data may fail strict alignment checks. For extraction, you can override with:
 ```
-python 1b_extract_windows.py --ignore-misalignment
+python 1b_extract_windows.py --session-dir <session_dir> --ignore-misalignment
 ```
 
 Resampled extraction (fixed shape windows):
 ```
-python 1b_extract_windows.py --target-fs 256
+python 1b_extract_windows.py --session-dir <session_dir> --target-fs 256
 ```
 
 ## Notes
 
 - Muse 2 sampling rate defaults to 256 Hz in code.
-- `pynput` is required for live event marking.
+- `pynput` enables live event marking; if unavailable, Step 1 disables keyboard marking and continues recording.
 - `5_validate_events.py` enforces validity and can auto-repair with `--apply`.
 
 ## EEGLAB-Style GUI Wrapper
