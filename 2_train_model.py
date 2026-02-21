@@ -31,8 +31,11 @@ from utils.sequence_data import (
 )
 from utils.experiment_logger import log_experiment, get_latest_experiment_hash
 from utils.label_schema import ACTION_REST
+from utils.splitting import infer_groups, assert_no_group_overlap
 from utils.session_layout import SessionLayout, resolve_session_dir
 
+# Pipeline handoff: Step 2 consumes Step 1b NPZ windows, then writes model/scaler
+# and split metadata that Step 3/3b/3c/4 reuse from the same run directory.
 SEED = 42
 BATCH_SIZE = 64
 EPOCHS = 60
@@ -158,6 +161,127 @@ def resolve_experiment_hash(meta: Dict[str, Any], n_expected: int) -> str:
         return "UNKNOWN"
 
 
+def _class_counts(values: np.ndarray) -> Dict[int, int]:
+    if len(values) == 0:
+        return {}
+    unique, counts = np.unique(values, return_counts=True)
+    return dict(zip(unique.tolist(), counts.tolist()))
+
+
+def _split_groups_from_meta(
+    meta: Dict[str, Any], n_expected: int, split_mode: str
+) -> np.ndarray:
+    if split_mode == "holdout_session":
+        if not meta or "session_id" not in meta:
+            raise ValueError("split_mode=holdout_session requires session_id in meta.")
+        session = np.asarray(meta["session_id"])
+        if session.ndim == 0 or len(session) != n_expected:
+            raise ValueError("session_id meta length mismatch for split diagnostics.")
+        return session
+    return infer_groups(meta, n_expected)
+
+
+def _log_split_diagnostics(
+    groups: np.ndarray,
+    y_action: np.ndarray,
+    y_finger: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+):
+    groups = np.asarray(groups).reshape(-1)
+    unique_groups, group_counts = np.unique(groups, return_counts=True)
+    train_groups = np.unique(groups[train_idx])
+    test_groups = np.unique(groups[test_idx])
+    order = np.argsort(group_counts)[::-1]
+    top = [(str(unique_groups[i]), int(group_counts[i])) for i in order[:10]]
+    singleton_count = int(np.sum(group_counts == 1))
+
+    print(
+        "Split diagnostics: "
+        f"train_groups={len(train_groups)} test_groups={len(test_groups)} total_groups={len(unique_groups)}"
+    )
+    print(f"Top group sizes (up to 10): {top}")
+    print(f"Singleton groups: {singleton_count}")
+
+    print(f"Train action counts: {_class_counts(y_action[train_idx])}")
+    print(f"Test action counts: {_class_counts(y_action[test_idx])}")
+    print(f"Train finger counts: {_class_counts(y_finger[train_idx])}")
+    print(f"Test finger counts: {_class_counts(y_finger[test_idx])}")
+
+    train_non_rest = y_action[train_idx] != ACTION_REST
+    test_non_rest = y_action[test_idx] != ACTION_REST
+    if np.any(train_non_rest):
+        print(
+            f"Train finger (non-REST) counts: {_class_counts(y_finger[train_idx][train_non_rest])}"
+        )
+    else:
+        print("Train finger (non-REST) counts: none")
+    if np.any(test_non_rest):
+        print(
+            f"Test finger (non-REST) counts: {_class_counts(y_finger[test_idx][test_non_rest])}"
+        )
+    else:
+        print("Test finger (non-REST) counts: none")
+
+
+def _window_idx_leakage_check(
+    meta: Dict[str, Any],
+    y_action: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    seed: int,
+    threshold: float,
+    strict: bool,
+):
+    if not meta:
+        return
+    if len(np.unique(y_action)) < 2:
+        return
+    if len(train_idx) == 0 or len(test_idx) == 0:
+        return
+    window_idx = None
+    key_used = None
+    for key in ("window_idx", "global_window_idx"):
+        if key not in meta:
+            continue
+        try:
+            arr = np.asarray(meta[key])
+        except Exception:
+            continue
+        if arr.ndim == 0 or len(arr) != len(y_action):
+            continue
+        window_idx = arr.reshape(-1)
+        key_used = key
+        break
+    if window_idx is None:
+        return
+
+    if window_idx.dtype.kind in "OUS":
+        _, inv = np.unique(window_idx.astype("U"), return_inverse=True)
+        X_idx = inv.astype(np.float32).reshape(-1, 1)
+    else:
+        X_idx = window_idx.astype(np.float32).reshape(-1, 1)
+
+    try:
+        from sklearn.tree import DecisionTreeClassifier
+    except Exception:
+        return
+
+    clf = DecisionTreeClassifier(random_state=seed, max_depth=5)
+    clf.fit(X_idx[train_idx], y_action[train_idx])
+    acc = float(clf.score(X_idx[test_idx], y_action[test_idx]))
+    if acc > float(threshold):
+        print(
+            "[WARN] window_idx leakage proxy: "
+            f"decision tree accuracy={acc:.3f} using {key_used}. "
+            "Protocol order may be confounded; consider counterbalancing/randomizing trial order."
+        )
+        if strict:
+            raise RuntimeError(
+                f"window_idx leakage accuracy {acc:.3f} exceeded threshold {threshold:.3f}"
+            )
+
+
 def build_arg_parser():
     p = argparse.ArgumentParser(description="Train CNN+LSTM EEG multi-head model")
     p.add_argument("--config", type=str, default=None, help="Path to JSON config")
@@ -204,7 +328,37 @@ def build_arg_parser():
     )
     p.add_argument("--test-size", type=float, default=0.2, help="Test split fraction")
     p.add_argument(
+        "--split-mode",
+        type=str,
+        default="group_trial",
+        choices=["group_trial", "holdout_session"],
+        help="Split mode (group_trial uses trial/event groups; holdout_session uses session_id)",
+    )
+    p.add_argument(
+        "--purge-seconds",
+        type=float,
+        default=0.0,
+        help="Purge train windows within this many seconds of any test window (same session)",
+    )
+    p.add_argument(
+        "--hop-seconds",
+        type=float,
+        default=None,
+        help="Optional hop size in seconds (used for purge heuristics if needed)",
+    )
+    p.add_argument(
         "--non-rest-only", action="store_true", help="Train only on non-REST windows"
+    )
+    p.add_argument(
+        "--window-idx-leak-threshold",
+        type=float,
+        default=0.65,
+        help="Warn if window_idx-only classifier exceeds this accuracy",
+    )
+    p.add_argument(
+        "--strict-leakage",
+        action="store_true",
+        help="Fail training if leakage checks exceed thresholds",
     )
     p.add_argument(
         "--save-model", type=str, default=DEFAULT_MODEL, help="Model output path"
@@ -541,6 +695,8 @@ def main():
         f"y_finger={y_finger_full.shape} meta_keys={meta_keys}"
     )
 
+    # Keep original sample positions so cached predictions can be validated later
+    # against the exact split/data snapshot used in this training run.
     # Global index mapping (original dataset positions)
     global_indices = np.arange(len(y_action_full), dtype=np.int64)
 
@@ -669,6 +825,8 @@ def main():
         exp_hash = resolve_experiment_hash(meta, len(y_action))
         log_experiment(subject, exp_hash, "STEP_2_TRAIN")
 
+        # Save all training artifacts together; downstream eval/report steps resolve
+        # this run folder and read model/scaler/predictions from it.
         run_dir, save_model_path, save_scaler_path, save_preds_path = resolve_output_paths(
             args, subject, exp_hash, session_dir=session_dir_path
         )
@@ -680,19 +838,49 @@ def main():
         )
 
         # ===== SPLIT =====
-        train_idx, test_idx = split_indices(
-            y_action,
-            y_finger,
-            meta=meta if meta else None,
-            test_size=args.test_size,
-            random_state=args.seed,
-        )
+        try:
+            train_idx, test_idx = split_indices(
+                y_action,
+                y_finger,
+                meta=meta if meta else None,
+                test_size=args.test_size,
+                random_state=args.seed,
+                split_mode=args.split_mode,
+                purge_seconds=args.purge_seconds,
+                hop_seconds=args.hop_seconds,
+                allow_fallback=False,
+            )
+        except ValueError as exc:
+            print(f"❌ Split failed: {exc}")
+            return 2
 
         train_idx = np.asarray(train_idx, dtype=np.int64)
         test_idx = np.asarray(test_idx, dtype=np.int64)
         n_samples = len(y_action)
         _validate_indices(train_idx, n_samples, "train")
         _validate_indices(test_idx, n_samples, "test")
+
+        try:
+            groups = _split_groups_from_meta(meta, len(y_action), args.split_mode)
+        except ValueError as exc:
+            print(f"❌ Split diagnostics failed: {exc}")
+            return 2
+        try:
+            assert_no_group_overlap(groups, train_idx, test_idx)
+        except RuntimeError as exc:
+            print(f"❌ Leakage guard tripped: {exc}")
+            return 2
+
+        _log_split_diagnostics(groups, y_action, y_finger, train_idx, test_idx)
+        _window_idx_leakage_check(
+            meta,
+            y_action,
+            train_idx,
+            test_idx,
+            seed=args.seed,
+            threshold=args.window_idx_leak_threshold,
+            strict=args.strict_leakage,
+        )
 
         if args.non_rest_only:
             keep_mask = y_action[train_idx] != ACTION_REST
@@ -811,6 +999,11 @@ def main():
             "loss_action_weight": args.loss_action_weight,
             "rest_weight": float(args.rest_weight),
             "test_size": args.test_size,
+            "split_mode": args.split_mode,
+            "purge_seconds": float(args.purge_seconds),
+            "hop_seconds": float(args.hop_seconds) if args.hop_seconds is not None else None,
+            "window_idx_leak_threshold": float(args.window_idx_leak_threshold),
+            "strict_leakage": bool(args.strict_leakage),
             "non_rest_only": bool(args.non_rest_only),
             "npz_path": str(npz_path),
             "session_dir": str(session_dir_path) if session_dir_path else None,

@@ -15,6 +15,7 @@ import json
 import platform
 import random
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
@@ -46,6 +47,78 @@ from utils.postprocess import (
     postprocess_predictions,
 )
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
+
+# Pipeline handoff: Step 3 reads Step 2 artifacts from one run directory and writes
+# calibrated metrics/plots/manifests back into that same run-scoped report path.
+try:
+    from projects.session_finder import latest_session_for_subject
+    from projects.session_paths import get_session_paths
+except Exception:
+    # PATCHED: session-aware path (fallback when projects package is unavailable)
+    def latest_session_for_subject(project: str, subject: str):
+        sessions_root = (
+            Path(__file__).resolve().parent
+            / "Projects"
+            / project
+            / "subjects"
+            / subject
+            / "sessions"
+        )
+        if not sessions_root.exists():
+            return None
+        sessions = [p for p in sessions_root.iterdir() if p.is_dir()]
+        if not sessions:
+            return None
+        return max(sessions, key=lambda p: p.stat().st_mtime).name
+
+    def get_session_paths(project: str, subject: str, session: str):
+        session_dir = (
+            Path(__file__).resolve().parent
+            / "Projects"
+            / project
+            / "subjects"
+            / subject
+            / "sessions"
+            / session
+        )
+        return _session_paths_from_dir(session_dir)
+
+
+@dataclass(frozen=True)
+class _SessionPathsCompat:
+    windows_npz: Path
+    model_file: Path
+    scaler_file: Path
+    test_predictions_npz: Path
+    eval_dir: Path
+
+
+def _session_paths_from_dir(session_dir: Path) -> _SessionPathsCompat:
+    session_dir = resolve_session_dir(session_dir)
+    layout = SessionLayout(session_dir)
+    run_dir = resolve_latest_run_dir(session_dir)
+    run_name = run_dir.name if run_dir is not None else "latest"
+    model_base = run_dir if run_dir is not None else layout.models_root
+    return _SessionPathsCompat(
+        windows_npz=layout.windows_npz,
+        model_file=model_base / "finger_action_model.pt",
+        scaler_file=model_base / "scaler.save",
+        test_predictions_npz=model_base / "test_predictions.npz",
+        eval_dir=layout.reports_root / run_name,
+    )
+
+
+def _infer_context_from_session_dir(session_dir: Path) -> Tuple[Optional[str], Optional[str], str]:
+    resolved = session_dir.expanduser().resolve()
+    parts = resolved.parts
+    for idx in range(0, len(parts) - 5):
+        if (
+            parts[idx].lower() == "projects"
+            and parts[idx + 2].lower() == "subjects"
+            and parts[idx + 4].lower() == "sessions"
+        ):
+            return parts[idx + 1], parts[idx + 3], parts[idx + 5]
+    return None, None, resolved.name
 
 # =========================
 # ===== CONFIG ============
@@ -491,43 +564,32 @@ def _split_with_checks(
     return None, None, MAX_SPLIT_ATTEMPTS
 
 
-def _resolve_path(path_str: str, base_dir: Optional[Path]) -> Path:
-    candidate = Path(path_str).expanduser()
-    if not candidate.is_absolute():
-        base = base_dir if base_dir is not None else Path.cwd()
-        candidate = (base / candidate).resolve()
-    return candidate
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
     parser.add_argument(
+        "--project",
+        type=str,
+        required=False,
+        help="Project identifier",
+    )
+    parser.add_argument(
+        "--subject",
+        type=str,
+        required=False,
+        help="Subject identifier",
+    )
+    parser.add_argument(
+        "--session",
+        type=str,
+        required=False,
+        help="Session identifier (defaults to latest for subject)",
+    )
+    parser.add_argument(
         "--session-dir",
         type=str,
         default=None,
-        help="Canonical session directory (resolves npz + latest model run by default).",
-    )
-    parser.add_argument(
-        "--run-dir",
-        type=str,
-        default=None,
-        help="Model run directory (defaults to latest under <session_dir>/processed/models/).",
-    )
-    parser.add_argument(
-        "--npz", type=str, default="eeg_windows.npz", help="Sequence npz file"
-    )
-    parser.add_argument(
-        "--pred-npz",
-        type=str,
-        default="test_predictions.npz",
-        help="Optional cached test predictions",
-    )
-    parser.add_argument(
-        "--model", type=str, default="finger_action_model.pt", help="Model weights path"
-    )
-    parser.add_argument(
-        "--scaler", type=str, default="scaler.save", help="Normalizer/scaler path"
+        help="Legacy session directory override from UI",
     )
     parser.add_argument(
         "--subject-id",
@@ -572,7 +634,7 @@ def main():
     parser.add_argument(
         "--export-test-pred",
         action="store_true",
-        help="Export test_predictions.npz for test split",
+        help="Export cached predictions for test split",
     )
     parser.add_argument(
         "--smooth-action-only",
@@ -617,137 +679,60 @@ def main():
         random.seed(split_seed)
         np.random.seed(split_seed)
 
-    config_dir = (
-        Path(args.config).expanduser().resolve().parent
-        if getattr(args, "config", None)
-        else None
-    )
-    explicit_npz = args.npz not in ("eeg_windows.npz", "./eeg_windows.npz")
-    explicit_model = args.model not in ("finger_action_model.pt", "./finger_action_model.pt")
-    explicit_scaler = args.scaler not in ("scaler.save", "./scaler.save")
-    explicit_pred = args.pred_npz not in ("test_predictions.npz", "./test_predictions.npz")
-    explicit_run_dir = bool(getattr(args, "run_dir", None))
-    explicit_overrides = [
-        name
-        for name, is_explicit in [
-            ("run_dir", explicit_run_dir),
-            ("npz", explicit_npz),
-            ("model", explicit_model),
-            ("scaler", explicit_scaler),
-            ("pred_npz", explicit_pred),
-        ]
-        if is_explicit
-    ]
-
-    plot_dir_override: Optional[Path] = None
-    session_dir_path: Optional[Path] = None
-    run_dir_path: Optional[Path] = None
-    selection_source = "legacy_explicit"
-
-    if getattr(args, "session_dir", None):
-        session_dir_path = resolve_session_dir(str(args.session_dir))
-        if not session_dir_path.exists():
-            print("Session selection source: session_dir")
-            print(f"Session dir not found: {session_dir_path}")
-            return 2
-        base_dir = session_dir_path
-        if explicit_overrides:
-            print(
-                f"⚠️ Explicit paths provided with --session-dir; using overrides: {explicit_overrides}"
-            )
-            selection_source = "legacy_explicit"
-        else:
-            selection_source = "session_dir"
-
-        run_dir_path = (
-            Path(str(args.run_dir)).expanduser()
-            if explicit_run_dir
-            else resolve_latest_run_dir(session_dir_path)
+    # PATCHED: session-aware path
+    legacy_session_dir: Optional[Path] = None
+    if args.session_dir:
+        legacy_session_dir = resolve_session_dir(args.session_dir)
+        inferred_project, inferred_subject, inferred_session = _infer_context_from_session_dir(
+            legacy_session_dir
         )
-        if run_dir_path is None or not run_dir_path.exists():
-            print("Session selection source: session_dir")
-            print(
-                "No model run directory found. Train a model first (Step 2), or pass --run-dir explicitly."
-            )
-            return 2
+        if not args.project and inferred_project:
+            args.project = inferred_project
+        if not args.subject and inferred_subject:
+            args.subject = inferred_subject
+        if args.session is None:
+            args.session = inferred_session
 
-        layout = SessionLayout(session_dir_path)
-        plot_dir_override = layout.reports_root / run_dir_path.name
-        plot_dir_override.mkdir(parents=True, exist_ok=True)
+    if not args.project or not args.subject:
+        print(
+            "Missing --project/--subject (or provide --session-dir under Projects/.../subjects/.../sessions/...)."
+        )
+        return 2
 
-        if explicit_npz:
-            args.npz = str(_resolve_path(args.npz, base_dir))
-        else:
-            args.npz = str(layout.windows_npz)
-        if explicit_model:
-            args.model = str(_resolve_path(args.model, base_dir))
-        else:
-            args.model = str(run_dir_path / "finger_action_model.pt")
-        if explicit_scaler:
-            args.scaler = str(_resolve_path(args.scaler, base_dir))
-        else:
-            args.scaler = str(run_dir_path / "scaler.save")
-        if explicit_pred:
-            args.pred_npz = str(_resolve_path(args.pred_npz, base_dir))
-        else:
-            args.pred_npz = str(run_dir_path / "test_predictions.npz")
-        if not args.save_manifest:
-            args.save_manifest = str(plot_dir_override / "eval_manifest.json")
-    else:
-        base_dir = config_dir or Path.cwd()
-        if not explicit_npz:
-            print("Session selection source: legacy_explicit")
-            print(
-                "❌ Missing --session-dir. Provide --session-dir or explicit --npz PATH."
-            )
-            return 2
-        if explicit_run_dir:
-            run_dir_path = Path(str(args.run_dir)).expanduser()
-            if not explicit_model:
-                args.model = str(run_dir_path / "finger_action_model.pt")
-            if not explicit_scaler:
-                args.scaler = str(run_dir_path / "scaler.save")
-            if not explicit_pred:
-                args.pred_npz = str(run_dir_path / "test_predictions.npz")
-            if not args.save_manifest:
-                plot_dir_override = Path("reports") / "runs" / run_dir_path.name
-                plot_dir_override.mkdir(parents=True, exist_ok=True)
-                args.save_manifest = str(plot_dir_override / "eval_manifest.json")
-        else:
-            if not explicit_model or not explicit_scaler:
-                print("Session selection source: legacy_explicit")
-                print(
-                    "❌ Missing --session-dir. Provide explicit --model and --scaler (or --run-dir)."
-                )
-                return 2
-        args.npz = str(_resolve_path(args.npz, base_dir))
-        if explicit_model:
-            args.model = str(_resolve_path(args.model, base_dir))
-        if explicit_scaler:
-            args.scaler = str(_resolve_path(args.scaler, base_dir))
-        if explicit_pred:
-            args.pred_npz = str(_resolve_path(args.pred_npz, base_dir))
+    if args.session is None:
+        args.session = latest_session_for_subject(args.project, args.subject)
+    if args.session is None:
+        print(
+            f"No session found for subject {args.subject} in project {args.project}."
+        )
+        return 2
+    paths = (
+        _session_paths_from_dir(legacy_session_dir)
+        if legacy_session_dir is not None
+        else get_session_paths(args.project, args.subject, args.session)
+    )
+    # PATCHED: session-aware path
+    os.makedirs(paths.eval_dir, exist_ok=True)
+    print(
+        f"[✓] Evaluating session {args.session} for subject {args.subject} in project {args.project}"
+    )
+    print(f"[✓] Loading model: {paths.model_file}")
+    print(f"[✓] Saving results to: {paths.eval_dir}")
 
-    print(f"Session selection source: {selection_source}")
-
-    npz_path = Path(args.npz)
-    pred_npz_path = Path(args.pred_npz)
-    model_path = Path(args.model)
-    scaler_path = Path(args.scaler)
-    print(f"Using NPZ file: {npz_path}")
-    print(f"Using model file: {model_path}")
-    print(f"Using scaler file: {scaler_path}")
+    npz_path = Path(paths.windows_npz).expanduser()
+    pred_npz_path = Path(paths.test_predictions_npz).expanduser()
+    model_path = Path(paths.model_file).expanduser()
+    scaler_path = Path(paths.scaler_file).expanduser()
     if not npz_path.exists():
         print(f"NPZ file not found: {npz_path}")
         return 2
     manifest_enabled = not args.no_manifest
-    manifest_path = (
-        Path(args.save_manifest)
-        if args.save_manifest
-        else Path("reports/last_eval_manifest.json")
-    )
+    manifest_name = Path(args.save_manifest).name if args.save_manifest else "eval_manifest.json"
+    manifest_path = Path(paths.eval_dir) / manifest_name
     print(f"Saving report/manifest to: {manifest_path}")
 
+    # Manifest ties metrics back to concrete files/hashes so later report/QA steps
+    # can verify they are using the same model/scaler/NPZ snapshot.
     def _path_info(path: Path, used: Optional[bool] = None) -> Dict[str, Any]:
         info: Dict[str, Any] = {
             "path": safe_resolve(path),
@@ -1015,7 +1000,7 @@ def main():
                     torch.softmax(finger_logits, dim=1).cpu().numpy()
                 )
 
-        print("✅ Ran deterministic inference (no cached test_predictions.npz found).")
+        print("✅ Ran deterministic inference (no cached predictions file found).")
 
     manifest["paths"]["pred_npz"]["used"] = cached_used
     if cached_used:
@@ -1068,9 +1053,8 @@ def main():
                     continue
                 if _is_maskable_array(meta[key], n_expected):
                     export_payload[key] = np.asarray(meta[key])[test_idx]
-        report_dir = Path("reports")
-        report_dir.mkdir(parents=True, exist_ok=True)
-        export_path = report_dir / f"test_predictions_{exp_hash}.npz"
+        export_path = pred_npz_path
+        export_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez(export_path, **export_payload)
         print(f"✅ Saved test predictions: {export_path}")
 
@@ -1338,7 +1322,7 @@ def main():
 
     plt.tight_layout()
 
-    plot_dir = plot_dir_override or Path("reports/subjects")
+    plot_dir = Path(paths.eval_dir)
     plot_dir.mkdir(parents=True, exist_ok=True)
     out_path = plot_dir / f"eval_{exp_hash}.png"
     plt.savefig(out_path)

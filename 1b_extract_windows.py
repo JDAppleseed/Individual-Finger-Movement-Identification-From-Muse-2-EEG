@@ -52,6 +52,8 @@ from utils.label_schema import (
     is_valid_action_finger,
 )
 
+# Pipeline handoff: Step 1b consumes Step 1 raw/events and produces the NPZ
+# that Step 2/3/3b/3c train/evaluate scripts all read.
 # =========================
 # ===== CONFIG ============
 # =========================
@@ -1007,6 +1009,7 @@ def main():
     session_meta: Dict[str, Any] = {}
     events: List[Dict[str, Any]] = []
 
+    # Prefer canonical session layout; keep legacy CSV mode only for back-compat.
     if session_dir:
         session_dir = session_dir.expanduser().resolve()
         features_path = session_dir / "raw"
@@ -1057,6 +1060,8 @@ def main():
             features_path
         )
 
+    # Propagate stable subject/session/experiment metadata so downstream split/report
+    # logic can identify exactly which capture a window came from.
     # Start with filename-derived values (most reliable)
     subject_id_value = inferred_subject
     session_id_value = inferred_session

@@ -15,6 +15,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Pipeline handoff: convenience wrapper that repeatedly runs Step 2 then Step 3
+# and keeps per-run train/eval logs together.
 
 def _run_and_log(cmd: str, log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)

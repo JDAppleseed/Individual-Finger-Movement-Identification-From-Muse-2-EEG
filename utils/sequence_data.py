@@ -7,8 +7,8 @@ Key goals:
 - Preserve *all* useful metadata from Step 1b NPZ (not just a short whitelist).
 - Keep y_action/y_finger strict (1D int64) and validate lengths.
 - Support memmap loading (don't cast X if mmap_mode is set).
-- Prefer leakage-resistant splits (trial_id groups first, then subject_id groups).
-- Stratify when possible, but gracefully fall back if stratification fails due to rare classes.
+- Prefer leakage-resistant splits (trial/event groups first; block segments if needed).
+- Stratify when possible, but never break groups.
 """
 
 from __future__ import annotations
@@ -18,7 +18,8 @@ from typing import Dict, Any, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split, GroupShuffleSplit
+
+from utils.splitting import split_indices as _safe_split_indices
 
 
 # -------------------------
@@ -172,83 +173,25 @@ def split_indices(
     meta: Optional[Dict[str, Any]] = None,
     test_size: float = 0.2,
     random_state: int = 42,
+    split_mode: str = "group_trial",
+    purge_seconds: float = 0.0,
+    hop_seconds: Optional[float] = None,
+    allow_fallback: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Return (train_idx, test_idx) as int64 arrays.
-
-    Preference order:
-      1) GroupShuffleSplit by trial_id if present and meaningful (reduces leakage).
-      2) GroupShuffleSplit by subject_id if multiple subjects exist.
-      3) Stratified train_test_split on combined label; fallback to non-stratified if it fails.
+    Return (train_idx, test_idx) as int64 arrays using leakage-aware, group-safe splitting.
     """
-    y_action = _as_1d_int64(y_action, "y_action")
-    y_finger = _as_1d_int64(y_finger, "y_finger")
-    n = len(y_action)
-    indices = np.arange(n, dtype=np.int64)
-
-    # ---- 1) Group by trial_id if available and usable ----
-    if meta and "trial_id" in meta:
-        try:
-            trial = np.asarray(meta["trial_id"]).reshape(-1)
-            if len(trial) == n:
-                # Only use if there are at least 2 groups
-                u = np.unique(trial)
-                if len(u) >= 2:
-                    splitter = GroupShuffleSplit(
-                        n_splits=1, test_size=test_size, random_state=random_state
-                    )
-                    train_idx, test_idx = next(
-                        splitter.split(indices, y_action, groups=trial)
-                    )
-                    return np.asarray(train_idx, dtype=np.int64), np.asarray(
-                        test_idx, dtype=np.int64
-                    )
-        except Exception:
-            pass
-
-    # ---- 2) Group by subject_id if multiple subjects exist ----
-    if meta and "subject_id" in meta:
-        try:
-            subject_ids = np.asarray(meta["subject_id"])
-            if subject_ids.ndim != 0 and len(subject_ids) == n:
-                subject_ids = subject_ids.astype("U")
-                unique_subjects = _unique_nonempty(subject_ids)
-                # Only group if we truly have multiple subjects (excluding UNKNOWN-only)
-                if len(unique_subjects) > 1:
-                    splitter = GroupShuffleSplit(
-                        n_splits=1, test_size=test_size, random_state=random_state
-                    )
-                    train_idx, test_idx = next(
-                        splitter.split(indices, y_action, groups=subject_ids)
-                    )
-                    return np.asarray(train_idx, dtype=np.int64), np.asarray(
-                        test_idx, dtype=np.int64
-                    )
-        except Exception:
-            pass
-
-    # ---- 3) Stratify on combined action/finger label; fallback if too sparse ----
-    # Safer multiplier than 100: derive from max finger class count
-    max_finger = int(np.max(y_finger)) if n > 0 else 0
-    stratify_labels = (y_action * (max_finger + 1)) + y_finger
-
-    try:
-        train_idx, test_idx = train_test_split(
-            indices,
-            test_size=test_size,
-            stratify=stratify_labels,
-            random_state=random_state,
-        )
-    except ValueError:
-        # Typically: "The least populated class in y has only 1 member"
-        train_idx, test_idx = train_test_split(
-            indices,
-            test_size=test_size,
-            random_state=random_state,
-            stratify=None,
-        )
-
-    return np.asarray(train_idx, dtype=np.int64), np.asarray(test_idx, dtype=np.int64)
+    return _safe_split_indices(
+        y_action=y_action,
+        y_finger=y_finger,
+        meta=meta,
+        test_size=test_size,
+        random_state=random_state,
+        split_mode=split_mode,
+        purge_seconds=purge_seconds,
+        hop_seconds=hop_seconds,
+        allow_fallback=allow_fallback,
+    )
 
 
 def fit_channel_normalizer(X_train: np.ndarray) -> Dict[str, Any]:

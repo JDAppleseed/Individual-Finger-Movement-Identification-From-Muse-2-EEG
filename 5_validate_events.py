@@ -54,6 +54,8 @@ def resolve_paths(session_dir=None, events_override=None, features_override=None
 
 
 def validate_events(events):
+    # This validator is a guardrail before Step 1b: enforce schema + timing sanity
+    # so window labels are derived from coherent event records.
     issues = []
     warnings = []
 
@@ -154,6 +156,7 @@ def validate_events(events):
 
 
 def repair_event(row):
+    # Repair logic mirrors label_schema rules used by extraction/training code.
     before = dict(row)
     action_id = int(row["action_id"])
     finger_id = int(row["finger_id"])

@@ -51,6 +51,8 @@ from utils.sessions import SessionWriter, Packet  # type: ignore
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 from utils.modeling import load_model_and_scaler  # type: ignore
 
+# Pipeline handoff: Step 7 runs online inference with the trained Step 2 model
+# and optional hardware actuation, while writing live-session artifacts.
 
 logger = logging.getLogger("live_infer")
 
@@ -239,6 +241,8 @@ def main() -> int:
         return str(candidate)
 
     selection_source = "legacy_explicit"
+    # Prefer session-dir resolution so model/scaler/output paths come from a
+    # single run context, matching the training/evaluation layout.
     if session_dir_value:
         session_dir_path = resolve_session_dir(str(session_dir_value))
         if not session_dir_path.exists():

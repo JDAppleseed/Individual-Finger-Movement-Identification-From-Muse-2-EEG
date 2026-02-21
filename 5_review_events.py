@@ -64,6 +64,7 @@ explicit_events = bool(args.events)
 explicit_features = bool(args.features)
 selection_source = "legacy_explicit"
 
+# Primary path: review/edit events emitted by Step 1 in a session directory.
 if args.session_dir:
     session_dir = Path(args.session_dir).expanduser().resolve()
     if not session_dir.exists():
@@ -231,6 +232,8 @@ def save_events():
 
 
 def normalize_event(event):
+    # Keep type/action/finger internally consistent with label_schema so Step 1b
+    # labeling and downstream training do not see contradictory labels.
     override = event.get("type")
     if override in {"artifact", "calibration", "rest"}:
         event["action_id"] = ACTION_REST

@@ -14,6 +14,8 @@ from utils.report_generator import (
 from utils.experiment_logger import LOG_DIR
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 
+# Pipeline handoff: Step 4 summarizes Step 2/3 outputs from either a concrete run
+# directory or an explicit experiment hash.
 
 def main():
     parser = argparse.ArgumentParser()
@@ -59,6 +61,7 @@ def main():
         out_dir = SessionLayout(session_dir_path).reports_root / run_dir_path.name
         print("Session selection source: session_dir")
         print(f"Using run dir: {run_dir_path}")
+        # Run report consumes artifacts that were produced under this exact run folder.
         report_path = generate_run_report(run_dir_path, out_dir=out_dir)
         print(f"Saving report to: {report_path}")
         print(f"✅ Run report generated: {report_path}")

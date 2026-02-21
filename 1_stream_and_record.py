@@ -45,6 +45,8 @@ from utils.label_schema import (
     is_valid_action_finger,
 )
 
+# Pipeline handoff: this step writes canonical raw/events artifacts consumed by
+# Step 1b (window extraction) and Step 5/5b (event review + validation).
 DEFAULT_SUBJECT_ID = "2-M16"
 GENDER = "M"
 AGE = 16
@@ -3132,11 +3134,14 @@ def main() -> int:
 
     args = parser.parse_args()
     defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
+    # Keep config + CLI merge centralized so UI/default settings and CLI overrides
+    # go through one code path before the runtime loop starts.
     config_payload, config_settings = _load_config_file(args.config)
     config_warnings = _apply_config_to_args(args, config_settings, defaults)
 
     args.plot_scale = _normalize_scale_mode(args.plot_scale)
 
+    # _run_recording owns stream ingest + writer lifecycle; main is an arg/config shim.
     return _run_recording(
         args, config_payload=config_payload, config_settings=config_settings, config_warnings=config_warnings
     )
