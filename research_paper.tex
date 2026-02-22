@@ -1,0 +1,216 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\title{
+Real-Time Finger-Level Intention Decoding from Consumer-Grade EEG
+Using an Uncertainty-Aware Neural Inference Pipeline
+}
+
+\author{
+\IEEEauthorblockN{Jonathan Davanzo et al.}
+\IEEEauthorblockA{
+AlphaHand Research Initiative\\
+Email: contact@alphahand.org}
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Real-time finger-level intention decoding from electroencephalography (EEG) is challenging due to low signal-to-noise ratio, temporal overlap of motor signals, and limited spatial resolution. These challenges are amplified when using consumer-grade hardware. This work presents an end-to-end neural inference pipeline for real-time finger movement decoding using the 4-channel Muse 2 EEG headset. The system integrates Lab Streaming Layer (LSL) acquisition, time-aligned sliding-window preprocessing, a multi-head CNN+LSTM classifier, and confidence-aware actuation gating. Across two subjects, the system achieved action classification accuracies of 77.38\% and 89.31\%, and finger classification (non-REST) accuracies of 86.27\% and 89.90\%, respectively. These results demonstrate that low-cost EEG hardware can support reproducible, subject-specific finger decoding with real-time deployment capability and explicit confidence analysis.
+\end{abstract}
+
+\section{Introduction}
+
+Finger-level motor intention decoding enables assistive robotics, prosthetic control, and adaptive human–machine interfaces. While clinical EEG systems with 32–128 channels have demonstrated robust motor decoding, such systems are expensive and rarely operate in fully real-time pipelines. Consumer-grade EEG devices offer accessibility but suffer from limited spatial resolution, dry electrodes, packet instability, and lower signal-to-noise ratio.
+
+This work demonstrates a real-time finger-level decoding system built on the Muse 2 headset (4 channels at 256 Hz). The pipeline provides:
+
+\begin{itemize}
+\item Continuous LSL-based EEG acquisition
+\item Timestamp-domain aligned event labeling
+\item Sliding-window preprocessing with NaN rejection
+\item Multi-head CNN+LSTM classification
+\item REST-class downweighting
+\item Confidence and reliability evaluation
+\item Open-source reproducibility
+\end{itemize}
+
+\section{System Overview}
+
+The end-to-end pipeline consists of:
+
+\begin{enumerate}
+\item BLE acquisition from Muse 2
+\item Muse SDK forwarding to Lab Streaming Layer
+\item Real-time recording (Step 1)
+\item Window extraction and labeling (Step 1b)
+\item Neural model training (Step 2)
+\item Evaluation bundle generation (Step 3)
+\item Real-time inference and actuation (Step 7)
+\end{enumerate}
+
+\section{Data Acquisition and Persistence}
+
+\subsection{Hardware}
+
+The Muse 2 headset provides four EEG channels:
+TP9, AF7, AF8, TP10 sampled at 256 Hz.
+
+\subsection{Streaming Model}
+
+All EEG samples are timestamped in the LSL clock domain. Event timestamps are converted into the same timebase to ensure alignment. Absolute session time is defined as:
+
+\[
+t_{\text{session}} = t_{\text{lsl}} - t_{\text{stream\_start}}
+\]
+
+\subsection{Persistence Architecture}
+
+Raw EEG samples are first captured and stored as binary NumPy arrays (\texttt{.npy}) to preserve original fidelity and avoid floating-point CSV rounding artifacts. After acquisition:
+
+\begin{itemize}
+\item Raw samples are compiled into \texttt{raw.csv}
+\item Event markers are written to both:
+  \begin{itemize}
+  \item \texttt{events.csv} (human-readable)
+  \item \texttt{events.json} (authoritative structured metadata)
+  \end{itemize}
+\end{itemize}
+
+The JSON file serves as the authoritative event source to prevent schema drift or CSV parsing ambiguity.
+
+No data paths exist that rely solely on in-memory buffers; all sessions persist to disk.
+
+\section{Preprocessing and Window Extraction}
+
+Sliding windows are extracted using:
+
+\[
+T_{\text{window}} = 250\text{ ms}
+\]
+
+\[
+N = f_{\text{target}} \times T_{\text{window}} = 256 \times 0.25 = 64 \text{ samples}
+\]
+
+Hop size: 50 ms (20 Hz update rate).
+
+Resampling is performed to ensure a fixed 256 Hz grid. Any window containing NaN values is discarded. Events without full window coverage are dropped. This guarantees that no NaNs reach training or inference.
+
+\section{Model Architecture}
+
+The neural architecture consists of:
+
+\begin{itemize}
+\item 1D convolutional layers for temporal feature extraction
+\item LSTM backbone for temporal dependency modeling
+\item Two output heads:
+  \begin{itemize}
+  \item Action: REST / OPEN / CLOSE
+  \item Finger: NONE + THUMB–PINKY
+  \end{itemize}
+\end{itemize}
+
+The loss function is:
+
+\[
+\mathcal{L} = \text{CE}_{\text{action}} + \text{CE}_{\text{finger}}
+\]
+
+The REST class is downweighted by 0.2 to prevent overprediction.
+
+\section{Monte Carlo Dropout for Uncertainty Estimation}
+
+During offline evaluation, dropout layers remain active at inference time. For \(K\) stochastic passes:
+
+\[
+\mu = \frac{1}{K}\sum_{k=1}^{K}\hat{y}_k
+\]
+
+\[
+\sigma^2 = \frac{1}{K}\sum_{k=1}^{K}(\hat{y}_k - \mu)^2
+\]
+
+Reliability diagrams and confidence scatter plots evaluate calibration.
+
+Live inference currently uses deterministic forward passes with confidence gating.
+
+\section{Training Procedure}
+
+Training configuration for Subject 2-M16:
+
+\begin{itemize}
+\item Epochs: 60
+\item Batch size: 64
+\item Learning rate: 0.001
+\item Seed: 42
+\end{itemize}
+
+Train metrics:
+\begin{itemize}
+\item Action accuracy: 90.99\%
+\item Finger accuracy: 89.03\%
+\item Average loss: 0.5174
+\end{itemize}
+
+\section{Experimental Results}
+
+\begin{table}[h]
+\centering
+\caption{Subject Performance}
+\begin{tabular}{lcc}
+\toprule
+Subject & Action Acc & Finger Acc (non-REST) \\
+\midrule
+1-M16 (500) & 77.38\% & 86.27\% \\
+2-M16 & 89.31\% & 89.90\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Mean action accuracy: 83.35\% \\
+Mean finger accuracy: 88.09\%
+
+Subject 2-M16 test coverage:
+\begin{itemize}
+\item Total test windows: 2,040
+\item Non-REST windows: 1,871
+\end{itemize}
+
+Finger accuracy demonstrates greater cross-subject stability than action accuracy.
+
+\section{Discussion}
+
+Strengths:
+\begin{itemize}
+\item Real-time deployment
+\item Consumer hardware
+\item Multi-head modeling
+\item Confidence-aware evaluation
+\item Public evaluation bundles
+\end{itemize}
+
+Limitations:
+\begin{itemize}
+\item Limited subject count (2 published)
+\item Window-level splits may inflate metrics
+\item No per-class distribution reporting
+\item Latency distributions not yet quantified
+\end{itemize}
+
+\section{Conclusion}
+
+This work demonstrates that finger-level intention decoding using 4-channel consumer EEG is feasible in real time with subject-specific models. Across two subjects, action accuracy ranged from 77–89\%, while finger accuracy remained 86–90\%, suggesting stable finger discrimination once movement is detected.
+
+The system is real-time, open-source, uncertainty-evaluated, and designed for scalability to larger cohorts and closed-loop robotic control.
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}
