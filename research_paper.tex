@@ -5,6 +5,13 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{hyperref}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric}
+
+% Auto-extracted numbers/figures from repo artifacts (do not hand-edit).
+\input{paper_artifacts/paper_macros.tex}
+
+\newcommand{\NotAvailable}{\textit{not available in current run artifacts}}
 
 \title{
 Real-Time Finger-Level Intention Decoding from Consumer-Grade EEG
@@ -22,14 +29,20 @@ Email: contact@alphahand.org}
 \maketitle
 
 \begin{abstract}
-Real-time finger-level intention decoding from electroencephalography (EEG) is challenging due to low signal-to-noise ratio, temporal overlap of motor signals, and limited spatial resolution. These challenges are amplified when using consumer-grade hardware. This work presents an end-to-end neural inference pipeline for real-time finger movement decoding using the 4-channel Muse 2 EEG headset. The system integrates Lab Streaming Layer (LSL) acquisition, time-aligned sliding-window preprocessing, a multi-head CNN+LSTM classifier, and confidence-aware actuation gating. Across two subjects, the system achieved action classification accuracies of 77.38\% and 89.31\%, and finger classification (non-REST) accuracies of 86.27\% and 89.90\%, respectively. These results demonstrate that low-cost EEG hardware can support reproducible, subject-specific finger decoding with real-time deployment capability and explicit confidence analysis.
+Real-time finger-level intention decoding from electroencephalography (EEG) is challenging due to low signal-to-noise ratio, temporal overlap of motor signals, and limited spatial resolution---limitations that are amplified by consumer-grade hardware. We present an end-to-end inference pipeline for finger movement decoding using a 4-channel Muse 2 EEG stream sampled at \TargetFsHz~Hz and labeled via time-aligned event markers. The system integrates sliding-window preprocessing (window \WindowSec~s, hop \HopSec~s), a multi-head CNN+LSTM classifier, and uncertainty-aware offline evaluation via Monte Carlo (MC) dropout. Across \NumSubjects subjects in the current repository run artifacts, mean test action accuracy is \ActionAccMean\% $\pm$ \ActionAccSD (range \ActionAccMin--\ActionAccMax) and mean finger accuracy on non-REST windows is \FingerAccMean\% $\pm$ \FingerAccSD (range \FingerAccMin--\FingerAccMax). Calibration is quantified using expected calibration error (ECE): \ActionECEMean (action) and \FingerECEMean (finger non-REST), computed from saved prediction bundles. These results support reproducible, subject-specific finger decoding with explicit calibration analysis and a deployment-oriented software stack.
 \end{abstract}
 
 \section{Introduction}
 
 Finger-level motor intention decoding enables assistive robotics, prosthetic control, and adaptive human–machine interfaces. While clinical EEG systems with 32–128 channels have demonstrated robust motor decoding, such systems are expensive and rarely operate in fully real-time pipelines. Consumer-grade EEG devices offer accessibility but suffer from limited spatial resolution, dry electrodes, packet instability, and lower signal-to-noise ratio.
 
-This work demonstrates a real-time finger-level decoding system built on the Muse 2 headset (4 channels at 256 Hz). The pipeline provides:
+This work demonstrates a real-time, deployment-oriented finger-level decoding system built on the Muse 2 headset (4 channels, \TargetFsHz~Hz). Beyond top-line accuracy, we emphasize \emph{calibration and reliability} because downstream actuation (e.g., a robotic hand) is a safety-critical decision layer: an overconfident misclassification can be more harmful than a low-confidence abstention. We therefore treat uncertainty estimation (MC dropout) and reliability visualization as first-class evaluation outputs.
+
+In the current run artifacts (two subjects), action decoding is more variable across subjects (SD \ActionAccSD~pp) than finger decoding on non-REST windows (SD \FingerAccSD~pp), suggesting that once movement is detected, the identity of the active finger is comparatively stable across sessions/subjects in this dataset.
+
+We additionally report train--test generalization gaps from the saved training artifacts to contextualize potential overfitting under window correlation.
+
+The pipeline provides:
 
 \begin{itemize}
 \item Continuous LSL-based EEG acquisition
@@ -41,26 +54,55 @@ This work demonstrates a real-time finger-level decoding system built on the Mus
 \item Open-source reproducibility
 \end{itemize}
 
+\section{Related Work}
+EEG motor decoding has a long history in motor imagery (MI) and event-related paradigms, with modern deep learning approaches often outperforming hand-crafted feature pipelines on within-subject decoding tasks. Compact convolutional models (e.g., EEGNet) and deeper CNN stacks have become common baselines for EEG classification and visualization. \cite{Lawhern2018EEGNet,Schirrmeister2017Deep}
+
+Finger-level decoding is substantially harder than binary MI due to weaker separability and the limited spatial resolution of scalp EEG; consumer devices further restrict spatial sampling. Prior work on consumer-grade EEG has explored feasibility for BCI prototyping, but performance and calibration depend strongly on protocol design and evaluation methodology. \cite{ConsumerEEGPlaceholder,FingerLevelPlaceholder}
+
+For uncertainty, we use MC dropout as a practical Bayesian approximation that enables uncertainty estimates at inference time without changing the trained architecture. \cite{Gal2016Dropout} For calibration assessment, we follow common reliability diagram/ECE methodology and report ECE for both action and finger predictions. \cite{Guo2017Calibration}
+
 \section{System Overview}
 
-The end-to-end pipeline consists of:
+The repository implements a seven-step pipeline with persistent artifacts at each stage:
 
 \begin{enumerate}
-\item BLE acquisition from Muse 2
-\item Muse SDK forwarding to Lab Streaming Layer
-\item Real-time recording (Step 1)
-\item Window extraction and labeling (Step 1b)
-\item Neural model training (Step 2)
-\item Evaluation bundle generation (Step 3)
-\item Real-time inference and actuation (Step 7)
+\item \textbf{Step 1:} stream and record raw EEG (\texttt{1\_stream\_and\_record.py})
+\item \textbf{Step 1b:} extract labeled windows (\texttt{1b\_extract\_windows.py})
+\item \textbf{Step 2:} train a multi-head neural model (\texttt{2\_train\_model.py})
+\item \textbf{Step 3:} evaluate and bundle predictions (\texttt{3\_evaluate\_model.py})
+\item \textbf{Step 3b:} dataset checks (\texttt{3b\_deepchecks\_evaluate.py})
+\item \textbf{Step 3c:} paper-ready figures (\texttt{3c\_live\_paper\_figures.py})
+\item \textbf{Step 4:} HTML report generation (\texttt{4\_generate\_reports.py})
+\item \textbf{Step 7:} live inference and (optional) actuation (\texttt{7\_live\_infer\_and\_actuate.py})
+\item UI support: \texttt{eeglab\_wrapper\_ui.py}
 \end{enumerate}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  node distance=0.9em and 1.2em,
+  box/.style={draw, rounded corners, align=center, inner sep=3pt, font=\scriptsize},
+  arr/.style={-{Latex[length=2mm]}, line width=0.4pt}
+]
+\node[box] (s1) {Step 1\\Stream \& Record\\raw.csv, events.csv};
+\node[box, right=of s1] (s1b) {Step 1b\\Window Extract\\eeg\_windows.npz};
+\node[box, right=of s1b] (s2) {Step 2\\Train\\model.pt, preds.npz};
+\node[box, right=of s2] (s3) {Step 3/3c\\Evaluate\\confusion, ECE};
+\node[box, below=of s2] (s7) {Step 7\\Live infer\\(optional actuation)};
+\draw[arr] (s1) -- (s1b);
+\draw[arr] (s1b) -- (s2);
+\draw[arr] (s2) -- (s3);
+\draw[arr] (s2) -- (s7);
+\end{tikzpicture}
+\caption{End-to-end system flow and persistent artifacts. Quantitative results reported in this paper are extracted from the saved bundles under each session’s \texttt{processed/} directory.}
+\end{figure}
 
 \section{Data Acquisition and Persistence}
 
 \subsection{Hardware}
 
 The Muse 2 headset provides four EEG channels:
-TP9, AF7, AF8, TP10 sampled at 256 Hz.
+TP9, AF7, AF8, TP10 sampled at \TargetFsHz~Hz.
 
 \subsection{Streaming Model}
 
@@ -87,35 +129,61 @@ The JSON file serves as the authoritative event source to prevent schema drift o
 
 No data paths exist that rely solely on in-memory buffers; all sessions persist to disk.
 
+\subsection{Cohort Summary}
+Demographics, session duration, and event label counts are derived directly from \texttt{subject.json}, \texttt{run\_meta.json}, and \texttt{events/events.csv}. Sex is not recorded in the current \texttt{subject.json} artifacts and is therefore reported as \NotAvailable.
+
+\input{paper_artifacts/tables_demographics.tex}
+\input{paper_artifacts/tables_sessions.tex}
+\input{paper_artifacts/tables_events.tex}
+
 \section{Preprocessing and Window Extraction}
 
-Sliding windows are extracted using:
+Sliding windows are extracted using fixed-length windows (window length \WindowSec~s, hop \HopSec~s) resampled to a fixed \TargetFsHz~Hz grid. Each window is assigned an action label (REST/OPEN/CLOSE) and a finger label (NONE/THUMB/INDEX/MIDDLE/RING/PINKY) as defined in \texttt{utils/label\_schema.py}.
+
+The nominal sample count per window is:
 
 \[
-T_{\text{window}} = 250\text{ ms}
+N = f_s \times T_{\text{window}} = \TargetFsHz \times \WindowSec
 \]
 
-\[
-N = f_{\text{target}} \times T_{\text{window}} = 256 \times 0.25 = 64 \text{ samples}
-\]
+Windows containing non-finite values are excluded during training as an additional safety filter (even though extraction attempts to prevent NaNs). The extracted dataset bundles include artifact and gap flags; in the current run artifacts, the stored counts of flagged windows are summarized in Table~\ref{tab:dataset} (auto-generated below). If additional artifact rejection (e.g., ICA) was applied, it is not logged in the current artifacts and is therefore \NotAvailable.
 
-Hop size: 50 ms (20 Hz update rate).
+\input{paper_artifacts/tables_dataset.tex}
 
-Resampling is performed to ensure a fixed 256 Hz grid. Any window containing NaN values is discarded. Events without full window coverage are dropped. This guarantees that no NaNs reach training or inference.
+\subsection{Split Strategy and Leakage Controls}
+Training uses a holdout test split (\texttt{test\_size}=0.2) with group-aware splitting (\texttt{split\_mode}=group\_trial) as configured in each run’s saved \texttt{train\_config.json}. The training CLI also includes explicit leakage guardrails: it asserts no group overlap between train/test, supports optional temporal purging (\texttt{purge\_seconds}), and runs a ``window index'' diagnostic intended to detect suspiciously high performance from ordering artifacts (threshold \texttt{window\_idx\_leak\_threshold}). In the current artifacts, \texttt{purge\_seconds}=0.0; therefore, any additional temporal separation beyond group splitting is not enforced.
+
+The window dataset bundles include \texttt{trial\_id} and \texttt{block\_id} fields, but in the current artifacts both are constant (\TrialIdUniqueMin--\TrialIdUniqueMax unique \texttt{trial\_id} values; \BlockIdUniqueMin--\BlockIdUniqueMax unique \texttt{block\_id} values). As a result, strict trial-level evaluation and stratification by trial are not possible for this bundle, and group splitting relies on contiguous time segmentation derived from \texttt{window\_start} gaps (as implemented in \texttt{utils/splitting.py}).
+
+\subsection{Diagnostics and Quality Controls}
+The pipeline includes multiple checks intended to prevent silent failure modes common in streaming EEG systems:
+\begin{itemize}
+\item \textbf{Finite-value hardening:} \texttt{2\_train\_model.py} removes any windows with non-finite values prior to training to prevent NaN/Inf propagation in PyTorch.
+\item \textbf{Leakage guardrails:} \texttt{utils/splitting.py} enforces group-aware splits and provides an optional ``purge'' mechanism (\texttt{purge\_seconds}) to drop training windows near test windows in time.
+\item \textbf{Dataset validation:} \texttt{3b\_deepchecks\_evaluate.py} produces a per-run HTML report (\texttt{deepchecks\_eeg\_report.html}) stored alongside other report artifacts.
+\end{itemize}
 
 \section{Model Architecture}
 
-The neural architecture consists of:
+We use a multi-head CNN+LSTM network (\texttt{models/cnn\_lstm\_finger\_action\_net.py}) with shared temporal features and two classification heads (finger and action). The default configuration includes two temporal 1D convolution blocks (16 and 32 channels; kernel sizes 5 and 3), group normalization, dropout, a single-layer LSTM with hidden size 64, and two linear heads. The model has \ModelParamCount trainable parameters.
 
-\begin{itemize}
-\item 1D convolutional layers for temporal feature extraction
-\item LSTM backbone for temporal dependency modeling
-\item Two output heads:
-  \begin{itemize}
-  \item Action: REST / OPEN / CLOSE
-  \item Finger: NONE + THUMB–PINKY
-  \end{itemize}
-\end{itemize}
+\begin{table}[t]
+\centering
+\caption{CNN+LSTM model configuration (from \texttt{models/cnn\_lstm\_finger\_action\_net.py} defaults).}
+\begin{tabular}{ll}
+\toprule
+Component & Setting \\
+\midrule
+Input & $[T{=}64, C{=}4]$ EEG window \\
+Conv1 & 16 channels, kernel 5, dropout 0.3 \\
+Conv2 & 32 channels, kernel 3, dropout 0.3 \\
+Norm & GroupNorm (up to 4 groups) \\
+LSTM & 1 layer, hidden size 64 \\
+Heads & Linear(64$\rightarrow$6) finger, Linear(64$\rightarrow$3) action \\
+Parameters & \ModelParamCount \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 The loss function is:
 
@@ -143,47 +211,70 @@ Live inference currently uses deterministic forward passes with confidence gatin
 
 \section{Training Procedure}
 
-Training configuration for Subject 2-M16:
+Training hyperparameters are saved per run in \texttt{train\_config.json} and summarized in the auto-extracted performance table. In the current artifacts, both runs use 60 epochs, batch size 64, learning rate 0.001, and seed 42. Optimization uses Adam. Early stopping and gradient clipping are \NotAvailable in the current run artifacts (not logged in \texttt{train\_config.json}).
 
-\begin{itemize}
-\item Epochs: 60
-\item Batch size: 64
-\item Learning rate: 0.001
-\item Seed: 42
-\end{itemize}
+Input normalization is performed using a per-channel normalizer fitted on the training split (\texttt{fit\_channel\_normalizer} in \texttt{2\_train\_model.py}). The REST action class is downweighted via \texttt{rest\_weight}=0.2 (saved in \texttt{train\_config.json}) to mitigate degenerate REST-dominant solutions.
 
-Train metrics:
-\begin{itemize}
-\item Action accuracy: 90.99\%
-\item Finger accuracy: 89.03\%
-\item Average loss: 0.5174
-\end{itemize}
+\section{Uncertainty \& Calibration}
+From each run’s saved \texttt{test\_predictions.npz}, we compute ECE using the same binning convention as \texttt{3\_evaluate\_model.py} (10 bins over confidence in $(a,b]$). Table~\ref{tab:perf} reports action ECE over all test windows and finger ECE over non-REST windows (defined by action $\neq$ REST). The per-run reliability diagrams and confidence scatter plots are inserted automatically from \texttt{processed/reports/}.
+
+Across subjects, mean action ECE is \ActionECEMean $\pm$ \ActionECESD and mean finger (non-REST) ECE is \FingerECEMean $\pm$ \FingerECESD. Lower ECE indicates better agreement between predicted confidence and empirical accuracy; however, ECE values should be interpreted in light of overlapping-window correlation and potential distribution shift between event segments.
+
+\section{Real-Time Inference and Actuation}
+\texttt{7\_live\_infer\_and\_actuate.py} implements online windowing and inference with optional actuation. Actuation decisions are gated by a joint confidence heuristic (minimum of the selected action and finger probabilities), a minimum probability threshold (default \texttt{actuation\_min\_prob}=0.65), a stability requirement over consecutive windows (default \texttt{actuation\_stability}=2), and a cooldown between sends (default \texttt{actuation\_cooldown\_ms}=150). Hardware safety gates prevent any actuation when the predicted action is REST or the predicted finger is NONE.
+
+The runtime additionally tracks recent window latency and supports policy-based handling when latency exceeds a threshold (\texttt{latency\_threshold\_ms} with \texttt{latency\_policy} in \{\texttt{warn}, \texttt{drop}, \texttt{degrade}\}). These safeguards are designed to prioritize timely decisions and prevent backlog spirals under load.
+
+Latency logs from Step~7 are \NotAvailable in the current run artifacts; therefore mean/p95/max inference latency and dropped-window statistics cannot be reported for the present bundle.
 
 \section{Experimental Results}
 
-\begin{table}[h]
-\centering
-\caption{Subject Performance}
-\begin{tabular}{lcc}
-\toprule
-Subject & Action Acc & Finger Acc (non-REST) \\
-\midrule
-1-M16 (500) & 77.38\% & 86.27\% \\
-2-M16 & 89.31\% & 89.90\% \\
-\bottomrule
-\end{tabular}
-\end{table}
+\input{paper_artifacts/tables_performance.tex}
+\input{paper_artifacts/tables_generalization_gap.tex}
 
-Mean action accuracy: 83.35\% \\
-Mean finger accuracy: 88.09\%
+\subsection{Per-Subject Figures}
+For each run, we include the action and finger confusion matrices, the reliability/calibration summary plot, and an MC-dropout confidence scatter plot produced by the repository’s reporting pipeline.
 
-Subject 2-M16 test coverage:
+\input{paper_artifacts/figures.tex}
+
+\subsection{Per-Class Accuracy}
+Per-class test accuracies and counts are derivable from the saved per-window prediction bundles and are reported in Table~\ref{tab:perclass}. These values help diagnose whether performance is driven by dominant classes (e.g., REST) or is sustained across the full action/finger label set.
+
+\input{paper_artifacts/tables_perclass.tex}
+
+\subsection{Across-Subject Summary}
+Across \NumSubjects subjects, action accuracy ranges from \ActionAccMin\% to \ActionAccMax\% and finger (non-REST) accuracy ranges from \FingerAccMin\% to \FingerAccMax\%. The larger cross-subject spread in action accuracy suggests that movement detection (REST vs OPEN/CLOSE) is more sensitive to session-specific factors (e.g., baseline drift, attention, or label timing), whereas finger identity may remain separable once non-REST movement is present.
+
+\section{Statistical Rigor}
+We report per-subject 95\% confidence intervals (Wilson score) for action accuracy over $n_{test}$ windows and for finger accuracy over $n_{non\text{-}REST}$ windows (Table~\ref{tab:perf}). These intervals reflect finite test-set uncertainty under an i.i.d.\ window assumption; they do not account for temporal correlation induced by overlapping windows and event segments, which can narrow effective sample size.
+
+\input{paper_artifacts/tables_bootstrap_ci.tex}
+
+As an additional robustness check, we compute percentile bootstrap confidence intervals over test windows (Table~\ref{tab:bootci}) using the saved per-window correctness vectors. Like the Wilson intervals, these bootstraps assume independent windows and should be interpreted cautiously in the presence of overlap.
+
+\section{Threats to Validity}
+Several threats should be considered when interpreting these results:
 \begin{itemize}
-\item Total test windows: 2,040
-\item Non-REST windows: 1,871
+\item \textbf{Window correlation and leakage risk:} overlapping windows violate i.i.d.\ assumptions. Although group-aware splits are used, correlation within contiguous segments remains.
+\item \textbf{Evaluation granularity:} window-level metrics may not reflect trial-level performance; trial IDs in the current artifacts are not informative (constant) and thus cannot support trial-level aggregation.
+\item \textbf{Small cohort:} only \NumSubjects subjects are included in the current run artifacts, limiting generalization claims.
+\item \textbf{Handedness bias:} both subjects are right-handed; left-handed generalization is untested.
+\item \textbf{Demographic completeness:} sex is \NotAvailable in \texttt{subject.json}; other covariates are not logged.
+\item \textbf{Real-time latency:} Step~7 latency logs are \NotAvailable in current artifacts, so real-time responsiveness cannot be quantified here.
 \end{itemize}
 
-Finger accuracy demonstrates greater cross-subject stability than action accuracy.
+\section{Reproducibility}
+All quantitative claims in this paper are extracted directly from repository artifacts. The repository commit hash for this manuscript build is \RepoCommitSha. Per-subject runs are stored under \texttt{Projects/*/subjects/*/sessions/*/processed/} and include:
+\begin{itemize}
+\item \texttt{processed/eeg\_windows.npz}: windowed dataset with labels and metadata
+\item \texttt{processed/models/<run\_id>/metrics.json}: train/test summary metrics
+\item \texttt{processed/models/<run\_id>/test\_predictions.npz}: per-window probabilities and labels used to compute ECE and confidence intervals
+\item \texttt{processed/reports/<run\_id>/*png}: confusion matrices and calibration figures inserted in this paper
+\end{itemize}
+If an item is not present in these directories, it is explicitly reported as \NotAvailable.
+
+\subsection{Data Schema (Summary)}
+For transparency, the window dataset (\texttt{processed/eeg\_windows.npz}) contains, at minimum, the feature tensor \texttt{X} along with per-window labels (\texttt{y\_action}, \texttt{y\_finger}) and timing metadata (\texttt{window\_start}, \texttt{window\_end}). The test prediction bundle (\texttt{test\_predictions.npz}) stores per-window probabilities for both heads (\texttt{action\_probs}, \texttt{finger\_probs}), ground-truth labels, and indices mapping predictions back to the original window dataset (\texttt{test\_indices\_global}). This design enables independent recomputation of all reported metrics (accuracy, ECE, CIs) from immutable artifacts.
 
 \section{Discussion}
 
@@ -198,17 +289,15 @@ Strengths:
 
 Limitations:
 \begin{itemize}
-\item Limited subject count (2 published)
-\item Window-level splits may inflate metrics
-\item No per-class distribution reporting
-\item Latency distributions not yet quantified
+\item Limited subject count (\NumSubjects in current artifacts)
+\item Window-level correlation complicates both metrics and CIs
+\item Trial-level evaluation is not possible from current run metadata
+\item Step~7 latency distributions not yet quantified in saved artifacts
 \end{itemize}
 
 \section{Conclusion}
 
-This work demonstrates that finger-level intention decoding using 4-channel consumer EEG is feasible in real time with subject-specific models. Across two subjects, action accuracy ranged from 77–89\%, while finger accuracy remained 86–90\%, suggesting stable finger discrimination once movement is detected.
-
-The system is real-time, open-source, uncertainty-evaluated, and designed for scalability to larger cohorts and closed-loop robotic control.
+This work demonstrates an end-to-end, artifact-driven pipeline for finger-level intention decoding from 4-channel consumer EEG with explicit uncertainty and calibration reporting. In the current repository run artifacts, finger decoding on non-REST windows is comparatively stable across subjects (range \FingerAccMin--\FingerAccMax\%) while action decoding exhibits a wider spread (range \ActionAccMin--\ActionAccMax\%). Future work will focus on (i) larger cohorts with richer demographics, (ii) trial-aware protocols that support strict trial-level evaluation, and (iii) logging and reporting of Step~7 latency/throughput to close the loop between offline metrics and real-time deployment behavior.
 
 \bibliographystyle{IEEEtran}
 \bibliography{references}
