@@ -144,8 +144,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Session directory (derives model/scaler + output dir defaults).",
     )
 
-    p.add_argument("--window_sec", type=float, default=1.0)
-    p.add_argument("--hop_sec", type=float, default=0.125)
+    p.add_argument("--window_sec", type=float, default=0.25)
+    p.add_argument("--hop_sec", type=float, default=0.05)
     p.add_argument("--target_fs", type=float, default=256.0)
 
     p.add_argument("--latency_threshold_ms", type=float, default=750.0)
@@ -157,7 +157,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--enable_actuation", action="store_true", help="Enable sending commands to Arduino hand")
     p.add_argument("--serial_port", type=str, default=None, help="Serial port (e.g. /dev/tty.usbmodem*, /dev/tty.*)")
     p.add_argument("--serial_baud", type=int, default=9600, help="Baud rate (must match Arduino sketch)")
-    p.add_argument("--actuation_min_prob", type=float, default=0.55, help="Min joint confidence to actuate")
+    p.add_argument("--actuation_min_prob", type=float, default=0.65, help="Min joint confidence to actuate")
     p.add_argument("--actuation_stability", type=int, default=2, help="Require same decision N windows in a row")
     p.add_argument("--actuation_cooldown_ms", type=int, default=150, help="Min time between sends")
 
