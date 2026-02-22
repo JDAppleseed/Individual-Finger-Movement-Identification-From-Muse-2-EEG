@@ -866,7 +866,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
 
     # Bootstrap CI table (optional rigor supplement)
     boot_lines: List[str] = []
-    boot_lines.append("\\begin{table}[t]\n\\centering\n")
+    boot_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
     boot_lines.append("\\caption{Bootstrap 95\\% confidence intervals for accuracy (percentile bootstrap over test windows).}\n")
     boot_lines.append("\\label{tab:bootci}\n")
     boot_lines.append("\\begin{tabular}{lrrrr}\n\\toprule\n")
@@ -887,7 +887,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
         boot_lines.append(
             f"{_latex_escape(r.subject_id)} & {_format_pct(r.test_action_acc_metrics, 2)} & {a_ci} & {_format_pct(r.test_finger_acc_non_rest_metrics, 2)} & {f_ci} \\\\\n"
         )
-    boot_lines.append("\\bottomrule\n\\end{tabular}\n\\end{table}\n\n")
+    boot_lines.append("\\bottomrule\n\\end{tabular}\n\\end{table*}\n\n")
     (OUT_DIR / "tables_bootstrap_ci.tex").write_text("".join(boot_lines), encoding="utf-8")
 
     # Train vs test generalization gaps (from metrics.json train/test blocks)
@@ -1000,7 +1000,8 @@ def main() -> int:
 
     # Write full JSON bundle
     stats = {
-        "repo_root": str(REPO_ROOT),
+        # Avoid embedding absolute local paths in version-controlled artifacts.
+        "repo_root": ".",
         "repo_commit_sha": sha,
         "n_runs": len(run_metrics),
         "runs": [asdict(r) for r in run_metrics],

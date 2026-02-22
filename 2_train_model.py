@@ -41,7 +41,10 @@ BATCH_SIZE = 64
 EPOCHS = 60
 LR = 1e-3
 LOSS_ACTION_WEIGHT = 1.0
-REST_WEIGHT = 0.2
+# Default REST class weight. Historically this repo used a smaller value (0.2)
+# for early, REST-imbalanced datasets. Current default increases REST weight to
+# reduce over-triggering on non-REST actions unless confidence gating is used.
+REST_WEIGHT = 0.8
 
 DEFAULT_NPZ = "eeg_windows.npz"
 DEFAULT_MODEL = "finger_action_model.pt"
