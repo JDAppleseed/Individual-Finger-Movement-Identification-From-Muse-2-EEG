@@ -160,7 +160,7 @@ def _sorted_raw_shards(raw_dir: Path) -> list[Path]:
     if not shard_paths:
         return []
     def _key(path: Path) -> tuple[int, str]:
-        match = re.search(r"eeg_raw_shard_(\\d+)\\.npy$", path.name)
+        match = re.search(r"eeg_raw_shard_(\d+)\.npy$", path.name)
         if match:
             return int(match.group(1)), path.name
         return (10**12, path.name)
