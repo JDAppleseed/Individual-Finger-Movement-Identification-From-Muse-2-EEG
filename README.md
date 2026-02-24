@@ -159,7 +159,8 @@ Step 2+ requires a valid session directory (auto-filled or manually selected).
 Event marking happens inside `1_stream_and_record.py` via keyboard:
 - `space` / `1–5` / `o` / `c` / `r` record events (configurable via `EVENT_KEYMAP`)
 
-Events are saved to `events.csv` during capture and mirrored to `events/events.jsonl` for pipeline steps.
+Events are saved to `events/events.jsonl` during capture (authoritative). The legacy `events.csv`
+is optional and intended for quick inspection.
 
 ## Live Inference (Dedicated Script)
 
@@ -240,7 +241,7 @@ Session outputs (canonical):
 - `Projects/<project>/subjects/<subject>/sessions/<session>/processed/eeg_windows.npz` sequence window dataset (primary)
 - `Projects/<project>/subjects/<subject>/sessions/<session>/processed/eeg_windows.csv` window summary (diagnostics)
 - `Projects/<project>/subjects/<subject>/sessions/<session>/processed/models/<run_id>/finger_action_model.pt`
-- `Projects/<project>/subjects/<subject>/sessions/<session>/processed/models/<run_id>/scaler.save`
+- `Projects/<project>/subjects/<subject>/sessions/<session>/processed/models/<run_id>/scaler.npz`
 - `Projects/<project>/subjects/<subject>/sessions/<session>/processed/reports/<run_id>/...`
 - `logs/experiments/*.json` experiment logs
 - `logs/calibration/*` calibration traces
@@ -256,10 +257,10 @@ Projects/<project>/subjects/<subject>/sessions/<session_id>/
   meta.json
   raw/
     eeg_raw_shard_*.npy
-    raw.csv
+    raw.csv  (legacy inspection)
   events/
     events.jsonl
-    events.csv
+    events.csv  (legacy inspection)
   logs/
     step1.log
     resolved_settings.json
@@ -282,16 +283,15 @@ When enabled, live plotting runs **out-of-band** from acquisition (separate proc
 
 All sessions use a single LSL-aligned timebase (`absolute_v1`).
 
-Raw CSV (`raw.csv`):
-- `lsl_ts_raw`: absolute LSL timestamp for each sample (seconds, LSL domain)
-- `lsl_ts_mono`: monotonic LSL timestamp after clamping
-- `timebase`: `time_s := lsl_ts_mono - stream_start_lsl_ts` (derived; not written)
+Raw shards (`raw/eeg_raw_shard_*.npy`, authoritative):
+- `seq`, `lsl_ts_raw`, `lsl_ts_mono`, `local_ts`, `flags`, `segment_id`, `clamped`
+- `sample` (float array of channel values)
 
-Events CSV (`events.csv`, legacy inspection schema):
-- `onset_s,duration_s,type,channel,confidence,notes,finger_id,action_id,trial_id,block_id,source`
-- `onset_s` is relative to `stream_start_lsl_ts` (LSL-aligned timebase)
+Events JSONL (`events/events.jsonl`, authoritative):
+- one JSON object per line with `onset_s`, `duration_s`, `type`, `finger_id`, `action_id`, etc.
 
-Events are mirrored to `events/events.jsonl` for pipeline steps.
+Legacy inspection CSVs (optional):
+- `raw.csv` and `events.csv` for quick viewing/debugging
 
 A per-session metadata JSON is written to `<session_dir>/meta.json`, and a timebase report is written to `<session_dir>/timebase_report.json`.
 
@@ -315,16 +315,16 @@ If resume is requested but artifacts are missing/empty/corrupt:
 - Existing event paths are **not** reused.
 - If any output file already exists for a new session, a new unique session_id is generated.
 
-## Muse streaming artifacts (CLI)
+## Muse streaming artifacts (CLI, legacy CSV pipeline)
 
 The CLI recorder writes under the output directory:
 
-- `*_raw.csv`: raw samples
+- `*_raw.csv`: raw samples (legacy CSV)
   - `time_s`, `lsl_ts`, `latency_ms`, `TP9`, `AF7`, `AF8`, `TP10`
-- `*_features.csv`: fixed-size window features
+- `*_features.csv`: fixed-size window features (legacy CSV)
   - `time_s` (window center), `lsl_ts`, `window_start_s`, `window_end_s`, `latency_ms`
   - `mean_*`, `std_*` per channel
-- `*_events.csv`: session_start/session_end markers
+- `*_events.csv`: session_start/session_end markers (legacy CSV)
 
 Resume gating:
 - Resume is allowed only if the subject matches and the existing features file has data rows.
@@ -383,7 +383,7 @@ pyinstaller --noconfirm --onefile --windowed eeglab_wrapper_ui.py
 - Everything here is a preliminary overview that will be updated to be more accurate when I get around to it
 - This project is usually constantly changing
 - For a simple pipeline run-through, use the ui (eeglab_wrapper_ui.py) and stick to the defaults
-- raw.csv and events.csv are for human observation, we save metadata in a different stack (npys, json) and that is what gets fed to the rest of the pipeline
+- raw.csv and events.csv are for human observation; the pipeline uses raw shards (NPYs) + events.jsonl
 - Don't break confidentiality on any subjects, thats a big No-No
 - Please use this ethically and whenever possible credit me for the usage
 - Don't sell this code to other people, thats mean

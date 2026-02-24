@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Repair eeg_features.csv timing so it can align with events.csv and be used for training.
+Repair eeg_features.csv timing so it can align with events.jsonl and be used for training.
 
 What it does:
 1) Loads eeg_features.csv even if it has "extra" columns vs header.
 2) Builds a monotonic "time_s_fixed" by stitching segments when time_s resets backwards.
-3) Loads events.csv and finds which stitched segment best overlaps event onsets.
+3) Loads events.jsonl (or legacy CSV) and finds which stitched segment best overlaps event onsets.
 4) Writes a cleaned features CSV that contains ONLY the best segment, with corrected time_s.
 
 Outputs:
@@ -15,7 +15,7 @@ Outputs:
 Usage:
   python scripts/repair_features_timing.py \
     --features eeg_features.csv \
-    --events events.csv \
+    --events events.jsonl \
     --out eeg_features_repaired.csv
 
 If your session_meta.json exists, you can then point features_path to the repaired file.
@@ -37,6 +37,15 @@ REQUIRED_COLS = [
     "ch3",
     "ch4",
 ]
+
+
+def load_events_df(path: Path) -> pd.DataFrame:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        return pd.read_json(path)
+    if suffix == ".jsonl":
+        return pd.read_json(path, lines=True)
+    return pd.read_csv(path)
 
 
 def robust_read_features_csv(path: Path) -> pd.DataFrame:
@@ -188,7 +197,7 @@ def choose_best_segment(
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--features", type=str, default="eeg_features.csv")
-    ap.add_argument("--events", type=str, default="events.csv")
+    ap.add_argument("--events", type=str, default="events.jsonl")
     ap.add_argument("--out", type=str, default="eeg_features_repaired.csv")
     args = ap.parse_args()
 
@@ -204,7 +213,7 @@ def main():
     df = robust_read_features_csv(features_path)
 
     # Load events
-    events_df = pd.read_csv(events_path)
+    events_df = load_events_df(events_path)
     if "onset_s" not in events_df.columns:
         raise ValueError(f"{events_path} missing onset_s column.")
     event_onsets = (
@@ -228,7 +237,7 @@ def main():
             f"\nEvents onset range: {float(event_onsets.min()):.3f} -> {float(event_onsets.max()):.3f} s"
         )
     else:
-        print("\nNo events found in events.csv (onset_s empty).")
+        print("\nNo events found in events file (onset_s empty).")
 
     best_i = choose_best_segment(segments, event_onsets)
     s, e, t0, t1 = segments[best_i]

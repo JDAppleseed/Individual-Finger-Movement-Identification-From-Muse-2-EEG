@@ -8,7 +8,7 @@ Strict rule: do not invent numbers. All quantitative claims come from:
   - Projects/**/processed/models/*/train_config.json
   - Projects/**/processed/eeg_windows.npz
   - Projects/**/sessions/*/run_meta.json
-  - Projects/**/sessions/*/events/events.csv
+  - Projects/**/sessions/*/events/events.jsonl
   - Projects/**/processed/reports/<run_id>/*.png
 
 Outputs:
@@ -138,29 +138,51 @@ def _load_json(path: Path) -> Dict[str, Any]:
         return json.load(f)
 
 
-def _read_events_counts(events_csv: Path) -> Dict[str, Any]:
-    if not events_csv.exists():
+def _read_events_counts(events_path: Path) -> Dict[str, Any]:
+    if not events_path.exists():
         return {"available": False}
     counts_by_type: Dict[str, int] = {}
     counts_by_action: Dict[str, int] = {}
     counts_by_finger: Dict[str, int] = {}
     counts_by_pair: Dict[str, int] = {}
     n_rows = 0
-    with events_csv.open("r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            n_rows += 1
-            t = (row.get("type") or "").strip()
-            counts_by_type[t] = counts_by_type.get(t, 0) + 1
-            a = (row.get("action_id") or "").strip()
-            fi = (row.get("finger_id") or "").strip()
-            if a != "":
-                counts_by_action[a] = counts_by_action.get(a, 0) + 1
-            if fi != "":
-                counts_by_finger[fi] = counts_by_finger.get(fi, 0) + 1
-            if a != "" and fi != "":
-                key = f"{a}:{fi}"
-                counts_by_pair[key] = counts_by_pair.get(key, 0) + 1
+    suffix = events_path.suffix.lower()
+    rows: List[Dict[str, Any]] = []
+    if suffix == ".json":
+        payload = _load_json(events_path)
+        if isinstance(payload, dict) and isinstance(payload.get("events"), list):
+            payload = payload.get("events")
+        if isinstance(payload, list):
+            rows = [dict(ev) for ev in payload if isinstance(ev, dict)]
+    elif suffix == ".jsonl":
+        for line in events_path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                rows.append(payload)
+    else:
+        with events_path.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+    for row in rows:
+        n_rows += 1
+        t = (str(row.get("type") or "")).strip()
+        counts_by_type[t] = counts_by_type.get(t, 0) + 1
+        a = str(row.get("action_id") or "").strip()
+        fi = str(row.get("finger_id") or "").strip()
+        if a != "":
+            counts_by_action[a] = counts_by_action.get(a, 0) + 1
+        if fi != "":
+            counts_by_finger[fi] = counts_by_finger.get(fi, 0) + 1
+        if a != "" and fi != "":
+            key = f"{a}:{fi}"
+            counts_by_pair[key] = counts_by_pair.get(key, 0) + 1
     return {
         "available": True,
         "n_events": int(n_rows),
@@ -524,8 +546,12 @@ def _scan_session_meta(subject_id: str) -> Dict[str, Any]:
                 duration_s = float(samples_received) / float(srate)
             except Exception:
                 duration_s = None
-        events_csv = sess_dir / "events" / "events.csv"
-        events_counts = _read_events_counts(events_csv)
+        events_path = sess_dir / "events" / "events.jsonl"
+        if not events_path.exists():
+            events_path = sess_dir / "events" / "events.json"
+        if not events_path.exists():
+            events_path = sess_dir / "events" / "events.csv"
+        events_counts = _read_events_counts(events_path)
         out["sessions"].append(
             {
                 "session_id": meta.get("session_id") or sess_dir.name,
@@ -777,7 +803,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
         )
     dur_lines.append("\\bottomrule\n\\end{tabular}\n\\end{table}\n\n")
 
-    # Event / movement counts (exact, from events/events.csv)
+    # Event / movement counts (exact, from events/events.jsonl)
     # Use union of event 'type' values across sessions and rotate headers to fit IEEE table* width.
     type_set = set()
     for s in session_meta.get("sessions", []):
@@ -805,7 +831,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     ev_lines: List[str] = []
     ev_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
     ev_lines.append(
-        "\\caption{Event label counts per session (from \\texttt{events/events.csv}).}\n"
+        "\\caption{Event label counts per session (from \\texttt{events/events.jsonl}).}\n"
     )
     ev_lines.append("\\label{tab:events}\n")
     ev_lines.append("\\begin{tabular}{l" + "r" * len(types) + "}\n\\toprule\n")

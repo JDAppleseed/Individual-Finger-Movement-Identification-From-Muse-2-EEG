@@ -81,11 +81,11 @@ REST_SUBSAMPLE_PROB = 1.0
 REST_SUBSAMPLE_SEED = 1337
 REST_MAX_WINDOWS: Optional[int] = None
 
-RAW_FILE = "raw.csv"  # deprecated: eeg_features.csv
-EVENT_FILE = "events.csv"
+LEGACY_RAW_FILE = "raw.csv"
+LEGACY_EVENT_FILE = "events.csv"
 OUT_FILE = "eeg_windows.csv"
 OUT_NPZ = "eeg_windows.npz"
-DEFAULT_SUBJECT_ID = "2-M16"
+DEFAULT_SUBJECT_ID = "8-M16"
 ROOT_DIR = Path(__file__).resolve().parent
 
 
@@ -435,11 +435,11 @@ def _select_session_paths(args):
                 session_meta = root_meta
                 if not features_path:
                     features_path = _resolve_path(
-                        root_meta.get("features_path", RAW_FILE)
+                        root_meta.get("features_path", LEGACY_RAW_FILE)
                     )
                 if not events_path:
                     events_path = _resolve_path(
-                        root_meta.get("events_path", EVENT_FILE)
+                        root_meta.get("events_path", LEGACY_EVENT_FILE)
                     )
         return features_path, events_path, session_meta, "overrides"
 
@@ -465,8 +465,8 @@ def _select_session_paths(args):
     # (3) root session_meta.json
     root_meta = load_root_session_meta()
     if root_meta:
-        fp = _resolve_path(root_meta.get("features_path", RAW_FILE))
-        ep = _resolve_path(root_meta.get("events_path", EVENT_FILE))
+        fp = _resolve_path(root_meta.get("features_path", LEGACY_RAW_FILE))
+        ep = _resolve_path(root_meta.get("events_path", LEGACY_EVENT_FILE))
         if _csv_has_data_rows(fp) and _csv_has_data_rows(ep):
             return fp, ep, root_meta, "session_meta.json"
 
@@ -590,14 +590,30 @@ def _load_events_jsonl(path: Path) -> List[Dict[str, Any]]:
     events: List[Dict[str, Any]] = []
     if not path.exists():
         return events
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    suffix = path.suffix.lower()
+    if suffix == ".json":
         try:
-            payload = json.loads(line)
+            payloads = json.loads(path.read_text())
         except Exception:
-            continue
+            return events
+        if isinstance(payloads, dict) and isinstance(payloads.get("events"), list):
+            payloads = payloads.get("events")
+        if not isinstance(payloads, list):
+            return events
+        payload_iter = [p for p in payloads if isinstance(p, dict)]
+    else:
+        payload_iter = []
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                payload_iter.append(payload)
+    for payload in payload_iter:
         onset_s = _safe_float(
             payload.get("event_time_s", payload.get("onset_s", np.nan))
         )
@@ -1014,6 +1030,8 @@ def main():
         session_dir = session_dir.expanduser().resolve()
         features_path = session_dir / "raw"
         events_path = session_dir / "events" / "events.jsonl"
+        if not events_path.exists():
+            events_path = session_dir / "events" / "events.json"
         source = "session_dir"
 
         from muse_streaming.validate_session import validate_session_dir

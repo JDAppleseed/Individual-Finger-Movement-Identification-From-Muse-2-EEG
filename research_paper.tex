@@ -84,7 +84,7 @@ The repository implements a seven-step pipeline with persistent artifacts at eac
   box/.style={draw, rounded corners, align=center, inner sep=3pt, font=\scriptsize},
   arr/.style={-{Latex[length=2mm]}, line width=0.4pt}
 ]
-\node[box] (s1) {Step 1\\Stream \& Record\\raw.csv, events.csv};
+\node[box] (s1) {Step 1\\Stream \& Record\\raw shards, events.jsonl};
 \node[box, right=of s1] (s1b) {Step 1b\\Window Extract\\eeg\_windows.npz};
 \node[box, right=of s1b] (s2) {Step 2\\Train\\model.pt, preds.npz};
 \node[box, right=of s2] (s3) {Step 3/3c\\Evaluate\\confusion, ECE};
@@ -117,11 +117,11 @@ t_{\text{session}} = t_{\text{lsl}} - t_{\text{stream\_start}}
 Raw EEG samples are first captured and stored as binary NumPy arrays (\texttt{.npy}) to preserve original fidelity and avoid floating-point CSV rounding artifacts. After acquisition:
 
 \begin{itemize}
-\item Raw samples are compiled into \texttt{raw.csv}
+\item Raw samples are compiled into \texttt{raw/eeg\_raw\_shard\_\*.npy}
 \item Event markers are written to both:
   \begin{itemize}
-  \item \texttt{events.csv} (human-readable)
-  \item \texttt{events.json} (authoritative structured metadata)
+  \item \texttt{events.csv} (legacy human-readable)
+  \item \texttt{events.jsonl} (authoritative structured metadata)
   \end{itemize}
 \end{itemize}
 
@@ -130,7 +130,7 @@ The JSON file serves as the authoritative event source to prevent schema drift o
 No data paths exist that rely solely on in-memory buffers; all sessions persist to disk.
 
 \subsection{Cohort Summary}
-Demographics, session duration, and event label counts are derived directly from \texttt{subject.json}, \texttt{run\_meta.json}, and \texttt{events/events.csv}. Sex is not recorded in the current \texttt{subject.json} artifacts and is therefore reported as \NotAvailable.
+Demographics, session duration, and event label counts are derived directly from \texttt{subject.json}, \texttt{run\_meta.json}, and \texttt{events/events.jsonl}. Sex is not recorded in the current \texttt{subject.json} artifacts and is therefore reported as \NotAvailable.
 
 \input{paper_artifacts/tables_demographics.tex}
 \input{paper_artifacts/tables_sessions.tex}

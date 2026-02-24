@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Deterministic simulation for time-based window extraction.
+Deterministic simulation for time-based window extraction (legacy CSV inputs).
 """
 
 from __future__ import annotations

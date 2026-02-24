@@ -319,7 +319,6 @@ class SessionWriter:
                 self._events_handle.flush()
                 self._events_handle.close()
                 self._events_handle = None
-
             expected = (
                 int(self._seq_max - self._seq_min + 1)
                 if self._seq_min is not None and self._seq_max is not None

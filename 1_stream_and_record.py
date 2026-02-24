@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Step 1 (record-only): connect to an existing LSL stream, show a live plot for
-visual inspection, allow live event marking, and save raw.csv + events.csv.
+visual inspection, allow live event marking, and save raw shards + events.jsonl
+(authoritative). Legacy inspection CSVs are optional.
 """
 from __future__ import annotations
 
@@ -47,7 +48,7 @@ from utils.label_schema import (
 
 # Pipeline handoff: this step writes canonical raw/events artifacts consumed by
 # Step 1b (window extraction) and Step 5/5b (event review + validation).
-DEFAULT_SUBJECT_ID = "2-M16"
+DEFAULT_SUBJECT_ID = "8-M16"
 GENDER = "M"
 AGE = 16
 TIMEBASE_VERSION = "absolute_v1"
@@ -150,7 +151,7 @@ class EventRecorder:
 
     def record(self, event: EventRecord) -> None:
         """
-        Write one row to the legacy events.csv schema (primary inspection artifact).
+        Write one row to the legacy events.csv schema (optional inspection artifact).
         """
         md = dict(event.metadata or {})
         onset_s = float(event.event_time_s)
@@ -440,12 +441,12 @@ def _open_raw_csv(path: Path, channel_count: int = CHANNELS) -> tuple[Any, csv.w
 
 def _open_events_csv(path: Path) -> tuple[Any, csv.writer]:
     """
-    Legacy human-readable events.csv (primary inspection artifact).
+    Legacy human-readable events.csv (optional inspection artifact).
 
     Schema (matches legacy sessions):
       onset_s,duration_s,type,channel,confidence,notes,finger_id,action_id,trial_id,block_id,source
 
-    NOTE: The new-format events/events.jsonl is written separately for pipeline steps.
+    NOTE: The authoritative events.jsonl is written separately for pipeline steps.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     exists = path.exists() and path.stat().st_size > 0
@@ -2131,6 +2132,7 @@ def _run_recording(
 
     raw_csv_path = session_dir / "raw" / "raw.csv"
     events_csv_path = session_dir / "events" / "events.csv"
+    events_jsonl_path = session_dir / "events" / "events.jsonl"
     raw_file, raw_writer = _open_raw_csv(raw_csv_path, channel_count=channel_count)
     raw_flush_interval_s = _clamp_positive(
         "RAW_FLUSH_INTERVAL_S",
@@ -2153,6 +2155,7 @@ def _run_recording(
             "project_name": str(project_name or "DEFAULT"),
             "raw_csv_path": "raw/raw.csv",
             "events_csv_path": "events/events.csv",
+            "events_jsonl_path": "events/events.jsonl",
             "session_dir": str(session_dir),
         }
     )
@@ -2167,6 +2170,8 @@ def _run_recording(
     except Exception:
         logger.exception("Failed to update manifest files mapping.")
 
+    logger.info("Raw shards (authoritative): %s", session_dir / "raw")
+    logger.info("Events JSONL (authoritative): %s", events_jsonl_path)
     logger.info("Raw CSV (legacy inspection): %s", raw_csv_path)
     logger.info("Events CSV (legacy inspection): %s", events_csv_path)
 
@@ -2980,6 +2985,7 @@ def _run_recording(
                     "created_utc": _now_utc_iso(),
                     "raw_csv": str(raw_csv_path),
                     "events_csv": str(events_csv_path),
+                    "events_jsonl": str(events_jsonl_path),
                     "samples_received": samples_received,
                     "samples_written": samples_written,
                     "events_written": events_written,

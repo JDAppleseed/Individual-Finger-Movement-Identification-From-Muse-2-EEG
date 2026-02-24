@@ -7,15 +7,16 @@ Keyboard controls:
   n/p: next/previous event
   e: edit selected event (terminal prompts)
   d: delete selected event
-  s: save events.csv
+  s: save events.jsonl
   q: quit
 """
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -28,8 +29,7 @@ from utils.label_schema import (
     event_type_for,
 )
 
-EVENTS_PATH = Path("events.csv")
-FEATURES_PATH = Path("eeg_features.csv")
+EVENTS_PATH = Path("events.jsonl")
 DEFAULT_FS = 256.0
 
 
@@ -40,33 +40,209 @@ def latest_subject_file(subject_id, suffix, base_dir):
     return candidates[-1] if candidates else None
 
 
+def _resolve_events_path(
+    session_dir: Optional[Path], explicit_events: Optional[str]
+) -> Path:
+    if explicit_events:
+        return Path(explicit_events)
+    if session_dir:
+        for name in ("events.jsonl", "events.json", "events.csv"):
+            candidate = session_dir / "events" / name
+            if candidate.exists():
+                return candidate
+        return session_dir / "events" / "events.jsonl"
+    return EVENTS_PATH
+
+
+def _load_events_records(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        try:
+            payload = json.loads(path.read_text())
+        except Exception:
+            return []
+        if isinstance(payload, dict) and isinstance(payload.get("events"), list):
+            payload = payload.get("events")
+        if not isinstance(payload, list):
+            return []
+        return [dict(ev) for ev in payload if isinstance(ev, dict)]
+    if suffix == ".jsonl":
+        events = []
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                events.append(payload)
+        return events
+    if suffix == ".csv":
+        df = pd.read_csv(path)
+        return df.to_dict(orient="records")
+    return []
+
+
+def _normalize_events_df(events_df: pd.DataFrame) -> pd.DataFrame:
+    if events_df.empty:
+        return events_df
+    if "onset_s" not in events_df.columns and "event_time_s" in events_df.columns:
+        events_df["onset_s"] = events_df["event_time_s"]
+    if "type" not in events_df.columns and "label" in events_df.columns:
+        events_df["type"] = events_df["label"]
+    defaults = {
+        "duration_s": 0.0,
+        "type": "",
+        "channel": "n/a",
+        "confidence": "",
+        "notes": "",
+        "finger_id": 0,
+        "action_id": 0,
+        "trial_id": 0,
+        "block_id": 0,
+        "source": "unknown",
+    }
+    for col, value in defaults.items():
+        if col not in events_df.columns:
+            events_df[col] = value
+    for col in ("onset_s", "duration_s", "finger_id", "action_id"):
+        events_df[col] = pd.to_numeric(events_df[col], errors="coerce")
+        if col in ("finger_id", "action_id"):
+            events_df[col] = events_df[col].fillna(0).astype(int)
+        else:
+            events_df[col] = events_df[col].fillna(0.0).astype(float)
+    return events_df
+
+
+def _sorted_raw_shards(raw_dir: Path) -> list[Path]:
+    shard_paths = list(raw_dir.glob("eeg_raw_shard_*.npy"))
+    if not shard_paths:
+        return []
+    def _key(path: Path) -> tuple[int, str]:
+        match = re.search(r"eeg_raw_shard_(\\d+)\\.npy$", path.name)
+        if match:
+            return int(match.group(1)), path.name
+        return (10**12, path.name)
+    return sorted(shard_paths, key=_key)
+
+
+def _load_raw_shards(raw_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+    shard_paths = _sorted_raw_shards(raw_dir)
+    if not shard_paths:
+        raise FileNotFoundError(f"No raw shards found in {raw_dir}")
+    records = [np.load(path) for path in shard_paths]
+    raw = np.concatenate(records) if len(records) > 1 else records[0]
+    if raw.size < 1 or "lsl_ts_mono" not in raw.dtype.names:
+        raise ValueError("Invalid raw shard format (missing lsl_ts_mono)")
+    time_s = raw["lsl_ts_mono"].astype(float)
+    time_s = time_s - float(time_s[0])
+    signal = raw["sample"].astype(float)
+    return time_s, signal
+
+
+def _load_features_csv(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    df = pd.read_csv(path)
+    if "time_s" in df.columns:
+        times = df["time_s"].to_numpy(dtype=float)
+    else:
+        times = np.arange(len(df), dtype=float) / DEFAULT_FS
+    channel_cols = [c for c in ["ch1", "ch2", "ch3", "ch4"] if c in df.columns]
+    if not channel_cols:
+        channel_cols = [c for c in ["TP9", "AF7", "AF8", "TP10"] if c in df.columns]
+    if not channel_cols:
+        raise ValueError(f"No channel columns found in {path}")
+    signal = df[channel_cols].values
+    return times, signal
+
+
+def _load_signal(
+    session_dir: Optional[Path], features_override: Optional[str]
+) -> tuple[np.ndarray, np.ndarray, str]:
+    if features_override:
+        times, signal = _load_features_csv(Path(features_override))
+        return times, signal, "legacy_features_csv"
+    if session_dir:
+        raw_dir = session_dir / "raw"
+        try:
+            times, signal = _load_raw_shards(raw_dir)
+            return times, signal, "raw_shards"
+        except Exception:
+            pass
+        raw_csv = raw_dir / "raw.csv"
+        if raw_csv.exists():
+            times, signal = _load_features_csv(raw_csv)
+            return times, signal, "legacy_raw_csv"
+        features_csv = session_dir / "features" / "eeg_features.csv"
+        if features_csv.exists():
+            times, signal = _load_features_csv(features_csv)
+            return times, signal, "legacy_features_csv"
+    raise FileNotFoundError("No raw shards or legacy features CSV found.")
+
+
+def _json_safe(value: Any) -> Any:
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    return value
+
+
+def _events_to_records(events_df: pd.DataFrame) -> list[dict]:
+    records = []
+    for row in events_df.to_dict(orient="records"):
+        record = {k: _json_safe(v) for k, v in row.items()}
+        onset = float(record.get("onset_s", record.get("event_time_s", 0.0)) or 0.0)
+        duration = float(record.get("duration_s", 0.0) or 0.0)
+        record["onset_s"] = onset
+        record["event_time_s"] = onset
+        record["duration_s"] = max(0.0, duration)
+        record["end_s"] = onset + max(0.0, duration)
+        if "type" not in record and "label" in record:
+            record["type"] = record.get("label", "")
+        records.append(record)
+    return records
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--session-dir",
     type=str,
     default=None,
-    help="Session directory (defaults to <session_dir>/events/events.csv and <session_dir>/raw/raw.csv).",
+    help="Session directory (defaults to events/events.jsonl + raw/eeg_raw_shard_*.npy).",
 )
 parser.add_argument(
     "--subject-id",
     type=str,
-    default="2-M16",
+    default="8-M16",
     help="(Deprecated) Subject ID lookup is no longer supported without explicit paths.",
 )
-parser.add_argument("--events", type=str, default=None, help="Override events path")
-parser.add_argument("--features", type=str, default=None, help="Override features path")
+parser.add_argument(
+    "--events",
+    type=str,
+    default=None,
+    help="Override events path (events.jsonl / legacy events.csv).",
+)
+parser.add_argument(
+    "--features",
+    type=str,
+    default=None,
+    help="Override legacy features CSV path (optional).",
+)
 args = parser.parse_args()
 subject_id_provided = "--subject-id" in sys.argv
 
-events_candidate = None
-features_candidate = None
 explicit_events = bool(args.events)
 explicit_features = bool(args.features)
 selection_source = "legacy_explicit"
+session_dir = Path(args.session_dir).expanduser().resolve() if args.session_dir else None
 
 # Primary path: review/edit events emitted by Step 1 in a session directory.
-if args.session_dir:
-    session_dir = Path(args.session_dir).expanduser().resolve()
+if session_dir:
     if not session_dir.exists():
         print("Session selection source: session_dir")
         print(f"Session dir not found: {session_dir}")
@@ -78,18 +254,6 @@ if args.session_dir:
         selection_source = "legacy_explicit"
     else:
         selection_source = "session_dir"
-    if explicit_events:
-        events_candidate = Path(args.events)
-    else:
-        events_candidate = session_dir / "events" / "events.csv"
-    if explicit_features:
-        features_candidate = Path(args.features)
-    else:
-        features_candidate = session_dir / "raw" / "raw.csv"
-        if not features_candidate.exists():
-            alt = session_dir / "features" / "eeg_features.csv"
-            if alt.exists():
-                features_candidate = alt
 else:
     if subject_id_provided:
         print("Session selection source: legacy_explicit")
@@ -97,58 +261,38 @@ else:
             "❌ subject-id lookup is not supported without --session-dir. Provide explicit --events/--features."
         )
         raise SystemExit(2)
-    if not explicit_events or not explicit_features:
+    if not explicit_features:
         print("Session selection source: legacy_explicit")
         print(
-            "❌ Missing --session-dir. Provide --session-dir or explicit --events/--features."
+            "❌ Missing --session-dir. Provide --session-dir or explicit --features."
         )
         raise SystemExit(2)
-    events_candidate = Path(args.events)
-    features_candidate = Path(args.features)
 
-EVENTS_PATH = events_candidate or EVENTS_PATH
-FEATURES_PATH = features_candidate or FEATURES_PATH
+EVENTS_PATH = _resolve_events_path(session_dir, args.events)
 
 print(f"Session selection source: {selection_source}")
 print(f"Using events file: {EVENTS_PATH}")
-print(f"Using features file: {FEATURES_PATH}")
-print(f"Saving edits to: {EVENTS_PATH}")
 
 if not EVENTS_PATH.exists():
-    print(f"events.csv not found: {EVENTS_PATH}")
-    raise SystemExit(2)
-if not FEATURES_PATH.exists():
-    print(f"eeg_features.csv not found: {FEATURES_PATH}")
+    print(f"events file not found: {EVENTS_PATH}")
     raise SystemExit(2)
 
-events_df = pd.read_csv(EVENTS_PATH)
+try:
+    times, signal, signal_source = _load_signal(session_dir, args.features)
+except FileNotFoundError as exc:
+    print(str(exc))
+    raise SystemExit(2)
 
-required_cols = [
-    "onset_s",
-    "duration_s",
-    "type",
-    "channel",
-    "confidence",
-    "notes",
-    "finger_id",
-    "action_id",
-    "source",
-]
-for col in required_cols:
-    if col not in events_df.columns:
-        raise ValueError(f"Missing column: {col}")
+print(f"Using signal source: {signal_source}")
+print(f"Saving edits to: {EVENTS_PATH}")
 
-features = pd.read_csv(FEATURES_PATH)
-if "time_s" in features.columns:
-    times = features["time_s"].to_numpy(dtype=float)
-else:
-    times = np.arange(len(features), dtype=float) / DEFAULT_FS
+events_records = _load_events_records(EVENTS_PATH)
+events_df = _normalize_events_df(pd.DataFrame(events_records))
 
 # If timestamps are flat/invalid, fall back to sample-derived time.
 if np.nanmax(times) - np.nanmin(times) < 1e-6:
-    times = np.arange(len(features), dtype=float) / DEFAULT_FS
+    times = np.arange(len(signal), dtype=float) / DEFAULT_FS
 
-signal = features[["ch1", "ch2", "ch3", "ch4"]].values
 signal_mean = signal.mean(axis=1)
 
 events = events_df.to_dict(orient="records")
@@ -227,8 +371,39 @@ def select_event(idx):
 
 
 def save_events():
-    pd.DataFrame(events).to_csv(EVENTS_PATH, index=False)
-    print(f"✅ Saved {len(events)} events to {EVENTS_PATH}")
+    events_df = pd.DataFrame(events)
+    records = _events_to_records(events_df)
+    if session_dir:
+        events_jsonl_path = session_dir / "events" / "events.jsonl"
+    else:
+        events_jsonl_path = EVENTS_PATH.with_suffix(".jsonl")
+    events_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    with events_jsonl_path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+
+    if EVENTS_PATH.suffix.lower() == ".json":
+        events_json_path = EVENTS_PATH
+        events_json_path.parent.mkdir(parents=True, exist_ok=True)
+        events_json_path.write_text(json.dumps(records, indent=2))
+    else:
+        events_json_path = None
+
+    legacy_csv_path = None
+    if EVENTS_PATH.suffix.lower() == ".csv":
+        legacy_csv_path = EVENTS_PATH
+    elif session_dir:
+        candidate = session_dir / "events" / "events.csv"
+        if candidate.exists():
+            legacy_csv_path = candidate
+    if legacy_csv_path is not None:
+        pd.DataFrame(records).to_csv(legacy_csv_path, index=False)
+
+    print(f"✅ Saved {len(records)} events to {events_jsonl_path}")
+    if events_json_path is not None:
+        print(f"↪︎ Updated legacy JSON: {events_json_path}")
+    if legacy_csv_path is not None:
+        print(f"↪︎ Updated legacy CSV: {legacy_csv_path}")
 
 
 def normalize_event(event):

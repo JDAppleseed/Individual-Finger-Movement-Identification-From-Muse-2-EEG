@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Trim an EEG features CSV to the time span covered by an events CSV (+/- margin).
+Trim an EEG features CSV to the time span covered by an events JSONL (+/- margin).
 
 Designed for this repo's outputs:
 
@@ -10,7 +10,7 @@ Features CSV (from 1_stream_and_record.py) includes:
   - ch1..ch4 (EEG channels after cleaning)
   - optional prediction/diagnostic columns (kept as-is)
 
-Events CSV includes:
+Events JSONL includes:
   - onset_s (float seconds, session-relative)
   - duration_s (float seconds)
   - action_id, finger_id, etc. (not required for trimming)
@@ -38,12 +38,26 @@ def _require_cols(df: pd.DataFrame, path: str, cols: list[str]) -> None:
         raise SystemExit(f"ERROR: {path} missing required columns: {missing}")
 
 
+def load_events_df(path: Path) -> pd.DataFrame:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        return pd.read_json(path)
+    if suffix == ".jsonl":
+        return pd.read_json(path, lines=True)
+    return pd.read_csv(path)
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument(
         "--features", required=True, type=str, help="Features CSV (eeg_features.csv)"
     )
-    p.add_argument("--events", required=True, type=str, help="Events CSV (events.csv)")
+    p.add_argument(
+        "--events",
+        required=True,
+        type=str,
+        help="Events JSONL (events.jsonl) or legacy CSV",
+    )
     p.add_argument(
         "--margin-s",
         type=float,
@@ -72,7 +86,7 @@ def main() -> int:
         raise SystemExit(f"ERROR: events file not found: {events_path}")
 
     df_f = pd.read_csv(features_path)
-    df_e = pd.read_csv(events_path)
+    df_e = load_events_df(events_path)
 
     _require_cols(df_f, str(features_path), ["time_s"])
     _require_cols(df_e, str(events_path), ["onset_s", "duration_s"])

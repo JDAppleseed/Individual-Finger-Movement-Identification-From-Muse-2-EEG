@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -96,32 +97,54 @@ def _trim_events(
         return []
     outputs: List[Path] = []
     out_dir = events_path.parent
-
-    with events_path.open("r", newline="") as handle:
-        reader = csv.DictReader(handle)
-        rows = list(reader)
+    rows: List[Dict[str, object]] = []
+    suffix = events_path.suffix.lower()
+    if suffix == ".json":
+        payload = json.loads(events_path.read_text())
+        if isinstance(payload, dict) and isinstance(payload.get("events"), list):
+            payload = payload.get("events")
+        if isinstance(payload, list):
+            rows = [dict(ev) for ev in payload if isinstance(ev, dict)]
+    elif suffix == ".jsonl":
+        for line in events_path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                rows.append(payload)
+    else:
+        with events_path.open("r", newline="") as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
 
     for segment in segments:
         idx = int(segment["index"])
         seg_min = segment["min_lsl"]
         seg_max = segment["max_lsl"]
-        out_path = out_dir / f"{prefix}_SEG{idx:02d}_events.csv"
-        with out_path.open("w", newline="") as out_handle:
-            writer = csv.DictWriter(out_handle, fieldnames=reader.fieldnames or [])
-            writer.writeheader()
-            for row in rows:
-                onset_lsl = _parse_float(row.get("onset_lsl", ""))
-                end_lsl = _parse_float(row.get("end_lsl", ""))
-                if onset_lsl is None:
-                    onset_lsl = _parse_float(row.get("event_lsl_ts", ""))
-                if onset_lsl is None:
-                    continue
-                if end_lsl is None:
-                    duration = _parse_float(row.get("duration_s", "")) or 0.0
-                    end_lsl = onset_lsl + duration
-                if end_lsl < seg_min or onset_lsl > seg_max:
-                    continue
-                writer.writerow(row)
+        out_path = out_dir / f"{prefix}_SEG{idx:02d}_events.jsonl"
+        seg_rows: List[Dict[str, object]] = []
+        for row in rows:
+            onset_lsl = _parse_float(str(row.get("onset_lsl", "")))
+            end_lsl = _parse_float(str(row.get("end_lsl", "")))
+            if onset_lsl is None:
+                onset_lsl = _parse_float(str(row.get("lsl_ts_mono", "")))
+            if onset_lsl is None:
+                onset_lsl = _parse_float(str(row.get("event_lsl_ts", "")))
+            if onset_lsl is None:
+                continue
+            if end_lsl is None:
+                duration = _parse_float(str(row.get("duration_s", ""))) or 0.0
+                end_lsl = onset_lsl + duration
+            if end_lsl < seg_min or onset_lsl > seg_max:
+                continue
+            seg_rows.append(row)
+        with out_path.open("w", encoding="utf-8") as handle:
+            for row in seg_rows:
+                handle.write(json.dumps(row) + "\n")
         outputs.append(out_path)
     return outputs
 
@@ -131,7 +154,11 @@ def main() -> None:
         description="Salvage legacy session files into segmented outputs."
     )
     parser.add_argument("--features", required=True, help="Path to features.csv")
-    parser.add_argument("--events", required=True, help="Path to events.csv")
+    parser.add_argument(
+        "--events",
+        required=True,
+        help="Path to events.jsonl or legacy CSV",
+    )
     parser.add_argument(
         "--gap-break-s",
         type=float,

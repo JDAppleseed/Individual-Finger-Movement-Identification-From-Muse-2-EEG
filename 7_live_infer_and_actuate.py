@@ -33,7 +33,6 @@ from pathlib import Path
 from typing import Deque, Optional, Tuple
 
 import numpy as np
-import joblib
 
 # Torch is required for inference
 import torch
@@ -46,7 +45,7 @@ from pylsl import StreamInlet, resolve_byprop  # type: ignore
 # They exist in the user's original file; we preserve names/structure.
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from muse_streaming.resample import resample_window
-from utils.runtime_utils import apply_channel_normalizer
+from utils.runtime_utils import apply_channel_normalizer, load_normalizer
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 
 # Pipeline handoff: Step 7 runs online inference with the trained Step 2 model
@@ -157,7 +156,10 @@ def _resample_window(
             target_fs=target_fs,
         )
         return window
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Resampling failed for window [%.3f, %.3f]: %s", start_s, end_s, exc
+        )
         return None
 
 
@@ -176,51 +178,42 @@ class Packet:
 
 
 class SessionWriter:
-    def __init__(self, out_dir: str) -> None:
+    def __init__(
+        self,
+        out_dir: str,
+        *,
+        channel_count: int,
+        shard_size_samples: int = 2048,
+    ) -> None:
+        from muse_streaming.session_writer import RawShardWriter
+
         self.out_dir = Path(out_dir).expanduser().resolve()
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        self._raw_path = self.out_dir / "raw.csv"
-        self._raw_handle = self._raw_path.open("a", newline="")
-        import csv
-
-        self._raw_writer = csv.writer(self._raw_handle)
-        self._header_written = self._raw_path.stat().st_size > 0
+        self.raw_dir = self.out_dir / "raw"
+        self._raw_writer = RawShardWriter(
+            raw_dir=self.raw_dir,
+            channel_count=channel_count,
+            shard_size_samples=shard_size_samples,
+        )
 
     def append_packets(self, packets: list[Packet]) -> None:
         if not packets:
             return
-        if not self._header_written:
-            sample_len = int(np.asarray(packets[0].sample).reshape(-1).shape[0])
-            header = [
-                "seq",
-                "lsl_ts_raw",
-                "lsl_ts_mono",
-                "local_ts",
-                "flags",
-                "segment_id",
-                "clamped",
-            ] + [f"ch{i + 1}" for i in range(sample_len)]
-            self._raw_writer.writerow(header)
-            self._header_written = True
-        for packet in packets:
-            sample = np.asarray(packet.sample, dtype=float).reshape(-1)
-            row = [
-                int(packet.seq),
-                float(packet.lsl_ts_raw),
-                float(packet.lsl_ts_mono),
-                float(packet.local_ts),
-                int(packet.flags),
-                int(packet.segment_id),
-                int(bool(packet.clamped)),
-            ]
-            row.extend(sample.tolist())
-            self._raw_writer.writerow(row)
-        self._raw_handle.flush()
+        record_arr = self._raw_writer.empty_record_array(len(packets))
+        for idx, packet in enumerate(packets):
+            record_arr["seq"][idx] = int(packet.seq)
+            record_arr["lsl_ts_raw"][idx] = float(packet.lsl_ts_raw)
+            record_arr["lsl_ts_mono"][idx] = float(packet.lsl_ts_mono)
+            record_arr["local_ts"][idx] = float(packet.local_ts)
+            record_arr["flags"][idx] = int(packet.flags)
+            record_arr["segment_id"][idx] = int(packet.segment_id)
+            record_arr["clamped"][idx] = int(bool(packet.clamped))
+            record_arr["sample"][idx] = np.asarray(packet.sample, dtype=float).reshape(-1)
+        self._raw_writer.append(record_arr)
 
     def close(self) -> None:
         try:
-            self._raw_handle.flush()
-            self._raw_handle.close()
+            self._raw_writer.flush()
         except Exception:
             pass
 
@@ -233,11 +226,7 @@ def load_model_and_scaler(
         raise FileNotFoundError(f"Model not found: {model_path_p}")
     if not model_path_p.suffix.lower() in {".pt", ".pth"}:
         raise ValueError(f"Unexpected model file extension: {model_path_p.suffix}")
-    try:
-        state = torch.load(model_path_p, map_location=device, weights_only=True)
-    except TypeError:
-        # Older PyTorch versions do not support weights_only.
-        state = torch.load(model_path_p, map_location=device)
+    state = torch.load(model_path_p, map_location=device, weights_only=True)
     try:
         in_ch = int(state["conv.0.weight"].shape[1])
     except Exception:
@@ -253,14 +242,13 @@ def load_model_and_scaler(
     scaler = None
     scaler_path_p = Path(scaler_path).expanduser().resolve()
     if scaler_path_p.exists():
-        if scaler_path_p.suffix.lower() not in {".save", ".pkl", ".joblib"}:
+        if scaler_path_p.suffix.lower() != ".npz":
             logger.warning("Unexpected scaler extension: %s", scaler_path_p.suffix)
-        try:
-            scaler = joblib.load(scaler_path_p)
-        except Exception as exc:
-            logger.warning("Failed to load scaler (joblib uses pickle; do not load untrusted files): %s", exc)
-            scaler = None
+        scaler = load_normalizer(scaler_path_p)
+        if scaler is None:
+            logger.warning("Failed to load scaler from %s", scaler_path_p)
     return model, scaler
+
 
 def _safe_float(x: float) -> float:
     try:
@@ -296,6 +284,7 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "actuation_min_prob": 0.65,
         "actuation_stability": 2,
         "actuation_cooldown_ms": 150,
+        "allow_outside_base": False,
     }
     p = argparse.ArgumentParser(description="Live inference + optional robotic hand actuation")
     p.set_defaults(**defaults)
@@ -330,6 +319,11 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
     p.add_argument("--actuation_min_prob", type=float, help="Min joint confidence to actuate")
     p.add_argument("--actuation_stability", type=int, help="Require same decision N windows in a row")
     p.add_argument("--actuation_cooldown_ms", type=int, help="Min time between sends")
+    p.add_argument(
+        "--allow_outside_base",
+        action="store_true",
+        help="Allow output dir outside session/config base directory.",
+    )
 
     return p, defaults
 
@@ -422,7 +416,15 @@ def main() -> int:
             candidate = (base / candidate).resolve()
         return str(candidate)
 
+    def _is_relative_to(path: Path, base: Path) -> bool:
+        try:
+            path.relative_to(base)
+            return True
+        except ValueError:
+            return False
+
     selection_source = "legacy_explicit"
+    base_dir: Optional[Path] = None
     # Prefer session-dir resolution so model/scaler/output paths come from a
     # single run context, matching the training/evaluation layout.
     if session_dir_value:
@@ -454,12 +456,13 @@ def main() -> int:
                 "No model run directory found. Train a model first (Step 2), or pass explicit model_path/scaler_path."
             )
             return 2
+        base_dir = session_dir_path
         if not model_path:
             model_path = str(run_dir / "finger_action_model.pt")
         else:
             model_path = _resolve_path(str(model_path), base_dir)
         if not scaler_path:
-            scaler_path = str(run_dir / "scaler.save")
+            scaler_path = str(run_dir / "scaler.npz")
         else:
             scaler_path = _resolve_path(str(scaler_path), base_dir)
         if not out_dir:
@@ -474,9 +477,20 @@ def main() -> int:
                 "Missing --session-dir. Config must include model_path, scaler_path, and out_dir."
             )
             return 2
+        base_dir = config_dir
         model_path = _resolve_path(str(model_path), config_dir)
         scaler_path = _resolve_path(str(scaler_path), config_dir)
         out_dir = _resolve_path(str(out_dir), config_dir)
+
+    base_dir = base_dir if base_dir is not None else Path.cwd()
+    out_dir_path = Path(out_dir).expanduser().resolve()
+    if not args.allow_outside_base:
+        if not _is_relative_to(out_dir_path, base_dir):
+            raise ValueError(
+                f"out_dir must be within {base_dir} (got {out_dir_path}). "
+                "Pass --allow_outside_base to override."
+            )
+    out_dir = str(out_dir_path)
 
     print(f"Session selection source: {selection_source}")
     print(f"Using model file: {model_path}")
@@ -502,8 +516,13 @@ def main() -> int:
     ch = int(info.channel_count())
     logger.info("Connected LSL stream name=%s type=%s sfreq=%s ch=%s", lsl_name, lsl_type, sfreq, ch)
 
-    # Session writer (preserved)
-    session_writer = SessionWriter(out_dir=str(out_dir))
+    # Session writer (raw shards, authoritative)
+    raw_shard_samples = int(cfg.get("raw_shard_samples", 2048))
+    session_writer = SessionWriter(
+        out_dir=str(out_dir),
+        channel_count=ch,
+        shard_size_samples=raw_shard_samples,
+    )
     raw_flush_size = int(cfg.get("raw_flush_size", 256))
     raw_buffer = []
 

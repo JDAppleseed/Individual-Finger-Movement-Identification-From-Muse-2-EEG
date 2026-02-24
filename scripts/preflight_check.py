@@ -33,11 +33,20 @@ def load_session_meta() -> dict:
         return {}
 
 
+def load_events_df(path: Path) -> pd.DataFrame:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        return pd.read_json(path)
+    if suffix == ".jsonl":
+        return pd.read_json(path, lines=True)
+    return pd.read_csv(path)
+
+
 def resolve_paths():
     meta = load_session_meta()
     features_path = Path(meta.get("features_path", "eeg_features.csv"))
-    events_path = Path(meta.get("events_path", "events.csv"))
-    raw_path = Path(meta.get("raw_path", "data/raw/UNKNOWN_raw.csv"))
+    events_path = Path(meta.get("events_path", "events.jsonl"))
+    raw_path = Path(meta.get("raw_path", "raw"))
     return meta, features_path, events_path, raw_path
 
 
@@ -45,7 +54,7 @@ def check_required_files(mode: str) -> bool:
     ok = True
     _, features_path, events_path, raw_path = resolve_paths()
     model_path = Path("finger_action_model.pt")
-    scaler_path = Path("scaler.save")
+    scaler_path = Path("scaler.npz")
 
     if not events_path.exists():
         print(f"❌ Missing events file: {events_path}")
@@ -54,7 +63,11 @@ def check_required_files(mode: str) -> bool:
         print(f"❌ Missing features file: {features_path}")
         ok = False
 
-    if not raw_path.exists():
+    if raw_path.is_dir():
+        if not any(raw_path.glob("eeg_raw_shard_*.npy")):
+            print(f"❌ Missing raw shards in: {raw_path}")
+            ok = False
+    elif not raw_path.exists():
         print(f"❌ Missing raw file: {raw_path}")
         ok = False
 
@@ -62,7 +75,7 @@ def check_required_files(mode: str) -> bool:
         if not model_path.exists():
             print("⚠ Model weights missing: finger_action_model.pt")
         if not scaler_path.exists():
-            print("⚠ Normalizer missing: scaler.save")
+            print("⚠ Normalizer missing: scaler.npz")
 
     return ok
 
@@ -71,7 +84,7 @@ def check_events_schema() -> bool:
     _, _, events_path, _ = resolve_paths()
     if not events_path.exists():
         return False
-    df = pd.read_csv(events_path)
+    df = load_events_df(events_path)
     cols = set(df.columns)
     missing = REQUIRED_EVENT_COLS - cols
     if missing:
@@ -119,7 +132,7 @@ def check_time_alignment() -> bool:
         print("❌ time_s is not monotonic increasing")
         return False
 
-    df_events = pd.read_csv(events_path)
+    df_events = load_events_df(events_path)
     if df_events.empty:
         print("ℹ No events recorded; skipping event alignment check")
         return True

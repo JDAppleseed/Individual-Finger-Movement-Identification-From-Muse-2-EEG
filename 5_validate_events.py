@@ -6,10 +6,12 @@ Use --apply to fix issues in-place and write edit logs.
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from utils.events_audit import log_event_edit
@@ -31,26 +33,190 @@ def latest_subject_file(subject_id, suffix, base_dir):
     return candidates[-1] if candidates else None
 
 
+def _resolve_events_path(session_dir, events_override):
+    if events_override:
+        return Path(events_override)
+    if session_dir:
+        for name in ("events.jsonl", "events.json", "events.csv"):
+            candidate = Path(session_dir) / "events" / name
+            if candidate.exists():
+                return candidate
+        return Path(session_dir) / "events" / "events.jsonl"
+    return None
+
+
+def _load_events_records(path: Path) -> list[dict]:
+    if not path or not path.exists():
+        return []
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        try:
+            payload = json.loads(path.read_text())
+        except Exception:
+            return []
+        if isinstance(payload, dict) and isinstance(payload.get("events"), list):
+            payload = payload.get("events")
+        if not isinstance(payload, list):
+            return []
+        return [dict(ev) for ev in payload if isinstance(ev, dict)]
+    if suffix == ".jsonl":
+        events = []
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                events.append(payload)
+        return events
+    if suffix == ".csv":
+        df = pd.read_csv(path)
+        return df.to_dict(orient="records")
+    return []
+
+
+def _normalize_events_df(events_df: pd.DataFrame) -> pd.DataFrame:
+    if events_df.empty:
+        return events_df
+    if "onset_s" not in events_df.columns and "event_time_s" in events_df.columns:
+        events_df["onset_s"] = events_df["event_time_s"]
+    if "type" not in events_df.columns and "label" in events_df.columns:
+        events_df["type"] = events_df["label"]
+    defaults = {
+        "duration_s": 0.0,
+        "type": "",
+        "finger_id": 0,
+        "action_id": 0,
+        "channel": "n/a",
+        "confidence": "",
+        "notes": "",
+        "source": "unknown",
+        "trial_id": 0,
+        "block_id": 0,
+    }
+    for col, value in defaults.items():
+        if col not in events_df.columns:
+            events_df[col] = value
+    for col in ("onset_s", "duration_s", "finger_id", "action_id"):
+        events_df[col] = pd.to_numeric(events_df[col], errors="coerce")
+        if col in ("finger_id", "action_id"):
+            events_df[col] = events_df[col].fillna(0).astype(int)
+        else:
+            events_df[col] = events_df[col].fillna(0.0).astype(float)
+    return events_df
+
+
+def _events_to_records(events_df: pd.DataFrame) -> list[dict]:
+    records = []
+    for row in events_df.to_dict(orient="records"):
+        record = json_safe_dict(row)
+        onset = float(record.get("onset_s", record.get("event_time_s", 0.0)) or 0.0)
+        duration = float(record.get("duration_s", 0.0) or 0.0)
+        record["onset_s"] = onset
+        record["event_time_s"] = onset
+        record["duration_s"] = max(0.0, duration)
+        record["end_s"] = onset + max(0.0, duration)
+        if "type" not in record and "label" in record:
+            record["type"] = record.get("label", "")
+        records.append(record)
+    return records
+
+
+def _write_events_files(events_df: pd.DataFrame, events_path: Path, session_dir):
+    records = _events_to_records(events_df)
+    if session_dir:
+        events_jsonl_path = Path(session_dir) / "events" / "events.jsonl"
+    else:
+        events_jsonl_path = events_path.with_suffix(".jsonl")
+    events_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    with events_jsonl_path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+
+    events_json_path = None
+    if events_path.suffix.lower() == ".json":
+        events_json_path = events_path
+        events_json_path.parent.mkdir(parents=True, exist_ok=True)
+        events_json_path.write_text(json.dumps(records, indent=2))
+
+    legacy_csv_path = None
+    if events_path.suffix.lower() == ".csv":
+        legacy_csv_path = events_path
+    elif session_dir:
+        candidate = Path(session_dir) / "events" / "events.csv"
+        if candidate.exists():
+            legacy_csv_path = candidate
+    if legacy_csv_path is not None:
+        pd.DataFrame(records).to_csv(legacy_csv_path, index=False)
+
+    return events_json_path, events_jsonl_path, legacy_csv_path
+
+
+def _sorted_raw_shards(raw_dir: Path) -> list[Path]:
+    shard_paths = list(raw_dir.glob("eeg_raw_shard_*.npy"))
+    if not shard_paths:
+        return []
+    def _key(path: Path) -> tuple[int, str]:
+        match = re.search(r"eeg_raw_shard_(\\d+)\\.npy$", path.name)
+        if match:
+            return int(match.group(1)), path.name
+        return (10**12, path.name)
+    return sorted(shard_paths, key=_key)
+
+
+def _raw_time_range(raw_dir: Path):
+    shard_paths = _sorted_raw_shards(raw_dir)
+    if not shard_paths:
+        return None
+    start = None
+    end = None
+    for shard_path in shard_paths:
+        data = np.load(shard_path)
+        if "lsl_ts_mono" not in data.dtype.names:
+            continue
+        lsl = data["lsl_ts_mono"].astype(float)
+        if lsl.size == 0:
+            continue
+        if start is None or lsl[0] < start:
+            start = float(lsl[0])
+        if end is None or lsl[-1] > end:
+            end = float(lsl[-1])
+    if start is None or end is None:
+        return None
+    return float(start), float(end)
+
+
 def resolve_paths(session_dir=None, events_override=None, features_override=None):
     session_used = False
     events_path = Path(events_override) if events_override else None
     features_path = Path(features_override) if features_override else None
+    session_path = None
 
     if session_dir:
         session_used = True
         session_path = Path(session_dir).expanduser().resolve()
         if not session_path.exists():
-            return False, None, None
+            return False, None, None, None
         if events_path is None:
-            events_path = session_path / "events" / "events.csv"
+            events_path = _resolve_events_path(session_path, None)
         if features_path is None:
-            features_path = session_path / "raw" / "raw.csv"
-            if not features_path.exists():
-                alt = session_path / "features" / "eeg_features.csv"
-                if alt.exists():
-                    features_path = alt
+            raw_dir = session_path / "raw"
+            has_shards = raw_dir.exists() and bool(_sorted_raw_shards(raw_dir))
+            if has_shards:
+                features_path = raw_dir
+            else:
+                candidate = raw_dir / "raw.csv"
+                if candidate.exists():
+                    features_path = candidate
+                else:
+                    alt = session_path / "features" / "eeg_features.csv"
+                    if alt.exists():
+                        features_path = alt
 
-    return session_used, events_path, features_path
+    return session_used, events_path, features_path, session_path
 
 
 def validate_events(events):
@@ -174,20 +340,30 @@ def repair_event(row):
 
 def alignment_check(features_path, events):
     if features_path is None or not Path(features_path).exists():
-        return None, ["features file missing"]
+        return None, ["features/raw source missing"]
 
-    df = pd.read_csv(features_path)
     warnings = []
-    if "time_s" in df.columns:
-        time_s = pd.to_numeric(df["time_s"], errors="coerce")
-        time_s = time_s.dropna()
-        if time_s.empty:
-            warnings.append("features time_s is empty after coercion")
+    features_path = Path(features_path)
+    if features_path.is_dir():
+        range_tuple = _raw_time_range(features_path)
+        if not range_tuple:
+            warnings.append("raw shards missing or invalid for alignment check")
             return None, warnings
-        feat_start, feat_end = float(time_s.min()), float(time_s.max())
-    else:
+        raw_start, raw_end = range_tuple
         feat_start = 0.0
-        feat_end = float(len(df)) / float(DEFAULT_FS)
+        feat_end = float(raw_end - raw_start)
+    else:
+        df = pd.read_csv(features_path)
+        if "time_s" in df.columns:
+            time_s = pd.to_numeric(df["time_s"], errors="coerce")
+            time_s = time_s.dropna()
+            if time_s.empty:
+                warnings.append("features time_s is empty after coercion")
+                return None, warnings
+            feat_start, feat_end = float(time_s.min()), float(time_s.max())
+        else:
+            feat_start = 0.0
+            feat_end = float(len(df)) / float(DEFAULT_FS)
 
     if events.empty:
         return {
@@ -272,7 +448,7 @@ def print_decision(exit_code, warnings):
 
 
 def main():
-    parser = argparse.ArgumentParser()
+parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true", help="Apply fixes in-place")
     parser.add_argument("--events", type=str, default=None, help="Override events path")
     parser.add_argument(
@@ -282,14 +458,14 @@ def main():
         "--session-dir",
         type=str,
         default=None,
-        help="Session directory (defaults to <session_dir>/events/events.csv and <session_dir>/raw/raw.csv).",
+        help="Session directory (defaults to events/events.jsonl + raw/eeg_raw_shard_*.npy).",
     )
-    parser.add_argument(
-        "--subject-id",
-        type=str,
-        default="2-M16",
-        help="(Deprecated) Subject ID lookup is no longer supported without explicit paths.",
-    )
+parser.add_argument(
+    "--subject-id",
+    type=str,
+    default="8-M16",
+    help="(Deprecated) Subject ID lookup is no longer supported without explicit paths.",
+)
     parser.add_argument(
         "--strict", action="store_true", help="Exit with code 1 on warnings"
     )
@@ -314,7 +490,7 @@ def main():
         )
         raise SystemExit(2)
 
-    session_used, events_path, features_path = resolve_paths(
+    session_used, events_path, features_path, session_path = resolve_paths(
         args.session_dir, args.events, args.features
     )
     if args.session_dir and not session_used:
@@ -339,9 +515,14 @@ def main():
 
     print(f"Validating events file: {events_path}")
     if features_path is not None and Path(features_path).exists():
-        print(f"Using features file: {features_path}")
+        path = Path(features_path)
+        if path.is_dir():
+            print(f"Using raw shards: {path}")
+        else:
+            print(f"Using features file: {path}")
 
-    events = pd.read_csv(events_path)
+    events_records = _load_events_records(Path(events_path))
+    events = _normalize_events_df(pd.DataFrame(events_records))
     if events.empty:
         warnings = ["events file is empty; nothing to validate"]
         summary = summary_counts(events)
@@ -456,11 +637,18 @@ def main():
                         note=issue_type,
                     )
 
-            events.to_csv(events_path, index=False)
-            print(f"✅ Applied fixes and saved {events_path}")
+            events_json_path, events_jsonl_path, legacy_csv_path = _write_events_files(
+                events, Path(events_path), session_path
+            )
+            print(f"✅ Applied fixes and saved {events_jsonl_path}")
+            if events_json_path is not None:
+                print(f"↪︎ Updated legacy JSON: {events_json_path}")
+            if legacy_csv_path is not None:
+                print(f"↪︎ Updated legacy CSV: {legacy_csv_path}")
             print(f"✅ Backup saved to {backup_path}")
 
-            events = pd.read_csv(events_path)
+            events_records = _load_events_records(events_jsonl_path)
+            events = _normalize_events_df(pd.DataFrame(events_records))
             issues, warnings, missing_required, missing_optional = validate_events(
                 events
             )

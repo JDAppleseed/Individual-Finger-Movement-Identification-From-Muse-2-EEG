@@ -1547,7 +1547,7 @@ class MainWindow(QMainWindow):
             return
         npz_path = self.replay_npz_path.text().strip()
         model_path = self.replay_model_path.text().strip() or "finger_action_model.pt"
-        scaler_path = self.replay_scaler_path.text().strip() or "scaler.save"
+        scaler_path = self.replay_scaler_path.text().strip() or "scaler.npz"
         try:
             self.replay_viz = ReplayVisualizer(
                 npz_path=npz_path, model_path=model_path, scaler_path=scaler_path
@@ -2078,8 +2078,8 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         self.event_features_path = OutlineLineEdit()
         self.event_events_path = OutlineLineEdit()
-        form.addRow("Features CSV", self.event_features_path)
-        form.addRow("Events CSV", self.event_events_path)
+        form.addRow("Legacy Features CSV", self.event_features_path)
+        form.addRow("Events JSONL", self.event_events_path)
         layout.addLayout(form)
 
         advanced = QGroupBox("Validation Options")
@@ -2203,7 +2203,7 @@ class MainWindow(QMainWindow):
         self.diag_features_path = OutlineLineEdit()
         self.diag_events_path = OutlineLineEdit()
         form.addRow("Raw/Features CSV", self.diag_features_path)
-        form.addRow("Events CSV", self.diag_events_path)
+        form.addRow("Events JSONL", self.diag_events_path)
         layout.addLayout(form)
 
         advanced = QGroupBox("Advanced")
@@ -3609,8 +3609,24 @@ class MainWindow(QMainWindow):
         features_dir = subject_dir / "features"
         preferred_events = None
         preferred_features = None
+        session_dir_value = (
+            self.session_dir_input.text().strip()
+            if getattr(self, "session_dir_input", None)
+            else ""
+        )
+        session_dir = Path(session_dir_value) if session_dir_value else None
+        if session_dir and session_dir.exists():
+            candidate_events = session_dir / "events" / "events.jsonl"
+            if not candidate_events.exists():
+                candidate_events = session_dir / "events" / "events.json"
+            if candidate_events.exists():
+                preferred_events = candidate_events
         if self.current_session_backend:
-            candidate_events = (
+            candidate_events_jsonl = (
+                events_dir
+                / f"{self.current_subject}_{self.current_session_backend}_events.jsonl"
+            )
+            candidate_events_csv = (
                 events_dir
                 / f"{self.current_subject}_{self.current_session_backend}_events.csv"
             )
@@ -3618,14 +3634,20 @@ class MainWindow(QMainWindow):
                 features_dir
                 / f"{self.current_subject}_{self.current_session_backend}_eeg_features.csv"
             )
-            if candidate_events.exists():
-                preferred_events = candidate_events
+            if candidate_events_jsonl.exists():
+                preferred_events = candidate_events_jsonl
+            elif candidate_events_csv.exists():
+                preferred_events = candidate_events_csv
             if candidate_features.exists():
                 preferred_features = candidate_features
 
         latest_events = preferred_events or self._latest_subject_file(
-            events_dir, f"{self.current_subject}_*_events.csv"
+            events_dir, f"{self.current_subject}_*_events.jsonl"
         )
+        if latest_events is None:
+            latest_events = self._latest_subject_file(
+                events_dir, f"{self.current_subject}_*_events.csv"
+            )
         latest_features = preferred_features or self._latest_subject_file(
             features_dir, f"{self.current_subject}_*_eeg_features.csv"
         )
@@ -3754,13 +3776,13 @@ class MainWindow(QMainWindow):
         run_dir = resolve_latest_run_dir(global_session)
         if run_dir:
             model_path = str(run_dir / "finger_action_model.pt")
-            scaler_path = str(run_dir / "scaler.save")
+            scaler_path = str(run_dir / "scaler.npz")
             _maybe_set(infer_model_widget, model_path, {"finger_action_model.pt"})
-            _maybe_set(infer_scaler_widget, scaler_path, {"scaler.save"})
+            _maybe_set(infer_scaler_widget, scaler_path, {"scaler.npz"})
             if hasattr(self, "replay_model_path"):
                 _maybe_set(self.replay_model_path, model_path, {"finger_action_model.pt"})
             if hasattr(self, "replay_scaler_path"):
-                _maybe_set(self.replay_scaler_path, scaler_path, {"scaler.save"})
+                _maybe_set(self.replay_scaler_path, scaler_path, {"scaler.npz"})
 
         if hasattr(self, "replay_npz_path"):
             _maybe_set(self.replay_npz_path, default_npz, {"eeg_windows.npz"})
@@ -3819,7 +3841,7 @@ class MainWindow(QMainWindow):
                     run_dir = runs[-1]
                     run_id = run_dir.name
                     model_path = run_dir / "finger_action_model.pt"
-                    scaler_path = run_dir / "scaler.save"
+                    scaler_path = run_dir / "scaler.npz"
                     return run_id, (model_path if model_path.exists() else None), (scaler_path if scaler_path.exists() else None)
 
         # Legacy fallback: repo-level models (data/models/<subject>/<exp_hash>/)
@@ -3833,7 +3855,7 @@ class MainWindow(QMainWindow):
         run_dir = runs[-1]
         exp_hash = run_dir.name
         model_path = run_dir / "finger_action_model.pt"
-        scaler_path = run_dir / "scaler.save"
+        scaler_path = run_dir / "scaler.npz"
         return exp_hash, (model_path if model_path.exists() else None), (scaler_path if scaler_path.exists() else None)
     def _update_resume_ui(self) -> None:
         if not hasattr(self, "resume_status_label") or not hasattr(
@@ -3859,7 +3881,7 @@ class MainWindow(QMainWindow):
         if tb and tb != TIMEBASE_VERSION:
             return False, f"Timebase mismatch: {tb}"
 
-        # Preferred (current) layout: session_dir/raw contains eeg_raw_shard_*.npy and optionally raw.csv
+        # Preferred (current) layout: session_dir/raw contains eeg_raw_shard_*.npy
         session_dir = Path(state.get("session_dir", "")) if state.get("session_dir") else None
         raw_dir = None
         if session_dir and session_dir.exists():
@@ -3873,7 +3895,7 @@ class MainWindow(QMainWindow):
         has_raw_shards = False
         if raw_dir and raw_dir.exists():
             try:
-                has_raw_shards = any(raw_dir.glob("eeg_raw_shard_*.npy")) or (raw_dir / "raw.csv").exists()
+                has_raw_shards = any(raw_dir.glob("eeg_raw_shard_*.npy"))
             except Exception:
                 has_raw_shards = False
 
@@ -4240,8 +4262,13 @@ class MainWindow(QMainWindow):
                 if not settings.get("events"):
                     latest_events = self._latest_subject_file(
                         subject_dir / "events",
-                        f"{self.current_subject}_*_events.csv",
+                        f"{self.current_subject}_*_events.jsonl",
                     )
+                    if not latest_events:
+                        latest_events = self._latest_subject_file(
+                            subject_dir / "events",
+                            f"{self.current_subject}_*_events.csv",
+                        )
                     if latest_events:
                         settings["events"] = str(latest_events)
         if step_id == "train":
@@ -4462,7 +4489,8 @@ class MainWindow(QMainWindow):
         session_dir = Path(session_dir_value)
         manifest_path = session_dir / "manifest.json"
         meta_path = session_dir / "meta.json"
-        events_path = session_dir / "events" / "events.jsonl"
+        events_jsonl_path = session_dir / "events" / "events.jsonl"
+        events_json_path = session_dir / "events" / "events.json"
         timebase_path = session_dir / "timebase_report.json"
         manifest = {}
         meta = {}
@@ -4478,8 +4506,19 @@ class MainWindow(QMainWindow):
             self._append_log(f"Failed to read session summary: {exc}")
             return
         event_count = 0
-        if events_path.exists():
-            event_count = len([ln for ln in events_path.read_text().splitlines() if ln.strip()])
+        if events_jsonl_path.exists():
+            event_count = len(
+                [ln for ln in events_jsonl_path.read_text().splitlines() if ln.strip()]
+            )
+        elif events_json_path.exists():
+            try:
+                payload = json.loads(events_json_path.read_text())
+                if isinstance(payload, dict) and isinstance(payload.get("events"), list):
+                    payload = payload.get("events")
+                if isinstance(payload, list):
+                    event_count = len([ev for ev in payload if isinstance(ev, dict)])
+            except Exception:
+                event_count = 0
         seq_min = manifest.get("seq_min")
         seq_max = manifest.get("seq_max")
         seq_range = f"{seq_min}..{seq_max}" if seq_min is not None else "-"
@@ -5116,6 +5155,11 @@ class MainWindow(QMainWindow):
     ) -> Optional[Path]:
         if not src.exists():
             return None
+        try:
+            if src.resolve() == dest.resolve():
+                return dest
+        except Exception:
+            pass
         dest_path = dest
         if dest_path.exists() and not allow_overwrite:
             dest_path = next_available_path(dest_path)
@@ -5128,6 +5172,11 @@ class MainWindow(QMainWindow):
     ) -> Optional[Path]:
         if not src.exists():
             return None
+        try:
+            if src.resolve() == dest.resolve():
+                return dest
+        except Exception:
+            pass
         dest_path = dest
         if dest_path.exists() and not allow_overwrite:
             dest_path = next_available_path(dest_path)
@@ -5150,8 +5199,7 @@ class MainWindow(QMainWindow):
         if not session_dir:
             return
         self._append_log(f"Session artifacts saved to: {session_dir}")
-        self._append_log(f"raw.csv: {session_dir / 'raw' / 'raw.csv'}")
-        self._append_log(f"events.csv: {session_dir / 'events' / 'events.csv'}")
+        self._append_log(f"raw shards: {session_dir / 'raw'}")
         self._append_log(f"events.jsonl: {session_dir / 'events' / 'events.jsonl'}")
 
     def _sync_step1_outputs(self) -> None:
@@ -5207,15 +5255,31 @@ class MainWindow(QMainWindow):
                 / f"{subject}_{session}_eeg_features.csv"
             )
         if events_src is None:
-            events_src = (
-                self.repo_root / "data" / "processed" / f"{subject}_{session}_events.csv"
-            )
+            candidate_jsonl = session_dir / "events" / "events.jsonl"
+            candidate_json = session_dir / "events" / "events.json"
+            if candidate_jsonl.exists():
+                events_src = candidate_jsonl
+            elif candidate_json.exists():
+                events_src = candidate_json
+            else:
+                events_src = (
+                    self.repo_root
+                    / "data"
+                    / "processed"
+                    / f"{subject}_{session}_events.csv"
+                )
         if raw_src is None:
-            raw_src = self.repo_root / "data" / "raw" / f"{subject}_{session}_raw.csv"
+            raw_dir = session_dir / "raw"
+            if raw_dir.exists() and any(raw_dir.glob("eeg_raw_shard_*.npy")):
+                raw_src = raw_dir
+            else:
+                raw_src = self.repo_root / "data" / "raw" / f"{subject}_{session}_raw.csv"
 
-        autosave_src = events_src.with_name(
-            events_src.name.replace("_events.csv", "_events_autosave.csv")
-        )
+        autosave_src = None
+        if events_src.suffix.lower() == ".csv":
+            autosave_src = events_src.with_name(
+                events_src.name.replace("_events.csv", "_events_autosave.csv")
+            )
         meta_src = features_src.parent / f"{subject}_{session}_session_meta.json"
 
         self._safe_copy(
@@ -5224,10 +5288,16 @@ class MainWindow(QMainWindow):
         self._safe_copy(
             events_src, subject_dir / "events" / events_src.name, allow_overwrite
         )
-        self._safe_copy(
-            autosave_src, subject_dir / "events" / autosave_src.name, allow_overwrite
-        )
-        self._safe_copy(raw_src, subject_dir / "raw" / raw_src.name, allow_overwrite)
+        if autosave_src is not None:
+            self._safe_copy(
+                autosave_src,
+                subject_dir / "events" / autosave_src.name,
+                allow_overwrite,
+            )
+        if raw_src.is_dir():
+            self._safe_copy_dir(raw_src, subject_dir / "raw", allow_overwrite)
+        else:
+            self._safe_copy(raw_src, subject_dir / "raw" / raw_src.name, allow_overwrite)
         if state_src:
             self._safe_copy(
                 state_src, subject_dir / "logs" / state_src.name, allow_overwrite
@@ -5243,10 +5313,16 @@ class MainWindow(QMainWindow):
         self._safe_copy(
             events_src, session_dir / "events" / events_src.name, allow_overwrite
         )
-        self._safe_copy(
-            autosave_src, session_dir / "events" / autosave_src.name, allow_overwrite
-        )
-        self._safe_copy(raw_src, session_dir / "raw" / raw_src.name, allow_overwrite)
+        if autosave_src is not None:
+            self._safe_copy(
+                autosave_src,
+                session_dir / "events" / autosave_src.name,
+                allow_overwrite,
+            )
+        if raw_src.is_dir():
+            self._safe_copy_dir(raw_src, session_dir / "raw", allow_overwrite)
+        else:
+            self._safe_copy(raw_src, session_dir / "raw" / raw_src.name, allow_overwrite)
         if state_src:
             self._safe_copy(
                 state_src, session_dir / "logs" / state_src.name, allow_overwrite
@@ -5467,10 +5543,8 @@ class MainWindow(QMainWindow):
             outputs.append(
                 ("Resolved settings", str(session_dir / "logs" / "resolved_settings.json"))
             )
-            outputs.append(("Raw CSV", str(session_dir / "raw" / "raw.csv")))
             outputs.append(("Raw shards", str(session_dir / "raw")))
             outputs.append(("Events JSONL", str(session_dir / "events" / "events.jsonl")))
-            outputs.append(("Events CSV", str(session_dir / "events" / "events.csv")))
         return outputs
 
     def _expected_step1b_outputs(self) -> list[tuple[str, str]]:
