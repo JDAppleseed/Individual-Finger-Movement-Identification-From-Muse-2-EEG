@@ -448,7 +448,7 @@ def print_decision(exit_code, warnings):
 
 
 def main():
-parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true", help="Apply fixes in-place")
     parser.add_argument("--events", type=str, default=None, help="Override events path")
     parser.add_argument(
