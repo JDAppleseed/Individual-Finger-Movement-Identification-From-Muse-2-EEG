@@ -128,6 +128,7 @@ def default_train_settings() -> Dict[str, Any]:
         "seed": 42,
         "loss_action_weight": 1.0,
         "rest_weight": 0.8,
+        "finger_weights": "1,1,1,1,1,1",
         "test_size": 0.2,
         "non_rest_only": False,
         "save_model": "finger_action_model.pt",

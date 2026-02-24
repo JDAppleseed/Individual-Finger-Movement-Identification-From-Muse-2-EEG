@@ -30,7 +30,7 @@ from utils.sequence_data import (
 )
 from utils.runtime_utils import save_normalizer
 from utils.experiment_logger import log_experiment, get_latest_experiment_hash
-from utils.label_schema import ACTION_REST
+from utils.label_schema import ACTION_REST, FINGER_NAMES
 from utils.splitting import infer_groups, assert_no_group_overlap
 from utils.session_layout import SessionLayout, resolve_session_dir
 
@@ -71,6 +71,58 @@ def _apply_config_to_args(args_obj, settings: Dict[str, Any], defaults: Dict[str
     for key, default in defaults.items():
         if key in settings and getattr(args_obj, key) == default:
             setattr(args_obj, key, settings[key])
+
+
+def _parse_finger_weights(value: Any, n_fingers: int) -> Optional[torch.Tensor]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw or raw.lower() in {"none", "null", "default"}:
+            return None
+        if raw[0] in "[{":
+            try:
+                value = json.loads(raw)
+            except Exception as exc:
+                raise ValueError(f"Invalid JSON for finger weights: {raw}") from exc
+        else:
+            parts = [p for p in re.split(r"[,\\s]+", raw) if p]
+            try:
+                values = [float(p) for p in parts]
+            except Exception as exc:
+                raise ValueError(f"Invalid finger weight list: {raw}") from exc
+            value = values
+
+    if isinstance(value, dict):
+        name_map = {name.lower(): idx for idx, name in FINGER_NAMES.items()}
+        weights = [1.0] * n_fingers
+        for key, val in value.items():
+            if isinstance(key, str):
+                k = key.strip().lower()
+                if k.isdigit():
+                    idx = int(k)
+                elif k in name_map:
+                    idx = name_map[k]
+                else:
+                    raise ValueError(f"Unknown finger key: {key}")
+            else:
+                idx = int(key)
+            if idx < 0 or idx >= n_fingers:
+                raise ValueError(f"Finger weight index out of range: {idx}")
+            weights[idx] = float(val)
+        return torch.tensor(weights, dtype=torch.float32)
+
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        weights = [float(v) for v in value]
+        if len(weights) != n_fingers:
+            raise ValueError(
+                f"finger_weights length {len(weights)} does not match n_fingers {n_fingers}"
+            )
+        return torch.tensor(weights, dtype=torch.float32)
+
+    raise ValueError(f"Unsupported finger_weights type: {type(value)}")
 
 
 def sha256_file(path: Path) -> Optional[str]:
@@ -328,6 +380,16 @@ def build_arg_parser():
         type=float,
         default=REST_WEIGHT,
         help="Class weight for REST action (0=ignore)",
+    )
+    p.add_argument(
+        "--finger-weights",
+        type=str,
+        default=None,
+        help=(
+            "Per-finger loss weights. Provide a comma/space list for finger IDs "
+            "0..N-1 (e.g. '1,1,1,1,1,0.5' to downweight pinky), or JSON list/dict "
+            "(e.g. '[1,1,1,1,1,0.5]' or '{\"pinky\":0.5}')."
+        ),
     )
     p.add_argument("--test-size", type=float, default=0.2, help="Test split fraction")
     p.add_argument(
@@ -932,8 +994,19 @@ def main():
 
         opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-        # Finger loss (unweighted by default)
-        loss_f = nn.CrossEntropyLoss()
+        # Finger loss (optionally weighted per finger)
+        finger_weights = None
+        if getattr(args, "finger_weights", None) is not None:
+            try:
+                finger_weights = _parse_finger_weights(args.finger_weights, n_fingers)
+            except ValueError as exc:
+                print(f"❌ Invalid --finger-weights: {exc}")
+                return 2
+        if finger_weights is not None:
+            loss_f = nn.CrossEntropyLoss(weight=finger_weights.to(device))
+            print(f"Using finger weights: {finger_weights.tolist()}")
+        else:
+            loss_f = nn.CrossEntropyLoss()
 
         # Action loss (REST downweighted)
         action_weights = torch.ones(n_actions, dtype=torch.float32)
@@ -1001,6 +1074,7 @@ def main():
             "learning_rate": args.lr,
             "loss_action_weight": args.loss_action_weight,
             "rest_weight": float(args.rest_weight),
+            "finger_weights": finger_weights.tolist() if finger_weights is not None else None,
             "test_size": args.test_size,
             "split_mode": args.split_mode,
             "purge_seconds": float(args.purge_seconds),

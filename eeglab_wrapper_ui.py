@@ -442,6 +442,7 @@ TOOLTIPS: Dict[str, str] = {
     "subject_id": "Subject ID for auto-resolving latest session.",
     "raw_dir": "Session root for raw recording.",
     "session_id": "Session ID for raw recording.",
+    "finger_weights": "Per-finger loss weights (CSV or JSON). Example: 1,1,1,1,1,0.4 or {\"pinky\":0.4}",
 }
 
 EEGLAB_STYLE = """
@@ -1016,6 +1017,12 @@ class MainWindow(QMainWindow):
                     "Action loss weight.",
                 ),
                 ArgSpec("rest_weight", "--rest-weight", "float", "REST class weight."),
+                ArgSpec(
+                    "finger_weights",
+                    "--finger-weights",
+                    "text",
+                    "Per-finger loss weights (CSV/JSON).",
+                ),
                 ArgSpec("test_size", "--test-size", "float", "Test split fraction."),
                 ArgSpec("non_rest_only", "--non-rest-only", "bool", "Train on non-REST only."),
                 ArgSpec("save_model", "--save-model", "text", "Model output path."),
@@ -3183,6 +3190,13 @@ class MainWindow(QMainWindow):
                 0,
                 10,
                 is_float=True,
+            )
+            self._add_text(
+                step_id,
+                form,
+                "finger_weights",
+                "Finger weights (CSV/JSON)",
+                defaults,
             )
             self._add_spin(
                 step_id, form, "test_size", "Test size", defaults, 0, 1, is_float=True

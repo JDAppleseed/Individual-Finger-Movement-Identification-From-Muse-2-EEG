@@ -63,17 +63,12 @@ static const uint8_t SERVO_PINS[N_SERVOS] = {7, 6, 5, 4, 3, 2};
 static const uint8_t OPEN_ANGLE[N_SERVOS]  = { 20,  20,  20,  20,  20,  90};   // wrist at ~90 neutral
 static const uint8_t CLOSE_ANGLE[N_SERVOS] = {160, 160, 160, 160, 160,  90};   // keep wrist neutral by default
 
-// How aggressively to move (ms between steps). Larger = slower/smoother.
-static const uint16_t STEP_DELAY_MS = 8;
-// Delay before executing a REST command when transitioning from OPEN/CLOSE.
-static const uint16_t REST_DELAY_MS = 500;
+// Movement behavior
+// Instant, no-ramp motion (snap to target angle on each command).
 
 // ------------------------- State -------------------------
 Servo servos[N_SERVOS];
 uint8_t currentAngle[N_SERVOS];
-uint8_t lastAction[N_SERVOS];
-bool pendingRest[N_SERVOS];
-unsigned long pendingRestAt[N_SERVOS];
 
 // ------------------------- Helpers -------------------------
 void attachServos() {
@@ -82,24 +77,15 @@ void attachServos() {
     uint8_t rest = (uint8_t)((uint16_t)OPEN_ANGLE[i] + (uint16_t)CLOSE_ANGLE[i]) / 2;
     currentAngle[i] = rest;
     servos[i].write(currentAngle[i]);
-    lastAction[i] = 0;        // start at rest
-    pendingRest[i] = false;
-    pendingRestAt[i] = 0;
     delay(50);
   }
 }
 
 void moveServoTo(uint8_t idx, uint8_t target) {
   if (idx >= N_SERVOS) return;
-  uint8_t cur = currentAngle[idx];
-  if (cur == target) return;
-
-  int8_t step = (cur < target) ? 1 : -1;
-  while (cur != target) {
-    cur = (uint8_t)(cur + step);
-    servos[idx].write(cur);
-    delay(STEP_DELAY_MS);
-  }
+  if (currentAngle[idx] == target) return;
+  // Instantaneous move (no ramping or delays).
+  servos[idx].write(target);
   currentAngle[idx] = target;
 }
 
@@ -113,24 +99,14 @@ void commandFinger(uint8_t finger_id, uint8_t action_id) {
   auto do_one = [&](uint8_t idx) {
     if (idx >= N_SERVOS) return;
     if (action_id == 0) {
-      // Delay REST if transitioning from OPEN/CLOSE.
-      if (lastAction[idx] == 1 || lastAction[idx] == 2) {
-        pendingRest[idx] = true;
-        pendingRestAt[idx] = millis();
-        return;
-      }
       uint8_t rest = (uint8_t)((uint16_t)OPEN_ANGLE[idx] + (uint16_t)CLOSE_ANGLE[idx]) / 2;
       moveServoTo(idx, rest);
-      lastAction[idx] = 0;
-      pendingRest[idx] = false;
       return;
     }
 
     // action_id 1 or 2: no extra delay, override any pending rest.
-    pendingRest[idx] = false;
     uint8_t target = (action_id == 1) ? OPEN_ANGLE[idx] : CLOSE_ANGLE[idx];
     moveServoTo(idx, target);
-    lastAction[idx] = action_id;
   };
 
   // Map ids to indices (1..6 -> 0..5)
@@ -179,14 +155,4 @@ void loop() {
     }
   }
 
-  // Service pending REST commands without blocking other commands.
-  unsigned long now = millis();
-  for (uint8_t i = 0; i < N_SERVOS; i++) {
-    if (!pendingRest[i]) continue;
-    if (now - pendingRestAt[i] < REST_DELAY_MS) continue;
-    uint8_t rest = (uint8_t)((uint16_t)OPEN_ANGLE[i] + (uint16_t)CLOSE_ANGLE[i]) / 2;
-    moveServoTo(i, rest);
-    lastAction[i] = 0;
-    pendingRest[i] = false;
-  }
 }
