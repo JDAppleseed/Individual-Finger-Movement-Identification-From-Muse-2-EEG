@@ -90,7 +90,14 @@ def log_experiment(subject_id, exp_hash, step, notes=None):
 
     if log_path.exists():
         data = json.loads(log_path.read_text())
-        data["steps"].append(entry)
+        # Backward-compat: older logs may not have a "steps" list.
+        steps = data.get("steps")
+        if not isinstance(steps, list):
+            steps = []
+        steps.append(entry)
+        data["steps"] = steps
+        data.setdefault("experiment_hash", exp_hash)
+        data.setdefault("subject_id", subject_id)
     else:
         data = {"experiment_hash": exp_hash, "subject_id": subject_id, "steps": [entry]}
 
