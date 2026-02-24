@@ -864,11 +864,11 @@ class MainWindow(QMainWindow):
         for item in [
             "Pipeline Overview",
             "1) Record (Lossless)",
-            "2) Events: Mark/Edit (Optional)",
-            "3) Validate Session",
-            "4) Extract Windows",
-            "5) Train Model",
-            "6) Evaluate",
+            "Events: Mark/Edit (Optional)",
+            "Validate Session (Tool)",
+            "1b) Extract Windows",
+            "2) Train Model",
+            "3+) Evaluate / Reports",
             "7) Live Infer + Actuate",
             "Logs & Diagnostics",
             "Projects",
@@ -1912,11 +1912,11 @@ class MainWindow(QMainWindow):
 
         for label, row in [
             ("1) Record (Lossless)", 1),
-            ("2) Events: Mark/Edit (Optional)", 2),
-            ("3) Validate Session", 3),
+            ("Events: Mark/Edit (Optional)", 2),
+            ("Validate Session (Tool)", 3),
             ("1b) Extract Windows", 4),
             ("2) Train Model", 5),
-            ("6) Evaluate", 6),
+            ("3+) Evaluate / Reports", 6),
             ("7) Live Infer + Actuate", 7),
         ]:
             box = QGroupBox(label)
@@ -1932,7 +1932,7 @@ class MainWindow(QMainWindow):
     def _build_session_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        header = QLabel("Step 3: Validate Session")
+        header = QLabel("Validate Session (Tool)")
         header.setStyleSheet("font-weight: 600; font-size: 16px;")
         layout.addWidget(header)
 
@@ -2016,7 +2016,7 @@ class MainWindow(QMainWindow):
     def _build_evaluate_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        header = QLabel("Step 6: Evaluate")
+        header = QLabel("Step 3+: Evaluate / Reports")
         header.setStyleSheet("font-weight: 600; font-size: 16px;")
         layout.addWidget(header)
         note = QLabel(
@@ -2062,7 +2062,7 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
 
-        header = QLabel("Step 2: Events: Mark/Edit (Optional)")
+        header = QLabel("Events: Mark/Edit (Optional)")
         header.setStyleSheet("font-weight: 600; font-size: 16px;")
         layout.addWidget(header)
         info = QLabel("Post-hoc event review/edit tools for the current session.")
@@ -2126,12 +2126,12 @@ class MainWindow(QMainWindow):
     def _build_step1b_page(self) -> QWidget:
         note = QLabel(
             "Extract windows from a lossless session directory (raw/ + events.jsonl). "
-            "Use the Session Directory (sessions/<session_id>) field or select a session in Validate Session."
+            "Use the Session Directory (sessions/<session_id>) field or select a session on the Validate Session page."
         )
         note.setWordWrap(True)
         return self._build_step_page(
             step_id="step1b",
-            title="Step 4: Extract Windows",
+            title="Step 1b: Extract Windows",
             defaults=default_step1b_settings(),
             script_key="step1b",
             include_event_tools=False,
@@ -2152,7 +2152,7 @@ class MainWindow(QMainWindow):
     def _build_train_page(self) -> QWidget:
         return self._build_step_page(
             step_id="train",
-            title="Step 5: Train Model",
+            title="Step 2: Train Model",
             defaults=default_train_settings(),
             script_key="train",
             include_event_tools=False,
@@ -2176,7 +2176,7 @@ class MainWindow(QMainWindow):
         note = QLabel(
             "Live inference runs in 7_live_infer_and_actuate.py. "
             "Set model/scaler paths, stream name/type, and windowing parameters. "
-            "Allow-drop is OFF by default; enable only if you accept latency-driven drops. "
+            "Allow-drop and latency policy are currently logged only in this script. "
             "Actuation is opt-in and requires confirmation before running."
         )
         note.setWordWrap(True)
@@ -2254,7 +2254,7 @@ class MainWindow(QMainWindow):
                 "continuity by default."
             ),
             "train": "Offline model training from extracted windows.",
-            "infer": "Live inference with optional actuation (opt-in) and latency guardrails.",
+            "infer": "Live inference with optional actuation (opt-in) and latency logging.",
         }
         return descriptions.get(step_id, "")
 

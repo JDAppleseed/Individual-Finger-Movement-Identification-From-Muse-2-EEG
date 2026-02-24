@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Deque, Optional, Tuple
 
 import numpy as np
+import joblib
 
 # Torch is required for inference
 import torch
@@ -43,13 +44,10 @@ from pylsl import StreamInlet, resolve_byprop  # type: ignore
 # Project-local imports (keep as-is; this file is intended to be a drop-in replacement)
 # NOTE: If these imports differ in your repo, keep the same ones you already had.
 # They exist in the user's original file; we preserve names/structure.
-from utils.io import ensure_dir, load_json  # type: ignore
-from utils.logging import setup_logger  # type: ignore
-from utils.preprocessing import standardize_window_TxC  # type: ignore
-from utils.resample import _resample_window  # type: ignore
-from utils.sessions import SessionWriter, Packet  # type: ignore
+from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+from muse_streaming.resample import resample_window
+from utils.runtime_utils import apply_channel_normalizer
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
-from utils.modeling import load_model_and_scaler  # type: ignore
 
 # Pipeline handoff: Step 7 runs online inference with the trained Step 2 model
 # and optional hardware actuation, while writing live-session artifacts.
@@ -114,6 +112,147 @@ class SerialHandActuator:
 
 # -------------------- Helpers --------------------
 
+def ensure_dir(path: str) -> None:
+    Path(path).expanduser().resolve().mkdir(parents=True, exist_ok=True)
+
+
+def load_json(path: str) -> dict:
+    return json.loads(Path(path).expanduser().resolve().read_text())
+
+
+def setup_logger(log_path: str, level: int = logging.INFO) -> None:
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S"
+    )
+    if not any(isinstance(h, logging.StreamHandler) for h in root_logger.handlers):
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setFormatter(formatter)
+        root_logger.addHandler(stream_handler)
+    if log_path:
+        file_handler = logging.FileHandler(log_path)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
+
+def standardize_window_TxC(window_TxC: np.ndarray, scaler: object) -> np.ndarray:
+    return apply_channel_normalizer(window_TxC, scaler)
+
+
+def _resample_window(
+    times: np.ndarray,
+    values: np.ndarray,
+    *,
+    start_s: float,
+    end_s: float,
+    target_fs: float,
+) -> Optional[np.ndarray]:
+    try:
+        _, window = resample_window(
+            times,
+            values,
+            start_s=start_s,
+            end_s=end_s,
+            target_fs=target_fs,
+        )
+        return window
+    except Exception:
+        return None
+
+
+@dataclass(frozen=True)
+class Packet:
+    seq: int
+    lsl_ts_raw: float
+    lsl_ts_mono: float
+    local_ts: float
+    sample: np.ndarray
+    flags: int
+    segment_id: int
+    clamped: bool
+    raw_path: Optional[Path] = None
+    segment_break_reason: Optional[str] = None
+
+
+class SessionWriter:
+    def __init__(self, out_dir: str) -> None:
+        self.out_dir = Path(out_dir).expanduser().resolve()
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self._raw_path = self.out_dir / "raw.csv"
+        self._raw_handle = self._raw_path.open("a", newline="")
+        import csv
+
+        self._raw_writer = csv.writer(self._raw_handle)
+        self._header_written = self._raw_path.stat().st_size > 0
+
+    def append_packets(self, packets: list[Packet]) -> None:
+        if not packets:
+            return
+        if not self._header_written:
+            sample_len = int(np.asarray(packets[0].sample).reshape(-1).shape[0])
+            header = [
+                "seq",
+                "lsl_ts_raw",
+                "lsl_ts_mono",
+                "local_ts",
+                "flags",
+                "segment_id",
+                "clamped",
+            ] + [f"ch{i + 1}" for i in range(sample_len)]
+            self._raw_writer.writerow(header)
+            self._header_written = True
+        for packet in packets:
+            sample = np.asarray(packet.sample, dtype=float).reshape(-1)
+            row = [
+                int(packet.seq),
+                float(packet.lsl_ts_raw),
+                float(packet.lsl_ts_mono),
+                float(packet.local_ts),
+                int(packet.flags),
+                int(packet.segment_id),
+                int(bool(packet.clamped)),
+            ]
+            row.extend(sample.tolist())
+            self._raw_writer.writerow(row)
+        self._raw_handle.flush()
+
+    def close(self) -> None:
+        try:
+            self._raw_handle.flush()
+            self._raw_handle.close()
+        except Exception:
+            pass
+
+
+def load_model_and_scaler(
+    model_path: str, scaler_path: str, *, device: torch.device
+) -> tuple[torch.nn.Module, object]:
+    model_path_p = Path(model_path).expanduser().resolve()
+    if not model_path_p.exists():
+        raise FileNotFoundError(f"Model not found: {model_path_p}")
+    state = torch.load(model_path_p, map_location=device)
+    try:
+        in_ch = int(state["conv.0.weight"].shape[1])
+    except Exception:
+        in_ch = 4
+    n_fingers = int(state["finger_head.weight"].shape[0])
+    n_actions = int(state["action_head.weight"].shape[0])
+    model = CNNLSTMFingerActionNet(
+        n_channels=in_ch, n_fingers=n_fingers, n_actions=n_actions
+    )
+    model.load_state_dict(state)
+    model.to(device)
+
+    scaler = None
+    scaler_path_p = Path(scaler_path).expanduser().resolve()
+    if scaler_path_p.exists():
+        try:
+            scaler = joblib.load(scaler_path_p)
+        except Exception:
+            scaler = None
+    return model, scaler
+
 def _safe_float(x: float) -> float:
     try:
         return float(x)
@@ -162,6 +301,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--actuation_cooldown_ms", type=int, default=150, help="Min time between sends")
 
     return p
+
+
+def _apply_config_to_args(
+    args_obj: argparse.Namespace, settings: dict, defaults: dict
+) -> None:
+    if not isinstance(settings, dict):
+        return
+    for key, default in defaults.items():
+        if key in settings and getattr(args_obj, key) == default:
+            setattr(args_obj, key, settings[key])
 
 
 def _select_device(device_override: Optional[str]) -> torch.device:
@@ -222,12 +371,15 @@ def _debounced_should_send(
 # -------------------- Main --------------------
 
 def main() -> int:
-    args = _build_arg_parser().parse_args()
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+    defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
     cfg = load_json(args.config)
+    _apply_config_to_args(args, cfg, defaults)
 
     # Required config keys (as in original file)
-    lsl_name = cfg.get("lsl_name", "Muse2-EEG")
-    lsl_type = cfg.get("lsl_type", "EEG")
+    lsl_name = cfg.get("lsl_name", cfg.get("stream_name", "Muse2-EEG"))
+    lsl_type = cfg.get("lsl_type", cfg.get("stream_type", "EEG"))
     model_path = cfg.get("model_path")
     scaler_path = cfg.get("scaler_path")
     out_dir = cfg.get("out_dir")
@@ -351,6 +503,7 @@ def main() -> int:
     stable_count = 0
     last_sent: Optional[Tuple[int, int]] = None
     last_send_ts = 0.0
+    sample_seq = 0
 
     termination_reason = "ok"
     try:
@@ -367,6 +520,7 @@ def main() -> int:
                     # Persist raw packets
                     raw_buffer.append(
                         Packet(
+                            seq=sample_seq,
                             lsl_ts_raw=lsl_ts,
                             lsl_ts_mono=lsl_ts,
                             local_ts=time.time(),
@@ -378,6 +532,7 @@ def main() -> int:
                             segment_break_reason=None,
                         )
                     )
+                    sample_seq += 1
                     if len(raw_buffer) >= raw_flush_size:
                         session_writer.append_packets(raw_buffer)
                         raw_buffer = []

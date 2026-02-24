@@ -1452,6 +1452,8 @@ def _apply_config_to_args(
         "LSL_SOURCE_ID": ("lsl_source_id", 100),
         "RAW_QUEUE_MAXSIZE": ("raw_queue_maxsize", 100),
         "RAW_SHARD_SAMPLES": ("raw_shard_samples", 100),
+        "SAMPLING_RATE": ("stream_rate", 100),
+        "CHANNELS": ("stream_ch", 100),
         "SESSION_ID_OVERRIDE": ("session_id", 100),
         "SESSION_NAME": ("session_id", 90),
         "MODE": ("mode", 100),
