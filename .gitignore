@@ -24,7 +24,7 @@ events.csv
 events_autosave.csv
 session_meta.json
 finger_action_model.pt
-scaler.save
+scaler.npz
 test_predictions.npz
 calibration_state*.json
 

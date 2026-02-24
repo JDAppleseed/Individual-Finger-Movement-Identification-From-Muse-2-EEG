@@ -314,9 +314,9 @@ def main() -> int:
                     if not (run_dir / "finger_action_model.pt").exists():
                         full_status = "FAIL"
                         print("Missing trained model: processed/models/<run_id>/finger_action_model.pt")
-                    if not (run_dir / "scaler.save").exists():
+                    if not (run_dir / "scaler.npz").exists():
                         full_status = "FAIL"
-                        print("Missing scaler: processed/models/<run_id>/scaler.save")
+                        print("Missing scaler: processed/models/<run_id>/scaler.npz")
 
             if full_status == "PASS":
                 eval_cmd = [

@@ -59,10 +59,10 @@ class SlidingBuffer:
 def _load_engine(device: str, mc_passes: int) -> InferenceEngine:
     root = repo_root()
     model_path = root / "finger_action_model.pt"
-    normalizer = load_normalizer(root / "scaler.save")
+    normalizer = load_normalizer(root / "scaler.npz")
     model: Optional[CNNLSTMFingerActionNet] = None
     if model_path.exists():
-        state = torch.load(model_path, map_location="cpu")
+        state = torch.load(model_path, map_location="cpu", weights_only=True)
         n_fingers = int(state["finger_head.weight"].shape[0])
         n_actions = int(state["action_head.weight"].shape[0])
         model = CNNLSTMFingerActionNet(

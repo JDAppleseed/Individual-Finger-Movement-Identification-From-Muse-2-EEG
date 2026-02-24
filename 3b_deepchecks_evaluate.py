@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-import joblib
 import numpy as np
 import torch
 
@@ -28,6 +27,7 @@ from utils.sequence_data import (
     apply_channel_normalizer,
     summarize_windows,
 )
+from utils.runtime_utils import load_normalizer
 from utils.splitting import infer_groups, assert_no_group_overlap, assert_identifier_not_in_X
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 
@@ -85,7 +85,7 @@ def _session_paths_from_dir(session_dir: Path) -> _SessionPathsCompat:
     return _SessionPathsCompat(
         windows_npz=layout.windows_npz,
         model_file=model_base / "finger_action_model.pt",
-        scaler_file=model_base / "scaler.save",
+        scaler_file=model_base / "scaler.npz",
         test_predictions_npz=model_base / "test_predictions.npz",
         eval_dir=layout.reports_root / run_name,
     )
@@ -420,7 +420,10 @@ if finger_train_unique < 2 or finger_test_unique < 2:
 # ===== REUSE SCALER ======
 # =========================
 
-normalizer = joblib.load(str(scaler_path))
+normalizer = load_normalizer(scaler_path)
+if normalizer is None:
+    print(f"Failed to load normalizer: {scaler_path}")
+    raise SystemExit(2)
 X_train = apply_channel_normalizer(X_train, normalizer)
 X_test = apply_channel_normalizer(X_test, normalizer)
 # =========================
@@ -474,7 +477,7 @@ n_actions = int(y_action.max()) + 1
 model = CNNLSTMFingerActionNet(
     n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions
 )
-model.load_state_dict(torch.load(str(model_path), map_location="cpu"))
+model.load_state_dict(torch.load(str(model_path), map_location="cpu", weights_only=True))
 model.eval()
 
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 
 import numpy as np
-import joblib
+
+from utils.runtime_utils import apply_channel_normalizer, load_normalizer
 
 if TYPE_CHECKING:
     import torch
@@ -46,13 +48,11 @@ class ReplayVisualizer:
             n_fingers=6,
             n_actions=3,
         ).to(self.device)
-        self.model.load_state_dict(torch.load(self.model_path, map_location=self.device))
+        self.model.load_state_dict(
+            torch.load(self.model_path, map_location=self.device, weights_only=True)
+        )
         self.model.eval()
-        self.scaler = None
-        try:
-            self.scaler = joblib.load(self.scaler_path)
-        except Exception:
-            self.scaler = None
+        self.scaler = load_normalizer(Path(self.scaler_path))
 
     def _get_window(self, idx: int) -> np.ndarray:
         if idx < 0 or idx >= self.window_count:
@@ -63,14 +63,7 @@ class ReplayVisualizer:
         return window
 
     def _standardize(self, window: np.ndarray) -> np.ndarray:
-        if self.scaler is None:
-            return window
-        if hasattr(self.scaler, "mean_") and hasattr(self.scaler, "scale_"):
-            mean = np.asarray(self.scaler.mean_, dtype=np.float32)
-            scale = np.asarray(self.scaler.scale_, dtype=np.float32)
-            scale = np.where(scale == 0, 1.0, scale)
-            return (window - mean) / scale
-        return window
+        return apply_channel_normalizer(window, self.scaler)
 
     def _tensor_from_window(self, idx: int) -> Any:
         window = self._standardize(self._get_window(idx))

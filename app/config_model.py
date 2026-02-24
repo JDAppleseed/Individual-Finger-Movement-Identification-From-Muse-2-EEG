@@ -131,7 +131,7 @@ def default_train_settings() -> Dict[str, Any]:
         "test_size": 0.2,
         "non_rest_only": False,
         "save_model": "finger_action_model.pt",
-        "save_scaler": "scaler.save",
+        "save_scaler": "scaler.npz",
         "save_preds": "test_predictions.npz",
         "N_FINGERS": 6,
         "N_ACTIONS": 3,
@@ -141,7 +141,7 @@ def default_train_settings() -> Dict[str, Any]:
 def default_infer_settings() -> Dict[str, Any]:
     return {
         "model_path": "models/finger_action_model.pt",
-        "scaler_path": "scaler.save",
+        "scaler_path": "scaler.npz",
         "stream_name": "Muse2-EEG",
         "stream_type": "EEG",
         "window_sec": 0.25,
@@ -153,7 +153,7 @@ def default_infer_settings() -> Dict[str, Any]:
         "log_every": 1.0,
         "enable_actuation": False,
         "bluetooth_target": "",
-        "record_raw": False,
+        "no_file_io": False,
     }
 
 

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-import joblib
 import numpy as np
 import torch
+
+logger = logging.getLogger(__name__)
+
+NORMALIZER_VERSION = 1
 
 
 def repo_root() -> Path:
@@ -33,12 +37,69 @@ def resolve_device(requested: str) -> torch.device:
     return torch.device("cpu")
 
 
+def _normalize_payload(normalizer: Any) -> Optional[dict]:
+    if not isinstance(normalizer, dict):
+        return None
+    if "mean" not in normalizer or "std" not in normalizer:
+        return None
+    mean = np.asarray(normalizer["mean"], dtype=np.float32).reshape(-1)
+    std = np.asarray(normalizer["std"], dtype=np.float32).reshape(-1)
+    if mean.shape != std.shape:
+        raise ValueError(f"Normalizer mean/std shape mismatch: {mean.shape} vs {std.shape}")
+    channels = int(normalizer.get("channels", mean.shape[0]))
+    norm_type = str(normalizer.get("type", "per_channel"))
+    return {
+        "version": NORMALIZER_VERSION,
+        "type": norm_type,
+        "mean": mean,
+        "std": std,
+        "channels": channels,
+    }
+
+
+def save_normalizer(path: Path, normalizer: Any) -> None:
+    path = Path(path)
+    payload = _normalize_payload(normalizer)
+    if payload is None:
+        raise ValueError("Unsupported normalizer payload; expected dict with mean/std.")
+    if path.suffix.lower() != ".npz":
+        raise ValueError(f"Unsupported normalizer extension: {path.suffix}. Use .npz.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        path,
+        version=np.array(payload["version"], dtype=np.int32),
+        type=np.array(payload["type"], dtype=str),
+        mean=payload["mean"],
+        std=payload["std"],
+        channels=np.array(payload["channels"], dtype=np.int32),
+    )
+
+
 def load_normalizer(path: Path) -> Optional[Any]:
+    path = Path(path)
     if not path.exists():
         return None
+    suffix = path.suffix.lower()
+    if suffix != ".npz":
+        logger.warning("Unsupported normalizer extension: %s", path.suffix)
+        return None
     try:
-        return joblib.load(path)
-    except Exception:
+        with np.load(path, allow_pickle=False) as npz:
+            if "mean" not in npz or "std" not in npz:
+                raise ValueError("Normalizer NPZ missing mean/std.")
+            mean = np.asarray(npz["mean"], dtype=np.float32)
+            std = np.asarray(npz["std"], dtype=np.float32)
+            if mean.shape != std.shape:
+                raise ValueError(f"Normalizer mean/std shape mismatch: {mean.shape} vs {std.shape}")
+            channels = int(npz["channels"]) if "channels" in npz else int(mean.shape[-1])
+            return {
+                "type": "per_channel",
+                "mean": mean,
+                "std": std,
+                "channels": channels,
+            }
+    except Exception as exc:
+        logger.warning("Failed to load normalizer from %s: %s", path, exc)
         return None
 
 

@@ -24,7 +24,6 @@ import numpy as np
 import torch
 import seaborn as sns
 import matplotlib.pyplot as plt
-import joblib
 import sklearn
 
 from sklearn.metrics import confusion_matrix, accuracy_score
@@ -46,6 +45,7 @@ from utils.postprocess import (
     PostprocessState,
     postprocess_predictions,
 )
+from utils.runtime_utils import load_normalizer
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 
 # Pipeline handoff: Step 3 reads Step 2 artifacts from one run directory and writes
@@ -102,7 +102,7 @@ def _session_paths_from_dir(session_dir: Path) -> _SessionPathsCompat:
     return _SessionPathsCompat(
         windows_npz=layout.windows_npz,
         model_file=model_base / "finger_action_model.pt",
-        scaler_file=model_base / "scaler.save",
+        scaler_file=model_base / "scaler.npz",
         test_predictions_npz=model_base / "test_predictions.npz",
         eval_dir=layout.reports_root / run_name,
     )
@@ -967,7 +967,10 @@ def main():
         if not scaler_path.exists():
             print(f"Missing scaler/normalizer file: {scaler_path}")
             return 2
-        normalizer = joblib.load(str(scaler_path))
+        normalizer = load_normalizer(scaler_path)
+        if normalizer is None:
+            print(f"Failed to load normalizer: {scaler_path}")
+            return 2
 
         if not model_path.exists():
             print(f"Missing model weights: {model_path}")
@@ -978,7 +981,9 @@ def main():
             n_fingers=n_fingers,
             n_actions=n_actions,
         )
-        model.load_state_dict(torch.load(str(model_path), map_location="cpu"))
+        model.load_state_dict(
+            torch.load(str(model_path), map_location="cpu", weights_only=True)
+        )
         model.eval()
 
         batch_size = max(1, int(args.batch_size))

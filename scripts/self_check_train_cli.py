@@ -48,7 +48,7 @@ def main():
             return 0
 
         model_out = tmp_path / "finger_action_model.pt"
-        scaler_out = tmp_path / "scaler.save"
+        scaler_out = tmp_path / "scaler.npz"
         preds_out = tmp_path / "test_predictions.npz"
 
         cmd = [

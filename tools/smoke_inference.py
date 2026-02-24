@@ -7,7 +7,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import joblib
 import numpy as np
 import torch
 
@@ -16,22 +15,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-def _apply_scaler(window_txc: np.ndarray, scaler_obj):
-    if scaler_obj is None:
-        return window_txc
-    if isinstance(scaler_obj, dict):
-        mean = np.asarray(scaler_obj.get("mean"), dtype=np.float32)
-        std = np.asarray(scaler_obj.get("std"), dtype=np.float32)
-        if mean.ndim == 0 or std.ndim == 0:
-            return window_txc
-        std = np.where(std == 0, 1.0, std)
-        return (window_txc - mean) / std
-    if hasattr(scaler_obj, "mean_") and hasattr(scaler_obj, "scale_"):
-        mean = np.asarray(scaler_obj.mean_, dtype=np.float32)
-        scale = np.asarray(scaler_obj.scale_, dtype=np.float32)
-        scale = np.where(scale == 0, 1.0, scale)
-        return (window_txc - mean) / scale
-    return window_txc
+from utils.runtime_utils import apply_channel_normalizer, load_normalizer
 
 
 def main():
@@ -51,7 +35,7 @@ def main():
     parser.add_argument(
         "--model", type=str, default="finger_action_model.pt", help="Model weights path"
     )
-    parser.add_argument("--scaler", type=str, default="scaler.save", help="Scaler path")
+    parser.add_argument("--scaler", type=str, default="scaler.npz", help="Scaler path")
     parser.add_argument("--index", type=int, default=0, help="Window index to use")
     parser.add_argument(
         "--n-fingers", type=int, default=6, help="Number of finger classes"
@@ -84,15 +68,8 @@ def main():
 
     window = X[idx]
 
-    scaler = None
-    if scaler_path.exists():
-        try:
-            scaler = joblib.load(scaler_path)
-        except Exception as exc:
-            print(f"WARN: Failed to load scaler: {exc}")
-            scaler = None
-
-    window = _apply_scaler(window, scaler)
+    scaler = load_normalizer(scaler_path)
+    window = apply_channel_normalizer(window, scaler)
 
     device = torch.device(args.device)
     model = CNNLSTMFingerActionNet(
@@ -100,7 +77,7 @@ def main():
         n_fingers=args.n_fingers,
         n_actions=args.n_actions,
     ).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model.eval()
 
     with torch.no_grad():

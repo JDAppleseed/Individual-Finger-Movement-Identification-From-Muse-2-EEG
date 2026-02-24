@@ -20,7 +20,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
-import joblib
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from utils.sequence_data import (
@@ -29,6 +28,7 @@ from utils.sequence_data import (
     fit_channel_normalizer,
     apply_channel_normalizer,
 )
+from utils.runtime_utils import save_normalizer
 from utils.experiment_logger import log_experiment, get_latest_experiment_hash
 from utils.label_schema import ACTION_REST
 from utils.splitting import infer_groups, assert_no_group_overlap
@@ -48,7 +48,7 @@ REST_WEIGHT = 0.8
 
 DEFAULT_NPZ = "eeg_windows.npz"
 DEFAULT_MODEL = "finger_action_model.pt"
-DEFAULT_SCALER = "scaler.save"
+DEFAULT_SCALER = "scaler.npz"
 DEFAULT_PREDS = "test_predictions.npz"
 MAX_SEARCH_DEPTH = 4
 
@@ -907,7 +907,7 @@ def main():
         normalizer = fit_channel_normalizer(X_train)
         X_train = apply_channel_normalizer(X_train, normalizer)
         X_test = apply_channel_normalizer(X_test, normalizer)
-        joblib.dump(normalizer, str(save_scaler_path))
+        save_normalizer(save_scaler_path, normalizer)
 
         # ===== DATALOADERS =====
         train_loader = DataLoader(

@@ -11,7 +11,6 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
-import joblib
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -27,6 +26,7 @@ from utils.sequence_data import (
     split_indices,
     apply_channel_normalizer,
 )
+from utils.runtime_utils import load_normalizer
 
 # Pipeline handoff: Step 3c reuses Step 2 model/scaler artifacts and produces
 # figure outputs that align with Step 3 evaluation semantics.
@@ -82,7 +82,7 @@ def _session_paths_from_dir(session_dir: Path) -> _SessionPathsCompat:
     return _SessionPathsCompat(
         windows_npz=layout.windows_npz,
         model_file=model_base / "finger_action_model.pt",
-        scaler_file=model_base / "scaler.save",
+        scaler_file=model_base / "scaler.npz",
         test_predictions_npz=model_base / "test_predictions.npz",
         eval_dir=layout.reports_root / run_name,
     )
@@ -206,7 +206,10 @@ y_finger_test = y_finger[test_idx]
 if not scaler_path.exists():
     print(f"Scaler file not found: {scaler_path}")
     raise SystemExit(2)
-normalizer = joblib.load(str(scaler_path))
+normalizer = load_normalizer(scaler_path)
+if normalizer is None:
+    print(f"Failed to load normalizer: {scaler_path}")
+    raise SystemExit(2)
 X_test = apply_channel_normalizer(X_test, normalizer)
 
 # =========================
@@ -222,7 +225,7 @@ model = CNNLSTMFingerActionNet(
 if not model_path.exists():
     print(f"Model file not found: {model_path}")
     raise SystemExit(2)
-model.load_state_dict(torch.load(str(model_path), map_location="cpu"))
+model.load_state_dict(torch.load(str(model_path), map_location="cpu", weights_only=True))
 
 # =========================
 # ===== MC DROPOUT =========

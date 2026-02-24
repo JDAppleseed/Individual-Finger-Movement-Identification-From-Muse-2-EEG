@@ -73,12 +73,9 @@ def _find_models(root: Path) -> List[Path]:
 def _find_scalers(root: Path) -> List[Path]:
     candidates: List[Path] = []
     for pattern in (
-        "scaler.save",
-        "*normalizer*.save",
-        "*scaler*.pkl",
-        "*scaler*.joblib",
-        "*normalizer*.pkl",
-        "*normalizer*.joblib",
+        "scaler.npz",
+        "*normalizer*.npz",
+        "*scaler*.npz",
     ):
         candidates.extend(root.rglob(pattern))
     return sorted({p.resolve() for p in candidates})
