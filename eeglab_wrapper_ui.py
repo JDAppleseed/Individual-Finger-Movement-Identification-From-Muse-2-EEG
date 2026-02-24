@@ -437,6 +437,7 @@ TOOLTIPS: Dict[str, str] = {
     "enable_actuation": "Enable robot hand actuation (explicit opt-in, requires confirmation).",
     "bluetooth_target": "Bluetooth device name/address for actuation.",
     "no_file_io": "Disable file outputs during live inference (max performance).",
+    "infer_subject_override": "Subject override for Step 7 (defaults to current subject).",
     "project_name": "Project name for auto-resolving latest session.",
     "subject_id": "Subject ID for auto-resolving latest session.",
     "raw_dir": "Session root for raw recording.",
@@ -2182,6 +2183,7 @@ class MainWindow(QMainWindow):
             "is auto-resolved; model/scaler fields act as explicit overrides. "
             "Outputs default to processed/live_infer and auto-version if the folder exists. "
             "Disable file outputs to run inference-only for max performance. "
+            "Use the inference subject dropdown to target a different subject for Step 7. "
             "Actuation is opt-in and requires confirmation before running."
         )
         note.setWordWrap(True)
@@ -2607,6 +2609,16 @@ class MainWindow(QMainWindow):
                 step_id, form, "CHANNELS", "Channels", defaults, 1, 64, read_only=True
             )
         elif step_id == "infer":
+            infer_subject_combo = QComboBox()
+            infer_subject_combo.addItem("(current)")
+            if self.current_project:
+                infer_subject_combo.addItems(list_subjects(self.current_project))
+            infer_subject_combo.setCurrentText("(current)")
+            infer_subject_combo.currentTextChanged.connect(self._on_infer_subject_changed)
+            self._apply_tooltip(infer_subject_combo, "infer_subject_override")
+            form.addRow("Inference subject", infer_subject_combo)
+            self.fields[step_id]["infer_subject_override"] = infer_subject_combo
+            self.infer_subject_combo = infer_subject_combo
             self._add_file_picker(
                 step_id,
                 form,
@@ -3539,6 +3551,60 @@ class MainWindow(QMainWindow):
         else:
             self.subject_combo.addItem("-")
         self.subject_combo.blockSignals(False)
+        self._refresh_infer_subjects()
+
+    def _refresh_infer_subjects(self) -> None:
+        if not hasattr(self, "infer_subject_combo"):
+            return
+        combo = self.infer_subject_combo
+        current = combo.currentText().strip()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("(current)")
+        if self.current_project:
+            combo.addItems(list_subjects(self.current_project))
+        if current and combo.findText(current) >= 0:
+            combo.setCurrentText(current)
+        else:
+            combo.setCurrentText("(current)")
+        combo.blockSignals(False)
+
+    def _infer_subject_override(self) -> Optional[str]:
+        combo = getattr(self, "infer_subject_combo", None)
+        if not isinstance(combo, QComboBox):
+            return None
+        value = combo.currentText().strip()
+        if not value or value in {"(current)", "-"}:
+            return None
+        return value
+
+    def _latest_session_for_subject(self, subject_id: str) -> Optional[Path]:
+        if not self.current_project:
+            return None
+        subject_dir = subject_root(self.current_project, subject_id)
+        sessions_root = subject_dir / "sessions"
+        return _latest_dir_by_mtime(sessions_root)
+
+    def _on_infer_subject_changed(self, _value: str) -> None:
+        subject_id = self._infer_subject_override() or self.current_subject
+        if not self.current_project or not subject_id:
+            return
+        subject_dir = subject_root(self.current_project, subject_id)
+        session_dir = self._latest_session_for_subject(subject_id)
+        run_dir = resolve_latest_run_dir(session_dir) if session_dir else None
+        if not run_dir:
+            return
+        infer_model_widget = self.fields.get("infer", {}).get("model_path")
+        infer_scaler_widget = self.fields.get("infer", {}).get("scaler_path")
+        def _maybe_set(widget: Optional[QLineEdit], value: str, legacy_values: set[str]) -> None:
+            if not isinstance(widget, QLineEdit):
+                return
+            current = widget.text().strip()
+            if not current or current in legacy_values:
+                widget.setText(value)
+
+        _maybe_set(infer_model_widget, str(run_dir / "finger_action_model.pt"), {"finger_action_model.pt"})
+        _maybe_set(infer_scaler_widget, str(run_dir / "scaler.npz"), {"scaler.npz"})
 
     def _select_subject(self, subject_id: str) -> None:
         if subject_id == "-" or not subject_id:
@@ -3838,10 +3904,16 @@ class MainWindow(QMainWindow):
         latest = self._latest_subject_file(subject_dir / "windows", f"{self.current_subject}_*_eeg_windows.npz")
         return latest
 
-    def _resolve_latest_model_artifacts(self, subject_dir: Path) -> Tuple[Optional[str], Optional[Path], Optional[Path]]:
+    def _resolve_latest_model_artifacts(
+        self,
+        subject_dir: Path,
+        *,
+        session_dir_override: Optional[Path] = None,
+        subject_id_override: Optional[str] = None,
+    ) -> Tuple[Optional[str], Optional[Path], Optional[Path]]:
         """Resolve latest (exp_hash, model_path, scaler_path) for the selected subject."""
         # Preferred: session-local model runs (sessions/<id>/processed/models/<run_id>/)
-        sdir = self._resolve_session_dir_for_current(subject_dir)
+        sdir = session_dir_override or self._resolve_session_dir_for_current(subject_dir)
         if sdir:
             models_root = sdir / "processed" / "models"
             if models_root.exists():
@@ -3855,7 +3927,8 @@ class MainWindow(QMainWindow):
                     return run_id, (model_path if model_path.exists() else None), (scaler_path if scaler_path.exists() else None)
 
         # Legacy fallback: repo-level models (data/models/<subject>/<exp_hash>/)
-        models_root = self.repo_root / "data" / "models" / str(self.current_subject or "UNKNOWN")
+        subject_id = subject_id_override or self.current_subject or "UNKNOWN"
+        models_root = self.repo_root / "data" / "models" / str(subject_id)
         if not models_root.exists():
             return None, None, None
         runs = [p for p in models_root.iterdir() if p.is_dir()]
@@ -4160,11 +4233,20 @@ class MainWindow(QMainWindow):
             )
             return
 
-        subject_dir = subject_root(self.current_project, self.current_subject)
+        infer_subject_override = None
+        subject_for_step = self.current_subject
+        if step_id == "infer":
+            infer_subject_override = self._infer_subject_override()
+            if infer_subject_override:
+                subject_for_step = infer_subject_override
+
+        subject_dir = subject_root(self.current_project, subject_for_step)
         ensure_subject_dirs(subject_dir)
 
         settings = self._collect_settings(step_id)
         settings["TIMEBASE_VERSION"] = TIMEBASE_VERSION
+        if step_id == "infer":
+            settings.pop("infer_subject_override", None)
         if step_id == "step1":
             settings["MODE"] = "train_record"
             settings["ALLOW_DROP"] = False
@@ -4175,6 +4257,7 @@ class MainWindow(QMainWindow):
             session_dir_path = self._resolve_effective_session_dir(step_id=None)
             if session_dir_path:
                 settings["session_dir"] = str(session_dir_path)
+        infer_session_dir: Optional[Path] = None
         if step_id == "infer":
             stream_name = self._selected_stream_name() or self.live_stream_name
             stream_type = self._selected_stream_type() or self.live_stream_type
@@ -4196,8 +4279,16 @@ class MainWindow(QMainWindow):
             settings["LABEL_CHECK_ACKNOWLEDGED"] = self.live_label_acknowledged
             settings["LABEL_CHECK_FOUND_LABELS"] = self.live_label_details.get("labels")
             settings["LABEL_CHECK_EXPECTED_LABELS"] = settings.get("REQUIRED_LSL_LABELS")
-            if not settings.get("session_id") and self.current_session_backend:
+            if not settings.get("session_id") and self.current_session_backend and not infer_subject_override:
                 settings["session_id"] = self.current_session_backend
+            if infer_subject_override and infer_subject_override != self.current_subject:
+                infer_session_dir = self._latest_session_for_subject(subject_for_step)
+            else:
+                infer_session_dir = self._resolve_effective_session_dir(step_id=None)
+                if infer_session_dir is None:
+                    infer_session_dir = self._latest_session_for_subject(subject_for_step)
+            if infer_session_dir:
+                settings["session_dir"] = str(infer_session_dir)
         if (
             step_id in {"step1", "infer"}
             and self.input_source.currentText() == "CSV Offline"
@@ -4225,8 +4316,11 @@ class MainWindow(QMainWindow):
             settings["force_new_session"] = not resume_requested
             backend_session = self._prepare_session_id(step_id, settings)
         elif step_id == "infer":
-            settings["subject_id"] = self.current_subject
-            backend_session = self._prepare_session_id(step_id, settings)
+            settings["subject_id"] = subject_for_step
+            if infer_subject_override:
+                backend_session = None
+            else:
+                backend_session = self._prepare_session_id(step_id, settings)
         elif step_id == "step1b" and not backend_session:
             backend_session = self._guess_backend_session_id()
         elif step_id == "train" and not backend_session:
@@ -4244,12 +4338,13 @@ class MainWindow(QMainWindow):
                     )
                     return
             else:
-                session_dir_path = self._resolve_effective_session_dir(step_id=None)
+                session_dir_path = infer_session_dir
                 if not session_dir_path:
                     QMessageBox.warning(
                         self,
                         "Session Dir Required",
-                        "Missing session dir. Select the session folder under subjects/<id>/sessions/<session_id>.",
+                        "Missing session dir. Select the session folder under subjects/<id>/sessions/<session_id> "
+                        "or ensure the subject has at least one session.",
                     )
                     return
         if step_id == "step1b":
@@ -4329,16 +4424,23 @@ class MainWindow(QMainWindow):
         # Ensure downstream steps that rely on model/scaler defaults don't accidentally pick up
         # stale root-level files. Prefer latest artifacts for the selected subject.
         if step_id in {"infer"}:
-            exp_hash, model_path, scaler_path = self._resolve_latest_model_artifacts(subject_dir)
+            exp_hash, model_path, scaler_path = self._resolve_latest_model_artifacts(
+                subject_dir,
+                session_dir_override=infer_session_dir,
+                subject_id_override=subject_for_step,
+            )
             if model_path and not settings.get("model_path"):
                 settings["model_path"] = str(model_path)
             if scaler_path and not settings.get("scaler_path"):
                 settings["scaler_path"] = str(scaler_path)
         config_path = subject_dir / "config" / f"{step_id}.json"
+        session_id_value = self.current_session_ui or "UNKNOWN"
+        if step_id == "infer" and infer_session_dir is not None:
+            session_id_value = infer_session_dir.name
         config = build_config(
             project_name=self.current_project,
-            subject_id=self.current_subject,
-            session_id=self.current_session_ui or "UNKNOWN",
+            subject_id=subject_for_step,
+            session_id=session_id_value,
             settings=settings,
             timebase_version=TIMEBASE_VERSION,
         )
@@ -4363,8 +4465,7 @@ class MainWindow(QMainWindow):
                 if self.allow_partial_checkbox.isChecked():
                     args.append("--allow-partial")
         if step_id == "infer":
-            session_dir_path = self._resolve_effective_session_dir(step_id=None)
-            session_dir_value = str(session_dir_path) if session_dir_path else ""
+            session_dir_value = str(infer_session_dir) if infer_session_dir else ""
             if session_dir_value:
                 args.extend(["--session-dir", session_dir_value])
         if step_id == "train":
