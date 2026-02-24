@@ -460,7 +460,7 @@ parser = argparse.ArgumentParser()
         default=None,
         help="Session directory (defaults to events/events.jsonl + raw/eeg_raw_shard_*.npy).",
     )
-parser.add_argument(
+    parser.add_argument(
     "--subject-id",
     type=str,
     default="8-M16",
