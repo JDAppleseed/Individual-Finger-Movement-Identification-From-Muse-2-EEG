@@ -14,3 +14,5 @@ bitstring>=4.1
 pyqtgraph>=0.13
 tqdm>=4.65
 pynput>=1.7
+pyserial>=3.5
+pytest>=7.4
