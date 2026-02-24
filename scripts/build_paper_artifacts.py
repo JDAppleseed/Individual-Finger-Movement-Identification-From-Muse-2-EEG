@@ -741,10 +741,11 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
 
     # Performance table per run
     perf_lines: List[str] = []
-    perf_lines.append("\\begin{table*}[t]\n\\centering\n")
+    perf_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n\\setlength{\\tabcolsep}{3pt}\n")
     perf_lines.append("\\caption{Per-subject test performance and calibration (from \\texttt{metrics.json} and \\texttt{test\\_predictions.npz}).}\n")
     perf_lines.append("\\label{tab:perf}\n")
-    perf_lines.append("\\begin{tabular}{llrrrrrrrr}\n\\toprule\n")
+    perf_lines.append("\\resizebox{\\textwidth}{!}{%\n")
+    perf_lines.append("\\begin{tabular}{lp{0.30\\textwidth}rrrrrrrr}\n\\toprule\n")
     perf_lines.append(
         "Subject & Session & $n_{test}$ & $n_{non\\text{-}REST}$ & Action Acc (\\%) & 95\\% CI & Finger Acc$_{non\\text{-}REST}$ (\\%) & 95\\% CI & Action ECE & Finger ECE$_{non\\text{-}REST}$ \\\\\n\\midrule\n"
     )
@@ -763,12 +764,14 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
             if np.isfinite(f_lo) and np.isfinite(f_hi)
             else "\\textit{n/a}"
         )
+        session_id = _latex_escape(r.session_id)
+        session_id = session_id.replace(r"\_", r"\_\allowbreak")
         perf_lines.append(
-            f"{_latex_escape(r.subject_id)} & {_latex_escape(r.session_id)} & {int(r.n_test_metrics or 0)} & {int(r.n_test_non_rest_metrics or 0)} & "
+            f"{_latex_escape(r.subject_id)} & {session_id} & {int(r.n_test_metrics or 0)} & {int(r.n_test_non_rest_metrics or 0)} & "
             f"{_format_pct(action_acc, 2)} & {a_ci} & {_format_pct(finger_acc, 2)} & {f_ci} & "
             f"{_format_num(r.test_action_ece, 4)} & {_format_num(r.test_finger_ece_non_rest, 4)} \\\\\n"
         )
-    perf_lines.append("\\bottomrule\n\\end{tabular}\n\\end{table*}\n\n")
+    perf_lines.append("\\bottomrule\n\\end{tabular}%\n}\n\\end{table*}\n\n")
 
     # Dataset / windowing table per run
     data_lines: List[str] = []
