@@ -231,7 +231,13 @@ def load_model_and_scaler(
     model_path_p = Path(model_path).expanduser().resolve()
     if not model_path_p.exists():
         raise FileNotFoundError(f"Model not found: {model_path_p}")
-    state = torch.load(model_path_p, map_location=device)
+    if not model_path_p.suffix.lower() in {".pt", ".pth"}:
+        raise ValueError(f"Unexpected model file extension: {model_path_p.suffix}")
+    try:
+        state = torch.load(model_path_p, map_location=device, weights_only=True)
+    except TypeError:
+        # Older PyTorch versions do not support weights_only.
+        state = torch.load(model_path_p, map_location=device)
     try:
         in_ch = int(state["conv.0.weight"].shape[1])
     except Exception:
@@ -247,9 +253,12 @@ def load_model_and_scaler(
     scaler = None
     scaler_path_p = Path(scaler_path).expanduser().resolve()
     if scaler_path_p.exists():
+        if scaler_path_p.suffix.lower() not in {".save", ".pkl", ".joblib"}:
+            logger.warning("Unexpected scaler extension: %s", scaler_path_p.suffix)
         try:
             scaler = joblib.load(scaler_path_p)
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to load scaler (joblib uses pickle; do not load untrusted files): %s", exc)
             scaler = None
     return model, scaler
 
@@ -270,37 +279,59 @@ def _is_noop_decision(finger_id: int, action_id: int) -> bool:
     return int(finger_id) == 0 or int(action_id) == 0
 
 
-def _build_arg_parser() -> argparse.ArgumentParser:
+def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
+    defaults = {
+        "device": None,
+        "session_dir": None,
+        "window_sec": 0.25,
+        "hop_sec": 0.05,
+        "target_fs": 256.0,
+        "latency_threshold_ms": 750.0,
+        "latency_policy": "warn",
+        "allow_drop": False,
+        "log_every": 5.0,
+        "enable_actuation": False,
+        "serial_port": None,
+        "serial_baud": 9600,
+        "actuation_min_prob": 0.65,
+        "actuation_stability": 2,
+        "actuation_cooldown_ms": 150,
+    }
     p = argparse.ArgumentParser(description="Live inference + optional robotic hand actuation")
+    p.set_defaults(**defaults)
 
     # Existing args (preserved from original file)
     p.add_argument("--config", required=True, type=str, help="Path to step7 config JSON")
-    p.add_argument("--device", default=None, type=str, help="torch device override (e.g., cpu, mps, cuda)")
+    p.add_argument("--device", type=str, help="torch device override (e.g., cpu, mps, cuda)")
     p.add_argument(
         "--session-dir",
         type=str,
-        default=None,
         help="Session directory (derives model/scaler + output dir defaults).",
     )
 
-    p.add_argument("--window_sec", type=float, default=0.25)
-    p.add_argument("--hop_sec", type=float, default=0.05)
-    p.add_argument("--target_fs", type=float, default=256.0)
+    p.add_argument("--window_sec", type=float, help="Window length (s).")
+    p.add_argument("--hop_sec", type=float, help="Window hop (s).")
+    p.add_argument("--target_fs", type=float, help="Target FS for resampling.")
 
-    p.add_argument("--latency_threshold_ms", type=float, default=750.0)
-    p.add_argument("--latency_policy", type=str, default="warn", choices=["warn", "drop", "degrade"])
+    p.add_argument("--latency_threshold_ms", type=float, help="Latency p95 threshold (ms).")
+    p.add_argument(
+        "--latency_policy",
+        type=str,
+        choices=["warn", "drop", "degrade"],
+        help="Latency policy (warn/drop/degrade).",
+    )
     p.add_argument("--allow_drop", action="store_true")
-    p.add_argument("--log_every", type=float, default=5.0)
+    p.add_argument("--log_every", type=float, help="Log interval (s).")
 
     # New: actuation knobs
     p.add_argument("--enable_actuation", action="store_true", help="Enable sending commands to Arduino hand")
-    p.add_argument("--serial_port", type=str, default=None, help="Serial port (e.g. /dev/tty.usbmodem*, /dev/tty.*)")
-    p.add_argument("--serial_baud", type=int, default=9600, help="Baud rate (must match Arduino sketch)")
-    p.add_argument("--actuation_min_prob", type=float, default=0.65, help="Min joint confidence to actuate")
-    p.add_argument("--actuation_stability", type=int, default=2, help="Require same decision N windows in a row")
-    p.add_argument("--actuation_cooldown_ms", type=int, default=150, help="Min time between sends")
+    p.add_argument("--serial_port", type=str, help="Serial port (e.g. /dev/tty.usbmodem*, /dev/tty.*)")
+    p.add_argument("--serial_baud", type=int, help="Baud rate (must match Arduino sketch)")
+    p.add_argument("--actuation_min_prob", type=float, help="Min joint confidence to actuate")
+    p.add_argument("--actuation_stability", type=int, help="Require same decision N windows in a row")
+    p.add_argument("--actuation_cooldown_ms", type=int, help="Min time between sends")
 
-    return p
+    return p, defaults
 
 
 def _apply_config_to_args(
@@ -371,9 +402,8 @@ def _debounced_should_send(
 # -------------------- Main --------------------
 
 def main() -> int:
-    parser = _build_arg_parser()
+    parser, defaults = _build_arg_parser()
     args = parser.parse_args()
-    defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
     cfg = load_json(args.config)
     _apply_config_to_args(args, cfg, defaults)
 
