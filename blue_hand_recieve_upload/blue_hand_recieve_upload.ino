@@ -26,9 +26,9 @@
       6 = wrist (optional)
 
     action_id:
-      0 = rest (no move; optional "hold" behavior)
-      1 = open
-      2 = close
+      0 = rest (move to midpoint between open/close; delayed 0.5s if coming from open/close)
+      1 = open (no extra delay)
+      2 = close (no extra delay)
 
   Examples:
     "0,1\n" -> NO-OP (never actuate)
@@ -65,17 +65,26 @@ static const uint8_t CLOSE_ANGLE[N_SERVOS] = {160, 160, 160, 160, 160,  90};   /
 
 // How aggressively to move (ms between steps). Larger = slower/smoother.
 static const uint16_t STEP_DELAY_MS = 8;
+// Delay before executing a REST command when transitioning from OPEN/CLOSE.
+static const uint16_t REST_DELAY_MS = 500;
 
 // ------------------------- State -------------------------
 Servo servos[N_SERVOS];
 uint8_t currentAngle[N_SERVOS];
+uint8_t lastAction[N_SERVOS];
+bool pendingRest[N_SERVOS];
+unsigned long pendingRestAt[N_SERVOS];
 
 // ------------------------- Helpers -------------------------
 void attachServos() {
   for (uint8_t i = 0; i < N_SERVOS; i++) {
     servos[i].attach(SERVO_PINS[i]);
-    currentAngle[i] = OPEN_ANGLE[i];
+    uint8_t rest = (uint8_t)((uint16_t)OPEN_ANGLE[i] + (uint16_t)CLOSE_ANGLE[i]) / 2;
+    currentAngle[i] = rest;
     servos[i].write(currentAngle[i]);
+    lastAction[i] = 0;        // start at rest
+    pendingRest[i] = false;
+    pendingRestAt[i] = 0;
     delay(50);
   }
 }
@@ -100,15 +109,28 @@ void commandFinger(uint8_t finger_id, uint8_t action_id) {
   if (finger_id == 0) {
     return;
   }
-  if (action_id == 0) {
-    // "rest" = do nothing (hold last position)
-    return;
-  }
 
   auto do_one = [&](uint8_t idx) {
     if (idx >= N_SERVOS) return;
+    if (action_id == 0) {
+      // Delay REST if transitioning from OPEN/CLOSE.
+      if (lastAction[idx] == 1 || lastAction[idx] == 2) {
+        pendingRest[idx] = true;
+        pendingRestAt[idx] = millis();
+        return;
+      }
+      uint8_t rest = (uint8_t)((uint16_t)OPEN_ANGLE[idx] + (uint16_t)CLOSE_ANGLE[idx]) / 2;
+      moveServoTo(idx, rest);
+      lastAction[idx] = 0;
+      pendingRest[idx] = false;
+      return;
+    }
+
+    // action_id 1 or 2: no extra delay, override any pending rest.
+    pendingRest[idx] = false;
     uint8_t target = (action_id == 1) ? OPEN_ANGLE[idx] : CLOSE_ANGLE[idx];
     moveServoTo(idx, target);
+    lastAction[idx] = action_id;
   };
 
   // Map ids to indices (1..6 -> 0..5)
@@ -149,13 +171,22 @@ void setup() {
 }
 
 void loop() {
-  if (!Serial.available()) return;
-
-  String line = Serial.readStringUntil('\n');
-  uint8_t finger_id = 0, action_id = 0;
-  if (!parseCommand(line, finger_id, action_id)) {
-    // ignore malformed lines
-    return;
+  if (Serial.available()) {
+    String line = Serial.readStringUntil('\n');
+    uint8_t finger_id = 0, action_id = 0;
+    if (parseCommand(line, finger_id, action_id)) {
+      commandFinger(finger_id, action_id);
+    }
   }
-  commandFinger(finger_id, action_id);
+
+  // Service pending REST commands without blocking other commands.
+  unsigned long now = millis();
+  for (uint8_t i = 0; i < N_SERVOS; i++) {
+    if (!pendingRest[i]) continue;
+    if (now - pendingRestAt[i] < REST_DELAY_MS) continue;
+    uint8_t rest = (uint8_t)((uint16_t)OPEN_ANGLE[i] + (uint16_t)CLOSE_ANGLE[i]) / 2;
+    moveServoTo(i, rest);
+    lastAction[i] = 0;
+    pendingRest[i] = false;
+  }
 }

@@ -7,7 +7,7 @@ Protocol sent to Arduino (newline-terminated ASCII):
   "{finger_id},{action_id}\n"
 Where:
   finger_id: 0=none, 1=thumb, 2=index, 3=middle, 4=ring, 5=pinky
-  action_id: 0=rest, 1=open, 2=close
+  action_id: 0=rest (midpoint), 1=open, 2=close
 
 This matches the project conventions used in event logs (rest down-weighting, etc.).
 
@@ -107,6 +107,19 @@ class SerialHandActuator:
         line = f"{finger_id},{action_id}\n".encode("ascii", errors="ignore")
         self.ser.write(line)
         # don't force flush; OS buffers are fine for this use-case
+
+
+def _warmup_actuation(actuator: SerialHandActuator, *, pause_s: float = 0.8, inter_cmd_s: float = 0.03) -> None:
+    """
+    Visual sanity check: open all fingers, close all, then return to rest (midpoint).
+    This is intentionally a best-effort sequence to confirm connectivity.
+    """
+    for action_id, label in [(1, "open"), (2, "close"), (0, "rest")]:
+        for finger_id in range(1, 6):
+            actuator.send(finger_id, action_id)
+            time.sleep(inter_cmd_s)
+        logger.info("Warmup: %s sent for all fingers; waiting %.2fs", label, pause_s)
+        time.sleep(pause_s)
 
 
 # -------------------- Helpers --------------------
@@ -330,7 +343,7 @@ def _is_noop_decision(finger_id: int, action_id: int) -> bool:
     Returns True if the decision represents a guaranteed no-op.
     Semantics:
       finger_id == 0 -> NONE
-      action_id == 0 -> REST
+      action_id == 0 -> REST (suppressed for safety during inference)
     """
     return int(finger_id) == 0 or int(action_id) == 0
 
@@ -654,6 +667,7 @@ def main() -> int:
         actuator = SerialHandActuator(args.serial_port, baud=args.serial_baud)
         actuator.open()
         logger.info("Actuation enabled via serial port %s @ %s baud", args.serial_port, args.serial_baud)
+        _warmup_actuation(actuator)
 
     # Live buffers
     from collections import deque
