@@ -119,6 +119,14 @@ def load_json(path: str) -> dict:
     return json.loads(Path(path).expanduser().resolve().read_text())
 
 
+def _load_config_file(path: Path) -> tuple[dict, dict]:
+    payload = load_json(str(path))
+    settings = payload.get("settings")
+    if isinstance(settings, dict):
+        return payload, settings
+    return payload, payload
+
+
 def setup_logger(log_path: str, level: int = logging.INFO) -> None:
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
@@ -257,6 +265,66 @@ def _safe_float(x: float) -> float:
         return 0.0
 
 
+def _latest_dir_by_mtime(root: Path) -> Optional[Path]:
+    if not root.exists():
+        return None
+    dirs = [p for p in root.iterdir() if p.is_dir()]
+    if not dirs:
+        return None
+    return max(dirs, key=lambda p: p.stat().st_mtime)
+
+
+def _resolve_repo_root(config_path: Path) -> Path:
+    parts = list(config_path.resolve().parts)
+    for idx, part in enumerate(parts):
+        if part == "Projects":
+            if idx == 0:
+                return Path("/")
+            return Path(*parts[:idx])
+    return config_path.parent
+
+
+def _derive_project_subject(
+    config_payload: dict,
+    config_path: Path,
+    project_override: Optional[str],
+    subject_override: Optional[str],
+    config_settings: Optional[dict] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    settings = config_settings or {}
+    project_name = (
+        project_override
+        or config_payload.get("project_name")
+        or config_payload.get("project")
+        or settings.get("project_name")
+        or settings.get("project")
+    )
+    subject_id = (
+        subject_override
+        or config_payload.get("subject_id")
+        or settings.get("subject_id")
+    )
+    if project_name and subject_id:
+        return str(project_name), str(subject_id)
+    parts = config_path.resolve().parts
+    for idx in range(len(parts) - 3):
+        if parts[idx] == "Projects" and parts[idx + 2] == "subjects":
+            return parts[idx + 1], parts[idx + 3]
+    return None, None
+
+
+def _ensure_unique_output_dir(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.name
+    parent = path.parent
+    for i in range(2, 1000):
+        candidate = parent / f"{stem}_v{i}"
+        if not candidate.exists():
+            return candidate
+    return path
+
+
 def _is_noop_decision(finger_id: int, action_id: int) -> bool:
     """
     Returns True if the decision represents a guaranteed no-op.
@@ -286,18 +354,25 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "actuation_cooldown_ms": 150,
         "allow_outside_base": False,
         "no_file_io": False,
+        "subject_id": None,
+        "project_name": None,
     }
     p = argparse.ArgumentParser(description="Live inference + optional robotic hand actuation")
     p.set_defaults(**defaults)
 
     # Existing args (preserved from original file)
     p.add_argument("--config", required=True, type=str, help="Path to step7 config JSON")
+    p.add_argument("--model-path", type=str, help="Override model file path.")
+    p.add_argument("--scaler-path", type=str, help="Override scaler file path.")
+    p.add_argument("--out-dir", type=str, help="Override output directory.")
     p.add_argument("--device", type=str, help="torch device override (e.g., cpu, mps, cuda)")
     p.add_argument(
         "--session-dir",
         type=str,
         help="Session directory (derives model/scaler + output dir defaults).",
     )
+    p.add_argument("--subject-id", type=str, help="Subject ID (auto-resolve latest session).")
+    p.add_argument("--project-name", type=str, help="Project name (auto-resolve latest session).")
 
     p.add_argument("--window_sec", type=float, help="Window length (s).")
     p.add_argument("--hop_sec", type=float, help="Window hop (s).")
@@ -404,16 +479,35 @@ def _debounced_should_send(
 def main() -> int:
     parser, defaults = _build_arg_parser()
     args = parser.parse_args()
-    cfg = load_json(args.config)
-    _apply_config_to_args(args, cfg, defaults)
+    config_path = Path(args.config).expanduser().resolve()
+    config_payload, config_settings = _load_config_file(config_path)
+    _apply_config_to_args(args, config_settings, defaults)
 
     # Required config keys (as in original file)
-    lsl_name = cfg.get("lsl_name", cfg.get("stream_name", "Muse2-EEG"))
-    lsl_type = cfg.get("lsl_type", cfg.get("stream_type", "EEG"))
-    model_path = cfg.get("model_path")
-    scaler_path = cfg.get("scaler_path")
-    out_dir = cfg.get("out_dir")
-    session_dir_value = args.session_dir or cfg.get("session_dir")
+    lsl_name = config_settings.get("lsl_name", config_settings.get("stream_name", "Muse2-EEG"))
+    lsl_type = config_settings.get("lsl_type", config_settings.get("stream_type", "EEG"))
+    session_dir_value = args.session_dir or config_settings.get("session_dir")
+    project_name, subject_id = _derive_project_subject(
+        config_payload, config_path, args.project_name, args.subject_id, config_settings
+    )
+    session_dir_inferred = False
+    if not session_dir_value and project_name and subject_id:
+        repo_root = _resolve_repo_root(config_path)
+        sessions_root = (
+            repo_root
+            / "Projects"
+            / project_name
+            / "subjects"
+            / subject_id
+            / "sessions"
+        )
+        latest_session = _latest_dir_by_mtime(sessions_root)
+        if latest_session is not None:
+            session_dir_value = str(latest_session)
+            session_dir_inferred = True
+    model_path = args.model_path or (None if session_dir_value else config_settings.get("model_path"))
+    scaler_path = args.scaler_path or (None if session_dir_value else config_settings.get("scaler_path"))
+    out_dir = args.out_dir or (None if session_dir_value else config_settings.get("out_dir"))
 
     def _resolve_path(path_str: str, base_dir: Optional[Path]) -> str:
         candidate = Path(path_str).expanduser()
@@ -441,11 +535,11 @@ def main() -> int:
             return 2
         base_dir = session_dir_path
         explicit_overrides = []
-        if model_path:
+        if args.model_path:
             explicit_overrides.append("model_path")
-        if scaler_path:
+        if args.scaler_path:
             explicit_overrides.append("scaler_path")
-        if out_dir:
+        if args.out_dir:
             explicit_overrides.append("out_dir")
         if explicit_overrides:
             print(
@@ -453,7 +547,7 @@ def main() -> int:
             )
             selection_source = "legacy_explicit"
         else:
-            selection_source = "session_dir"
+            selection_source = "subject_latest" if session_dir_inferred else "session_dir"
 
         run_dir = resolve_latest_run_dir(session_dir_path)
         if run_dir is None or not run_dir.exists():
@@ -498,8 +592,17 @@ def main() -> int:
             )
     out_dir = str(out_dir_path)
 
-    no_file_io = bool(args.no_file_io or cfg.get("no_file_io", False))
+    config_no_file_io = config_settings.get("no_file_io")
+    if config_no_file_io is None and "record_raw" in config_settings:
+        config_no_file_io = not bool(config_settings.get("record_raw"))
+    no_file_io = bool(args.no_file_io or config_no_file_io)
     record_raw = not no_file_io
+    if record_raw:
+        unique_dir = _ensure_unique_output_dir(out_dir_path)
+        if unique_dir != out_dir_path:
+            out_dir_path = unique_dir
+            out_dir = str(out_dir_path)
+            print(f"Output dir exists; using: {out_dir}")
 
     print(f"Session selection source: {selection_source}")
     print(f"Using model file: {model_path}")
@@ -532,9 +635,9 @@ def main() -> int:
     # Session writer (raw shards, optional)
     session_writer = None
     raw_buffer: list[Packet] = []
-    raw_flush_size = int(cfg.get("raw_flush_size", 256))
+    raw_flush_size = int(config_settings.get("raw_flush_size", 256))
     if record_raw:
-        raw_shard_samples = int(cfg.get("raw_shard_samples", 2048))
+        raw_shard_samples = int(config_settings.get("raw_shard_samples", 2048))
         session_writer = SessionWriter(
             out_dir=str(out_dir),
             channel_count=ch,

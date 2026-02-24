@@ -425,6 +425,7 @@ TOOLTIPS: Dict[str, str] = {
     "LABEL_CHECK_ACKNOWLEDGED": "Operator acknowledged label mismatch.",
     "model_path": "Model path for live inference.",
     "scaler_path": "Scaler path for live inference.",
+    "out_dir": "Output directory override for live inference.",
     "stream_name": "LSL stream name for live inference.",
     "stream_type": "LSL stream type for live inference.",
     "hop_sec": "Window hop length in seconds.",
@@ -435,7 +436,9 @@ TOOLTIPS: Dict[str, str] = {
     "log_every": "Live inference log interval (s).",
     "enable_actuation": "Enable robot hand actuation (explicit opt-in, requires confirmation).",
     "bluetooth_target": "Bluetooth device name/address for actuation.",
-    "record_raw": "Record raw EEG during live inference.",
+    "no_file_io": "Disable file outputs during live inference (max performance).",
+    "project_name": "Project name for auto-resolving latest session.",
+    "subject_id": "Subject ID for auto-resolving latest session.",
     "raw_dir": "Session root for raw recording.",
     "session_id": "Session ID for raw recording.",
 }
@@ -926,6 +929,7 @@ class MainWindow(QMainWindow):
             "infer": [
                 ArgSpec("model_path", "--model-path", "text", "Model path."),
                 ArgSpec("scaler_path", "--scaler-path", "text", "Scaler path."),
+                ArgSpec("out_dir", "--out-dir", "text", "Output directory override."),
                 ArgSpec("stream_name", "--stream-name", "text", "LSL stream name."),
                 ArgSpec("stream_type", "--stream-type", "text", "LSL stream type."),
                 ArgSpec("window_sec", "--window-sec", "float", "Window length (s)."),
@@ -957,10 +961,9 @@ class MainWindow(QMainWindow):
                     "text",
                     "Bluetooth target name/address.",
                 ),
-                ArgSpec("record_raw", "--record-raw", "bool", "Record raw EEG."),
-                ArgSpec("raw_dir", "--raw-dir", "text", "Raw session root."),
-                ArgSpec("subject_id", "--subject-id", "text", "Subject ID for raw recording."),
-                ArgSpec("session_id", "--session-id", "text", "Session ID for raw recording."),
+                ArgSpec("no_file_io", "--no_file_io", "bool", "Disable file outputs."),
+                ArgSpec("subject_id", "--subject-id", "text", "Subject ID (auto-resolve latest session)."),
+                ArgSpec("project_name", "--project-name", "text", "Project name (auto-resolve latest session)."),
             ],
             "step1b": [
                 ArgSpec(
@@ -2175,8 +2178,10 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(box)
         note = QLabel(
             "Live inference runs in 7_live_infer_and_actuate.py. "
-            "Set model/scaler paths, stream name/type, and windowing parameters. "
-            "Allow-drop and latency policy are currently logged only in this script. "
+            "When a session (or subject/project) is selected, the latest trained run "
+            "is auto-resolved; model/scaler fields act as explicit overrides. "
+            "Outputs default to processed/live_infer and auto-version if the folder exists. "
+            "Disable file outputs to run inference-only for max performance. "
             "Actuation is opt-in and requires confirmation before running."
         )
         note.setWordWrap(True)
@@ -2658,8 +2663,13 @@ class MainWindow(QMainWindow):
                 "Enable Robot Hand Actuation (DANGEROUS)",
                 defaults,
             )
-            self._add_checkbox(step_id, form, "record_raw", "Record raw", defaults)
-            self._add_text(step_id, form, "raw_dir", "Raw dir", defaults)
+            self._add_checkbox(
+                step_id,
+                form,
+                "no_file_io",
+                "Disable file outputs (max performance)",
+                defaults,
+            )
         elif step_id == "step1b":
             self._add_spin(
                 step_id,
@@ -4453,6 +4463,9 @@ class MainWindow(QMainWindow):
     def _migrate_legacy_settings(
         self, step_id: str, settings: Dict[str, Any]
     ) -> Dict[str, Any]:
+        if "record_raw" in settings and "no_file_io" not in settings:
+            settings["no_file_io"] = not bool(settings.get("record_raw"))
+            settings.pop("record_raw", None)
         if "ENABLE_ACTUATION" in settings:
             if "ENABLE_ACTUATION" not in self._legacy_warnings:
                 self._append_log(
