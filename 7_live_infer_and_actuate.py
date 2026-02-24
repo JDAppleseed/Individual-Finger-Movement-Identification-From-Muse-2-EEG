@@ -285,6 +285,7 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "actuation_stability": 2,
         "actuation_cooldown_ms": 150,
         "allow_outside_base": False,
+        "no_file_io": False,
     }
     p = argparse.ArgumentParser(description="Live inference + optional robotic hand actuation")
     p.set_defaults(**defaults)
@@ -323,6 +324,11 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "--allow_outside_base",
         action="store_true",
         help="Allow output dir outside session/config base directory.",
+    )
+    p.add_argument(
+        "--no_file_io",
+        action="store_true",
+        help="Disable all file outputs (raw shards + log file) for max performance.",
     )
 
     return p, defaults
@@ -492,15 +498,22 @@ def main() -> int:
             )
     out_dir = str(out_dir_path)
 
+    no_file_io = bool(args.no_file_io or cfg.get("no_file_io", False))
+    record_raw = not no_file_io
+
     print(f"Session selection source: {selection_source}")
     print(f"Using model file: {model_path}")
     print(f"Using scaler file: {scaler_path}")
-    print(f"Saving outputs to: {out_dir}")
+    if no_file_io:
+        print("File outputs disabled: raw shards + log file")
+    else:
+        print(f"Saving outputs to: {out_dir}")
 
-    ensure_dir(out_dir)
+    if not no_file_io:
+        ensure_dir(out_dir)
 
     setup_logger(
-        log_path=str(Path(out_dir) / "live_infer.log"),
+        log_path="" if no_file_io else str(Path(out_dir) / "live_infer.log"),
         level=logging.INFO,
     )
 
@@ -516,15 +529,19 @@ def main() -> int:
     ch = int(info.channel_count())
     logger.info("Connected LSL stream name=%s type=%s sfreq=%s ch=%s", lsl_name, lsl_type, sfreq, ch)
 
-    # Session writer (raw shards, authoritative)
-    raw_shard_samples = int(cfg.get("raw_shard_samples", 2048))
-    session_writer = SessionWriter(
-        out_dir=str(out_dir),
-        channel_count=ch,
-        shard_size_samples=raw_shard_samples,
-    )
+    # Session writer (raw shards, optional)
+    session_writer = None
+    raw_buffer: list[Packet] = []
     raw_flush_size = int(cfg.get("raw_flush_size", 256))
-    raw_buffer = []
+    if record_raw:
+        raw_shard_samples = int(cfg.get("raw_shard_samples", 2048))
+        session_writer = SessionWriter(
+            out_dir=str(out_dir),
+            channel_count=ch,
+            shard_size_samples=raw_shard_samples,
+        )
+    else:
+        logger.info("Raw recording disabled (no_file_io).")
 
     # Serial actuator
     actuator: Optional[SerialHandActuator] = None
@@ -566,25 +583,26 @@ def main() -> int:
                     vec = np.asarray(sample, dtype=np.float32)
                     buffer.append((time_s, vec))
 
-                    # Persist raw packets
-                    raw_buffer.append(
-                        Packet(
-                            seq=sample_seq,
-                            lsl_ts_raw=lsl_ts,
-                            lsl_ts_mono=lsl_ts,
-                            local_ts=time.time(),
-                            sample=np.asarray(sample, dtype=float),
-                            flags=0,
-                            segment_id=0,
-                            clamped=False,
-                            raw_path=None,
-                            segment_break_reason=None,
+                    # Persist raw packets (optional)
+                    if record_raw and session_writer is not None:
+                        raw_buffer.append(
+                            Packet(
+                                seq=sample_seq,
+                                lsl_ts_raw=lsl_ts,
+                                lsl_ts_mono=lsl_ts,
+                                local_ts=time.time(),
+                                sample=np.asarray(sample, dtype=float),
+                                flags=0,
+                                segment_id=0,
+                                clamped=False,
+                                raw_path=None,
+                                segment_break_reason=None,
+                            )
                         )
-                    )
-                    sample_seq += 1
-                    if len(raw_buffer) >= raw_flush_size:
-                        session_writer.append_packets(raw_buffer)
-                        raw_buffer = []
+                        sample_seq += 1
+                        if len(raw_buffer) >= raw_flush_size:
+                            session_writer.append_packets(raw_buffer)
+                            raw_buffer = []
 
             # Infer over available windows
             time_s = time.monotonic() - start_ts
@@ -703,7 +721,7 @@ def main() -> int:
         raise
     finally:
         try:
-            if session_writer is not None:
+            if record_raw and session_writer is not None:
                 if raw_buffer:
                     session_writer.append_packets(raw_buffer)
                 session_writer.close()
