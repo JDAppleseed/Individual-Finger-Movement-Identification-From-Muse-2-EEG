@@ -1,6 +1,6 @@
 {
   "repo_root": ".",
-  "repo_commit_sha": "9e83faccc224335c73c03471eada35100041765a",
+  "repo_commit_sha": "8d7195d6fb5ede5c03cf8fb491a8ea79b8b3d342",
   "n_runs": 2,
   "runs": [
     {
@@ -176,14 +176,14 @@
     {
       "subject_id": "1-M16 500",
       "age": 16,
-      "sex": null,
+      "sex": "Male",
       "handedness": "Right",
       "notes": "500 dataset"
     },
     {
       "subject_id": "2-M16",
       "age": 16,
-      "sex": null,
+      "sex": "Male",
       "handedness": "Right",
       "notes": "500"
     }
@@ -219,12 +219,10 @@
               "pinky_close": 54
             },
             "counts_by_action_id": {
-              "0": 3,
               "1": 293,
               "2": 302
             },
             "counts_by_finger_id": {
-              "0": 4,
               "1": 146,
               "2": 110,
               "3": 112,
@@ -232,8 +230,6 @@
               "5": 97
             },
             "counts_by_action_finger": {
-              "0:0": 3,
-              "1:0": 1,
               "1:1": 69,
               "2:1": 77,
               "2:2": 59,
@@ -279,12 +275,10 @@
               "pinky_close": 59
             },
             "counts_by_action_id": {
-              "0": 5,
               "1": 284,
               "2": 290
             },
             "counts_by_finger_id": {
-              "0": 6,
               "1": 112,
               "2": 111,
               "3": 114,
@@ -292,8 +286,6 @@
               "5": 119
             },
             "counts_by_action_finger": {
-              "0:0": 5,
-              "1:0": 1,
               "1:1": 57,
               "2:1": 55,
               "1:2": 54,

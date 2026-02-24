@@ -130,7 +130,7 @@ The JSON file serves as the authoritative event source to prevent schema drift o
 No data paths exist that rely solely on in-memory buffers; all sessions persist to disk.
 
 \subsection{Cohort Summary}
-Demographics, session duration, and event label counts are derived directly from \texttt{subject.json}, \texttt{run\_meta.json}, and \texttt{events/events.jsonl}. Sex is not recorded in the current \texttt{subject.json} artifacts and is therefore reported as \NotAvailable.
+Demographics, session duration, and event label counts are derived directly from \texttt{subject.json}, \texttt{run\_meta.json}, and \texttt{events/events.jsonl}. Sex is inferred from the subject ID string: IDs containing \texttt{M} are treated as male and IDs containing \texttt{F} as female.
 
 \input{paper_artifacts/tables_demographics.tex}
 \input{paper_artifacts/tables_sessions.tex}
@@ -259,7 +259,7 @@ Several threats should be considered when interpreting these results:
 \item \textbf{Evaluation granularity:} window-level metrics may not reflect trial-level performance; trial IDs in the current artifacts are not informative (constant) and thus cannot support trial-level aggregation.
 \item \textbf{Small cohort:} only \NumSubjects subjects are included in the current run artifacts, limiting generalization claims.
 \item \textbf{Handedness bias:} both subjects are right-handed; left-handed generalization is untested.
-\item \textbf{Demographic completeness:} sex is \NotAvailable in \texttt{subject.json}; other covariates are not logged.
+\item \textbf{Demographic completeness:} sex is inferred from the subject ID string (\texttt{M} or \texttt{F}); other covariates are not logged.
 \item \textbf{Real-time latency:} Step~7 latency logs are \NotAvailable in current artifacts, so real-time responsiveness cannot be quantified here.
 \end{itemize}
 
