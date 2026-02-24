@@ -5,19 +5,25 @@ This document defines canonical artifacts, filenames, and schemas used across th
 ## 1) Raw EEG Stream (Step 1)
 
 Primary archive path (per session):
-- `data/raw/<subject_id>_<session_id>_raw.csv`
+- `Projects/<project>/subjects/<subject>/sessions/<session_id>/raw/eeg_raw_shard_*.npy`
 
-Columns:
-- `lsl_timestamp` (float) — raw LSL timestamp
-- `ch1`, `ch2`, `ch3`, `ch4` (float) — Muse 2 channels
+Record fields (numpy dtype):
+- `seq` (int) — sample sequence
+- `lsl_ts_raw` (float) — raw LSL timestamp
+- `lsl_ts_mono` (float) — monotonic LSL timestamp
+- `local_ts` (float) — local wall clock
+- `flags` (int) — integrity flags
+- `segment_id` (int) — segment index
+- `clamped` (int) — monotonic clamp indicator
+- `sample` (float[C]) — Muse 2 channel samples
 
 Sampling:
 - Nominal 256 Hz (see `session_meta.json` for actual sampling rate)
 
 ## 2) Cleaned Feature Stream (Step 1)
 
-Per-session file (appendable):
-- `data/processed/<subject_id>_<session_id>_eeg_features.csv`
+Legacy per-session file (appendable):
+- `data/processed/<subject_id>_<session_id>_eeg_features.csv` (legacy)
 
 Columns:
 - `lsl_timestamp` (float)
@@ -33,16 +39,18 @@ Columns:
 - `latency_ms` (float)
 
 Notes:
-- The stream is saved one sample per iteration after the buffer is full.
-- This file is used by the event review UI.
+- Legacy artifact used by older review/diagnostic tools.
 
 ## 3) Event Marking (Step 1 UI)
 
-Per-session files:
-- `data/processed/<subject_id>_<session_id>_events_autosave.csv`
-- `data/processed/<subject_id>_<session_id>_events.csv`
+Authoritative per-session file:
+- `Projects/<project>/subjects/<subject>/sessions/<session_id>/events/events.jsonl`
 
-Required columns:
+Legacy per-session files:
+- `data/processed/<subject_id>_<session_id>_events_autosave.csv` (legacy)
+- `data/processed/<subject_id>_<session_id>_events.csv` (legacy)
+
+Required fields (events.jsonl payloads):
 - `onset_s` (float)
 - `duration_s` (float)
 - `type` (string) — `artifact`, `calibration`, `rest`, or derived from `action_id` + `finger_id`
@@ -84,7 +92,7 @@ Diagnostic summary:
 
 ## 5) Normalization
 
-- `scaler.save` — per-channel normalizer
+- `scaler.npz` — per-channel normalizer
   - dict with `mean` and `std` arrays of shape `[C]`
   - fit on training windows only
 

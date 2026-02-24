@@ -425,6 +425,7 @@ TOOLTIPS: Dict[str, str] = {
     "LABEL_CHECK_ACKNOWLEDGED": "Operator acknowledged label mismatch.",
     "model_path": "Model path for live inference.",
     "scaler_path": "Scaler path for live inference.",
+    "out_dir": "Output directory override for live inference.",
     "stream_name": "LSL stream name for live inference.",
     "stream_type": "LSL stream type for live inference.",
     "hop_sec": "Window hop length in seconds.",
@@ -435,7 +436,10 @@ TOOLTIPS: Dict[str, str] = {
     "log_every": "Live inference log interval (s).",
     "enable_actuation": "Enable robot hand actuation (explicit opt-in, requires confirmation).",
     "bluetooth_target": "Bluetooth device name/address for actuation.",
-    "record_raw": "Record raw EEG during live inference.",
+    "no_file_io": "Disable file outputs during live inference (max performance).",
+    "infer_subject_override": "Subject override for Step 7 (defaults to current subject).",
+    "project_name": "Project name for auto-resolving latest session.",
+    "subject_id": "Subject ID for auto-resolving latest session.",
     "raw_dir": "Session root for raw recording.",
     "session_id": "Session ID for raw recording.",
 }
@@ -864,11 +868,11 @@ class MainWindow(QMainWindow):
         for item in [
             "Pipeline Overview",
             "1) Record (Lossless)",
-            "2) Events: Mark/Edit (Optional)",
-            "3) Validate Session",
-            "4) Extract Windows",
-            "5) Train Model",
-            "6) Evaluate",
+            "Events: Mark/Edit (Optional)",
+            "Validate Session (Tool)",
+            "1b) Extract Windows",
+            "2) Train Model",
+            "3+) Evaluate / Reports",
             "7) Live Infer + Actuate",
             "Logs & Diagnostics",
             "Projects",
@@ -926,6 +930,7 @@ class MainWindow(QMainWindow):
             "infer": [
                 ArgSpec("model_path", "--model-path", "text", "Model path."),
                 ArgSpec("scaler_path", "--scaler-path", "text", "Scaler path."),
+                ArgSpec("out_dir", "--out-dir", "text", "Output directory override."),
                 ArgSpec("stream_name", "--stream-name", "text", "LSL stream name."),
                 ArgSpec("stream_type", "--stream-type", "text", "LSL stream type."),
                 ArgSpec("window_sec", "--window-sec", "float", "Window length (s)."),
@@ -957,10 +962,9 @@ class MainWindow(QMainWindow):
                     "text",
                     "Bluetooth target name/address.",
                 ),
-                ArgSpec("record_raw", "--record-raw", "bool", "Record raw EEG."),
-                ArgSpec("raw_dir", "--raw-dir", "text", "Raw session root."),
-                ArgSpec("subject_id", "--subject-id", "text", "Subject ID for raw recording."),
-                ArgSpec("session_id", "--session-id", "text", "Session ID for raw recording."),
+                ArgSpec("no_file_io", "--no_file_io", "bool", "Disable file outputs."),
+                ArgSpec("subject_id", "--subject-id", "text", "Subject ID (auto-resolve latest session)."),
+                ArgSpec("project_name", "--project-name", "text", "Project name (auto-resolve latest session)."),
             ],
             "step1b": [
                 ArgSpec(
@@ -1547,7 +1551,7 @@ class MainWindow(QMainWindow):
             return
         npz_path = self.replay_npz_path.text().strip()
         model_path = self.replay_model_path.text().strip() or "finger_action_model.pt"
-        scaler_path = self.replay_scaler_path.text().strip() or "scaler.save"
+        scaler_path = self.replay_scaler_path.text().strip() or "scaler.npz"
         try:
             self.replay_viz = ReplayVisualizer(
                 npz_path=npz_path, model_path=model_path, scaler_path=scaler_path
@@ -1912,11 +1916,11 @@ class MainWindow(QMainWindow):
 
         for label, row in [
             ("1) Record (Lossless)", 1),
-            ("2) Events: Mark/Edit (Optional)", 2),
-            ("3) Validate Session", 3),
+            ("Events: Mark/Edit (Optional)", 2),
+            ("Validate Session (Tool)", 3),
             ("1b) Extract Windows", 4),
             ("2) Train Model", 5),
-            ("6) Evaluate", 6),
+            ("3+) Evaluate / Reports", 6),
             ("7) Live Infer + Actuate", 7),
         ]:
             box = QGroupBox(label)
@@ -1932,7 +1936,7 @@ class MainWindow(QMainWindow):
     def _build_session_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        header = QLabel("Step 3: Validate Session")
+        header = QLabel("Validate Session (Tool)")
         header.setStyleSheet("font-weight: 600; font-size: 16px;")
         layout.addWidget(header)
 
@@ -2016,7 +2020,7 @@ class MainWindow(QMainWindow):
     def _build_evaluate_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        header = QLabel("Step 6: Evaluate")
+        header = QLabel("Step 3+: Evaluate / Reports")
         header.setStyleSheet("font-weight: 600; font-size: 16px;")
         layout.addWidget(header)
         note = QLabel(
@@ -2062,7 +2066,7 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
 
-        header = QLabel("Step 2: Events: Mark/Edit (Optional)")
+        header = QLabel("Events: Mark/Edit (Optional)")
         header.setStyleSheet("font-weight: 600; font-size: 16px;")
         layout.addWidget(header)
         info = QLabel("Post-hoc event review/edit tools for the current session.")
@@ -2078,8 +2082,8 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         self.event_features_path = OutlineLineEdit()
         self.event_events_path = OutlineLineEdit()
-        form.addRow("Features CSV", self.event_features_path)
-        form.addRow("Events CSV", self.event_events_path)
+        form.addRow("Legacy Features CSV", self.event_features_path)
+        form.addRow("Events JSONL", self.event_events_path)
         layout.addLayout(form)
 
         advanced = QGroupBox("Validation Options")
@@ -2126,12 +2130,12 @@ class MainWindow(QMainWindow):
     def _build_step1b_page(self) -> QWidget:
         note = QLabel(
             "Extract windows from a lossless session directory (raw/ + events.jsonl). "
-            "Use the Session Directory (sessions/<session_id>) field or select a session in Validate Session."
+            "Use the Session Directory (sessions/<session_id>) field or select a session on the Validate Session page."
         )
         note.setWordWrap(True)
         return self._build_step_page(
             step_id="step1b",
-            title="Step 4: Extract Windows",
+            title="Step 1b: Extract Windows",
             defaults=default_step1b_settings(),
             script_key="step1b",
             include_event_tools=False,
@@ -2152,7 +2156,7 @@ class MainWindow(QMainWindow):
     def _build_train_page(self) -> QWidget:
         return self._build_step_page(
             step_id="train",
-            title="Step 5: Train Model",
+            title="Step 2: Train Model",
             defaults=default_train_settings(),
             script_key="train",
             include_event_tools=False,
@@ -2175,8 +2179,11 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(box)
         note = QLabel(
             "Live inference runs in 7_live_infer_and_actuate.py. "
-            "Set model/scaler paths, stream name/type, and windowing parameters. "
-            "Allow-drop is OFF by default; enable only if you accept latency-driven drops. "
+            "When a session (or subject/project) is selected, the latest trained run "
+            "is auto-resolved; model/scaler fields act as explicit overrides. "
+            "Outputs default to processed/live_infer and auto-version if the folder exists. "
+            "Disable file outputs to run inference-only for max performance. "
+            "Use the inference subject dropdown to target a different subject for Step 7. "
             "Actuation is opt-in and requires confirmation before running."
         )
         note.setWordWrap(True)
@@ -2203,7 +2210,7 @@ class MainWindow(QMainWindow):
         self.diag_features_path = OutlineLineEdit()
         self.diag_events_path = OutlineLineEdit()
         form.addRow("Raw/Features CSV", self.diag_features_path)
-        form.addRow("Events CSV", self.diag_events_path)
+        form.addRow("Events JSONL", self.diag_events_path)
         layout.addLayout(form)
 
         advanced = QGroupBox("Advanced")
@@ -2254,7 +2261,7 @@ class MainWindow(QMainWindow):
                 "continuity by default."
             ),
             "train": "Offline model training from extracted windows.",
-            "infer": "Live inference with optional actuation (opt-in) and latency guardrails.",
+            "infer": "Live inference with optional actuation (opt-in) and latency logging.",
         }
         return descriptions.get(step_id, "")
 
@@ -2602,6 +2609,16 @@ class MainWindow(QMainWindow):
                 step_id, form, "CHANNELS", "Channels", defaults, 1, 64, read_only=True
             )
         elif step_id == "infer":
+            infer_subject_combo = QComboBox()
+            infer_subject_combo.addItem("(current)")
+            if self.current_project:
+                infer_subject_combo.addItems(list_subjects(self.current_project))
+            infer_subject_combo.setCurrentText("(current)")
+            infer_subject_combo.currentTextChanged.connect(self._on_infer_subject_changed)
+            self._apply_tooltip(infer_subject_combo, "infer_subject_override")
+            form.addRow("Inference subject", infer_subject_combo)
+            self.fields[step_id]["infer_subject_override"] = infer_subject_combo
+            self.infer_subject_combo = infer_subject_combo
             self._add_file_picker(
                 step_id,
                 form,
@@ -2658,8 +2675,13 @@ class MainWindow(QMainWindow):
                 "Enable Robot Hand Actuation (DANGEROUS)",
                 defaults,
             )
-            self._add_checkbox(step_id, form, "record_raw", "Record raw", defaults)
-            self._add_text(step_id, form, "raw_dir", "Raw dir", defaults)
+            self._add_checkbox(
+                step_id,
+                form,
+                "no_file_io",
+                "Disable file outputs (max performance)",
+                defaults,
+            )
         elif step_id == "step1b":
             self._add_spin(
                 step_id,
@@ -3529,6 +3551,60 @@ class MainWindow(QMainWindow):
         else:
             self.subject_combo.addItem("-")
         self.subject_combo.blockSignals(False)
+        self._refresh_infer_subjects()
+
+    def _refresh_infer_subjects(self) -> None:
+        if not hasattr(self, "infer_subject_combo"):
+            return
+        combo = self.infer_subject_combo
+        current = combo.currentText().strip()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("(current)")
+        if self.current_project:
+            combo.addItems(list_subjects(self.current_project))
+        if current and combo.findText(current) >= 0:
+            combo.setCurrentText(current)
+        else:
+            combo.setCurrentText("(current)")
+        combo.blockSignals(False)
+
+    def _infer_subject_override(self) -> Optional[str]:
+        combo = getattr(self, "infer_subject_combo", None)
+        if not isinstance(combo, QComboBox):
+            return None
+        value = combo.currentText().strip()
+        if not value or value in {"(current)", "-"}:
+            return None
+        return value
+
+    def _latest_session_for_subject(self, subject_id: str) -> Optional[Path]:
+        if not self.current_project:
+            return None
+        subject_dir = subject_root(self.current_project, subject_id)
+        sessions_root = subject_dir / "sessions"
+        return _latest_dir_by_mtime(sessions_root)
+
+    def _on_infer_subject_changed(self, _value: str) -> None:
+        subject_id = self._infer_subject_override() or self.current_subject
+        if not self.current_project or not subject_id:
+            return
+        subject_dir = subject_root(self.current_project, subject_id)
+        session_dir = self._latest_session_for_subject(subject_id)
+        run_dir = resolve_latest_run_dir(session_dir) if session_dir else None
+        if not run_dir:
+            return
+        infer_model_widget = self.fields.get("infer", {}).get("model_path")
+        infer_scaler_widget = self.fields.get("infer", {}).get("scaler_path")
+        def _maybe_set(widget: Optional[QLineEdit], value: str, legacy_values: set[str]) -> None:
+            if not isinstance(widget, QLineEdit):
+                return
+            current = widget.text().strip()
+            if not current or current in legacy_values:
+                widget.setText(value)
+
+        _maybe_set(infer_model_widget, str(run_dir / "finger_action_model.pt"), {"finger_action_model.pt"})
+        _maybe_set(infer_scaler_widget, str(run_dir / "scaler.npz"), {"scaler.npz"})
 
     def _select_subject(self, subject_id: str) -> None:
         if subject_id == "-" or not subject_id:
@@ -3609,8 +3685,24 @@ class MainWindow(QMainWindow):
         features_dir = subject_dir / "features"
         preferred_events = None
         preferred_features = None
+        session_dir_value = (
+            self.session_dir_input.text().strip()
+            if getattr(self, "session_dir_input", None)
+            else ""
+        )
+        session_dir = Path(session_dir_value) if session_dir_value else None
+        if session_dir and session_dir.exists():
+            candidate_events = session_dir / "events" / "events.jsonl"
+            if not candidate_events.exists():
+                candidate_events = session_dir / "events" / "events.json"
+            if candidate_events.exists():
+                preferred_events = candidate_events
         if self.current_session_backend:
-            candidate_events = (
+            candidate_events_jsonl = (
+                events_dir
+                / f"{self.current_subject}_{self.current_session_backend}_events.jsonl"
+            )
+            candidate_events_csv = (
                 events_dir
                 / f"{self.current_subject}_{self.current_session_backend}_events.csv"
             )
@@ -3618,14 +3710,20 @@ class MainWindow(QMainWindow):
                 features_dir
                 / f"{self.current_subject}_{self.current_session_backend}_eeg_features.csv"
             )
-            if candidate_events.exists():
-                preferred_events = candidate_events
+            if candidate_events_jsonl.exists():
+                preferred_events = candidate_events_jsonl
+            elif candidate_events_csv.exists():
+                preferred_events = candidate_events_csv
             if candidate_features.exists():
                 preferred_features = candidate_features
 
         latest_events = preferred_events or self._latest_subject_file(
-            events_dir, f"{self.current_subject}_*_events.csv"
+            events_dir, f"{self.current_subject}_*_events.jsonl"
         )
+        if latest_events is None:
+            latest_events = self._latest_subject_file(
+                events_dir, f"{self.current_subject}_*_events.csv"
+            )
         latest_features = preferred_features or self._latest_subject_file(
             features_dir, f"{self.current_subject}_*_eeg_features.csv"
         )
@@ -3754,13 +3852,13 @@ class MainWindow(QMainWindow):
         run_dir = resolve_latest_run_dir(global_session)
         if run_dir:
             model_path = str(run_dir / "finger_action_model.pt")
-            scaler_path = str(run_dir / "scaler.save")
+            scaler_path = str(run_dir / "scaler.npz")
             _maybe_set(infer_model_widget, model_path, {"finger_action_model.pt"})
-            _maybe_set(infer_scaler_widget, scaler_path, {"scaler.save"})
+            _maybe_set(infer_scaler_widget, scaler_path, {"scaler.npz"})
             if hasattr(self, "replay_model_path"):
                 _maybe_set(self.replay_model_path, model_path, {"finger_action_model.pt"})
             if hasattr(self, "replay_scaler_path"):
-                _maybe_set(self.replay_scaler_path, scaler_path, {"scaler.save"})
+                _maybe_set(self.replay_scaler_path, scaler_path, {"scaler.npz"})
 
         if hasattr(self, "replay_npz_path"):
             _maybe_set(self.replay_npz_path, default_npz, {"eeg_windows.npz"})
@@ -3806,10 +3904,16 @@ class MainWindow(QMainWindow):
         latest = self._latest_subject_file(subject_dir / "windows", f"{self.current_subject}_*_eeg_windows.npz")
         return latest
 
-    def _resolve_latest_model_artifacts(self, subject_dir: Path) -> Tuple[Optional[str], Optional[Path], Optional[Path]]:
+    def _resolve_latest_model_artifacts(
+        self,
+        subject_dir: Path,
+        *,
+        session_dir_override: Optional[Path] = None,
+        subject_id_override: Optional[str] = None,
+    ) -> Tuple[Optional[str], Optional[Path], Optional[Path]]:
         """Resolve latest (exp_hash, model_path, scaler_path) for the selected subject."""
         # Preferred: session-local model runs (sessions/<id>/processed/models/<run_id>/)
-        sdir = self._resolve_session_dir_for_current(subject_dir)
+        sdir = session_dir_override or self._resolve_session_dir_for_current(subject_dir)
         if sdir:
             models_root = sdir / "processed" / "models"
             if models_root.exists():
@@ -3819,11 +3923,12 @@ class MainWindow(QMainWindow):
                     run_dir = runs[-1]
                     run_id = run_dir.name
                     model_path = run_dir / "finger_action_model.pt"
-                    scaler_path = run_dir / "scaler.save"
+                    scaler_path = run_dir / "scaler.npz"
                     return run_id, (model_path if model_path.exists() else None), (scaler_path if scaler_path.exists() else None)
 
         # Legacy fallback: repo-level models (data/models/<subject>/<exp_hash>/)
-        models_root = self.repo_root / "data" / "models" / str(self.current_subject or "UNKNOWN")
+        subject_id = subject_id_override or self.current_subject or "UNKNOWN"
+        models_root = self.repo_root / "data" / "models" / str(subject_id)
         if not models_root.exists():
             return None, None, None
         runs = [p for p in models_root.iterdir() if p.is_dir()]
@@ -3833,7 +3938,7 @@ class MainWindow(QMainWindow):
         run_dir = runs[-1]
         exp_hash = run_dir.name
         model_path = run_dir / "finger_action_model.pt"
-        scaler_path = run_dir / "scaler.save"
+        scaler_path = run_dir / "scaler.npz"
         return exp_hash, (model_path if model_path.exists() else None), (scaler_path if scaler_path.exists() else None)
     def _update_resume_ui(self) -> None:
         if not hasattr(self, "resume_status_label") or not hasattr(
@@ -3859,7 +3964,7 @@ class MainWindow(QMainWindow):
         if tb and tb != TIMEBASE_VERSION:
             return False, f"Timebase mismatch: {tb}"
 
-        # Preferred (current) layout: session_dir/raw contains eeg_raw_shard_*.npy and optionally raw.csv
+        # Preferred (current) layout: session_dir/raw contains eeg_raw_shard_*.npy
         session_dir = Path(state.get("session_dir", "")) if state.get("session_dir") else None
         raw_dir = None
         if session_dir and session_dir.exists():
@@ -3873,7 +3978,7 @@ class MainWindow(QMainWindow):
         has_raw_shards = False
         if raw_dir and raw_dir.exists():
             try:
-                has_raw_shards = any(raw_dir.glob("eeg_raw_shard_*.npy")) or (raw_dir / "raw.csv").exists()
+                has_raw_shards = any(raw_dir.glob("eeg_raw_shard_*.npy"))
             except Exception:
                 has_raw_shards = False
 
@@ -4128,11 +4233,20 @@ class MainWindow(QMainWindow):
             )
             return
 
-        subject_dir = subject_root(self.current_project, self.current_subject)
+        infer_subject_override = None
+        subject_for_step = self.current_subject
+        if step_id == "infer":
+            infer_subject_override = self._infer_subject_override()
+            if infer_subject_override:
+                subject_for_step = infer_subject_override
+
+        subject_dir = subject_root(self.current_project, subject_for_step)
         ensure_subject_dirs(subject_dir)
 
         settings = self._collect_settings(step_id)
         settings["TIMEBASE_VERSION"] = TIMEBASE_VERSION
+        if step_id == "infer":
+            settings.pop("infer_subject_override", None)
         if step_id == "step1":
             settings["MODE"] = "train_record"
             settings["ALLOW_DROP"] = False
@@ -4143,6 +4257,7 @@ class MainWindow(QMainWindow):
             session_dir_path = self._resolve_effective_session_dir(step_id=None)
             if session_dir_path:
                 settings["session_dir"] = str(session_dir_path)
+        infer_session_dir: Optional[Path] = None
         if step_id == "infer":
             stream_name = self._selected_stream_name() or self.live_stream_name
             stream_type = self._selected_stream_type() or self.live_stream_type
@@ -4164,8 +4279,16 @@ class MainWindow(QMainWindow):
             settings["LABEL_CHECK_ACKNOWLEDGED"] = self.live_label_acknowledged
             settings["LABEL_CHECK_FOUND_LABELS"] = self.live_label_details.get("labels")
             settings["LABEL_CHECK_EXPECTED_LABELS"] = settings.get("REQUIRED_LSL_LABELS")
-            if not settings.get("session_id") and self.current_session_backend:
+            if not settings.get("session_id") and self.current_session_backend and not infer_subject_override:
                 settings["session_id"] = self.current_session_backend
+            if infer_subject_override and infer_subject_override != self.current_subject:
+                infer_session_dir = self._latest_session_for_subject(subject_for_step)
+            else:
+                infer_session_dir = self._resolve_effective_session_dir(step_id=None)
+                if infer_session_dir is None:
+                    infer_session_dir = self._latest_session_for_subject(subject_for_step)
+            if infer_session_dir:
+                settings["session_dir"] = str(infer_session_dir)
         if (
             step_id in {"step1", "infer"}
             and self.input_source.currentText() == "CSV Offline"
@@ -4193,8 +4316,11 @@ class MainWindow(QMainWindow):
             settings["force_new_session"] = not resume_requested
             backend_session = self._prepare_session_id(step_id, settings)
         elif step_id == "infer":
-            settings["subject_id"] = self.current_subject
-            backend_session = self._prepare_session_id(step_id, settings)
+            settings["subject_id"] = subject_for_step
+            if infer_subject_override:
+                backend_session = None
+            else:
+                backend_session = self._prepare_session_id(step_id, settings)
         elif step_id == "step1b" and not backend_session:
             backend_session = self._guess_backend_session_id()
         elif step_id == "train" and not backend_session:
@@ -4212,12 +4338,13 @@ class MainWindow(QMainWindow):
                     )
                     return
             else:
-                session_dir_path = self._resolve_effective_session_dir(step_id=None)
+                session_dir_path = infer_session_dir
                 if not session_dir_path:
                     QMessageBox.warning(
                         self,
                         "Session Dir Required",
-                        "Missing session dir. Select the session folder under subjects/<id>/sessions/<session_id>.",
+                        "Missing session dir. Select the session folder under subjects/<id>/sessions/<session_id> "
+                        "or ensure the subject has at least one session.",
                     )
                     return
         if step_id == "step1b":
@@ -4240,8 +4367,13 @@ class MainWindow(QMainWindow):
                 if not settings.get("events"):
                     latest_events = self._latest_subject_file(
                         subject_dir / "events",
-                        f"{self.current_subject}_*_events.csv",
+                        f"{self.current_subject}_*_events.jsonl",
                     )
+                    if not latest_events:
+                        latest_events = self._latest_subject_file(
+                            subject_dir / "events",
+                            f"{self.current_subject}_*_events.csv",
+                        )
                     if latest_events:
                         settings["events"] = str(latest_events)
         if step_id == "train":
@@ -4292,16 +4424,23 @@ class MainWindow(QMainWindow):
         # Ensure downstream steps that rely on model/scaler defaults don't accidentally pick up
         # stale root-level files. Prefer latest artifacts for the selected subject.
         if step_id in {"infer"}:
-            exp_hash, model_path, scaler_path = self._resolve_latest_model_artifacts(subject_dir)
+            exp_hash, model_path, scaler_path = self._resolve_latest_model_artifacts(
+                subject_dir,
+                session_dir_override=infer_session_dir,
+                subject_id_override=subject_for_step,
+            )
             if model_path and not settings.get("model_path"):
                 settings["model_path"] = str(model_path)
             if scaler_path and not settings.get("scaler_path"):
                 settings["scaler_path"] = str(scaler_path)
         config_path = subject_dir / "config" / f"{step_id}.json"
+        session_id_value = self.current_session_ui or "UNKNOWN"
+        if step_id == "infer" and infer_session_dir is not None:
+            session_id_value = infer_session_dir.name
         config = build_config(
             project_name=self.current_project,
-            subject_id=self.current_subject,
-            session_id=self.current_session_ui or "UNKNOWN",
+            subject_id=subject_for_step,
+            session_id=session_id_value,
             settings=settings,
             timebase_version=TIMEBASE_VERSION,
         )
@@ -4326,8 +4465,7 @@ class MainWindow(QMainWindow):
                 if self.allow_partial_checkbox.isChecked():
                     args.append("--allow-partial")
         if step_id == "infer":
-            session_dir_path = self._resolve_effective_session_dir(step_id=None)
-            session_dir_value = str(session_dir_path) if session_dir_path else ""
+            session_dir_value = str(infer_session_dir) if infer_session_dir else ""
             if session_dir_value:
                 args.extend(["--session-dir", session_dir_value])
         if step_id == "train":
@@ -4426,6 +4564,9 @@ class MainWindow(QMainWindow):
     def _migrate_legacy_settings(
         self, step_id: str, settings: Dict[str, Any]
     ) -> Dict[str, Any]:
+        if "record_raw" in settings and "no_file_io" not in settings:
+            settings["no_file_io"] = not bool(settings.get("record_raw"))
+            settings.pop("record_raw", None)
         if "ENABLE_ACTUATION" in settings:
             if "ENABLE_ACTUATION" not in self._legacy_warnings:
                 self._append_log(
@@ -4462,7 +4603,8 @@ class MainWindow(QMainWindow):
         session_dir = Path(session_dir_value)
         manifest_path = session_dir / "manifest.json"
         meta_path = session_dir / "meta.json"
-        events_path = session_dir / "events" / "events.jsonl"
+        events_jsonl_path = session_dir / "events" / "events.jsonl"
+        events_json_path = session_dir / "events" / "events.json"
         timebase_path = session_dir / "timebase_report.json"
         manifest = {}
         meta = {}
@@ -4478,8 +4620,19 @@ class MainWindow(QMainWindow):
             self._append_log(f"Failed to read session summary: {exc}")
             return
         event_count = 0
-        if events_path.exists():
-            event_count = len([ln for ln in events_path.read_text().splitlines() if ln.strip()])
+        if events_jsonl_path.exists():
+            event_count = len(
+                [ln for ln in events_jsonl_path.read_text().splitlines() if ln.strip()]
+            )
+        elif events_json_path.exists():
+            try:
+                payload = json.loads(events_json_path.read_text())
+                if isinstance(payload, dict) and isinstance(payload.get("events"), list):
+                    payload = payload.get("events")
+                if isinstance(payload, list):
+                    event_count = len([ev for ev in payload if isinstance(ev, dict)])
+            except Exception:
+                event_count = 0
         seq_min = manifest.get("seq_min")
         seq_max = manifest.get("seq_max")
         seq_range = f"{seq_min}..{seq_max}" if seq_min is not None else "-"
@@ -5116,6 +5269,11 @@ class MainWindow(QMainWindow):
     ) -> Optional[Path]:
         if not src.exists():
             return None
+        try:
+            if src.resolve() == dest.resolve():
+                return dest
+        except Exception:
+            pass
         dest_path = dest
         if dest_path.exists() and not allow_overwrite:
             dest_path = next_available_path(dest_path)
@@ -5128,6 +5286,11 @@ class MainWindow(QMainWindow):
     ) -> Optional[Path]:
         if not src.exists():
             return None
+        try:
+            if src.resolve() == dest.resolve():
+                return dest
+        except Exception:
+            pass
         dest_path = dest
         if dest_path.exists() and not allow_overwrite:
             dest_path = next_available_path(dest_path)
@@ -5150,8 +5313,7 @@ class MainWindow(QMainWindow):
         if not session_dir:
             return
         self._append_log(f"Session artifacts saved to: {session_dir}")
-        self._append_log(f"raw.csv: {session_dir / 'raw' / 'raw.csv'}")
-        self._append_log(f"events.csv: {session_dir / 'events' / 'events.csv'}")
+        self._append_log(f"raw shards: {session_dir / 'raw'}")
         self._append_log(f"events.jsonl: {session_dir / 'events' / 'events.jsonl'}")
 
     def _sync_step1_outputs(self) -> None:
@@ -5207,15 +5369,31 @@ class MainWindow(QMainWindow):
                 / f"{subject}_{session}_eeg_features.csv"
             )
         if events_src is None:
-            events_src = (
-                self.repo_root / "data" / "processed" / f"{subject}_{session}_events.csv"
-            )
+            candidate_jsonl = session_dir / "events" / "events.jsonl"
+            candidate_json = session_dir / "events" / "events.json"
+            if candidate_jsonl.exists():
+                events_src = candidate_jsonl
+            elif candidate_json.exists():
+                events_src = candidate_json
+            else:
+                events_src = (
+                    self.repo_root
+                    / "data"
+                    / "processed"
+                    / f"{subject}_{session}_events.csv"
+                )
         if raw_src is None:
-            raw_src = self.repo_root / "data" / "raw" / f"{subject}_{session}_raw.csv"
+            raw_dir = session_dir / "raw"
+            if raw_dir.exists() and any(raw_dir.glob("eeg_raw_shard_*.npy")):
+                raw_src = raw_dir
+            else:
+                raw_src = self.repo_root / "data" / "raw" / f"{subject}_{session}_raw.csv"
 
-        autosave_src = events_src.with_name(
-            events_src.name.replace("_events.csv", "_events_autosave.csv")
-        )
+        autosave_src = None
+        if events_src.suffix.lower() == ".csv":
+            autosave_src = events_src.with_name(
+                events_src.name.replace("_events.csv", "_events_autosave.csv")
+            )
         meta_src = features_src.parent / f"{subject}_{session}_session_meta.json"
 
         self._safe_copy(
@@ -5224,10 +5402,16 @@ class MainWindow(QMainWindow):
         self._safe_copy(
             events_src, subject_dir / "events" / events_src.name, allow_overwrite
         )
-        self._safe_copy(
-            autosave_src, subject_dir / "events" / autosave_src.name, allow_overwrite
-        )
-        self._safe_copy(raw_src, subject_dir / "raw" / raw_src.name, allow_overwrite)
+        if autosave_src is not None:
+            self._safe_copy(
+                autosave_src,
+                subject_dir / "events" / autosave_src.name,
+                allow_overwrite,
+            )
+        if raw_src.is_dir():
+            self._safe_copy_dir(raw_src, subject_dir / "raw", allow_overwrite)
+        else:
+            self._safe_copy(raw_src, subject_dir / "raw" / raw_src.name, allow_overwrite)
         if state_src:
             self._safe_copy(
                 state_src, subject_dir / "logs" / state_src.name, allow_overwrite
@@ -5243,10 +5427,16 @@ class MainWindow(QMainWindow):
         self._safe_copy(
             events_src, session_dir / "events" / events_src.name, allow_overwrite
         )
-        self._safe_copy(
-            autosave_src, session_dir / "events" / autosave_src.name, allow_overwrite
-        )
-        self._safe_copy(raw_src, session_dir / "raw" / raw_src.name, allow_overwrite)
+        if autosave_src is not None:
+            self._safe_copy(
+                autosave_src,
+                session_dir / "events" / autosave_src.name,
+                allow_overwrite,
+            )
+        if raw_src.is_dir():
+            self._safe_copy_dir(raw_src, session_dir / "raw", allow_overwrite)
+        else:
+            self._safe_copy(raw_src, session_dir / "raw" / raw_src.name, allow_overwrite)
         if state_src:
             self._safe_copy(
                 state_src, session_dir / "logs" / state_src.name, allow_overwrite
@@ -5467,10 +5657,8 @@ class MainWindow(QMainWindow):
             outputs.append(
                 ("Resolved settings", str(session_dir / "logs" / "resolved_settings.json"))
             )
-            outputs.append(("Raw CSV", str(session_dir / "raw" / "raw.csv")))
             outputs.append(("Raw shards", str(session_dir / "raw")))
             outputs.append(("Events JSONL", str(session_dir / "events" / "events.jsonl")))
-            outputs.append(("Events CSV", str(session_dir / "events" / "events.csv")))
         return outputs
 
     def _expected_step1b_outputs(self) -> list[tuple[str, str]]:

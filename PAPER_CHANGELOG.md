@@ -8,7 +8,7 @@ This changelog summarizes the modifications made to expand `research_paper.tex` 
   - Scans `Projects/**/processed/models/*/metrics.json` and `test_predictions.npz`
   - Computes test accuracies, ECE (10-bin), Wilson 95% CIs, and bootstrap 95% CIs directly from saved predictions
   - Extracts demographics from `Projects/**/subject.json`
-  - Extracts session durations and movement/event counts from `Projects/**/run_meta.json` and `events/events.csv`
+  - Extracts session durations and movement/event counts from `Projects/**/run_meta.json` and `events/events.jsonl`
   - Copies all required figures from `processed/reports/<run_id>/` into `paper_figures/` with LaTeX-safe filenames
   - Writes LaTeX snippets + macros into `paper_artifacts/`
 

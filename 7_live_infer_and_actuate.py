@@ -43,13 +43,10 @@ from pylsl import StreamInlet, resolve_byprop  # type: ignore
 # Project-local imports (keep as-is; this file is intended to be a drop-in replacement)
 # NOTE: If these imports differ in your repo, keep the same ones you already had.
 # They exist in the user's original file; we preserve names/structure.
-from utils.io import ensure_dir, load_json  # type: ignore
-from utils.logging import setup_logger  # type: ignore
-from utils.preprocessing import standardize_window_TxC  # type: ignore
-from utils.resample import _resample_window  # type: ignore
-from utils.sessions import SessionWriter, Packet  # type: ignore
+from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+from muse_streaming.resample import resample_window
+from utils.runtime_utils import apply_channel_normalizer, load_normalizer
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
-from utils.modeling import load_model_and_scaler  # type: ignore
 
 # Pipeline handoff: Step 7 runs online inference with the trained Step 2 model
 # and optional hardware actuation, while writing live-session artifacts.
@@ -114,11 +111,218 @@ class SerialHandActuator:
 
 # -------------------- Helpers --------------------
 
+def ensure_dir(path: str) -> None:
+    Path(path).expanduser().resolve().mkdir(parents=True, exist_ok=True)
+
+
+def load_json(path: str) -> dict:
+    return json.loads(Path(path).expanduser().resolve().read_text())
+
+
+def _load_config_file(path: Path) -> tuple[dict, dict]:
+    payload = load_json(str(path))
+    settings = payload.get("settings")
+    if isinstance(settings, dict):
+        return payload, settings
+    return payload, payload
+
+
+def setup_logger(log_path: str, level: int = logging.INFO) -> None:
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S"
+    )
+    if not any(isinstance(h, logging.StreamHandler) for h in root_logger.handlers):
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setFormatter(formatter)
+        root_logger.addHandler(stream_handler)
+    if log_path:
+        file_handler = logging.FileHandler(log_path)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
+
+def standardize_window_TxC(window_TxC: np.ndarray, scaler: object) -> np.ndarray:
+    return apply_channel_normalizer(window_TxC, scaler)
+
+
+def _resample_window(
+    times: np.ndarray,
+    values: np.ndarray,
+    *,
+    start_s: float,
+    end_s: float,
+    target_fs: float,
+) -> Optional[np.ndarray]:
+    try:
+        _, window = resample_window(
+            times,
+            values,
+            start_s=start_s,
+            end_s=end_s,
+            target_fs=target_fs,
+        )
+        return window
+    except Exception as exc:
+        logger.warning(
+            "Resampling failed for window [%.3f, %.3f]: %s", start_s, end_s, exc
+        )
+        return None
+
+
+@dataclass(frozen=True)
+class Packet:
+    seq: int
+    lsl_ts_raw: float
+    lsl_ts_mono: float
+    local_ts: float
+    sample: np.ndarray
+    flags: int
+    segment_id: int
+    clamped: bool
+    raw_path: Optional[Path] = None
+    segment_break_reason: Optional[str] = None
+
+
+class SessionWriter:
+    def __init__(
+        self,
+        out_dir: str,
+        *,
+        channel_count: int,
+        shard_size_samples: int = 2048,
+    ) -> None:
+        from muse_streaming.session_writer import RawShardWriter
+
+        self.out_dir = Path(out_dir).expanduser().resolve()
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.raw_dir = self.out_dir / "raw"
+        self._raw_writer = RawShardWriter(
+            raw_dir=self.raw_dir,
+            channel_count=channel_count,
+            shard_size_samples=shard_size_samples,
+        )
+
+    def append_packets(self, packets: list[Packet]) -> None:
+        if not packets:
+            return
+        record_arr = self._raw_writer.empty_record_array(len(packets))
+        for idx, packet in enumerate(packets):
+            record_arr["seq"][idx] = int(packet.seq)
+            record_arr["lsl_ts_raw"][idx] = float(packet.lsl_ts_raw)
+            record_arr["lsl_ts_mono"][idx] = float(packet.lsl_ts_mono)
+            record_arr["local_ts"][idx] = float(packet.local_ts)
+            record_arr["flags"][idx] = int(packet.flags)
+            record_arr["segment_id"][idx] = int(packet.segment_id)
+            record_arr["clamped"][idx] = int(bool(packet.clamped))
+            record_arr["sample"][idx] = np.asarray(packet.sample, dtype=float).reshape(-1)
+        self._raw_writer.append(record_arr)
+
+    def close(self) -> None:
+        try:
+            self._raw_writer.flush()
+        except Exception:
+            pass
+
+
+def load_model_and_scaler(
+    model_path: str, scaler_path: str, *, device: torch.device
+) -> tuple[torch.nn.Module, object]:
+    model_path_p = Path(model_path).expanduser().resolve()
+    if not model_path_p.exists():
+        raise FileNotFoundError(f"Model not found: {model_path_p}")
+    if not model_path_p.suffix.lower() in {".pt", ".pth"}:
+        raise ValueError(f"Unexpected model file extension: {model_path_p.suffix}")
+    state = torch.load(model_path_p, map_location=device, weights_only=True)
+    try:
+        in_ch = int(state["conv.0.weight"].shape[1])
+    except Exception:
+        in_ch = 4
+    n_fingers = int(state["finger_head.weight"].shape[0])
+    n_actions = int(state["action_head.weight"].shape[0])
+    model = CNNLSTMFingerActionNet(
+        n_channels=in_ch, n_fingers=n_fingers, n_actions=n_actions
+    )
+    model.load_state_dict(state)
+    model.to(device)
+
+    scaler = None
+    scaler_path_p = Path(scaler_path).expanduser().resolve()
+    if scaler_path_p.exists():
+        if scaler_path_p.suffix.lower() != ".npz":
+            logger.warning("Unexpected scaler extension: %s", scaler_path_p.suffix)
+        scaler = load_normalizer(scaler_path_p)
+        if scaler is None:
+            logger.warning("Failed to load scaler from %s", scaler_path_p)
+    return model, scaler
+
+
 def _safe_float(x: float) -> float:
     try:
         return float(x)
     except Exception:
         return 0.0
+
+
+def _latest_dir_by_mtime(root: Path) -> Optional[Path]:
+    if not root.exists():
+        return None
+    dirs = [p for p in root.iterdir() if p.is_dir()]
+    if not dirs:
+        return None
+    return max(dirs, key=lambda p: p.stat().st_mtime)
+
+
+def _resolve_repo_root(config_path: Path) -> Path:
+    parts = list(config_path.resolve().parts)
+    for idx, part in enumerate(parts):
+        if part == "Projects":
+            if idx == 0:
+                return Path("/")
+            return Path(*parts[:idx])
+    return config_path.parent
+
+
+def _derive_project_subject(
+    config_payload: dict,
+    config_path: Path,
+    project_override: Optional[str],
+    subject_override: Optional[str],
+    config_settings: Optional[dict] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    settings = config_settings or {}
+    project_name = (
+        project_override
+        or config_payload.get("project_name")
+        or config_payload.get("project")
+        or settings.get("project_name")
+        or settings.get("project")
+    )
+    subject_id = (
+        subject_override
+        or config_payload.get("subject_id")
+        or settings.get("subject_id")
+    )
+    if project_name and subject_id:
+        return str(project_name), str(subject_id)
+    parts = config_path.resolve().parts
+    for idx in range(len(parts) - 3):
+        if parts[idx] == "Projects" and parts[idx + 2] == "subjects":
+            return parts[idx + 1], parts[idx + 3]
+    return None, None
+
+
+def _ensure_unique_output_dir(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.name
+    parent = path.parent
+    for i in range(2, 1000):
+        candidate = parent / f"{stem}_v{i}"
+        if not candidate.exists():
+            return candidate
+    return path
 
 
 def _is_noop_decision(finger_id: int, action_id: int) -> bool:
@@ -131,37 +335,88 @@ def _is_noop_decision(finger_id: int, action_id: int) -> bool:
     return int(finger_id) == 0 or int(action_id) == 0
 
 
-def _build_arg_parser() -> argparse.ArgumentParser:
+def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
+    defaults = {
+        "device": None,
+        "session_dir": None,
+        "window_sec": 0.25,
+        "hop_sec": 0.05,
+        "target_fs": 256.0,
+        "latency_threshold_ms": 750.0,
+        "latency_policy": "warn",
+        "allow_drop": False,
+        "log_every": 5.0,
+        "enable_actuation": False,
+        "serial_port": None,
+        "serial_baud": 9600,
+        "actuation_min_prob": 0.65,
+        "actuation_stability": 2,
+        "actuation_cooldown_ms": 150,
+        "allow_outside_base": False,
+        "no_file_io": False,
+        "subject_id": None,
+        "project_name": None,
+    }
     p = argparse.ArgumentParser(description="Live inference + optional robotic hand actuation")
+    p.set_defaults(**defaults)
 
     # Existing args (preserved from original file)
     p.add_argument("--config", required=True, type=str, help="Path to step7 config JSON")
-    p.add_argument("--device", default=None, type=str, help="torch device override (e.g., cpu, mps, cuda)")
+    p.add_argument("--model-path", type=str, help="Override model file path.")
+    p.add_argument("--scaler-path", type=str, help="Override scaler file path.")
+    p.add_argument("--out-dir", type=str, help="Override output directory.")
+    p.add_argument("--device", type=str, help="torch device override (e.g., cpu, mps, cuda)")
     p.add_argument(
         "--session-dir",
         type=str,
-        default=None,
         help="Session directory (derives model/scaler + output dir defaults).",
     )
+    p.add_argument("--subject-id", type=str, help="Subject ID (auto-resolve latest session).")
+    p.add_argument("--project-name", type=str, help="Project name (auto-resolve latest session).")
 
-    p.add_argument("--window_sec", type=float, default=0.25)
-    p.add_argument("--hop_sec", type=float, default=0.05)
-    p.add_argument("--target_fs", type=float, default=256.0)
+    p.add_argument("--window_sec", type=float, help="Window length (s).")
+    p.add_argument("--hop_sec", type=float, help="Window hop (s).")
+    p.add_argument("--target_fs", type=float, help="Target FS for resampling.")
 
-    p.add_argument("--latency_threshold_ms", type=float, default=750.0)
-    p.add_argument("--latency_policy", type=str, default="warn", choices=["warn", "drop", "degrade"])
+    p.add_argument("--latency_threshold_ms", type=float, help="Latency p95 threshold (ms).")
+    p.add_argument(
+        "--latency_policy",
+        type=str,
+        choices=["warn", "drop", "degrade"],
+        help="Latency policy (warn/drop/degrade).",
+    )
     p.add_argument("--allow_drop", action="store_true")
-    p.add_argument("--log_every", type=float, default=5.0)
+    p.add_argument("--log_every", type=float, help="Log interval (s).")
 
     # New: actuation knobs
     p.add_argument("--enable_actuation", action="store_true", help="Enable sending commands to Arduino hand")
-    p.add_argument("--serial_port", type=str, default=None, help="Serial port (e.g. /dev/tty.usbmodem*, /dev/tty.*)")
-    p.add_argument("--serial_baud", type=int, default=9600, help="Baud rate (must match Arduino sketch)")
-    p.add_argument("--actuation_min_prob", type=float, default=0.65, help="Min joint confidence to actuate")
-    p.add_argument("--actuation_stability", type=int, default=2, help="Require same decision N windows in a row")
-    p.add_argument("--actuation_cooldown_ms", type=int, default=150, help="Min time between sends")
+    p.add_argument("--serial_port", type=str, help="Serial port (e.g. /dev/tty.usbmodem*, /dev/tty.*)")
+    p.add_argument("--serial_baud", type=int, help="Baud rate (must match Arduino sketch)")
+    p.add_argument("--actuation_min_prob", type=float, help="Min joint confidence to actuate")
+    p.add_argument("--actuation_stability", type=int, help="Require same decision N windows in a row")
+    p.add_argument("--actuation_cooldown_ms", type=int, help="Min time between sends")
+    p.add_argument(
+        "--allow_outside_base",
+        action="store_true",
+        help="Allow output dir outside session/config base directory.",
+    )
+    p.add_argument(
+        "--no_file_io",
+        action="store_true",
+        help="Disable all file outputs (raw shards + log file) for max performance.",
+    )
 
-    return p
+    return p, defaults
+
+
+def _apply_config_to_args(
+    args_obj: argparse.Namespace, settings: dict, defaults: dict
+) -> None:
+    if not isinstance(settings, dict):
+        return
+    for key, default in defaults.items():
+        if key in settings and getattr(args_obj, key) == default:
+            setattr(args_obj, key, settings[key])
 
 
 def _select_device(device_override: Optional[str]) -> torch.device:
@@ -222,16 +477,37 @@ def _debounced_should_send(
 # -------------------- Main --------------------
 
 def main() -> int:
-    args = _build_arg_parser().parse_args()
-    cfg = load_json(args.config)
+    parser, defaults = _build_arg_parser()
+    args = parser.parse_args()
+    config_path = Path(args.config).expanduser().resolve()
+    config_payload, config_settings = _load_config_file(config_path)
+    _apply_config_to_args(args, config_settings, defaults)
 
     # Required config keys (as in original file)
-    lsl_name = cfg.get("lsl_name", "Muse2-EEG")
-    lsl_type = cfg.get("lsl_type", "EEG")
-    model_path = cfg.get("model_path")
-    scaler_path = cfg.get("scaler_path")
-    out_dir = cfg.get("out_dir")
-    session_dir_value = args.session_dir or cfg.get("session_dir")
+    lsl_name = config_settings.get("lsl_name", config_settings.get("stream_name", "Muse2-EEG"))
+    lsl_type = config_settings.get("lsl_type", config_settings.get("stream_type", "EEG"))
+    session_dir_value = args.session_dir or config_settings.get("session_dir")
+    project_name, subject_id = _derive_project_subject(
+        config_payload, config_path, args.project_name, args.subject_id, config_settings
+    )
+    session_dir_inferred = False
+    if not session_dir_value and project_name and subject_id:
+        repo_root = _resolve_repo_root(config_path)
+        sessions_root = (
+            repo_root
+            / "Projects"
+            / project_name
+            / "subjects"
+            / subject_id
+            / "sessions"
+        )
+        latest_session = _latest_dir_by_mtime(sessions_root)
+        if latest_session is not None:
+            session_dir_value = str(latest_session)
+            session_dir_inferred = True
+    model_path = args.model_path or (None if session_dir_value else config_settings.get("model_path"))
+    scaler_path = args.scaler_path or (None if session_dir_value else config_settings.get("scaler_path"))
+    out_dir = args.out_dir or (None if session_dir_value else config_settings.get("out_dir"))
 
     def _resolve_path(path_str: str, base_dir: Optional[Path]) -> str:
         candidate = Path(path_str).expanduser()
@@ -240,7 +516,15 @@ def main() -> int:
             candidate = (base / candidate).resolve()
         return str(candidate)
 
+    def _is_relative_to(path: Path, base: Path) -> bool:
+        try:
+            path.relative_to(base)
+            return True
+        except ValueError:
+            return False
+
     selection_source = "legacy_explicit"
+    base_dir: Optional[Path] = None
     # Prefer session-dir resolution so model/scaler/output paths come from a
     # single run context, matching the training/evaluation layout.
     if session_dir_value:
@@ -251,11 +535,11 @@ def main() -> int:
             return 2
         base_dir = session_dir_path
         explicit_overrides = []
-        if model_path:
+        if args.model_path:
             explicit_overrides.append("model_path")
-        if scaler_path:
+        if args.scaler_path:
             explicit_overrides.append("scaler_path")
-        if out_dir:
+        if args.out_dir:
             explicit_overrides.append("out_dir")
         if explicit_overrides:
             print(
@@ -263,7 +547,7 @@ def main() -> int:
             )
             selection_source = "legacy_explicit"
         else:
-            selection_source = "session_dir"
+            selection_source = "subject_latest" if session_dir_inferred else "session_dir"
 
         run_dir = resolve_latest_run_dir(session_dir_path)
         if run_dir is None or not run_dir.exists():
@@ -272,12 +556,13 @@ def main() -> int:
                 "No model run directory found. Train a model first (Step 2), or pass explicit model_path/scaler_path."
             )
             return 2
+        base_dir = session_dir_path
         if not model_path:
             model_path = str(run_dir / "finger_action_model.pt")
         else:
             model_path = _resolve_path(str(model_path), base_dir)
         if not scaler_path:
-            scaler_path = str(run_dir / "scaler.save")
+            scaler_path = str(run_dir / "scaler.npz")
         else:
             scaler_path = _resolve_path(str(scaler_path), base_dir)
         if not out_dir:
@@ -292,19 +577,46 @@ def main() -> int:
                 "Missing --session-dir. Config must include model_path, scaler_path, and out_dir."
             )
             return 2
+        base_dir = config_dir
         model_path = _resolve_path(str(model_path), config_dir)
         scaler_path = _resolve_path(str(scaler_path), config_dir)
         out_dir = _resolve_path(str(out_dir), config_dir)
 
+    base_dir = base_dir if base_dir is not None else Path.cwd()
+    out_dir_path = Path(out_dir).expanduser().resolve()
+    if not args.allow_outside_base:
+        if not _is_relative_to(out_dir_path, base_dir):
+            raise ValueError(
+                f"out_dir must be within {base_dir} (got {out_dir_path}). "
+                "Pass --allow_outside_base to override."
+            )
+    out_dir = str(out_dir_path)
+
+    config_no_file_io = config_settings.get("no_file_io")
+    if config_no_file_io is None and "record_raw" in config_settings:
+        config_no_file_io = not bool(config_settings.get("record_raw"))
+    no_file_io = bool(args.no_file_io or config_no_file_io)
+    record_raw = not no_file_io
+    if record_raw:
+        unique_dir = _ensure_unique_output_dir(out_dir_path)
+        if unique_dir != out_dir_path:
+            out_dir_path = unique_dir
+            out_dir = str(out_dir_path)
+            print(f"Output dir exists; using: {out_dir}")
+
     print(f"Session selection source: {selection_source}")
     print(f"Using model file: {model_path}")
     print(f"Using scaler file: {scaler_path}")
-    print(f"Saving outputs to: {out_dir}")
+    if no_file_io:
+        print("File outputs disabled: raw shards + log file")
+    else:
+        print(f"Saving outputs to: {out_dir}")
 
-    ensure_dir(out_dir)
+    if not no_file_io:
+        ensure_dir(out_dir)
 
     setup_logger(
-        log_path=str(Path(out_dir) / "live_infer.log"),
+        log_path="" if no_file_io else str(Path(out_dir) / "live_infer.log"),
         level=logging.INFO,
     )
 
@@ -320,10 +632,19 @@ def main() -> int:
     ch = int(info.channel_count())
     logger.info("Connected LSL stream name=%s type=%s sfreq=%s ch=%s", lsl_name, lsl_type, sfreq, ch)
 
-    # Session writer (preserved)
-    session_writer = SessionWriter(out_dir=str(out_dir))
-    raw_flush_size = int(cfg.get("raw_flush_size", 256))
-    raw_buffer = []
+    # Session writer (raw shards, optional)
+    session_writer = None
+    raw_buffer: list[Packet] = []
+    raw_flush_size = int(config_settings.get("raw_flush_size", 256))
+    if record_raw:
+        raw_shard_samples = int(config_settings.get("raw_shard_samples", 2048))
+        session_writer = SessionWriter(
+            out_dir=str(out_dir),
+            channel_count=ch,
+            shard_size_samples=raw_shard_samples,
+        )
+    else:
+        logger.info("Raw recording disabled (no_file_io).")
 
     # Serial actuator
     actuator: Optional[SerialHandActuator] = None
@@ -351,6 +672,7 @@ def main() -> int:
     stable_count = 0
     last_sent: Optional[Tuple[int, int]] = None
     last_send_ts = 0.0
+    sample_seq = 0
 
     termination_reason = "ok"
     try:
@@ -364,23 +686,26 @@ def main() -> int:
                     vec = np.asarray(sample, dtype=np.float32)
                     buffer.append((time_s, vec))
 
-                    # Persist raw packets
-                    raw_buffer.append(
-                        Packet(
-                            lsl_ts_raw=lsl_ts,
-                            lsl_ts_mono=lsl_ts,
-                            local_ts=time.time(),
-                            sample=np.asarray(sample, dtype=float),
-                            flags=0,
-                            segment_id=0,
-                            clamped=False,
-                            raw_path=None,
-                            segment_break_reason=None,
+                    # Persist raw packets (optional)
+                    if record_raw and session_writer is not None:
+                        raw_buffer.append(
+                            Packet(
+                                seq=sample_seq,
+                                lsl_ts_raw=lsl_ts,
+                                lsl_ts_mono=lsl_ts,
+                                local_ts=time.time(),
+                                sample=np.asarray(sample, dtype=float),
+                                flags=0,
+                                segment_id=0,
+                                clamped=False,
+                                raw_path=None,
+                                segment_break_reason=None,
+                            )
                         )
-                    )
-                    if len(raw_buffer) >= raw_flush_size:
-                        session_writer.append_packets(raw_buffer)
-                        raw_buffer = []
+                        sample_seq += 1
+                        if len(raw_buffer) >= raw_flush_size:
+                            session_writer.append_packets(raw_buffer)
+                            raw_buffer = []
 
             # Infer over available windows
             time_s = time.monotonic() - start_ts
@@ -499,7 +824,7 @@ def main() -> int:
         raise
     finally:
         try:
-            if session_writer is not None:
+            if record_raw and session_writer is not None:
                 if raw_buffer:
                     session_writer.append_packets(raw_buffer)
                 session_writer.close()

@@ -19,7 +19,7 @@ Key values to eyeball:
 ```
 python -m compileall .
 pytest -q
-python 3_evaluate_model.py --npz eeg_windows.npz --model finger_action_model.pt --scaler scaler.save --subject-id "" --deterministic --split-seed 42 --no-manifest
+python 3_evaluate_model.py --npz eeg_windows.npz --model finger_action_model.pt --scaler scaler.npz --subject-id "" --deterministic --split-seed 42 --no-manifest
 python 1b_extract_windows.py --help
 python -c "import json; from pathlib import Path; print('ok')"
 python -c "from utils.timebase import clamp_monotonic_time; print('ok')"
@@ -34,7 +34,7 @@ python scripts/smoke_step1_record.py
 ```
 
 Expected:
-- non-empty `*_raw.csv` in the temp output dir
+- non-empty `raw/eeg_raw_shard_*.npy` in the temp output dir
 - `events/events.jsonl` may be empty if no labels were sent (this is OK)
 - log lines with `[alive] recv=... wrote=...`
 

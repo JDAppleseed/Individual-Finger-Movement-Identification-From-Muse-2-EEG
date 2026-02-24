@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Check alignment between features/events on the absolute_v1 timebase.
+Legacy CSV alignment check between features/events on the absolute_v1 timebase.
 """
 
 import argparse
@@ -278,8 +278,18 @@ def main():
     parser = argparse.ArgumentParser(
         description="Check time alignment between features/events"
     )
-    parser.add_argument("--features", type=str, default=None, help="Features CSV path")
-    parser.add_argument("--events", type=str, default=None, help="Events CSV path")
+    parser.add_argument(
+        "--features",
+        type=str,
+        default=None,
+        help="Features CSV path (legacy)",
+    )
+    parser.add_argument(
+        "--events",
+        type=str,
+        default=None,
+        help="Events CSV path (legacy)",
+    )
     parser.add_argument(
         "--session-meta",
         type=str,

@@ -20,18 +20,54 @@ def _load_json(path: Path) -> Dict[str, Any]:
 
 def _load_events(path: Path) -> Tuple[int, List[str]]:
     if not path.exists():
-        return 0, ["events.jsonl missing"]
+        return 0, [f"{path.name} missing"]
     errors: List[str] = []
     count = 0
-    for idx, line in enumerate(path.read_text().splitlines()):
-        if not line.strip():
-            continue
+    suffix = path.suffix.lower()
+    if suffix == ".json":
         try:
-            json.loads(line)
-            count += 1
-        except Exception:
-            errors.append(f"events.jsonl parse error at line {idx + 1}")
-    return count, errors
+            payload = json.loads(path.read_text())
+        except Exception as exc:
+            return 0, [f"{path.name} parse error: {exc}"]
+        if isinstance(payload, dict) and isinstance(payload.get("events"), list):
+            payload = payload.get("events")
+        if not isinstance(payload, list):
+            return 0, [f"{path.name} must contain a list of events"]
+        count = len([ev for ev in payload if isinstance(ev, dict)])
+        return count, []
+    if suffix == ".jsonl":
+        for idx, line in enumerate(path.read_text().splitlines()):
+            if not line.strip():
+                continue
+            try:
+                json.loads(line)
+                count += 1
+            except Exception:
+                errors.append(f"{path.name} parse error at line {idx + 1}")
+        return count, errors
+    if suffix == ".csv":
+        try:
+            import csv
+
+            with path.open("r", newline="") as handle:
+                reader = csv.reader(handle)
+                next(reader, None)
+                for row in reader:
+                    if row:
+                        count += 1
+        except Exception as exc:
+            errors.append(f"{path.name} parse error: {exc}")
+        return count, errors
+    return 0, [f"unsupported events file: {path.name}"]
+
+
+def _resolve_events_path(session_dir: Path) -> Path:
+    events_dir = session_dir / "events"
+    for name in ("events.jsonl", "events.json", "events.csv"):
+        candidate = events_dir / name
+        if candidate.exists():
+            return candidate
+    return events_dir / "events.jsonl"
 
 
 def validate_session_dir(session_dir: Path, *, allow_partial: bool = False) -> Dict[str, Any]:
@@ -39,7 +75,7 @@ def validate_session_dir(session_dir: Path, *, allow_partial: bool = False) -> D
     manifest_path = session_dir / "manifest.json"
     meta_path = session_dir / "meta.json"
     raw_dir = session_dir / "raw"
-    events_path = session_dir / "events" / "events.jsonl"
+    events_path = _resolve_events_path(session_dir)
 
     report: Dict[str, Any] = {
         "session_dir": str(session_dir),

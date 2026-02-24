@@ -23,6 +23,15 @@ def load_session_meta():
     return meta_path, json.loads(meta_path.read_text())
 
 
+def load_events_df(path: Path) -> pd.DataFrame:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        return pd.read_json(path)
+    if suffix == ".jsonl":
+        return pd.read_json(path, lines=True)
+    return pd.read_csv(path)
+
+
 def print_header(title):
     print("\n" + "=" * 80)
     print(title)
@@ -241,8 +250,8 @@ def main():
 
     meta_path, meta = load_session_meta()
     features_path = Path(meta.get("features_path", "eeg_features.csv"))
-    events_path = Path(meta.get("events_path", "events.csv"))
-    raw_path = Path(meta.get("raw_path", "data/raw/UNKNOWN_raw.csv"))
+    events_path = Path(meta.get("events_path", "events.jsonl"))
+    raw_path = Path(meta.get("raw_path", "raw"))
     subject_id = meta.get("subject_id", "UNKNOWN")
 
     report = {
@@ -275,7 +284,7 @@ def main():
         print("❌ Missing events file")
         raise SystemExit(1)
 
-    df_events = pd.read_csv(events_path)
+    df_events = load_events_df(events_path)
     if df_events.empty:
         print("⚠️ events file is empty")
         ev_min = 0.0
