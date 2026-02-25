@@ -793,11 +793,18 @@ def main():
         "metrics": {
             "action_acc": None,
             "finger_acc_non_rest": None,
+            "finger_acc_overall": None,
+            "rest_tpr": None,
+            "rest_fpr": None,
             "action_ece": None,
             "finger_ece_non_rest": None,
             "smoothed_action_acc": None,
             "smoothed_finger_acc_non_rest": None,
+            "smoothed_finger_acc_overall": None,
+            "smoothed_rest_tpr": None,
+            "smoothed_rest_fpr": None,
         },
+        "warnings": [],
         "environment": {
             "python": sys.version,
             "torch": torch.__version__,
@@ -862,6 +869,20 @@ def main():
     )
 
     _print_label_summary("Filtered", y_action, y_finger)
+
+    if isinstance(meta, dict) and "session_id" in meta:
+        try:
+            sess = np.asarray(meta["session_id"]).astype("U")
+            sess = sess[sess != ""]
+            unique_sessions = np.unique(sess)
+        except Exception:
+            unique_sessions = np.array([])
+        if unique_sessions.size <= 1:
+            msg = "single_session_eval"
+            print(
+                "⚠️ Evaluation uses a single session; accuracy may be optimistic for live inference."
+            )
+            manifest["warnings"].append(msg)
 
     subject_ids = meta.get("subject_id", None)
     exp_hash = _first_meta_scalar(
@@ -1122,14 +1143,32 @@ def main():
         else None
     )
 
+    finger_acc_overall = (
+        accuracy_score(y_finger_test, finger_preds)
+        if y_finger_test.size
+        else None
+    )
+
+    rest_mask = y_action_test == ACTION_REST
+    rest_tpr = None
+    rest_fpr = None
+    if np.any(rest_mask):
+        rest_tpr = float(np.mean(action_preds[rest_mask] == ACTION_REST))
+        rest_fpr = float(1.0 - rest_tpr)
+
     print(f"\n🎯 Action Accuracy: {action_acc * 100:.2f}%")
     if finger_acc is not None:
         print(f"🎯 Finger Accuracy (non-REST): {finger_acc * 100:.2f}%\n")
     else:
         print("🎯 Finger Accuracy (non-REST): skipped\n")
+    if rest_tpr is not None:
+        print(f"🎯 REST TPR: {rest_tpr * 100:.2f}% | REST FPR: {rest_fpr * 100:.2f}%")
 
     action_acc_s = None
     finger_acc_s = None
+    finger_acc_overall_s = None
+    rest_tpr_s = None
+    rest_fpr_s = None
     # =========================
     # ===== OPTIONAL SMOOTHED METRICS (stateful) ==========
     # =========================
@@ -1180,6 +1219,15 @@ def main():
             if (finger_metrics_ok and mask_s.any())
             else None
         )
+        finger_acc_overall_s = (
+            accuracy_score(y_finger_test[order], smoothed_finger)
+            if y_finger_test.size
+            else None
+        )
+        rest_mask_s = y_action_test[order] == ACTION_REST
+        if np.any(rest_mask_s):
+            rest_tpr_s = float(np.mean(smoothed_action[rest_mask_s] == ACTION_REST))
+            rest_fpr_s = float(1.0 - rest_tpr_s)
 
         print(f"🎯 Smoothed Action Accuracy: {action_acc_s * 100:.2f}%")
         if finger_acc_s is not None:
@@ -1188,6 +1236,10 @@ def main():
             )
         else:
             print("🎯 Smoothed Finger Accuracy (non-REST): skipped\n")
+        if rest_tpr_s is not None:
+            print(
+                f"🎯 Smoothed REST TPR: {rest_tpr_s * 100:.2f}% | REST FPR: {rest_fpr_s * 100:.2f}%"
+            )
 
     # =========================
     # ===== ECE COMPUTATION ===
@@ -1208,6 +1260,11 @@ def main():
     manifest["metrics"]["finger_acc_non_rest"] = (
         float(finger_acc) if finger_acc is not None else None
     )
+    manifest["metrics"]["finger_acc_overall"] = (
+        float(finger_acc_overall) if finger_acc_overall is not None else None
+    )
+    manifest["metrics"]["rest_tpr"] = float(rest_tpr) if rest_tpr is not None else None
+    manifest["metrics"]["rest_fpr"] = float(rest_fpr) if rest_fpr is not None else None
     manifest["metrics"]["action_ece"] = float(action_ece)
     manifest["metrics"]["finger_ece_non_rest"] = (
         float(finger_ece) if finger_ece is not None else None
@@ -1217,6 +1274,15 @@ def main():
     )
     manifest["metrics"]["smoothed_finger_acc_non_rest"] = (
         float(finger_acc_s) if finger_acc_s is not None else None
+    )
+    manifest["metrics"]["smoothed_finger_acc_overall"] = (
+        float(finger_acc_overall_s) if finger_acc_overall_s is not None else None
+    )
+    manifest["metrics"]["smoothed_rest_tpr"] = (
+        float(rest_tpr_s) if rest_tpr_s is not None else None
+    )
+    manifest["metrics"]["smoothed_rest_fpr"] = (
+        float(rest_fpr_s) if rest_fpr_s is not None else None
     )
 
     if subject_ids is not None:

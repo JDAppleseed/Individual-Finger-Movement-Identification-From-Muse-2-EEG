@@ -17,7 +17,7 @@ except Exception:  # pragma: no cover - optional dependency
     ACTION_REST = None
 
 
-_TRIAL_KEYS = ["trial_id", "event_trial_id", "trial", "event_id"]
+_TRIAL_KEYS = ["event_id", "event_index", "trial_id", "event_trial_id", "trial"]
 _BLOCK_KEYS = ["block_id", "event_block_id", "block"]
 _WINDOW_START_KEYS = ["window_start", "start_s", "onset_s"]
 _WINDOW_INDEX_KEYS = ["window_idx", "global_window_idx"]
@@ -38,6 +38,7 @@ _IDENTIFIER_KEYS = {
     "trial_id",
     "event_trial_id",
     "event_id",
+    "event_index",
     "block_id",
     "event_block_id",
     "session_id",
@@ -191,6 +192,33 @@ def infer_groups(meta: Dict[str, Any], n: int) -> np.ndarray:
         arr = _get_meta_array(meta, [key], n)
         if arr is None:
             continue
+        # Prefer event_id/event_index, but avoid collapsing all no-event windows into one group.
+        if key in {"event_id", "event_index"}:
+            try:
+                arr_int = np.asarray(arr).astype(np.int64).reshape(-1)
+            except Exception:
+                arr_int = None
+            if arr_int is not None:
+                if np.all(arr_int == -1):
+                    # No usable event IDs at all; fall through to block/time groups.
+                    continue
+                if np.any(arr_int == -1):
+                    rest_mask = arr_int == -1
+                    window_start = _get_meta_array(meta, _WINDOW_START_KEYS, n)
+                    if window_start is None:
+                        continue
+                    hop = _infer_hop_seconds(meta, np.asarray(window_start, dtype=float))
+                    rest_block = np.zeros(int(rest_mask.sum()), dtype=np.int64)
+                    rest_groups = _block_time_groups(
+                        rest_block, np.asarray(window_start, dtype=float)[rest_mask], hop
+                    )
+                    offset = int(arr_int[~rest_mask].max() + 1) if np.any(~rest_mask) else 0
+                    groups = arr_int.copy()
+                    groups[rest_mask] = rest_groups + offset
+                    if _is_usable_group(groups):
+                        return groups
+                if _is_usable_group(arr_int):
+                    return arr_int
         if _is_usable_group(arr):
             return np.asarray(arr).reshape(-1)
 

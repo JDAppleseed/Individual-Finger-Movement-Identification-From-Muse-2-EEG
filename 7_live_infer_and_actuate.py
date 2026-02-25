@@ -38,15 +38,22 @@ import numpy as np
 import torch
 
 # LSL is required for live stream
-from pylsl import StreamInlet, resolve_byprop  # type: ignore
+try:
+    from pylsl import StreamInlet, resolve_byprop  # type: ignore
+    LSL_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency
+    StreamInlet = None
+    resolve_byprop = None
+    LSL_AVAILABLE = False
 
 # Project-local imports (keep as-is; this file is intended to be a drop-in replacement)
 # NOTE: If these imports differ in your repo, keep the same ones you already had.
 # They exist in the user's original file; we preserve names/structure.
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
-from muse_streaming.resample import resample_window
+from muse_streaming.resample import resample_window, verify_alignment
 from utils.runtime_utils import apply_channel_normalizer, load_normalizer
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
+from utils.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
 
 # Pipeline handoff: Step 7 runs online inference with the trained Step 2 model
 # and optional hardware actuation, while writing live-session artifacts.
@@ -349,6 +356,7 @@ def _is_noop_decision(finger_id: int, action_id: int) -> bool:
 
 
 def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
+    pp_defaults = PostprocessSettings()
     defaults = {
         "device": None,
         "session_dir": None,
@@ -369,6 +377,19 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "no_file_io": False,
         "subject_id": None,
         "project_name": None,
+        "postprocess": True,
+        "smoothing_enabled": bool(pp_defaults.smoothing_enabled),
+        "smoothing_method": str(pp_defaults.smoothing_method),
+        "smoothing_window": int(pp_defaults.smoothing_window),
+        "hysteresis_enabled": bool(pp_defaults.hysteresis_enabled),
+        "hysteresis_frames": int(pp_defaults.hysteresis_frames),
+        "threshold_action": float(pp_defaults.threshold_action),
+        "threshold_finger": float(pp_defaults.threshold_finger),
+        "adjacency_enabled": bool(pp_defaults.adjacency_enabled),
+        "hysteresis_margin": float(pp_defaults.hysteresis_margin),
+        "finger_delta": float(pp_defaults.finger_delta),
+        "finger_mode": str(pp_defaults.finger_mode),
+        "pred_log": None,
     }
     p = argparse.ArgumentParser(description="Live inference + optional robotic hand actuation")
     p.set_defaults(**defaults)
@@ -401,6 +422,102 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
     p.add_argument("--allow_drop", action="store_true")
     p.add_argument("--log_every", type=float, help="Log interval (s).")
 
+    # Postprocess knobs
+    post_group = p.add_mutually_exclusive_group()
+    post_group.add_argument(
+        "--postprocess",
+        dest="postprocess",
+        action="store_true",
+        help="Enable postprocess smoothing/thresholding.",
+    )
+    post_group.add_argument(
+        "--no-postprocess",
+        dest="postprocess",
+        action="store_false",
+        help="Disable postprocess and use raw argmax predictions.",
+    )
+    smooth_group = p.add_mutually_exclusive_group()
+    smooth_group.add_argument(
+        "--smoothing-enabled",
+        dest="smoothing_enabled",
+        action="store_true",
+        help="Enable postprocess smoothing.",
+    )
+    smooth_group.add_argument(
+        "--no-smoothing",
+        dest="smoothing_enabled",
+        action="store_false",
+        help="Disable postprocess smoothing.",
+    )
+    hyst_group = p.add_mutually_exclusive_group()
+    hyst_group.add_argument(
+        "--hysteresis-enabled",
+        dest="hysteresis_enabled",
+        action="store_true",
+        help="Enable postprocess hysteresis.",
+    )
+    hyst_group.add_argument(
+        "--no-hysteresis",
+        dest="hysteresis_enabled",
+        action="store_false",
+        help="Disable postprocess hysteresis.",
+    )
+    adj_group = p.add_mutually_exclusive_group()
+    adj_group.add_argument(
+        "--adjacency-enabled",
+        dest="adjacency_enabled",
+        action="store_true",
+        help="Enable adjacency correction for fingers.",
+    )
+    adj_group.add_argument(
+        "--no-adjacency",
+        dest="adjacency_enabled",
+        action="store_false",
+        help="Disable adjacency correction for fingers.",
+    )
+    p.add_argument(
+        "--smoothing-method",
+        type=str,
+        choices=["vote", "ema"],
+        help="Postprocess smoothing method.",
+    )
+    p.add_argument(
+        "--smoothing-window",
+        type=int,
+        help="Postprocess smoothing window size.",
+    )
+    p.add_argument(
+        "--hysteresis-frames",
+        type=int,
+        help="Postprocess hysteresis frames.",
+    )
+    p.add_argument(
+        "--threshold-action",
+        type=float,
+        help="Postprocess action confidence threshold.",
+    )
+    p.add_argument(
+        "--threshold-finger",
+        type=float,
+        help="Postprocess finger confidence threshold.",
+    )
+    p.add_argument(
+        "--hysteresis-margin",
+        type=float,
+        help="Postprocess hysteresis margin.",
+    )
+    p.add_argument(
+        "--finger-delta",
+        type=float,
+        help="Postprocess finger delta threshold.",
+    )
+    p.add_argument(
+        "--finger-mode",
+        type=str,
+        choices=["raw", "smooth"],
+        help="Finger smoothing mode (raw/smooth).",
+    )
+
     # New: actuation knobs
     p.add_argument("--enable_actuation", action="store_true", help="Enable sending commands to Arduino hand")
     p.add_argument("--serial_port", type=str, help="Serial port (e.g. /dev/tty.usbmodem*, /dev/tty.*)")
@@ -408,6 +525,7 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
     p.add_argument("--actuation_min_prob", type=float, help="Min joint confidence to actuate")
     p.add_argument("--actuation_stability", type=int, help="Require same decision N windows in a row")
     p.add_argument("--actuation_cooldown_ms", type=int, help="Min time between sends")
+    p.add_argument("--pred-log", type=str, help="Optional prediction log JSONL path override.")
     p.add_argument(
         "--allow_outside_base",
         action="store_true",
@@ -443,6 +561,8 @@ def _select_device(device_override: Optional[str]) -> torch.device:
 
 
 def _resolve_lsl_inlet(name: str, type_: str, timeout_s: float = 5.0) -> StreamInlet:
+    if not LSL_AVAILABLE or resolve_byprop is None or StreamInlet is None:
+        raise RuntimeError("pylsl is required for live inference.")
     streams = resolve_byprop("name", name, timeout=timeout_s)
     streams = [s for s in streams if (s.type() == type_)]
     if not streams:
@@ -460,6 +580,34 @@ def _choose_actuation(
     # Joint confidence heuristic: min of the two max probs
     conf = float(min(float(finger_probs[pred_finger].item()), float(action_probs[pred_action].item())))
     return ActuationDecision(finger_id=pred_finger, action_id=pred_action, prob=conf)
+
+
+def _postprocess_decision(
+    action_probs: np.ndarray,
+    finger_probs: np.ndarray,
+    *,
+    enabled: bool,
+    settings: PostprocessSettings,
+    state: PostprocessState,
+) -> dict:
+    if not enabled:
+        raw_action = int(np.argmax(action_probs)) if action_probs.size else 0
+        raw_finger = int(np.argmax(finger_probs)) if finger_probs.size else 0
+        action_conf = float(np.max(action_probs)) if action_probs.size else 0.0
+        finger_conf = float(np.max(finger_probs)) if finger_probs.size else 0.0
+        return {
+            "committed_action_id": raw_action,
+            "committed_finger_id": raw_finger,
+            "raw_top_action_id": raw_action,
+            "raw_top_finger_id": raw_finger,
+            "action_conf": action_conf,
+            "finger_conf": finger_conf,
+            "smoothed_action_id": raw_action,
+            "smoothed_finger_id": raw_finger,
+            "decision_reason": "raw_argmax",
+            "frames_in_state": 1,
+        }
+    return postprocess_predictions(action_probs, finger_probs, settings, state)
 
 
 def _debounced_should_send(
@@ -633,6 +781,34 @@ def main() -> int:
         level=logging.INFO,
     )
 
+    postprocess_enabled = bool(args.postprocess)
+    post_settings = PostprocessSettings(
+        smoothing_enabled=bool(args.smoothing_enabled),
+        smoothing_method=str(args.smoothing_method),
+        smoothing_window=int(args.smoothing_window),
+        hysteresis_enabled=bool(args.hysteresis_enabled),
+        hysteresis_frames=int(args.hysteresis_frames),
+        threshold_action=float(args.threshold_action),
+        threshold_finger=float(args.threshold_finger),
+        adjacency_enabled=bool(args.adjacency_enabled),
+        hysteresis_margin=float(args.hysteresis_margin),
+        finger_delta=float(args.finger_delta),
+        finger_mode=str(args.finger_mode),
+    )
+    post_state = PostprocessState()
+
+    pred_log = None
+    pred_log_path = None
+    pred_log_flush_every = 50
+    pred_log_count = 0
+    if not no_file_io:
+        pred_log_path = args.pred_log or str(Path(out_dir) / "predictions.jsonl")
+        try:
+            pred_log = Path(pred_log_path).open("a")
+            logger.info("Prediction log: %s", pred_log_path)
+        except Exception as exc:
+            logger.warning("Failed to open prediction log %s: %s", pred_log_path, exc)
+
     device = _select_device(args.device)
     logger.info("Using device=%s", device)
 
@@ -739,6 +915,34 @@ def main() -> int:
                 window_times = times[mask]
                 window_values = values[mask]
 
+                alignment = verify_alignment(
+                    window_times,
+                    start_s=window_start,
+                    end_s=window_end,
+                    target_fs=args.target_fs,
+                    max_gap_s=1.0 / float(args.target_fs) * 4.0,
+                )
+                if not alignment.ok:
+                    dropped_windows += 1
+                    if pred_log is not None:
+                        payload = {
+                            "ts_utc": time.time(),
+                            "window_start_s": float(window_start),
+                            "window_end_s": float(window_end),
+                            "latency_ms": None,
+                            "alignment_ok": False,
+                            "alignment_reason": alignment.reason,
+                            "decision_reason": "alignment_fail",
+                            "committed_action_id": 0,
+                            "committed_finger_id": 0,
+                        }
+                        pred_log.write(json.dumps(payload) + "\n")
+                        pred_log_count += 1
+                        if pred_log_count % pred_log_flush_every == 0:
+                            pred_log.flush()
+                    next_window_start_s += args.hop_sec
+                    continue
+
                 window = _resample_window(
                     window_times,
                     window_values,
@@ -756,10 +960,24 @@ def main() -> int:
 
                 with torch.inference_mode():
                     finger_logits, action_logits = model(x)
-                    action_probs = torch.softmax(action_logits, dim=1).squeeze(0)
-                    finger_probs = torch.softmax(finger_logits, dim=1).squeeze(0)
+                    action_probs_t = torch.softmax(action_logits, dim=1).squeeze(0)
+                    finger_probs_t = torch.softmax(finger_logits, dim=1).squeeze(0)
 
-                decision = _choose_actuation(finger_probs, action_probs)
+                action_probs = action_probs_t.detach().cpu().numpy()
+                finger_probs = finger_probs_t.detach().cpu().numpy()
+
+                decision_info = _postprocess_decision(
+                    action_probs,
+                    finger_probs,
+                    enabled=postprocess_enabled,
+                    settings=post_settings,
+                    state=post_state,
+                )
+                decision = ActuationDecision(
+                    finger_id=int(decision_info["committed_finger_id"]),
+                    action_id=int(decision_info["committed_action_id"]),
+                    prob=float(min(decision_info["action_conf"], decision_info["finger_conf"])),
+                )
 
                 # Latency tracking
                 now = time.monotonic()
@@ -771,22 +989,55 @@ def main() -> int:
 
                 if _is_noop_decision(decision.finger_id, decision.action_id):
                     logger.info(
-                        "PREDICT NO-OP finger=%s action=%s joint_prob=%.3f latency_ms=%.1f dropped_windows=%s",
+                        "PREDICT NO-OP finger=%s action=%s joint_prob=%.3f raw_finger=%s raw_action=%s reason=%s latency_ms=%.1f dropped_windows=%s",
                         decision.finger_id,
                         decision.action_id,
                         decision.prob,
+                        decision_info.get("raw_top_finger_id"),
+                        decision_info.get("raw_top_action_id"),
+                        decision_info.get("decision_reason"),
                         latency_ms,
                         dropped_windows,
                     )
                 else:
                     logger.info(
-                        "PREDICT ACTUATABLE finger=%s action=%s joint_prob=%.3f latency_ms=%.1f dropped_windows=%s",
+                        "PREDICT ACTUATABLE finger=%s action=%s joint_prob=%.3f raw_finger=%s raw_action=%s reason=%s latency_ms=%.1f dropped_windows=%s",
                         decision.finger_id,
                         decision.action_id,
                         decision.prob,
+                        decision_info.get("raw_top_finger_id"),
+                        decision_info.get("raw_top_action_id"),
+                        decision_info.get("decision_reason"),
                         latency_ms,
                         dropped_windows,
                     )
+
+                if pred_log is not None:
+                    payload = {
+                        "ts_utc": time.time(),
+                        "window_start_s": float(window_start),
+                        "window_end_s": float(window_end),
+                        "latency_ms": float(latency_ms),
+                        "alignment_ok": True,
+                        "action_probs": action_probs.tolist(),
+                        "finger_probs": finger_probs.tolist(),
+                        "raw_top_action_id": int(decision_info.get("raw_top_action_id", 0)),
+                        "raw_top_finger_id": int(decision_info.get("raw_top_finger_id", 0)),
+                        "smoothed_action_id": int(decision_info.get("smoothed_action_id", 0)),
+                        "smoothed_finger_id": int(decision_info.get("smoothed_finger_id", 0)),
+                        "committed_action_id": int(decision_info.get("committed_action_id", 0)),
+                        "committed_finger_id": int(decision_info.get("committed_finger_id", 0)),
+                        "action_conf": float(decision_info.get("action_conf", 0.0)),
+                        "finger_conf": float(decision_info.get("finger_conf", 0.0)),
+                        "joint_conf": float(decision.prob),
+                        "decision_reason": str(decision_info.get("decision_reason", "")),
+                        "postprocess_enabled": bool(postprocess_enabled),
+                        "dropped_windows": int(dropped_windows),
+                    }
+                    pred_log.write(json.dumps(payload) + "\n")
+                    pred_log_count += 1
+                    if pred_log_count % pred_log_flush_every == 0:
+                        pred_log.flush()
 
                 # Stability / debounce
                 key = (decision.finger_id, decision.action_id)
@@ -843,6 +1094,12 @@ def main() -> int:
                     session_writer.append_packets(raw_buffer)
                 session_writer.close()
         finally:
+            if pred_log is not None:
+                try:
+                    pred_log.flush()
+                    pred_log.close()
+                except Exception:
+                    pass
             if actuator is not None:
                 actuator.close()
             logger.info("Shutdown complete (reason=%s).", termination_reason)

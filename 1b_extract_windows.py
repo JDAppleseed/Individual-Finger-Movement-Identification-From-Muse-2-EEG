@@ -69,7 +69,8 @@ DEDUP_POLICY = "keep_last"
 INTERPOLATION_POLICY = "np.interp.linear"
 
 # Label assignment robustness
-LABEL_GATED = True  # If True, drop unlabeled windows instead of REST-by-exclusion
+LABEL_GATED = True  # Legacy: drop unlabeled windows instead of REST-by-exclusion
+REST_POLICY: Optional[str] = None  # "label_gated" or "rest_by_exclusion" (preferred)
 KEEP_BASELINE_REST_EVENTS = 2  # Keep REST only if overlapping first N rest events
 MIN_OVERLAP_RATIO = 0.20  # fraction of WINDOW_SEC required for non-REST labels
 GUARD_BAND_SEC = (
@@ -138,6 +139,20 @@ def _resolve_path(path_str: Optional[str]) -> Optional[Path]:
     if p.exists():
         return p
     return ROOT_DIR / p
+
+
+def _resolve_rest_policy(rest_policy: Optional[str], label_gated: bool) -> str:
+    """
+    Resolve REST handling policy, preserving legacy LABEL_GATED behavior when unset.
+    """
+    if rest_policy is None:
+        return "label_gated" if label_gated else "rest_by_exclusion"
+    raw = str(rest_policy).strip().lower()
+    if raw in {"label_gated", "rest_by_exclusion"}:
+        return raw
+    fallback = "label_gated" if label_gated else "rest_by_exclusion"
+    print(f"⚠️ Unknown REST_POLICY={rest_policy!r}; defaulting to {fallback}.")
+    return fallback
 
 
 def _latest_session_dir(sessions_dir: Path) -> Optional[Path]:
@@ -832,6 +847,26 @@ def is_baseline_rest_window(
     return False
 
 
+def _decide_no_overlap_label(
+    *,
+    rest_policy: str,
+    window_start: float,
+    window_end: float,
+    baseline_rest_events: List[Dict[str, Any]],
+    min_overlap_sec: float,
+) -> Tuple[bool, int, int, str]:
+    """
+    Returns (drop_window, action_id, finger_id, assigned_type).
+    """
+    if rest_policy == "label_gated":
+        if is_baseline_rest_window(
+            window_start, window_end, baseline_rest_events, min_overlap_sec
+        ):
+            return False, int(ACTION_REST), int(FINGER_NONE), "baseline_rest"
+        return True, int(ACTION_REST), int(FINGER_NONE), ""
+    return False, int(ACTION_REST), int(FINGER_NONE), "rest_by_exclusion"
+
+
 def _select_rest_keep_indices(
     rest_indices: List[int],
     non_rest_count: int,
@@ -984,11 +1019,23 @@ def main():
     parser.add_argument(
         "--seed", type=int, default=None, help="Seed for deterministic REST subsampling"
     )
+    parser.add_argument(
+        "--rest-policy",
+        type=str,
+        default=None,
+        choices=["label_gated", "rest_by_exclusion"],
+        help="REST handling policy (default derived from LABEL_GATED)",
+    )
     args = parser.parse_args()
     defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
     settings = _load_config(args.config)
     _apply_config(settings)
     _apply_config_to_args(args, settings, defaults)
+
+    rest_policy = _resolve_rest_policy(
+        getattr(args, "rest_policy", None) or REST_POLICY, LABEL_GATED
+    )
+    label_gated = rest_policy == "label_gated"
 
     if isinstance(settings, dict):
         config_seed = settings.get(
@@ -1064,7 +1111,7 @@ def main():
         print(f"No features file found at {features_path}")
         raise SystemExit(2)
 
-    if LABEL_GATED and (not events_path or not events_path.exists()):
+    if label_gated and (not events_path or not events_path.exists()):
         print(
             "No events file found. Provide --events PATH or run Step 1 to create events before extraction."
         )
@@ -1155,6 +1202,7 @@ def main():
     print(f"Derived subject_id: {subject_id_value}")
     print(f"Derived experiment_hash: {experiment_hash_value}")
     print(f"Derived session_id: {session_id_value}")
+    print(f"REST policy: {rest_policy}")
     print(f"Events time shift (s): {events_time_shift_s}")
     print(f"Target window rate: {target_fs} Hz ({window_samples} samples/window)")
     print(f"Interpolation policy: {INTERPOLATION_POLICY}, dedupe: {DEDUP_POLICY}")
@@ -1208,7 +1256,7 @@ def main():
     events = cleaned
     if dropped:
         print(f"⚠️ Dropped {dropped}/{before_n} malformed events (pre-windowing).")
-    if LABEL_GATED and not events:
+    if label_gated and not events:
         print(
             "❌ No labeled events found (events.jsonl is empty). "
             "Enable Step 1 event marking or provide a legacy --events CSV."
@@ -1281,6 +1329,8 @@ def main():
     assigned_event_types: List[str] = []
     overlap_seconds: List[float] = []
     overlap_fracs: List[float] = []
+    event_ids: List[int] = []
+    event_indices: List[int] = []
     event_onsets_out: List[float] = []
     event_durations_out: List[float] = []
     event_sources: List[str] = []
@@ -1389,13 +1439,18 @@ def main():
         best_session_mode = ""
         best_trial_id = 0
         best_block_id = 0
+        best_event_id = -1
+        best_event_index = -1
 
-        if LABEL_GATED and not overlapping:
-            if is_baseline_rest_window(
-                window_start, window_end, baseline_rest_events, min_overlap_sec
-            ):
-                assigned_type = "baseline_rest"
-            else:
+        if not overlapping:
+            drop_window, action_id, finger_id, assigned_type = _decide_no_overlap_label(
+                rest_policy=rest_policy,
+                window_start=window_start,
+                window_end=window_end,
+                baseline_rest_events=baseline_rest_events,
+                min_overlap_sec=min_overlap_sec,
+            )
+            if drop_window:
                 drop_no_overlap += 1
                 continue
 
@@ -1408,7 +1463,8 @@ def main():
                 drop_no_overlap += 1
                 continue
             best_ov, best_ov_frac, best = best_selection
-            best_event_index = best.get("event_index")
+            best_event_index = int(best.get("event_index", -1))
+            best_event_id = int(best.get("event_id", -1))
 
             if best.get("type") == "artifact":
                 artifact_flag = 1
@@ -1434,7 +1490,7 @@ def main():
                     best_trial_id = int(best.get("trial_id", 0))
                     best_block_id = int(best.get("block_id", 0))
                 elif int(best.get("action_id", ACTION_REST)) == int(ACTION_REST):
-                    if LABEL_GATED:
+                    if label_gated:
                         if (
                             best_event_index in baseline_rest_event_indices
                             and is_baseline_rest_window(
@@ -1461,7 +1517,7 @@ def main():
                         best_trial_id = int(best.get("trial_id", 0))
                         best_block_id = int(best.get("block_id", 0))
                 else:
-                    if LABEL_GATED:
+                    if label_gated:
                         drop_no_overlap += 1
                         continue
                     action_id = int(ACTION_REST)
@@ -1505,6 +1561,8 @@ def main():
         gap_fractions.append(float(gap_fraction))
 
         assigned_event_types.append(str(assigned_type))
+        event_ids.append(int(best_event_id))
+        event_indices.append(int(best_event_index))
         overlap_seconds.append(float(best_ov))
         overlap_fracs.append(float(best_ov_frac))
         event_onsets_out.append(
@@ -1550,6 +1608,8 @@ def main():
                 "session_mode": str(best_session_mode),
                 "trial_id": int(best_trial_id),
                 "block_id": int(best_block_id),
+                "event_id": int(best_event_id),
+                "event_index": int(best_event_index),
             }
         )
         kept_windows += 1
@@ -1588,6 +1648,8 @@ def main():
         gap_fractions = _filter_by_mask(gap_fractions, keep_mask)
 
         assigned_event_types = _filter_by_mask(assigned_event_types, keep_mask)
+        event_ids = _filter_by_mask(event_ids, keep_mask)
+        event_indices = _filter_by_mask(event_indices, keep_mask)
         overlap_seconds = _filter_by_mask(overlap_seconds, keep_mask)
         overlap_fracs = _filter_by_mask(overlap_fracs, keep_mask)
         event_onsets_out = _filter_by_mask(event_onsets_out, keep_mask)
@@ -1614,6 +1676,7 @@ def main():
 
     action_dist = pd.Series(action_labels).value_counts().sort_index().to_dict()
     finger_dist = pd.Series(finger_labels).value_counts().sort_index().to_dict()
+    assigned_type_counts = pd.Series(assigned_event_types).value_counts().to_dict()
     print("---- Window Extraction Summary ----")
     print(f"Total windows considered: {total_windows}")
     print(f"Windows kept: {kept_windows}")
@@ -1648,6 +1711,7 @@ def main():
             "rest_cap": int(drop_rest_cap),
         },
         "rest_policy": {
+            "policy": str(rest_policy),
             "keep_baseline_events": int(KEEP_BASELINE_REST_EVENTS),
             "subsample_prob": float(REST_SUBSAMPLE_PROB),
             "seed": int(seed_value),
@@ -1655,6 +1719,8 @@ def main():
             "baseline_rest_event_indices_count": int(len(baseline_rest_event_indices)),
             "rest_kept": int(rest_kept),
             "rest_dropped": int(rest_dropped),
+            "rest_by_exclusion_kept": int(assigned_type_counts.get("rest_by_exclusion", 0)),
+            "rest_by_low_overlap_kept": int(assigned_type_counts.get("rest_by_low_overlap", 0)),
         },
         "timebase_version": str(timebase_version),
         "subject_id": str(subject_id_value),
@@ -1720,6 +1786,7 @@ def main():
             "rest_subsample_prob": float(REST_SUBSAMPLE_PROB),
             "rest_subsample_seed": int(seed_value),
             "rest_max_windows": int(REST_MAX_WINDOWS) if REST_MAX_WINDOWS else None,
+            "rest_policy": str(rest_policy),
         }
     )
     config_arr = np.array([config_json], dtype=_u_dtype_for(config_json))
@@ -1735,6 +1802,8 @@ def main():
         window_end=np.array(window_ends, dtype=np.float32),
         trial_id=np.array(trial_ids, dtype=np.int64),
         block_id=np.array(block_ids, dtype=np.int64),
+        event_id=np.array(event_ids, dtype=np.int64),
+        event_index=np.array(event_indices, dtype=np.int64),
         source_features_path=source_features_path_arr,
         source_events_path=source_events_path_arr,
         events_time_shift_s=np.array([events_time_shift_s], dtype=np.float32),

@@ -87,4 +87,12 @@ def test_extract_from_session_dir(tmp_path, monkeypatch):
     ]
     monkeypatch.setattr(sys, "argv", argv)
     assert mod.main() == 0
-    assert (tmp_path / "eeg_windows.csv").exists()
+    processed_dir = session_dir / "processed"
+    assert (processed_dir / "eeg_windows.csv").exists()
+    npz_path = processed_dir / "eeg_windows.npz"
+    assert npz_path.exists()
+    data = np.load(npz_path, allow_pickle=True)
+    assert "event_id" in data.files
+    assert "event_index" in data.files
+    assert len(data["event_id"]) == len(data["y_action"])
+    assert len(data["event_index"]) == len(data["y_action"])

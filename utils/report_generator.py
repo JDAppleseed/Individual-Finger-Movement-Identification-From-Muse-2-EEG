@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import accuracy_score, confusion_matrix
 
+from utils.label_schema import ACTION_REST
 from utils.per_subject_calibration import expected_calibration_error
 from utils.sequence_data import load_sequence_npz
 
@@ -331,6 +332,9 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
 
     action_acc = None
     finger_acc_non_rest = None
+    finger_acc_overall = None
+    rest_tpr = None
+    rest_fpr = None
     action_cm = None
     finger_cm = None
     if preds is not None:
@@ -340,10 +344,16 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
         if y_action.size:
             action_acc = float(accuracy_score(y_action, action_pred))
             action_cm = confusion_matrix(y_action, action_pred)
-        mask = y_action != 0
+            rest_mask = y_action == ACTION_REST
+            if np.any(rest_mask):
+                rest_tpr = float(np.mean(action_pred[rest_mask] == ACTION_REST))
+                rest_fpr = float(1.0 - rest_tpr)
+        mask = y_action != ACTION_REST
         if np.any(mask):
             finger_acc_non_rest = float(accuracy_score(y_finger[mask], finger_pred[mask]))
             finger_cm = confusion_matrix(y_finger[mask], finger_pred[mask])
+        if y_finger.size:
+            finger_acc_overall = float(accuracy_score(y_finger, finger_pred))
 
     confusion_html = ""
     if action_cm is not None:
@@ -397,6 +407,8 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     <ul>
       <li>Action accuracy: {_safe_pct(action_acc)}</li>
       <li>Finger accuracy (non-REST): {_safe_pct(finger_acc_non_rest)}</li>
+      <li>Finger accuracy (overall): {_safe_pct(finger_acc_overall)}</li>
+      <li>REST TPR: {_safe_pct(rest_tpr)} | REST FPR: {_safe_pct(rest_fpr)}</li>
     </ul>
 
     <h2>Confusion Matrices</h2>

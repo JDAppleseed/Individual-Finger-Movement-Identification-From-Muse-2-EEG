@@ -60,3 +60,16 @@ def test_purge_removes_boundary_windows():
         assert np.all(diffs > 2.0)
 
     assert len(train_idx) == n_per_trial - 2
+
+
+def test_infer_groups_uses_event_id():
+    windows_per_event = 5
+    event_ids = np.repeat(np.arange(4), windows_per_event)
+    n = len(event_ids)
+    y_action = np.random.randint(0, 3, size=n)
+    y_finger = np.random.randint(0, 5, size=n)
+    meta = {"event_id": event_ids}
+
+    groups = infer_groups(meta, n)
+    assert len(np.unique(groups)) == 4
+    assert np.all(groups == event_ids)

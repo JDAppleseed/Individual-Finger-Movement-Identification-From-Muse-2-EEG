@@ -3096,6 +3096,93 @@ class MainWindow(QMainWindow):
             )
             self._add_text(step_id, form, "subject_id", "Subject ID", defaults)
             self._add_text(step_id, form, "session_id", "Session ID", defaults)
+            self._add_checkbox(step_id, form, "postprocess", "Enable postprocess", defaults)
+            self._add_checkbox(step_id, form, "smoothing_enabled", "Smoothing enabled", defaults)
+            self._add_choice_dropdown(
+                step_id,
+                form,
+                "smoothing_method",
+                "Smoothing method",
+                defaults,
+                ["vote", "ema"],
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "smoothing_window",
+                "Smoothing window",
+                defaults,
+                1,
+                50,
+            )
+            self._add_checkbox(step_id, form, "hysteresis_enabled", "Hysteresis enabled", defaults)
+            self._add_spin(
+                step_id,
+                form,
+                "hysteresis_frames",
+                "Hysteresis frames",
+                defaults,
+                1,
+                20,
+            )
+            self._add_slider(
+                step_id,
+                form,
+                "threshold_action",
+                "Action threshold",
+                defaults,
+                0,
+                1,
+                decimals=2,
+            )
+            self._add_slider(
+                step_id,
+                form,
+                "threshold_finger",
+                "Finger threshold",
+                defaults,
+                0,
+                1,
+                decimals=2,
+            )
+            self._add_checkbox(step_id, form, "adjacency_enabled", "Adjacency assist", defaults)
+            self._add_slider(
+                step_id,
+                form,
+                "hysteresis_margin",
+                "Hysteresis margin",
+                defaults,
+                0,
+                1,
+                decimals=2,
+            )
+            self._add_slider(
+                step_id,
+                form,
+                "finger_delta",
+                "Finger delta",
+                defaults,
+                0,
+                1,
+                decimals=2,
+            )
+            self._add_choice_dropdown(
+                step_id,
+                form,
+                "finger_mode",
+                "Finger mode",
+                defaults,
+                ["raw", "smooth"],
+            )
+            self._add_file_picker(
+                step_id,
+                form,
+                "pred_log",
+                "Prediction log (JSONL)",
+                defaults,
+                "JSONL (*.jsonl);;All Files (*)",
+                mode="save",
+            )
         elif step_id == "step1b":
             self._add_spin(
                 step_id,
@@ -3128,6 +3215,14 @@ class MainWindow(QMainWindow):
                 step_id, form, "INTERPOLATION_POLICY", "Interpolation policy", defaults
             )
             self._add_checkbox(step_id, form, "LABEL_GATED", "Label gated", defaults)
+            self._add_choice_dropdown(
+                step_id,
+                form,
+                "REST_POLICY",
+                "REST policy",
+                defaults,
+                ["label_gated", "rest_by_exclusion"],
+            )
             self._add_spin(
                 step_id,
                 form,

@@ -52,6 +52,8 @@
 
 // ------------------------- Config -------------------------
 const long BAUD = 9600;
+// If no valid command arrives within this window, return to midpoint/rest.
+const unsigned long IDLE_TIMEOUT_MS = 250;
 
 // Servo channel order: thumb, index, middle, ring, pinky, wrist
 static const uint8_t N_SERVOS = 6;
@@ -69,6 +71,8 @@ static const uint8_t CLOSE_ANGLE[N_SERVOS] = {160, 160, 160, 160, 160,  90};   /
 // ------------------------- State -------------------------
 Servo servos[N_SERVOS];
 uint8_t currentAngle[N_SERVOS];
+unsigned long lastCommandMs = 0;
+bool atRest = false;
 
 // ------------------------- Helpers -------------------------
 void attachServos() {
@@ -79,6 +83,7 @@ void attachServos() {
     servos[i].write(currentAngle[i]);
     delay(50);
   }
+  atRest = true;
 }
 
 void moveServoTo(uint8_t idx, uint8_t target) {
@@ -113,6 +118,10 @@ void commandFinger(uint8_t finger_id, uint8_t action_id) {
   if (finger_id >= 1 && finger_id <= 6) {
     do_one((uint8_t)(finger_id - 1));
   }
+
+  // Any valid command resets the idle timer and marks the hand as active.
+  lastCommandMs = millis();
+  atRest = false;
 }
 
 // Parse line formats like "3,2" or "3 2"
@@ -143,6 +152,7 @@ bool parseCommand(String line, uint8_t &finger_id, uint8_t &action_id) {
 void setup() {
   Serial.begin(BAUD);
   attachServos();
+  lastCommandMs = millis();
   Serial.println("uHand Serial Receiver ready (protocol: finger,action)");
 }
 
@@ -153,6 +163,16 @@ void loop() {
     if (parseCommand(line, finger_id, action_id)) {
       commandFinger(finger_id, action_id);
     }
+  }
+
+  // Safety idle timeout: if no commands arrive, return all servos to rest.
+  unsigned long now = millis();
+  if (!atRest && (now - lastCommandMs) >= IDLE_TIMEOUT_MS) {
+    for (uint8_t i = 0; i < N_SERVOS; i++) {
+      uint8_t rest = (uint8_t)((uint16_t)OPEN_ANGLE[i] + (uint16_t)CLOSE_ANGLE[i]) / 2;
+      moveServoTo(i, rest);
+    }
+    atRest = true;
   }
 
 }

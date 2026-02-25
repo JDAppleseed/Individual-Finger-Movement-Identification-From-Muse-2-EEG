@@ -104,3 +104,18 @@ def test_overlap_tie_break_is_robust():
     best_identical, ambiguous_identical = mod._select_best_overlap(overlaps_identical)
     assert best_identical[2]["event_id"] == 1
     assert ambiguous_identical is True
+
+
+def test_rest_by_exclusion_no_overlap():
+    mod = _load_extract_module()
+    drop, action_id, finger_id, assigned_type = mod._decide_no_overlap_label(
+        rest_policy="rest_by_exclusion",
+        window_start=0.0,
+        window_end=0.25,
+        baseline_rest_events=[],
+        min_overlap_sec=0.05,
+    )
+    assert drop is False
+    assert action_id == mod.ACTION_REST
+    assert finger_id == mod.FINGER_NONE
+    assert assigned_type == "rest_by_exclusion"
