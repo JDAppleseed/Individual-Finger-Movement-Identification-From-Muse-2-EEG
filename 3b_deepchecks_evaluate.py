@@ -4,7 +4,9 @@ Deterministic model behavior (Dropout OFF)
 """
 
 import argparse
+import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
@@ -112,13 +114,14 @@ MIN_TEST_SAMPLES = 30
 MAX_SPLIT_ATTEMPTS = 8
 DEFAULT_BATCH_SIZE = 256
 
-# Deterministic setup
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+
+def _set_deterministic(seed: int) -> None:
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def _format_label_counts(values: np.ndarray, name_map: Optional[dict] = None):
@@ -187,8 +190,79 @@ def _apply_sample_limit(
     return X, y_action, y_finger, meta
 
 
+def _mask_meta(meta, mask, n_before: int):
+    if not meta:
+        return {}
+    mask = np.asarray(mask)
+    out = {}
+    for key, val in meta.items():
+        if isinstance(val, dict) or isinstance(val, (str, bytes)):
+            out[key] = val
+            continue
+        try:
+            arr = np.asarray(val)
+        except Exception:
+            out[key] = val
+            continue
+        if arr.ndim == 0:
+            out[key] = val
+            continue
+        try:
+            if len(arr) == n_before:
+                out[key] = arr[mask]
+            else:
+                out[key] = val
+        except Exception:
+            out[key] = val
+    return out
+
+
+def _ensure_X_shape(X, meta):
+    X = np.asarray(X, dtype=np.float32)
+    if X.ndim != 3:
+        raise ValueError(f"Expected X to be 3D (N,T,C), got shape {X.shape}")
+
+    channel_count = None
+    if meta and "channel_names" in meta:
+        try:
+            channel_count = int(len(np.asarray(meta["channel_names"])))
+        except Exception:
+            channel_count = None
+
+    if channel_count is not None and channel_count > 0:
+        if X.shape[2] == channel_count:
+            return X
+        if X.shape[1] == channel_count and X.shape[2] != channel_count:
+            return np.transpose(X, (0, 2, 1))
+        raise ValueError(
+            f"Cannot infer X layout: expected channels in dim=2 or dim=1 to equal {channel_count}, got {X.shape}"
+        )
+
+    if X.shape[1] <= 16 and X.shape[2] > 16:
+        return np.transpose(X, (0, 2, 1))
+    return X
+
+
+def _load_train_config(run_dir: Path) -> dict:
+    path = run_dir / "train_config.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text())
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
 def _split_with_checks(
-    y_action, y_finger, meta, seed: int, split_mode: str, purge_seconds: float, hop_seconds
+    y_action,
+    y_finger,
+    meta,
+    seed: int,
+    split_mode: str,
+    purge_seconds: float,
+    hop_seconds,
+    test_size: float,
 ):
     overall_action_unique = len(np.unique(y_action))
     overall_finger_unique = _unique_non_rest_fingers(y_action, y_finger)
@@ -198,7 +272,7 @@ def _split_with_checks(
             y_action,
             y_finger,
             meta=meta,
-            test_size=0.2,
+            test_size=test_size,
             random_state=seed + attempt * 11,
             split_mode=split_mode,
             purge_seconds=purge_seconds,
@@ -274,17 +348,29 @@ parser.add_argument(
     "--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Inference batch size"
 )
 parser.add_argument(
+    "--test-size",
+    type=float,
+    default=None,
+    help="Test split fraction (defaults to train_config.json when available).",
+)
+parser.add_argument(
+    "--split-seed",
+    type=int,
+    default=None,
+    help="Split seed (defaults to train_config.json when available).",
+)
+parser.add_argument(
     "--split-mode",
     type=str,
-    default="group_trial",
+    default=None,
     choices=["group_trial", "holdout_session"],
-    help="Split mode for train/test partitions",
+    help="Split mode for train/test partitions (defaults to train_config.json when available).",
 )
 parser.add_argument(
     "--purge-seconds",
     type=float,
-    default=0.0,
-    help="Purge train windows within this many seconds of any test window (same session)",
+    default=None,
+    help="Purge train windows within this many seconds of any test window (same session).",
 )
 parser.add_argument(
     "--hop-seconds",
@@ -336,6 +422,7 @@ print(f"[✓] Saving results to: {paths.eval_dir}")
 npz_path = Path(paths.windows_npz).expanduser()
 model_path = Path(paths.model_file).expanduser()
 scaler_path = Path(paths.scaler_file).expanduser()
+run_dir = model_path.parent
 if not npz_path.exists():
     print(f"NPZ file not found: {npz_path}")
     raise SystemExit(2)
@@ -347,12 +434,79 @@ if not model_path.exists():
     raise SystemExit(2)
 
 X, y_action, y_finger, meta = load_sequence_npz(str(npz_path), mmap_mode="r")
+try:
+    X = _ensure_X_shape(X, meta if isinstance(meta, dict) else {})
+except ValueError as exc:
+    print(str(exc))
+    raise SystemExit(2)
 if isinstance(X, np.memmap) and X.dtype != np.float32:
     print(f"ℹ️ X dtype is {X.dtype}; casting to float32 per batch.")
 
-X, y_action, y_finger, meta = _apply_sample_limit(
-    X, y_action, y_finger, meta, args.max_samples, SEED
+train_cfg = _load_train_config(run_dir)
+cli_flags = {
+    "split_seed": "--split-seed" in sys.argv,
+    "test_size": "--test-size" in sys.argv,
+    "split_mode": "--split-mode" in sys.argv,
+    "purge_seconds": "--purge-seconds" in sys.argv,
+    "hop_seconds": "--hop-seconds" in sys.argv,
+}
+
+split_seed = (
+    args.split_seed
+    if cli_flags["split_seed"]
+    else int(train_cfg.get("seed", SEED) or SEED)
 )
+test_size = (
+    float(args.test_size)
+    if cli_flags["test_size"] and args.test_size is not None
+    else float(train_cfg.get("test_size", 0.2))
+)
+if not (0.0 < float(test_size) < 1.0):
+    print(f"⚠️ Invalid test_size={test_size}; defaulting to 0.2.")
+    test_size = 0.2
+split_mode = (
+    args.split_mode
+    if cli_flags["split_mode"] and args.split_mode is not None
+    else str(train_cfg.get("split_mode", "group_trial"))
+)
+split_mode = str(split_mode).strip()
+if split_mode not in {"group_trial", "holdout_session"}:
+    print(f"⚠️ Unknown split_mode={split_mode!r}; defaulting to 'group_trial'.")
+    split_mode = "group_trial"
+purge_seconds = (
+    float(args.purge_seconds)
+    if cli_flags["purge_seconds"] and args.purge_seconds is not None
+    else float(train_cfg.get("purge_seconds", 0.0) or 0.0)
+)
+hop_seconds = (
+    float(args.hop_seconds)
+    if cli_flags["hop_seconds"] and args.hop_seconds is not None
+    else train_cfg.get("hop_seconds", None)
+)
+_set_deterministic(int(split_seed))
+print(
+    "Split config: "
+    f"test_size={test_size}, seed={split_seed}, mode={split_mode}, "
+    f"purge_seconds={purge_seconds}, hop_seconds={hop_seconds}"
+)
+
+X, y_action, y_finger, meta = _apply_sample_limit(
+    X, y_action, y_finger, meta, args.max_samples, split_seed
+)
+
+finite_mask = np.isfinite(X).all(axis=tuple(range(1, X.ndim)))
+bad = int((~finite_mask).sum())
+if bad > 0:
+    print(f"⚠️ Dropping {bad}/{len(X)} samples with NaN/Inf in X (matching Step 2).")
+    n_before = len(X)
+    X = X[finite_mask]
+    y_action = y_action[finite_mask]
+    y_finger = y_finger[finite_mask]
+    if isinstance(meta, dict):
+        meta = _mask_meta(meta, finite_mask, n_before)
+    if len(X) == 0:
+        print("❌ All samples dropped due to NaN/Inf. Aborting Deepchecks.")
+        raise SystemExit(2)
 
 _print_label_summary("Filtered", y_action, y_finger)
 
@@ -364,16 +518,17 @@ train_idx, test_idx = _split_with_checks(
     y_action,
     y_finger,
     meta=meta,
-    seed=SEED,
-    split_mode=args.split_mode,
-    purge_seconds=args.purge_seconds,
-    hop_seconds=args.hop_seconds,
+    seed=int(split_seed),
+    split_mode=split_mode,
+    purge_seconds=purge_seconds,
+    hop_seconds=hop_seconds,
+    test_size=test_size,
 )
 if train_idx is None or test_idx is None:
     print("⚠️ Unable to create a split with multiple classes. Aborting Deepchecks.")
     raise SystemExit(2)
 try:
-    if args.split_mode == "holdout_session":
+    if split_mode == "holdout_session":
         if not meta or "session_id" not in meta:
             raise ValueError("split_mode=holdout_session requires session_id in meta.")
         groups = np.asarray(meta["session_id"]).reshape(-1)

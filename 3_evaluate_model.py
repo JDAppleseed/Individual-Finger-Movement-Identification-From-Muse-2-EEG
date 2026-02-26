@@ -26,7 +26,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import sklearn
 
-from sklearn.metrics import confusion_matrix, accuracy_score
+from sklearn.metrics import confusion_matrix, accuracy_score, f1_score
 from sklearn.model_selection import StratifiedShuffleSplit
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
@@ -446,6 +446,17 @@ def _load_predictions_if_present(path: Path):
         return None
 
 
+def _load_train_config(run_dir: Path) -> Dict[str, Any]:
+    path = run_dir / "train_config.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text())
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
 def _format_label_counts(values: np.ndarray, name_map: Optional[dict] = None):
     if values.size == 0:
         return "none"
@@ -525,7 +536,14 @@ def _apply_sample_limit(
 
 
 def _split_with_checks(
-    y_action, y_finger, meta, seed: int
+    y_action,
+    y_finger,
+    meta,
+    seed: int,
+    test_size: float,
+    split_mode: str,
+    purge_seconds: float,
+    hop_seconds: Optional[float],
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], int]:
     overall_action_unique = len(np.unique(y_action))
     overall_finger_unique = _unique_non_rest_fingers(y_action, y_finger)
@@ -535,8 +553,12 @@ def _split_with_checks(
             y_action,
             y_finger,
             meta=meta,
-            test_size=0.2,
+            test_size=test_size,
             random_state=seed + attempt * 11,
+            split_mode=split_mode,
+            purge_seconds=purge_seconds,
+            hop_seconds=hop_seconds,
+            allow_fallback=False,
         )
 
         if len(test_idx) < MIN_TEST_SAMPLES:
@@ -632,6 +654,31 @@ def main():
         "--split-seed", type=int, default=SEED, help="Seed used for split attempts"
     )
     parser.add_argument(
+        "--test-size",
+        type=float,
+        default=None,
+        help="Test split fraction (defaults to train_config.json when available).",
+    )
+    parser.add_argument(
+        "--split-mode",
+        type=str,
+        default=None,
+        choices=["group_trial", "holdout_session"],
+        help="Split mode (defaults to train_config.json when available).",
+    )
+    parser.add_argument(
+        "--purge-seconds",
+        type=float,
+        default=None,
+        help="Purge train windows within this many seconds of any test window (same session).",
+    )
+    parser.add_argument(
+        "--hop-seconds",
+        type=float,
+        default=None,
+        help="Optional hop size in seconds (used for purge heuristics if needed).",
+    )
+    parser.add_argument(
         "--export-test-pred",
         action="store_true",
         help="Export cached predictions for test split",
@@ -664,6 +711,13 @@ def main():
     defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
     settings = _load_config(args.config)
     _apply_config_to_args(args, settings, defaults)
+    cli_flags = {
+        "split_seed": "--split-seed" in sys.argv,
+        "test_size": "--test-size" in sys.argv,
+        "split_mode": "--split-mode" in sys.argv,
+        "purge_seconds": "--purge-seconds" in sys.argv,
+        "hop_seconds": "--hop-seconds" in sys.argv,
+    }
     if args.smooth_action_only and not args.smooth:
         args.smooth = True
     split_seed = int(args.split_seed) if args.split_seed is not None else SEED
@@ -726,6 +780,53 @@ def main():
     if not npz_path.exists():
         print(f"NPZ file not found: {npz_path}")
         return 2
+    train_cfg = _load_train_config(model_path.parent)
+    split_seed_effective = (
+        int(args.split_seed)
+        if cli_flags["split_seed"] and args.split_seed is not None
+        else int(train_cfg.get("seed", split_seed) or split_seed)
+    )
+    test_size = (
+        float(args.test_size)
+        if cli_flags["test_size"] and args.test_size is not None
+        else float(train_cfg.get("test_size", 0.2))
+    )
+    if not (0.0 < float(test_size) < 1.0):
+        print(f"⚠️ Invalid test_size={test_size}; defaulting to 0.2.")
+        test_size = 0.2
+    split_mode = (
+        args.split_mode
+        if cli_flags["split_mode"] and args.split_mode is not None
+        else str(train_cfg.get("split_mode", "group_trial"))
+    )
+    split_mode = str(split_mode).strip()
+    if split_mode not in {"group_trial", "holdout_session"}:
+        print(f"⚠️ Unknown split_mode={split_mode!r}; defaulting to 'group_trial'.")
+        split_mode = "group_trial"
+    purge_seconds = (
+        float(args.purge_seconds)
+        if cli_flags["purge_seconds"] and args.purge_seconds is not None
+        else float(train_cfg.get("purge_seconds", 0.0) or 0.0)
+    )
+    hop_seconds = (
+        float(args.hop_seconds)
+        if cli_flags["hop_seconds"] and args.hop_seconds is not None
+        else train_cfg.get("hop_seconds", None)
+    )
+    if split_seed_effective != split_seed:
+        split_seed = int(split_seed_effective)
+        if args.deterministic:
+            random.seed(split_seed)
+            np.random.seed(split_seed)
+            torch.manual_seed(split_seed)
+        else:
+            random.seed(split_seed)
+            np.random.seed(split_seed)
+    print(
+        "Split config: "
+        f"test_size={test_size}, seed={split_seed}, mode={split_mode}, "
+        f"purge_seconds={purge_seconds}, hop_seconds={hop_seconds}"
+    )
     manifest_enabled = not args.no_manifest
     manifest_name = Path(args.save_manifest).name if args.save_manifest else "eval_manifest.json"
     manifest_path = Path(paths.eval_dir) / manifest_name
@@ -773,6 +874,10 @@ def main():
         },
         "split": {
             "seed": split_seed,
+            "test_size": float(test_size),
+            "split_mode": str(split_mode),
+            "purge_seconds": float(purge_seconds),
+            "hop_seconds": float(hop_seconds) if hop_seconds is not None else None,
             "attempts": None,
             "train_n": None,
             "test_n": None,
@@ -792,17 +897,33 @@ def main():
         },
         "metrics": {
             "action_acc": None,
+            "action_f1_macro": None,
+            "action_f1_weighted": None,
             "finger_acc_non_rest": None,
             "finger_acc_overall": None,
+            "finger_f1_non_rest_macro": None,
+            "finger_f1_non_rest_weighted": None,
+            "finger_f1_overall_macro": None,
+            "finger_f1_overall_weighted": None,
             "rest_tpr": None,
             "rest_fpr": None,
+            "rest_precision": None,
+            "rest_f1": None,
             "action_ece": None,
             "finger_ece_non_rest": None,
             "smoothed_action_acc": None,
+            "smoothed_action_f1_macro": None,
+            "smoothed_action_f1_weighted": None,
             "smoothed_finger_acc_non_rest": None,
             "smoothed_finger_acc_overall": None,
+            "smoothed_finger_f1_non_rest_macro": None,
+            "smoothed_finger_f1_non_rest_weighted": None,
+            "smoothed_finger_f1_overall_macro": None,
+            "smoothed_finger_f1_overall_weighted": None,
             "smoothed_rest_tpr": None,
             "smoothed_rest_fpr": None,
+            "smoothed_rest_precision": None,
+            "smoothed_rest_f1": None,
         },
         "warnings": [],
         "environment": {
@@ -972,7 +1093,14 @@ def main():
 
     if cached is None:
         train_idx, test_idx, split_attempts = _split_with_checks(
-            y_action, y_finger, meta=meta, seed=split_seed
+            y_action,
+            y_finger,
+            meta=meta,
+            seed=split_seed,
+            test_size=float(test_size),
+            split_mode=str(split_mode),
+            purge_seconds=float(purge_seconds),
+            hop_seconds=hop_seconds,
         )
         if train_idx is None or test_idx is None:
             print(
@@ -1131,6 +1259,12 @@ def main():
     # ===== METRICS ===========
     # =========================
     action_acc = accuracy_score(y_action_test, action_preds)
+    action_f1_macro = f1_score(
+        y_action_test, action_preds, average="macro", zero_division=0
+    )
+    action_f1_weighted = f1_score(
+        y_action_test, action_preds, average="weighted", zero_division=0
+    )
     mask = y_action_test != ACTION_REST
     if not mask.any():
         print("⚠️ No non-REST windows in test set; skipping finger metrics.")
@@ -1142,9 +1276,31 @@ def main():
         if (finger_metrics_ok and mask.any())
         else None
     )
+    finger_f1_non_rest_macro = (
+        f1_score(y_finger_test[mask], finger_preds[mask], average="macro", zero_division=0)
+        if (finger_metrics_ok and mask.any())
+        else None
+    )
+    finger_f1_non_rest_weighted = (
+        f1_score(
+            y_finger_test[mask], finger_preds[mask], average="weighted", zero_division=0
+        )
+        if (finger_metrics_ok and mask.any())
+        else None
+    )
 
     finger_acc_overall = (
         accuracy_score(y_finger_test, finger_preds)
+        if y_finger_test.size
+        else None
+    )
+    finger_f1_overall_macro = (
+        f1_score(y_finger_test, finger_preds, average="macro", zero_division=0)
+        if y_finger_test.size
+        else None
+    )
+    finger_f1_overall_weighted = (
+        f1_score(y_finger_test, finger_preds, average="weighted", zero_division=0)
         if y_finger_test.size
         else None
     )
@@ -1152,23 +1308,58 @@ def main():
     rest_mask = y_action_test == ACTION_REST
     rest_tpr = None
     rest_fpr = None
+    rest_precision = None
+    rest_f1 = None
     if np.any(rest_mask):
-        rest_tpr = float(np.mean(action_preds[rest_mask] == ACTION_REST))
-        rest_fpr = float(1.0 - rest_tpr)
+        rest_tp = int(np.sum(rest_mask & (action_preds == ACTION_REST)))
+        rest_fn = int(np.sum(rest_mask & (action_preds != ACTION_REST)))
+        rest_fp = int(np.sum(~rest_mask & (action_preds == ACTION_REST)))
+        rest_tn = int(np.sum(~rest_mask & (action_preds != ACTION_REST)))
+        rest_tpr = float(rest_tp / (rest_tp + rest_fn)) if (rest_tp + rest_fn) else None
+        rest_fpr = float(rest_fp / (rest_fp + rest_tn)) if (rest_fp + rest_tn) else None
+        rest_precision = (
+            float(rest_tp / (rest_tp + rest_fp)) if (rest_tp + rest_fp) else None
+        )
+        if rest_precision is not None and rest_tpr is not None:
+            denom = rest_precision + rest_tpr
+            rest_f1 = float(2 * rest_precision * rest_tpr / denom) if denom else None
 
     print(f"\n🎯 Action Accuracy: {action_acc * 100:.2f}%")
+    print(
+        f"🎯 Action F1 (macro/weighted): {action_f1_macro:.3f} / {action_f1_weighted:.3f}"
+    )
     if finger_acc is not None:
-        print(f"🎯 Finger Accuracy (non-REST): {finger_acc * 100:.2f}%\n")
+        print(f"🎯 Finger Accuracy (non-REST): {finger_acc * 100:.2f}%")
+        if finger_f1_non_rest_macro is not None:
+            print(
+                f"🎯 Finger F1 (non-REST macro/weighted): "
+                f"{finger_f1_non_rest_macro:.3f} / {finger_f1_non_rest_weighted:.3f}\n"
+            )
+        else:
+            print()
     else:
         print("🎯 Finger Accuracy (non-REST): skipped\n")
     if rest_tpr is not None:
-        print(f"🎯 REST TPR: {rest_tpr * 100:.2f}% | REST FPR: {rest_fpr * 100:.2f}%")
+        rest_prec_str = f"{rest_precision * 100:.2f}%" if rest_precision is not None else "n/a"
+        rest_f1_str = f"{rest_f1:.3f}" if rest_f1 is not None else "n/a"
+        print(
+            f"🎯 REST TPR: {rest_tpr * 100:.2f}% | REST FPR: {rest_fpr * 100:.2f}% "
+            f"| REST Precision: {rest_prec_str} | REST F1: {rest_f1_str}"
+        )
 
     action_acc_s = None
+    action_f1_macro_s = None
+    action_f1_weighted_s = None
     finger_acc_s = None
     finger_acc_overall_s = None
+    finger_f1_non_rest_macro_s = None
+    finger_f1_non_rest_weighted_s = None
+    finger_f1_overall_macro_s = None
+    finger_f1_overall_weighted_s = None
     rest_tpr_s = None
     rest_fpr_s = None
+    rest_precision_s = None
+    rest_f1_s = None
     # =========================
     # ===== OPTIONAL SMOOTHED METRICS (stateful) ==========
     # =========================
@@ -1213,9 +1404,35 @@ def main():
             smoothed_finger[smoothed_action == ACTION_REST] = 0  # NONE=0
 
         action_acc_s = accuracy_score(y_action_test[order], smoothed_action)
+        action_f1_macro_s = f1_score(
+            y_action_test[order], smoothed_action, average="macro", zero_division=0
+        )
+        action_f1_weighted_s = f1_score(
+            y_action_test[order], smoothed_action, average="weighted", zero_division=0
+        )
         mask_s = y_action_test[order] != ACTION_REST
         finger_acc_s = (
             accuracy_score(y_finger_test[order][mask_s], smoothed_finger[mask_s])
+            if (finger_metrics_ok and mask_s.any())
+            else None
+        )
+        finger_f1_non_rest_macro_s = (
+            f1_score(
+                y_finger_test[order][mask_s],
+                smoothed_finger[mask_s],
+                average="macro",
+                zero_division=0,
+            )
+            if (finger_metrics_ok and mask_s.any())
+            else None
+        )
+        finger_f1_non_rest_weighted_s = (
+            f1_score(
+                y_finger_test[order][mask_s],
+                smoothed_finger[mask_s],
+                average="weighted",
+                zero_division=0,
+            )
             if (finger_metrics_ok and mask_s.any())
             else None
         )
@@ -1224,21 +1441,77 @@ def main():
             if y_finger_test.size
             else None
         )
+        finger_f1_overall_macro_s = (
+            f1_score(
+                y_finger_test[order], smoothed_finger, average="macro", zero_division=0
+            )
+            if y_finger_test.size
+            else None
+        )
+        finger_f1_overall_weighted_s = (
+            f1_score(
+                y_finger_test[order],
+                smoothed_finger,
+                average="weighted",
+                zero_division=0,
+            )
+            if y_finger_test.size
+            else None
+        )
         rest_mask_s = y_action_test[order] == ACTION_REST
+        rest_precision_s = None
+        rest_f1_s = None
         if np.any(rest_mask_s):
-            rest_tpr_s = float(np.mean(smoothed_action[rest_mask_s] == ACTION_REST))
-            rest_fpr_s = float(1.0 - rest_tpr_s)
+            rest_tp_s = int(np.sum(rest_mask_s & (smoothed_action == ACTION_REST)))
+            rest_fn_s = int(np.sum(rest_mask_s & (smoothed_action != ACTION_REST)))
+            rest_fp_s = int(np.sum(~rest_mask_s & (smoothed_action == ACTION_REST)))
+            rest_tn_s = int(np.sum(~rest_mask_s & (smoothed_action != ACTION_REST)))
+            rest_tpr_s = (
+                float(rest_tp_s / (rest_tp_s + rest_fn_s))
+                if (rest_tp_s + rest_fn_s)
+                else None
+            )
+            rest_fpr_s = (
+                float(rest_fp_s / (rest_fp_s + rest_tn_s))
+                if (rest_fp_s + rest_tn_s)
+                else None
+            )
+            rest_precision_s = (
+                float(rest_tp_s / (rest_tp_s + rest_fp_s))
+                if (rest_tp_s + rest_fp_s)
+                else None
+            )
+            if rest_precision_s is not None and rest_tpr_s is not None:
+                denom = rest_precision_s + rest_tpr_s
+                rest_f1_s = (
+                    float(2 * rest_precision_s * rest_tpr_s / denom) if denom else None
+                )
 
         print(f"🎯 Smoothed Action Accuracy: {action_acc_s * 100:.2f}%")
+        print(
+            f"🎯 Smoothed Action F1 (macro/weighted): "
+            f"{action_f1_macro_s:.3f} / {action_f1_weighted_s:.3f}"
+        )
         if finger_acc_s is not None:
-            print(
-                f"🎯 Smoothed Finger Accuracy (non-REST): {finger_acc_s * 100:.2f}%\n"
-            )
+            print(f"🎯 Smoothed Finger Accuracy (non-REST): {finger_acc_s * 100:.2f}%")
+            if finger_f1_non_rest_macro_s is not None:
+                print(
+                    f"🎯 Smoothed Finger F1 (non-REST macro/weighted): "
+                    f"{finger_f1_non_rest_macro_s:.3f} / {finger_f1_non_rest_weighted_s:.3f}\n"
+                )
+            else:
+                print()
         else:
             print("🎯 Smoothed Finger Accuracy (non-REST): skipped\n")
         if rest_tpr_s is not None:
+            rest_prec_s_str = (
+                f"{rest_precision_s * 100:.2f}%" if rest_precision_s is not None else "n/a"
+            )
+            rest_f1_s_str = f"{rest_f1_s:.3f}" if rest_f1_s is not None else "n/a"
             print(
-                f"🎯 Smoothed REST TPR: {rest_tpr_s * 100:.2f}% | REST FPR: {rest_fpr_s * 100:.2f}%"
+                f"🎯 Smoothed REST TPR: {rest_tpr_s * 100:.2f}% | "
+                f"REST FPR: {rest_fpr_s * 100:.2f}% | "
+                f"REST Precision: {rest_prec_s_str} | REST F1: {rest_f1_s_str}"
             )
 
     # =========================
@@ -1257,14 +1530,40 @@ def main():
         print(f"📏 Finger ECE (non-REST): {finger_ece:.4f}")
 
     manifest["metrics"]["action_acc"] = float(action_acc)
+    manifest["metrics"]["action_f1_macro"] = float(action_f1_macro)
+    manifest["metrics"]["action_f1_weighted"] = float(action_f1_weighted)
     manifest["metrics"]["finger_acc_non_rest"] = (
         float(finger_acc) if finger_acc is not None else None
     )
     manifest["metrics"]["finger_acc_overall"] = (
         float(finger_acc_overall) if finger_acc_overall is not None else None
     )
+    manifest["metrics"]["finger_f1_non_rest_macro"] = (
+        float(finger_f1_non_rest_macro)
+        if finger_f1_non_rest_macro is not None
+        else None
+    )
+    manifest["metrics"]["finger_f1_non_rest_weighted"] = (
+        float(finger_f1_non_rest_weighted)
+        if finger_f1_non_rest_weighted is not None
+        else None
+    )
+    manifest["metrics"]["finger_f1_overall_macro"] = (
+        float(finger_f1_overall_macro)
+        if finger_f1_overall_macro is not None
+        else None
+    )
+    manifest["metrics"]["finger_f1_overall_weighted"] = (
+        float(finger_f1_overall_weighted)
+        if finger_f1_overall_weighted is not None
+        else None
+    )
     manifest["metrics"]["rest_tpr"] = float(rest_tpr) if rest_tpr is not None else None
     manifest["metrics"]["rest_fpr"] = float(rest_fpr) if rest_fpr is not None else None
+    manifest["metrics"]["rest_precision"] = (
+        float(rest_precision) if rest_precision is not None else None
+    )
+    manifest["metrics"]["rest_f1"] = float(rest_f1) if rest_f1 is not None else None
     manifest["metrics"]["action_ece"] = float(action_ece)
     manifest["metrics"]["finger_ece_non_rest"] = (
         float(finger_ece) if finger_ece is not None else None
@@ -1272,17 +1571,49 @@ def main():
     manifest["metrics"]["smoothed_action_acc"] = (
         float(action_acc_s) if action_acc_s is not None else None
     )
+    manifest["metrics"]["smoothed_action_f1_macro"] = (
+        float(action_f1_macro_s) if action_f1_macro_s is not None else None
+    )
+    manifest["metrics"]["smoothed_action_f1_weighted"] = (
+        float(action_f1_weighted_s) if action_f1_weighted_s is not None else None
+    )
     manifest["metrics"]["smoothed_finger_acc_non_rest"] = (
         float(finger_acc_s) if finger_acc_s is not None else None
     )
     manifest["metrics"]["smoothed_finger_acc_overall"] = (
         float(finger_acc_overall_s) if finger_acc_overall_s is not None else None
     )
+    manifest["metrics"]["smoothed_finger_f1_non_rest_macro"] = (
+        float(finger_f1_non_rest_macro_s)
+        if finger_f1_non_rest_macro_s is not None
+        else None
+    )
+    manifest["metrics"]["smoothed_finger_f1_non_rest_weighted"] = (
+        float(finger_f1_non_rest_weighted_s)
+        if finger_f1_non_rest_weighted_s is not None
+        else None
+    )
+    manifest["metrics"]["smoothed_finger_f1_overall_macro"] = (
+        float(finger_f1_overall_macro_s)
+        if finger_f1_overall_macro_s is not None
+        else None
+    )
+    manifest["metrics"]["smoothed_finger_f1_overall_weighted"] = (
+        float(finger_f1_overall_weighted_s)
+        if finger_f1_overall_weighted_s is not None
+        else None
+    )
     manifest["metrics"]["smoothed_rest_tpr"] = (
         float(rest_tpr_s) if rest_tpr_s is not None else None
     )
     manifest["metrics"]["smoothed_rest_fpr"] = (
         float(rest_fpr_s) if rest_fpr_s is not None else None
+    )
+    manifest["metrics"]["smoothed_rest_precision"] = (
+        float(rest_precision_s) if rest_precision_s is not None else None
+    )
+    manifest["metrics"]["smoothed_rest_f1"] = (
+        float(rest_f1_s) if rest_f1_s is not None else None
     )
 
     if subject_ids is not None:

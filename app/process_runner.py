@@ -6,7 +6,7 @@ import os
 import signal
 import logging
 
-from PySide6.QtCore import QObject, QProcess, QTimer, Signal
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
 
 
 logger = logging.getLogger(__name__)
@@ -73,11 +73,15 @@ class ProcessRunner(QObject):
             return
         if cwd:
             self._process.setWorkingDirectory(cwd)
+        process_env = self._process.processEnvironment()
+        if process_env.isEmpty():
+            process_env = QProcessEnvironment.systemEnvironment()
+        process_env.insert("PYTHONUNBUFFERED", "1")
+        process_env.insert("PYTHONIOENCODING", "utf-8")
         if env:
-            process_env = self._process.processEnvironment()
             for key, val in env.items():
                 process_env.insert(key, val)
-            self._process.setProcessEnvironment(process_env)
+        self._process.setProcessEnvironment(process_env)
         self._process.setProgram(program)
         self._process.setArguments(args)
         self._process.start()

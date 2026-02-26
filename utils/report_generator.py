@@ -13,7 +13,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 
 from utils.label_schema import ACTION_REST
 from utils.per_subject_calibration import expected_calibration_error
@@ -64,6 +64,12 @@ def _safe_pct(value):
     if value is None or np.isnan(value):
         return "N/A"
     return f"{value * 100:.2f}%"
+
+
+def _safe_float(value):
+    if value is None or np.isnan(value):
+        return "N/A"
+    return f"{value:.3f}"
 
 
 # =========================
@@ -331,10 +337,18 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
             preds = None
 
     action_acc = None
+    action_f1_macro = None
+    action_f1_weighted = None
     finger_acc_non_rest = None
     finger_acc_overall = None
+    finger_f1_non_rest_macro = None
+    finger_f1_non_rest_weighted = None
+    finger_f1_overall_macro = None
+    finger_f1_overall_weighted = None
     rest_tpr = None
     rest_fpr = None
+    rest_precision = None
+    rest_f1 = None
     action_cm = None
     finger_cm = None
     if preds is not None:
@@ -343,17 +357,47 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
         finger_pred = np.argmax(finger_probs, axis=1).astype(int)
         if y_action.size:
             action_acc = float(accuracy_score(y_action, action_pred))
+            action_f1_macro = float(
+                f1_score(y_action, action_pred, average="macro", zero_division=0)
+            )
+            action_f1_weighted = float(
+                f1_score(y_action, action_pred, average="weighted", zero_division=0)
+            )
             action_cm = confusion_matrix(y_action, action_pred)
             rest_mask = y_action == ACTION_REST
             if np.any(rest_mask):
-                rest_tpr = float(np.mean(action_pred[rest_mask] == ACTION_REST))
-                rest_fpr = float(1.0 - rest_tpr)
+                rest_tp = int(np.sum(rest_mask & (action_pred == ACTION_REST)))
+                rest_fn = int(np.sum(rest_mask & (action_pred != ACTION_REST)))
+                rest_fp = int(np.sum(~rest_mask & (action_pred == ACTION_REST)))
+                rest_tn = int(np.sum(~rest_mask & (action_pred != ACTION_REST)))
+                rest_tpr = float(rest_tp / (rest_tp + rest_fn)) if (rest_tp + rest_fn) else None
+                rest_fpr = float(rest_fp / (rest_fp + rest_tn)) if (rest_fp + rest_tn) else None
+                rest_precision = (
+                    float(rest_tp / (rest_tp + rest_fp)) if (rest_tp + rest_fp) else None
+                )
+                if rest_precision is not None and rest_tpr is not None:
+                    denom = rest_precision + rest_tpr
+                    rest_f1 = float(2 * rest_precision * rest_tpr / denom) if denom else None
         mask = y_action != ACTION_REST
         if np.any(mask):
             finger_acc_non_rest = float(accuracy_score(y_finger[mask], finger_pred[mask]))
+            finger_f1_non_rest_macro = float(
+                f1_score(y_finger[mask], finger_pred[mask], average="macro", zero_division=0)
+            )
+            finger_f1_non_rest_weighted = float(
+                f1_score(
+                    y_finger[mask], finger_pred[mask], average="weighted", zero_division=0
+                )
+            )
             finger_cm = confusion_matrix(y_finger[mask], finger_pred[mask])
         if y_finger.size:
             finger_acc_overall = float(accuracy_score(y_finger, finger_pred))
+            finger_f1_overall_macro = float(
+                f1_score(y_finger, finger_pred, average="macro", zero_division=0)
+            )
+            finger_f1_overall_weighted = float(
+                f1_score(y_finger, finger_pred, average="weighted", zero_division=0)
+            )
 
     confusion_html = ""
     if action_cm is not None:
@@ -406,9 +450,12 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     <h2>Performance (from predictions)</h2>
     <ul>
       <li>Action accuracy: {_safe_pct(action_acc)}</li>
+      <li>Action F1 (macro/weighted): {_safe_float(action_f1_macro)} / {_safe_float(action_f1_weighted)}</li>
       <li>Finger accuracy (non-REST): {_safe_pct(finger_acc_non_rest)}</li>
+      <li>Finger F1 (non-REST macro/weighted): {_safe_float(finger_f1_non_rest_macro)} / {_safe_float(finger_f1_non_rest_weighted)}</li>
       <li>Finger accuracy (overall): {_safe_pct(finger_acc_overall)}</li>
-      <li>REST TPR: {_safe_pct(rest_tpr)} | REST FPR: {_safe_pct(rest_fpr)}</li>
+      <li>Finger F1 (overall macro/weighted): {_safe_float(finger_f1_overall_macro)} / {_safe_float(finger_f1_overall_weighted)}</li>
+      <li>REST TPR: {_safe_pct(rest_tpr)} | REST FPR: {_safe_pct(rest_fpr)} | REST Precision: {_safe_pct(rest_precision)} | REST F1: {_safe_float(rest_f1)}</li>
     </ul>
 
     <h2>Confusion Matrices</h2>
