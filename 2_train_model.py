@@ -370,6 +370,24 @@ def build_arg_parser():
     p.add_argument("--lr", type=float, default=LR, help="Learning rate")
     p.add_argument("--seed", type=int, default=SEED, help="Random seed")
     p.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "cuda", "mps"],
+        help="Training device (auto picks cuda/mps if available).",
+    )
+    p.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader worker processes (0 = main process).",
+    )
+    p.add_argument(
+        "--pin-memory",
+        action="store_true",
+        help="Pin DataLoader memory (useful for CUDA).",
+    )
+    p.add_argument(
         "--loss-action-weight",
         type=float,
         default=LOSS_ACTION_WEIGHT,
@@ -977,19 +995,31 @@ def main():
             batch_size=args.batch_size,
             shuffle=True,
             drop_last=False,
+            num_workers=max(0, int(args.num_workers)),
+            pin_memory=bool(args.pin_memory),
         )
         test_loader = DataLoader(
             EEGWindowDataset(X_test, y_finger_test, y_action_test),
             batch_size=args.batch_size,
             shuffle=False,
             drop_last=False,
+            num_workers=max(0, int(args.num_workers)),
+            pin_memory=bool(args.pin_memory),
         )
 
         # ===== MODEL =====
         model = CNNLSTMFingerActionNet(
             n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions
         )
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if args.device == "auto":
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+            elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+                device = torch.device("mps")
+            else:
+                device = torch.device("cpu")
+        else:
+            device = torch.device(args.device)
         model.to(device)
 
         opt = torch.optim.Adam(model.parameters(), lr=args.lr)
