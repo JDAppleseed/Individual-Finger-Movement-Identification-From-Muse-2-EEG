@@ -80,6 +80,35 @@ def main() -> int:
     parser.add_argument("--lrs", type=str, default="0.001")
     parser.add_argument("--epochs", type=str, default="60")
     parser.add_argument("--seeds", type=str, default="42")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Override batch size for training runs (if set).",
+    )
+    parser.add_argument(
+        "--auto-batch",
+        action="store_true",
+        help="Benchmark batch sizes before sweep and pick the fastest.",
+    )
+    parser.add_argument(
+        "--batch-candidates",
+        type=str,
+        default="64,128,256",
+        help="Comma/space list of batch sizes to benchmark when --auto-batch is set.",
+    )
+    parser.add_argument(
+        "--bench-epochs",
+        type=int,
+        default=2,
+        help="Epochs to use for batch-size benchmark.",
+    )
+    parser.add_argument(
+        "--bench-seed",
+        type=int,
+        default=42,
+        help="Seed to use for batch-size benchmark.",
+    )
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--pin-memory", action="store_true")
@@ -106,6 +135,7 @@ def main() -> int:
     lrs = _parse_list(args.lrs, float)
     epochs = _parse_list(args.epochs, int)
     seeds = _parse_list(args.seeds, int)
+    batch_candidates = _parse_list(args.batch_candidates, int)
 
     fieldnames = [
         "run_id",
@@ -194,6 +224,8 @@ def main() -> int:
                 f" --num-workers {int(args.num_workers)}"
                 f"{' --pin-memory' if args.pin_memory else ''}"
             )
+            if args.batch_size is not None:
+                train_cmd += f" --batch-size {int(args.batch_size)}"
             _run(train_cmd)
 
             eval_cmd = (
@@ -233,3 +265,52 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+    if args.auto_batch and args.batch_size is None:
+        bench_root = log_dir / f"bench_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        bench_root.mkdir(parents=True, exist_ok=True)
+        timings = []
+        print(
+            f"Benchmarking batch sizes: {batch_candidates} (epochs={args.bench_epochs})",
+            flush=True,
+        )
+        for bs in batch_candidates:
+            bench_dir = bench_root / f"bs{bs}"
+            bench_dir.mkdir(parents=True, exist_ok=True)
+            bench_log = bench_root / f"bench_bs{bs}.log"
+            train_cmd = (
+                f"{shlex.quote(str(args.python))} 2_train_model.py"
+                f" --config {shlex.quote(str(args.config))}"
+                f" --session-dir {shlex.quote(str(session_dir))}"
+                f" --rest-weight {rest_weights[0]}"
+                f" --loss-action-weight {action_weights[0]}"
+                f" --lr {lrs[0]}"
+                f" --epochs {int(args.bench_epochs)}"
+                f" --seed {int(args.bench_seed)}"
+                f" --device {shlex.quote(str(args.device))}"
+                f" --num-workers {int(args.num_workers)}"
+                f"{' --pin-memory' if args.pin_memory else ''}"
+                f" --batch-size {int(bs)}"
+                f" --run-dir {shlex.quote(str(bench_dir))}"
+            )
+            print(f"▶ {train_cmd}", flush=True)
+            start = datetime.now(timezone.utc)
+            with bench_log.open("w", encoding="utf-8") as handle:
+                proc = subprocess.run(
+                    shlex.split(train_cmd),
+                    stdout=handle,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+            if proc.returncode != 0:
+                print(f"⚠️ Benchmark failed for batch_size={bs}; see {bench_log}", flush=True)
+                continue
+            elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+            timings.append((elapsed, bs))
+            print(f"✅ batch_size={bs} elapsed={elapsed:.1f}s", flush=True)
+
+        if timings:
+            timings.sort()
+            args.batch_size = timings[0][1]
+            print(f"Selected batch_size={args.batch_size} (fastest)", flush=True)
+        else:
+            print("⚠️ Benchmark failed for all batch sizes; keeping defaults.", flush=True)

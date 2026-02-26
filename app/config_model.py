@@ -127,7 +127,7 @@ def default_train_settings() -> Dict[str, Any]:
         "batch_size": 64,
         "lr": 0.001,
         "seed": 42,
-        "loss_action_weight": 2.0,
+        "loss_action_weight": 3.0,
         "rest_weight": 1.0,
         "finger_weights": "1,1,1,1,1,1",
         "test_size": 0.2,
