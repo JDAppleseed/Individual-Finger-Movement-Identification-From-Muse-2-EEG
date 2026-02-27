@@ -48,6 +48,12 @@ from utils.postprocess import (
 from utils.runtime_utils import load_normalizer
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 
+# Fixed label ordering for standardized confusion matrices
+ACTION_LABELS = sorted(ACTION_NAMES.keys())
+ACTION_TICK_LABELS = [ACTION_NAMES[label] for label in ACTION_LABELS]
+FINGER_LABELS = sorted(FINGER_NAMES.keys())
+FINGER_TICK_LABELS = [FINGER_NAMES[label] for label in FINGER_LABELS]
+
 # Pipeline handoff: Step 3 reads Step 2 artifacts from one run directory and writes
 # calibrated metrics/plots/manifests back into that same run-scoped report path.
 try:
@@ -1655,10 +1661,8 @@ def main():
     # =========================
     fig, axs = plt.subplots(2, 2, figsize=(14, 10))
 
-    action_cm = confusion_matrix(
-        y_action_test, action_preds, labels=list(range(n_actions))
-    )
-    action_labels = _safe_label_list(ACTION_NAMES, n_actions)
+    action_cm = confusion_matrix(y_action_test, action_preds, labels=ACTION_LABELS)
+    action_labels = ACTION_TICK_LABELS
 
     sns.heatmap(
         action_cm,
@@ -1674,15 +1678,12 @@ def main():
     axs[0, 0].set_ylabel("True")
 
     if finger_metrics_ok and mask.any():
-        finger_label_ids = [i for i in range(n_fingers) if i != 0]
         finger_cm = confusion_matrix(
             y_finger_test[mask],
             finger_preds[mask],
-            labels=finger_label_ids,
+            labels=FINGER_LABELS,
         )
-        finger_labels = [
-            _safe_label_list(FINGER_NAMES, n_fingers)[i] for i in finger_label_ids
-        ]
+        finger_labels = FINGER_TICK_LABELS
 
         sns.heatmap(
             finger_cm,

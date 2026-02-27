@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 
-from utils.label_schema import ACTION_REST
+from utils.label_schema import ACTION_REST, ACTION_NAMES, FINGER_NAMES
 from utils.per_subject_calibration import expected_calibration_error
 from utils.sequence_data import load_sequence_npz
 
@@ -24,6 +24,11 @@ REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 CALIB_DIR = Path("logs/calibration")
 EXP_LOG_DIR = Path("logs/experiments")
+
+ACTION_LABELS = sorted(ACTION_NAMES.keys())
+ACTION_TICK_LABELS = [ACTION_NAMES[label] for label in ACTION_LABELS]
+FINGER_LABELS = sorted(FINGER_NAMES.keys())
+FINGER_TICK_LABELS = [FINGER_NAMES[label] for label in FINGER_LABELS]
 
 
 # =========================
@@ -70,6 +75,27 @@ def _safe_float(value):
     if value is None or np.isnan(value):
         return "N/A"
     return f"{value:.3f}"
+
+
+def _plot_confusion_matrix(cm, labels, tick_labels, *, title, cmap, out_path):
+    plt.figure(figsize=(4, 4))
+    plt.imshow(cm, cmap=cmap)
+    plt.title(title)
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    if tick_labels:
+        plt.xticks(
+            range(len(labels)),
+            tick_labels,
+            rotation=45,
+            ha="right",
+            fontsize=8,
+        )
+        plt.yticks(range(len(labels)), tick_labels, fontsize=8)
+    plt.colorbar()
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
 
 
 # =========================
@@ -131,7 +157,9 @@ def generate_subject_report(subject_id, experiment_hash):
             finger_preds_subj = finger_preds[subj_mask]
 
             action_acc = accuracy_score(y_action_subj, action_preds_subj)
-            action_cm = confusion_matrix(y_action_subj, action_preds_subj)
+            action_cm = confusion_matrix(
+                y_action_subj, action_preds_subj, labels=ACTION_LABELS
+            )
 
             mask = y_action_subj != 0
             if mask.any():
@@ -139,7 +167,9 @@ def generate_subject_report(subject_id, experiment_hash):
                     y_finger_subj[mask], finger_preds_subj[mask]
                 )
                 finger_cm = confusion_matrix(
-                    y_finger_subj[mask], finger_preds_subj[mask]
+                    y_finger_subj[mask],
+                    finger_preds_subj[mask],
+                    labels=FINGER_LABELS,
                 )
 
     # ===== Plots =====
@@ -184,28 +214,26 @@ def generate_subject_report(subject_id, experiment_hash):
     confusion_html = ""
     if action_cm is not None:
         cm_path = subject_report_dir / "action_confusion.png"
-        plt.figure(figsize=(4, 4))
-        plt.imshow(action_cm, cmap="Blues")
-        plt.title("Action Confusion")
-        plt.xlabel("Predicted")
-        plt.ylabel("True")
-        plt.colorbar()
-        plt.tight_layout()
-        plt.savefig(cm_path)
-        plt.close()
+        _plot_confusion_matrix(
+            action_cm,
+            ACTION_LABELS,
+            ACTION_TICK_LABELS,
+            title="Action Confusion",
+            cmap="Blues",
+            out_path=cm_path,
+        )
         confusion_html += f'<img src="{cm_path.name}" width="400"/>'
 
     if finger_cm is not None:
         cm_path = subject_report_dir / "finger_confusion.png"
-        plt.figure(figsize=(4, 4))
-        plt.imshow(finger_cm, cmap="Greens")
-        plt.title("Finger Confusion (non-REST)")
-        plt.xlabel("Predicted")
-        plt.ylabel("True")
-        plt.colorbar()
-        plt.tight_layout()
-        plt.savefig(cm_path)
-        plt.close()
+        _plot_confusion_matrix(
+            finger_cm,
+            FINGER_LABELS,
+            FINGER_TICK_LABELS,
+            title="Finger Confusion (non-REST)",
+            cmap="Greens",
+            out_path=cm_path,
+        )
         confusion_html += f'<img src="{cm_path.name}" width="400"/>'
 
     ece_str = f"{ece:.4f}" if ece is not None else "N/A"
@@ -363,7 +391,7 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
             action_f1_weighted = float(
                 f1_score(y_action, action_pred, average="weighted", zero_division=0)
             )
-            action_cm = confusion_matrix(y_action, action_pred)
+            action_cm = confusion_matrix(y_action, action_pred, labels=ACTION_LABELS)
             rest_mask = y_action == ACTION_REST
             if np.any(rest_mask):
                 rest_tp = int(np.sum(rest_mask & (action_pred == ACTION_REST)))
@@ -389,7 +417,9 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
                     y_finger[mask], finger_pred[mask], average="weighted", zero_division=0
                 )
             )
-            finger_cm = confusion_matrix(y_finger[mask], finger_pred[mask])
+            finger_cm = confusion_matrix(
+                y_finger[mask], finger_pred[mask], labels=FINGER_LABELS
+            )
         if y_finger.size:
             finger_acc_overall = float(accuracy_score(y_finger, finger_pred))
             finger_f1_overall_macro = float(
@@ -402,28 +432,26 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     confusion_html = ""
     if action_cm is not None:
         cm_path = out_dir / "action_confusion.png"
-        plt.figure(figsize=(4, 4))
-        plt.imshow(action_cm, cmap="Blues")
-        plt.title("Action Confusion")
-        plt.xlabel("Predicted")
-        plt.ylabel("True")
-        plt.colorbar()
-        plt.tight_layout()
-        plt.savefig(cm_path)
-        plt.close()
+        _plot_confusion_matrix(
+            action_cm,
+            ACTION_LABELS,
+            ACTION_TICK_LABELS,
+            title="Action Confusion",
+            cmap="Blues",
+            out_path=cm_path,
+        )
         confusion_html += f'<img src="{cm_path.name}" width="400"/>'
 
     if finger_cm is not None:
         cm_path = out_dir / "finger_confusion.png"
-        plt.figure(figsize=(4, 4))
-        plt.imshow(finger_cm, cmap="Greens")
-        plt.title("Finger Confusion (non-REST)")
-        plt.xlabel("Predicted")
-        plt.ylabel("True")
-        plt.colorbar()
-        plt.tight_layout()
-        plt.savefig(cm_path)
-        plt.close()
+        _plot_confusion_matrix(
+            finger_cm,
+            FINGER_LABELS,
+            FINGER_TICK_LABELS,
+            title="Finger Confusion (non-REST)",
+            cmap="Greens",
+            out_path=cm_path,
+        )
         confusion_html += f'<img src="{cm_path.name}" width="400"/>'
 
     metrics_pre = json.dumps(metrics, indent=2) if metrics else "{}"
