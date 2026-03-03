@@ -58,6 +58,29 @@ python 5_review_events.py --session-dir <session_dir>
 - Step 3+: Evaluate / Figures / Reports → read from the same session directory and the latest model run.
 - Step 7: Live Infer + Actuate → reads model/scaler from `<session_dir>/processed/models/<run_id>/` unless explicitly overridden.
 
+## Merging Two Sessions For One Subject
+
+If a subject has multiple sessions (for example, a full run plus a rest session) and you want to train on both:
+
+1) Run Step 1b on each session to produce `<session_dir>/processed/eeg_windows.npz`.
+2) Merge the NPZs into a new combined session directory:
+```
+python tools/merge_windows_npz.py \
+  --npz <session1>/processed/eeg_windows.npz \
+  --npz <session2>/processed/eeg_windows.npz \
+  --out <combined_session>/processed/eeg_windows.npz
+```
+3) Train, evaluate, and report using the combined session directory:
+```
+python 2_train_model.py --session-dir <combined_session> --subject-id <subject>
+python 3_evaluate_model.py --session-dir <combined_session>
+python 4_generate_reports.py --session-dir <combined_session>
+```
+
+Notes:
+- The merge requires both sessions to use the same windowing settings (`fs` / `window_sec` / `step_sec`).
+- The combined session can be a new folder under `Projects/<project>/subjects/<subject>/sessions/` with only `processed/eeg_windows.npz`.
+
 ## What changed / How to run
 
 - Connect Muse: `python eeglab_wrapper_ui.py` → click **Connect Muse 2** (Step 0), or run `python muse_lsl_streamer.py --name Muse2-EEG`.
