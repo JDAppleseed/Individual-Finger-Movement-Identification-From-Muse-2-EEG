@@ -469,16 +469,30 @@ QGroupBox {
   background: rgb(95, 110, 135);
   border: 1px solid #8ba0c7;
   border-radius: 6px;
-  margin-top: 12px;
+  margin-top: 18px;
 }
 QGroupBox::title {
   subcontrol-origin: margin;
-  left: 8px;
-  top: -8px;
-  padding: 0 4px;
+  subcontrol-position: top left;
+  left: 10px;
+  top: 2px;
+  padding: 0 6px;
   color: white;
   font-weight: 700;
 }
+
+QToolButton#InfoButton {
+  background: rgb(80, 100, 130);
+  color: white;
+  border: 1px solid #8ba0c7;
+  border-radius: 7px;
+  padding: 0px 4px;
+  min-width: 14px;
+  min-height: 14px;
+  font-weight: 700;
+}
+QToolButton#InfoButton:hover { background: rgb(110, 130, 170); }
+QToolButton#InfoButton:pressed { background: rgb(65, 80, 105); }
 
 QPushButton {
   background: rgb(110, 130, 170);
@@ -799,6 +813,7 @@ class MainWindow(QMainWindow):
         self.step_arg_specs = self._build_step_arg_specs()
         self.step_arg_widgets: Dict[str, Dict[str, QWidget]] = {}
         self.step_arg_includes: Dict[str, Dict[str, QCheckBox]] = {}
+        self.eval_fields: Dict[str, Dict[str, QWidget]] = {}
 
         self.runner = ProcessRunner(self)
         self.runner.line_ready.connect(self._append_log)
@@ -841,6 +856,8 @@ class MainWindow(QMainWindow):
         self._stop_waiting_runner = False
         self._stop_waiting_connector = False
         self._stop_step_id: Optional[str] = None
+        self._eval_queue: list[str] = []
+        self._eval_queue_active = False
 
         self._build_ui()
 
@@ -1646,16 +1663,34 @@ class MainWindow(QMainWindow):
         self.project_label.setText(text)
         if hasattr(self, "project_label_dock") and self.project_label_dock is not None:
             self.project_label_dock.setText(text)
+        self._refresh_eval_context()
 
     def _set_subject_label(self, text: str) -> None:
         self.subject_label.setText(text)
         if hasattr(self, "subject_label_dock") and self.subject_label_dock is not None:
             self.subject_label_dock.setText(text)
+        self._refresh_eval_context()
 
     def _set_session_label(self, text: str) -> None:
         self.session_label.setText(text)
         if hasattr(self, "session_label_dock") and self.session_label_dock is not None:
             self.session_label_dock.setText(text)
+        self._refresh_eval_context()
+
+    def _refresh_eval_context(self) -> None:
+        if not hasattr(self, "eval_context_label"):
+            return
+        project = self.current_project or "-"
+        subject = self.current_subject or "-"
+        session = self.current_session_ui or "-"
+        session_dir = "-"
+        if self.current_project and self.current_subject:
+            subject_dir = subject_root(self.current_project, self.current_subject)
+            resolved = self._resolve_session_dir_for_current(subject_dir)
+            if resolved:
+                session_dir = str(resolved)
+        context = f"Project: {project} | Subject: {subject} | Session: {session}\nSession dir: {session_dir}"
+        self.eval_context_label.setText(context)
 
     def _wire_status_updates(self) -> None:
         for step_id in ("step1", "infer"):
@@ -1764,6 +1799,19 @@ class MainWindow(QMainWindow):
         """
         page = QWidget()
         layout = QVBoxLayout(page)
+        header_row = QHBoxLayout()
+        header = QLabel("Projects & Subjects")
+        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        header_row.addWidget(header)
+        header_row.addWidget(
+            self._make_info_button(
+                "Projects & Subjects",
+                "Create/open a project, then create/edit subjects within it. "
+                "Subjects are used to organize sessions and model runs.",
+            )
+        )
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
 
         # --- Project controls ---
         project_box = QGroupBox("Project")
@@ -1820,6 +1868,19 @@ class MainWindow(QMainWindow):
     def _build_stream_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        header_row = QHBoxLayout()
+        header = QLabel("Stream Setup")
+        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        header_row.addWidget(header)
+        header_row.addWidget(
+            self._make_info_button(
+                "Stream Setup",
+                "Connect Muse via BLE→LSL, select an LSL stream, or use CSV offline mode. "
+                "Use this page to verify the stream and sampling rate before recording.",
+            )
+        )
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
 
         self.stream_status = QLabel("")
         connector_box = QGroupBox("Muse Connector (BLE → LSL)")
@@ -1910,9 +1971,19 @@ class MainWindow(QMainWindow):
     def _build_pipeline_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        header_row = QHBoxLayout()
         header = QLabel("Pipeline Overview")
         header.setStyleSheet("font-weight: 600; font-size: 16px;")
-        layout.addWidget(header)
+        header_row.addWidget(header)
+        header_row.addWidget(
+            self._make_info_button(
+                "Pipeline Overview",
+                "High-level map of the end-to-end pipeline. Use the left navigation to "
+                "move through steps in order.",
+            )
+        )
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
         intro = QLabel(
             "Use the navigation on the left to walk through the lossless pipeline. "
             "Record (lossless) captures raw shards + events only (no inference). "
@@ -1943,9 +2014,19 @@ class MainWindow(QMainWindow):
     def _build_session_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        header_row = QHBoxLayout()
         header = QLabel("Validate Session (Tool)")
         header.setStyleSheet("font-weight: 600; font-size: 16px;")
-        layout.addWidget(header)
+        header_row.addWidget(header)
+        header_row.addWidget(
+            self._make_info_button(
+                "Validate Session",
+                "Checks session integrity (manifest continuity, missing shards, timebase ranges) "
+                "and summarizes metadata before window extraction.",
+            )
+        )
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
 
         form = QFormLayout()
         self.session_root_input = OutlineLineEdit()
@@ -2027,31 +2108,354 @@ class MainWindow(QMainWindow):
     def _build_evaluate_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        header_row = QHBoxLayout()
         header = QLabel("Step 3+: Evaluate / Reports")
         header.setStyleSheet("font-weight: 600; font-size: 16px;")
-        layout.addWidget(header)
+        header_row.addWidget(header)
+        header_row.addWidget(
+            self._make_info_button(
+                "Evaluate / Reports",
+                "Runs model evaluation, Deepchecks diagnostics, paper figures, "
+                "and reports for the selected session. Recommended order: "
+                "Step 3 → 3b → 3c → 4.",
+            )
+        )
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
         note = QLabel(
-            "Run evaluation scripts (3b/3c/4) on trained models and extracted windows."
+            "Run evaluation on the selected session. Recommended order: "
+            "Step 3 → 3b → 3c → 4. Outputs write under "
+            "`sessions/<id>/processed/` by default."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
 
-        btn_row = QHBoxLayout()
-        deepchecks_btn = QPushButton("Run 3b Deepchecks")
-        deepchecks_btn.clicked.connect(
-            lambda: self._run_eval_script("evaluate_deepchecks")
+        target_box = QGroupBox("Evaluation Target")
+        target_layout = QFormLayout(target_box)
+        self.eval_context_label = QLabel("")
+        self.eval_context_label.setWordWrap(True)
+        target_layout.addRow("Current selection", self.eval_context_label)
+        if hasattr(self, "session_dir_input"):
+            session_widget = self._clone_bound_widget(
+                self.session_dir_input, "session_dir"
+            )
+            if isinstance(session_widget, QLineEdit):
+                session_widget.setPlaceholderText(
+                    "Use Validate Session selection or browse here."
+                )
+            target_layout.addRow("Session Dir (recommended)", session_widget)
+        layout.addWidget(target_box)
+
+        full_btn_row = QHBoxLayout()
+        full_btn = QPushButton("Run Full Evaluation (3 → 3b → 3c → 4)")
+        full_btn.clicked.connect(self._run_evaluate_all)
+        full_btn_row.addWidget(full_btn)
+        full_btn_row.addStretch(1)
+        layout.addLayout(full_btn_row)
+
+        layout.addWidget(self._build_eval_step3_box())
+        layout.addWidget(self._build_eval_deepchecks_box())
+        layout.addWidget(self._build_eval_figures_box())
+        layout.addWidget(self._build_eval_reports_box())
+        layout.addStretch(1)
+        self._refresh_eval_context()
+        return page
+
+    def _build_eval_step3_box(self) -> QWidget:
+        box = QGroupBox("Step 3: Evaluate Model + Calibration (3_evaluate_model.py)")
+        layout = QVBoxLayout(box)
+        desc = QLabel(
+            "Core evaluation: accuracy, confusion matrices, calibration curves, "
+            "and cached predictions. Uses the latest model under the selected session."
         )
-        figures_btn = QPushButton("Run 3c Paper Figures")
-        figures_btn.clicked.connect(lambda: self._run_eval_script("evaluate_figures"))
-        reports_btn = QPushButton("Run 4 Generate Reports")
-        reports_btn.clicked.connect(lambda: self._run_eval_script("evaluate_reports"))
-        btn_row.addWidget(deepchecks_btn)
-        btn_row.addWidget(figures_btn)
-        btn_row.addWidget(reports_btn)
+        desc.setWordWrap(True)
+        desc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        desc_row = QHBoxLayout()
+        desc_row.addWidget(desc)
+        desc_row.addWidget(
+            self._make_info_button(
+                "Step 3: Evaluate Model",
+                "Deterministic evaluation of the latest model using the session's "
+                "window dataset. Writes an eval manifest and plots under "
+                "`processed/reports/<run_id>/`.",
+            )
+        )
+        desc_row.addStretch(1)
+        layout.addLayout(desc_row)
+
+        self.eval_fields.setdefault("evaluate", {})
+        fields = self.eval_fields["evaluate"]
+
+        basic = QGroupBox("Basic Overrides")
+        basic_layout = QFormLayout(basic)
+
+        max_samples = OutlineSpinBox()
+        max_samples.setRange(0, 10_000_000)
+        max_samples.setSpecialValueText("Auto")
+        max_samples.setValue(0)
+        basic_layout.addRow("Max samples (auto)", max_samples)
+        fields["max_samples"] = max_samples
+
+        batch_size = OutlineSpinBox()
+        batch_size.setRange(1, 8192)
+        batch_size.setValue(256)
+        basic_layout.addRow("Batch size", batch_size)
+        fields["batch_size"] = batch_size
+
+        split_seed = OutlineSpinBox()
+        split_seed.setRange(0, 1_000_000)
+        split_seed.setValue(42)
+        basic_layout.addRow("Split seed", split_seed)
+        fields["split_seed"] = split_seed
+
+        export_preds = QCheckBox("Export cached test predictions")
+        basic_layout.addRow("Export test preds", export_preds)
+        fields["export_test_pred"] = export_preds
+
+        no_manifest = QCheckBox("Disable manifest output")
+        basic_layout.addRow("No manifest", no_manifest)
+        fields["no_manifest"] = no_manifest
+
+        save_manifest = OutlineLineEdit()
+        save_manifest.setPlaceholderText("Optional manifest path override")
+        basic_layout.addRow("Save manifest", save_manifest)
+        fields["save_manifest"] = save_manifest
+
+        disable_det = QCheckBox("Disable deterministic eval (not recommended)")
+        basic_layout.addRow("Determinism", disable_det)
+        fields["disable_deterministic"] = disable_det
+
+        layout.addWidget(basic)
+
+        post = QGroupBox("Postprocess Overrides")
+        post_layout = QFormLayout(post)
+
+        smooth = QCheckBox("Enable smoothing")
+        post_layout.addRow("Smooth", smooth)
+        fields["smooth"] = smooth
+
+        smooth_action_only = QCheckBox("Smooth action only")
+        post_layout.addRow("Smooth action only", smooth_action_only)
+        fields["smooth_action_only"] = smooth_action_only
+
+        smooth_method = QComboBox()
+        smooth_method.addItems(["vote", "ema"])
+        smooth_method.setCurrentText("vote")
+        post_layout.addRow("Smooth method", smooth_method)
+        fields["smooth_method"] = smooth_method
+
+        smooth_window = OutlineSpinBox()
+        smooth_window.setRange(1, 200)
+        smooth_window.setValue(5)
+        post_layout.addRow("Smooth window", smooth_window)
+        fields["smooth_window"] = smooth_window
+
+        hysteresis = QCheckBox("Enable hysteresis")
+        post_layout.addRow("Hysteresis", hysteresis)
+        fields["hysteresis"] = hysteresis
+
+        hysteresis_frames = OutlineSpinBox()
+        hysteresis_frames.setRange(1, 50)
+        hysteresis_frames.setValue(3)
+        post_layout.addRow("Hysteresis frames", hysteresis_frames)
+        fields["hysteresis_frames"] = hysteresis_frames
+
+        threshold_action = OutlineDoubleSpinBox()
+        threshold_action.setRange(0.0, 1.0)
+        threshold_action.setDecimals(2)
+        threshold_action.setSingleStep(0.01)
+        threshold_action.setValue(0.75)
+        post_layout.addRow("Threshold action", threshold_action)
+        fields["threshold_action"] = threshold_action
+
+        threshold_finger = OutlineDoubleSpinBox()
+        threshold_finger.setRange(0.0, 1.0)
+        threshold_finger.setDecimals(2)
+        threshold_finger.setSingleStep(0.01)
+        threshold_finger.setValue(0.75)
+        post_layout.addRow("Threshold finger", threshold_finger)
+        fields["threshold_finger"] = threshold_finger
+
+        adjacency = QCheckBox("Enable adjacency assist")
+        post_layout.addRow("Adjacency", adjacency)
+        fields["adjacency"] = adjacency
+
+        layout.addWidget(post)
+
+        btn_row = QHBoxLayout()
+        run_btn = QPushButton("Run Step 3 Evaluate")
+        run_btn.clicked.connect(lambda: self._run_eval_script("evaluate"))
+        btn_row.addWidget(run_btn)
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
-        layout.addStretch(1)
-        return page
+        if "evaluate" not in self.scripts:
+            run_btn.setEnabled(False)
+        return box
+
+    def _build_eval_deepchecks_box(self) -> QWidget:
+        box = QGroupBox("Step 3b: Deepchecks Evaluation (3b_deepchecks_evaluate.py)")
+        layout = QVBoxLayout(box)
+        desc = QLabel(
+            "Dataset integrity and model evaluation checks. Aligns to the same session/model "
+            "resolution as Step 3."
+        )
+        desc.setWordWrap(True)
+        desc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        desc_row = QHBoxLayout()
+        desc_row.addWidget(desc)
+        desc_row.addWidget(
+            self._make_info_button(
+                "Step 3b: Deepchecks",
+                "Runs Deepchecks suites (data integrity, train/test validation, "
+                "model evaluation) using the same split config as training unless overridden.",
+            )
+        )
+        desc_row.addStretch(1)
+        layout.addLayout(desc_row)
+
+        self.eval_fields.setdefault("evaluate_deepchecks", {})
+        fields = self.eval_fields["evaluate_deepchecks"]
+
+        form = QFormLayout()
+        max_samples = OutlineSpinBox()
+        max_samples.setRange(0, 10_000_000)
+        max_samples.setSpecialValueText("Auto")
+        max_samples.setValue(0)
+        form.addRow("Max samples (auto)", max_samples)
+        fields["max_samples"] = max_samples
+
+        batch_size = OutlineSpinBox()
+        batch_size.setRange(1, 8192)
+        batch_size.setValue(256)
+        form.addRow("Batch size", batch_size)
+        fields["batch_size"] = batch_size
+
+        split_mode = QComboBox()
+        split_mode.addItems(["Auto (train_config)", "group_trial", "holdout_session"])
+        split_mode.setCurrentText("Auto (train_config)")
+        form.addRow("Split mode", split_mode)
+        fields["split_mode"] = split_mode
+
+        purge_seconds = OutlineDoubleSpinBox()
+        purge_seconds.setRange(0.0, 60.0)
+        purge_seconds.setDecimals(2)
+        purge_seconds.setSingleStep(0.25)
+        purge_seconds.setValue(0.0)
+        form.addRow("Purge seconds", purge_seconds)
+        fields["purge_seconds"] = purge_seconds
+
+        hop_seconds = OutlineDoubleSpinBox()
+        hop_seconds.setRange(0.0, 10.0)
+        hop_seconds.setDecimals(2)
+        hop_seconds.setSingleStep(0.05)
+        hop_seconds.setSpecialValueText("Auto")
+        hop_seconds.setValue(0.0)
+        form.addRow("Hop seconds (auto)", hop_seconds)
+        fields["hop_seconds"] = hop_seconds
+
+        layout.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        run_btn = QPushButton("Run 3b Deepchecks")
+        run_btn.clicked.connect(lambda: self._run_eval_script("evaluate_deepchecks"))
+        btn_row.addWidget(run_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+        if "evaluate_deepchecks" not in self.scripts:
+            run_btn.setEnabled(False)
+        return box
+
+    def _build_eval_figures_box(self) -> QWidget:
+        box = QGroupBox("Step 3c: Paper Figures (3c_live_paper_figures.py)")
+        layout = QVBoxLayout(box)
+        desc = QLabel(
+            "Generates reliability and confidence figures for reports/paper. "
+            "Defaults: MC_SAMPLES=30, SEED=42."
+        )
+        desc.setWordWrap(True)
+        desc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        desc_row = QHBoxLayout()
+        desc_row.addWidget(desc)
+        desc_row.addWidget(
+            self._make_info_button(
+                "Step 3c: Paper Figures",
+                "Produces MC-dropout reliability/uncertainty plots saved under "
+                "`processed/reports/<run_id>/`.",
+            )
+        )
+        desc_row.addStretch(1)
+        layout.addLayout(desc_row)
+
+        self.eval_fields.setdefault("evaluate_figures", {})
+        fields = self.eval_fields["evaluate_figures"]
+
+        form = QFormLayout()
+        show_plots = QCheckBox("Show interactive plots (sets SHOW_PLOTS=1)")
+        form.addRow("Live plots", show_plots)
+        fields["show_plots"] = show_plots
+        layout.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        run_btn = QPushButton("Run 3c Paper Figures")
+        run_btn.clicked.connect(lambda: self._run_eval_script("evaluate_figures"))
+        btn_row.addWidget(run_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+        if "evaluate_figures" not in self.scripts:
+            run_btn.setEnabled(False)
+        return box
+
+    def _build_eval_reports_box(self) -> QWidget:
+        box = QGroupBox("Step 4: Generate Reports (4_generate_reports.py)")
+        layout = QVBoxLayout(box)
+        desc = QLabel(
+            "Produces per-run HTML/summary reports. Uses the latest model run under the "
+            "selected session unless you override the run directory."
+        )
+        desc.setWordWrap(True)
+        desc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        desc_row = QHBoxLayout()
+        desc_row.addWidget(desc)
+        desc_row.addWidget(
+            self._make_info_button(
+                "Step 4: Generate Reports",
+                "Builds HTML reports from model artifacts (metrics, predictions, "
+                "confusion matrices, calibration figures).",
+            )
+        )
+        desc_row.addStretch(1)
+        layout.addLayout(desc_row)
+
+        self.eval_fields.setdefault("evaluate_reports", {})
+        fields = self.eval_fields["evaluate_reports"]
+
+        form = QFormLayout()
+        run_dir = OutlineLineEdit()
+        run_dir.setPlaceholderText("Optional: override run dir")
+        form.addRow("Run dir override", run_dir)
+        fields["run_dir"] = run_dir
+
+        exp_hash = OutlineLineEdit()
+        exp_hash.setPlaceholderText("Optional: legacy exp hash")
+        form.addRow("Exp hash", exp_hash)
+        fields["exp_hash"] = exp_hash
+
+        subject_id = OutlineLineEdit()
+        subject_id.setPlaceholderText("Optional: legacy subject id")
+        form.addRow("Subject ID", subject_id)
+        fields["subject_id"] = subject_id
+
+        layout.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        run_btn = QPushButton("Run 4 Generate Reports")
+        run_btn.clicked.connect(lambda: self._run_eval_script("evaluate_reports"))
+        btn_row.addWidget(run_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+        if "evaluate_reports" not in self.scripts:
+            run_btn.setEnabled(False)
+        return box
 
     def _build_step1_page(self) -> QWidget:
         lossless_banner = QLabel(
@@ -2073,9 +2477,19 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
 
+        header_row = QHBoxLayout()
         header = QLabel("Events: Mark/Edit (Optional)")
         header.setStyleSheet("font-weight: 600; font-size: 16px;")
-        layout.addWidget(header)
+        header_row.addWidget(header)
+        header_row.addWidget(
+            self._make_info_button(
+                "Events: Mark/Edit",
+                "Review or repair event labels after capture. Use this when you need to "
+                "clean up timestamps or correct labels.",
+            )
+        )
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
         info = QLabel("Post-hoc event review/edit tools for the current session.")
         layout.addWidget(info)
         note = QLabel(
@@ -2200,6 +2614,19 @@ class MainWindow(QMainWindow):
     def _build_export_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        header_row = QHBoxLayout()
+        header = QLabel("Export")
+        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        header_row.addWidget(header)
+        header_row.addWidget(
+            self._make_info_button(
+                "Export",
+                "Export utilities (e.g., EEGLAB .set/.mat) would appear here when available.",
+            )
+        )
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
+
         msg = QLabel("Export to EEGLAB (.set/.mat) not found in repo; export disabled.")
         msg.setWordWrap(True)
         layout.addWidget(msg)
@@ -2210,8 +2637,18 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
 
+        msg_row = QHBoxLayout()
         msg = QLabel("Diagnostics for timebase alignment and event coverage.")
-        layout.addWidget(msg)
+        msg_row.addWidget(msg)
+        msg_row.addWidget(
+            self._make_info_button(
+                "Diagnostics",
+                "Runs time alignment checks between raw EEG and events, and reports "
+                "gaps or timebase inconsistencies.",
+            )
+        )
+        msg_row.addStretch(1)
+        layout.addLayout(msg_row)
 
         form = QFormLayout()
         self.diag_features_path = OutlineLineEdit()
@@ -2261,14 +2698,21 @@ class MainWindow(QMainWindow):
     def _step_description(self, step_id: str) -> str:
         descriptions = {
             "step1": (
-                "Raw lossless session capture (raw shards + events). No inference."
+                "Record raw EEG + events into a session directory. No inference is run. "
+                "Outputs live under `sessions/<id>/raw/` and `sessions/<id>/events/`."
             ),
             "step1b": (
-                "Offline window extraction from a session directory; validates manifest "
-                "continuity by default."
+                "Extract fixed windows from a session directory and generate `eeg_windows.npz`. "
+                "Performs manifest continuity validation by default."
             ),
-            "train": "Offline model training from extracted windows.",
-            "infer": "Live inference with optional actuation (opt-in) and latency logging.",
+            "train": (
+                "Train the CNN+LSTM model from `eeg_windows.npz` and write model/scaler artifacts "
+                "under `sessions/<id>/processed/models/<run_id>/`."
+            ),
+            "infer": (
+                "Run live inference on an LSL stream or CSV input. Optional actuation is opt-in "
+                "with safety confirmation and latency logging."
+            ),
         }
         return descriptions.get(step_id, "")
 
@@ -2287,10 +2731,15 @@ class MainWindow(QMainWindow):
 
         self.step_script_key[step_id] = script_key
 
+        description = self._step_description(step_id)
+        header_row = QHBoxLayout()
         header = QLabel(title)
         header.setStyleSheet("font-weight: 600; font-size: 16px;")
-        layout.addWidget(header)
-        description = self._step_description(step_id)
+        header_row.addWidget(header)
+        if description:
+            header_row.addWidget(self._make_info_button(title, description))
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
         if description:
             desc_label = QLabel(description)
             desc_label.setWordWrap(True)
@@ -4327,6 +4776,9 @@ class MainWindow(QMainWindow):
                 "You must acknowledge the last hard stop report before restarting steps.",
             )
             return
+        if self._eval_queue_active:
+            self._eval_queue_active = False
+            self._eval_queue = []
         if not self.current_project or not self.current_subject:
             QMessageBox.warning(
                 self, "Project/Subject Required", "Select a project and subject first."
@@ -4791,19 +5243,35 @@ class MainWindow(QMainWindow):
         self.runner.start(sys.executable, args, cwd=str(self.repo_root))
 
     def _run_evaluate_all(self) -> None:
+        if self._eval_queue_active:
+            self._append_log("Evaluate pipeline already running.")
+            return
+        self._eval_queue = [
+            "evaluate",
+            "evaluate_deepchecks",
+            "evaluate_figures",
+            "evaluate_reports",
+        ]
+        self._eval_queue_active = True
         self._append_log(
-            "Run evaluate pipeline: starting 3b (deepchecks). Run 3c/4 manually after completion."
+            "Run evaluate pipeline: Step 3 → 3b → 3c → 4 (full battery)."
         )
-        self._run_eval_script("evaluate_deepchecks")
+        started = self._run_eval_script(self._eval_queue.pop(0), from_queue=True)
+        if not started:
+            self._eval_queue_active = False
+            self._eval_queue = []
 
-    def _run_eval_script(self, script_key: str) -> None:
+    def _run_eval_script(self, script_key: str, *, from_queue: bool = False) -> bool:
         if self.runner.is_running():
             self._append_log("Another process is running; stop it before evaluation.")
-            return
+            return False
+        if not from_queue and self._eval_queue_active:
+            self._eval_queue_active = False
+            self._eval_queue = []
         script_info = self.scripts.get(script_key)
         if not script_info:
             self._append_log(f"Evaluation script not found: {script_key}")
-            return
+            return False
 
         subject_dir = subject_root(self.current_project, self.current_subject)
         session_dir = self._resolve_session_dir_for_current(subject_dir)
@@ -4813,7 +5281,7 @@ class MainWindow(QMainWindow):
                 "Session Dir Required",
                 "Missing session dir. Select the session folder under subjects/<id>/sessions/<session_id>.",
             )
-            return
+            return False
         npz_path = self._resolve_windows_npz_for_current(subject_dir)
         exp_hash, model_path, scaler_path = self._resolve_latest_model_artifacts(subject_dir)
 
@@ -4822,13 +5290,21 @@ class MainWindow(QMainWindow):
         # Preferred: session_dir contract (scripts auto-resolve latest run under processed/models)
         if session_dir:
             args += ["--session-dir", str(session_dir)]
+        args += self._collect_eval_args(script_key)
+        env_overrides = self._collect_eval_env(script_key)
 
         self.active_step = script_key
         self._append_log(f"Running: {args} (cwd={self.repo_root})")
         if getattr(self, "dry_run_checkbox", None) and self.dry_run_checkbox.isChecked():
             self._append_log("Dry run enabled; command not executed.")
-            return
-        self.runner.start(sys.executable, args, cwd=str(self.repo_root))
+            return False
+        self.runner.start(
+            sys.executable,
+            args,
+            cwd=str(self.repo_root),
+            env=env_overrides or None,
+        )
+        return True
 
     def _collect_step_args(self, step_id: str) -> list[str]:
         specs = self.step_arg_specs.get(step_id, [])
@@ -4851,6 +5327,113 @@ class MainWindow(QMainWindow):
                 continue
             args.extend([spec.flag, str(value)])
         return args
+
+    def _collect_eval_args(self, script_key: str) -> list[str]:
+        args: list[str] = []
+        fields = self.eval_fields.get(script_key, {})
+
+        def _spin_value(key: str) -> Optional[float]:
+            widget = fields.get(key)
+            if isinstance(widget, QSpinBox):
+                return float(widget.value())
+            if isinstance(widget, QDoubleSpinBox):
+                return float(widget.value())
+            return None
+
+        def _text_value(key: str) -> Optional[str]:
+            widget = fields.get(key)
+            if isinstance(widget, QLineEdit):
+                text = widget.text().strip()
+                return text or None
+            if isinstance(widget, QTextEdit):
+                text = widget.toPlainText().strip()
+                return text or None
+            return None
+
+        def _is_checked(key: str) -> bool:
+            widget = fields.get(key)
+            return bool(isinstance(widget, QCheckBox) and widget.isChecked())
+
+        if script_key == "evaluate":
+            max_samples = _spin_value("max_samples")
+            if max_samples and max_samples > 0:
+                args += ["--max-samples", str(int(max_samples))]
+            batch_size = _spin_value("batch_size")
+            if batch_size:
+                args += ["--batch-size", str(int(batch_size))]
+            split_seed = _spin_value("split_seed")
+            if split_seed is not None:
+                args += ["--split-seed", str(int(split_seed))]
+            save_manifest = _text_value("save_manifest")
+            if save_manifest:
+                args += ["--save-manifest", save_manifest]
+            if _is_checked("no_manifest"):
+                args.append("--no-manifest")
+            if _is_checked("export_test_pred"):
+                args.append("--export-test-pred")
+            if _is_checked("disable_deterministic"):
+                args.append("--no-deterministic")
+            if _is_checked("smooth"):
+                args.append("--smooth")
+            if _is_checked("smooth_action_only"):
+                args.append("--smooth-action-only")
+            smooth_method = fields.get("smooth_method")
+            if isinstance(smooth_method, QComboBox):
+                args += ["--smooth-method", smooth_method.currentText()]
+            smooth_window = _spin_value("smooth_window")
+            if smooth_window:
+                args += ["--smooth-window", str(int(smooth_window))]
+            if _is_checked("hysteresis"):
+                args.append("--hysteresis")
+            hysteresis_frames = _spin_value("hysteresis_frames")
+            if hysteresis_frames:
+                args += ["--hysteresis-frames", str(int(hysteresis_frames))]
+            threshold_action = _spin_value("threshold_action")
+            if threshold_action is not None:
+                args += ["--threshold-action", f"{threshold_action:.2f}"]
+            threshold_finger = _spin_value("threshold_finger")
+            if threshold_finger is not None:
+                args += ["--threshold-finger", f"{threshold_finger:.2f}"]
+            if _is_checked("adjacency"):
+                args.append("--adjacency")
+        elif script_key == "evaluate_deepchecks":
+            max_samples = _spin_value("max_samples")
+            if max_samples and max_samples > 0:
+                args += ["--max-samples", str(int(max_samples))]
+            batch_size = _spin_value("batch_size")
+            if batch_size:
+                args += ["--batch-size", str(int(batch_size))]
+            split_mode = fields.get("split_mode")
+            if isinstance(split_mode, QComboBox):
+                mode_text = split_mode.currentText().strip()
+                if not mode_text.lower().startswith("auto"):
+                    args += ["--split-mode", mode_text]
+            purge_seconds = _spin_value("purge_seconds")
+            if purge_seconds and purge_seconds > 0:
+                args += ["--purge-seconds", f"{purge_seconds:.2f}"]
+            hop_seconds = _spin_value("hop_seconds")
+            if hop_seconds and hop_seconds > 0:
+                args += ["--hop-seconds", f"{hop_seconds:.2f}"]
+        elif script_key == "evaluate_reports":
+            run_dir = _text_value("run_dir")
+            if run_dir:
+                args += ["--run-dir", run_dir]
+            exp_hash = _text_value("exp_hash")
+            if exp_hash:
+                args += ["--exp-hash", exp_hash]
+            subject_id = _text_value("subject_id")
+            if subject_id:
+                args += ["--subject-id", subject_id]
+        return args
+
+    def _collect_eval_env(self, script_key: str) -> Dict[str, str]:
+        env: Dict[str, str] = {}
+        fields = self.eval_fields.get(script_key, {})
+        if script_key == "evaluate_figures":
+            show_plots = fields.get("show_plots")
+            if isinstance(show_plots, QCheckBox) and show_plots.isChecked():
+                env["SHOW_PLOTS"] = "1"
+        return env
 
     def _widget_value(self, widget: QWidget) -> Any:
         if isinstance(widget, QCheckBox):
@@ -5230,6 +5813,23 @@ class MainWindow(QMainWindow):
         layout.addWidget(btn)
         return dialog.exec() == QDialog.Accepted
 
+    def _show_info_dialog(self, title: str, message: str) -> None:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle(title)
+        dialog.setText(message)
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setStandardButtons(QMessageBox.Ok)
+        dialog.exec()
+
+    def _make_info_button(self, title: str, message: str) -> QToolButton:
+        btn = QToolButton()
+        btn.setObjectName("InfoButton")
+        btn.setText("i")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setToolTip("Info")
+        btn.clicked.connect(lambda: self._show_info_dialog(title, message))
+        return btn
+
     def _on_process_started(self) -> None:
         self._stop_requested = False
         self._stop_waiting_runner = False
@@ -5270,7 +5870,45 @@ class MainWindow(QMainWindow):
             self._refresh_status_summary()
         self.active_step = None
         self._set_live_buttons_state()
+        self._maybe_continue_eval_queue(step, exit_code, exit_status)
         self._maybe_finalize_stop()
+
+    def _maybe_continue_eval_queue(
+        self, step: str, exit_code: int, exit_status: int
+    ) -> None:
+        if not self._eval_queue_active:
+            return
+        if step not in {
+            "evaluate",
+            "evaluate_deepchecks",
+            "evaluate_figures",
+            "evaluate_reports",
+        }:
+            return
+        if exit_status != 0 or exit_code != 0:
+            self._append_log(
+                "Evaluate pipeline aborted due to non-zero exit code/status."
+            )
+            self._eval_queue_active = False
+            self._eval_queue = []
+            return
+        if not self._eval_queue:
+            self._append_log("✅ Evaluate pipeline complete.")
+            self._eval_queue_active = False
+            return
+        next_step = self._eval_queue.pop(0)
+        QTimer.singleShot(
+            150,
+            lambda: (
+                self._run_eval_script(next_step, from_queue=True)
+                or self._finalize_eval_queue_abort()
+            ),
+        )
+
+    def _finalize_eval_queue_abort(self) -> None:
+        self._append_log("Evaluate pipeline aborted (failed to start next step).")
+        self._eval_queue_active = False
+        self._eval_queue = []
 
     def _maybe_finalize_stop(self) -> None:
         if not self._stop_requested:
@@ -5299,11 +5937,48 @@ class MainWindow(QMainWindow):
                 self.live_hidden_plot.update(payload)
             return
         self.log_entries.append(line)
-        self._refresh_log_display()
+        self._append_log_line_to_console(line)
         if line.startswith("🛑 HARD STOP"):
             self._handle_hard_stop_detected()
 
+    def _log_is_at_bottom(self) -> bool:
+        if not hasattr(self, "log_console"):
+            return True
+        bar = self.log_console.verticalScrollBar()
+        return bar.value() >= (bar.maximum() - 2)
+
+    def _restore_log_scroll(self, prev_value: int, was_at_bottom: bool) -> None:
+        if not hasattr(self, "log_console"):
+            return
+        bar = self.log_console.verticalScrollBar()
+        if was_at_bottom:
+            bar.setValue(bar.maximum())
+        else:
+            bar.setValue(min(prev_value, bar.maximum()))
+
+    def _append_log_line_to_console(self, line: str) -> None:
+        if not hasattr(self, "log_console"):
+            return
+        filter_mode = (
+            self.log_filter_combo.currentText()
+            if hasattr(self, "log_filter_combo")
+            else "All"
+        )
+        if filter_mode == "Errors" and "ERROR" not in line:
+            return
+        if filter_mode == "Warnings" and not any(
+            token in line for token in ["WARN", "WARNING", "ERROR"]
+        ):
+            return
+        bar = self.log_console.verticalScrollBar()
+        was_at_bottom = self._log_is_at_bottom()
+        prev_value = bar.value()
+        self.log_console.appendPlainText(line)
+        self._restore_log_scroll(prev_value, was_at_bottom)
+
     def _refresh_log_display(self) -> None:
+        if not hasattr(self, "log_console"):
+            return
         filter_mode = (
             self.log_filter_combo.currentText()
             if hasattr(self, "log_filter_combo")
@@ -5318,11 +5993,16 @@ class MainWindow(QMainWindow):
             ):
                 continue
             lines.append(line)
+        bar = self.log_console.verticalScrollBar()
+        was_at_bottom = self._log_is_at_bottom()
+        prev_value = bar.value()
         self.log_console.setPlainText("\n".join(lines))
+        self._restore_log_scroll(prev_value, was_at_bottom)
 
     def _clear_logs(self) -> None:
         self.log_entries = []
-        self.log_console.clear()
+        if hasattr(self, "log_console"):
+            self.log_console.clear()
 
     def _handle_hard_stop_detected(self) -> None:
         if self.hard_stop_locked:

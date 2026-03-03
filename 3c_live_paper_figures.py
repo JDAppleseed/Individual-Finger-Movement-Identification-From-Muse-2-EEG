@@ -28,6 +28,12 @@ from utils.sequence_data import (
 )
 from utils.runtime_utils import load_normalizer
 
+# Fixed label ordering for standardized confusion matrices
+ACTION_LABELS = sorted(ACTION_NAMES.keys())
+ACTION_TICK_LABELS = [ACTION_NAMES[label] for label in ACTION_LABELS]
+FINGER_LABELS = sorted(FINGER_NAMES.keys())
+FINGER_TICK_LABELS = [FINGER_NAMES[label] for label in FINGER_LABELS]
+
 # Pipeline handoff: Step 3c reuses Step 2 model/scaler artifacts and produces
 # figure outputs that align with Step 3 evaluation semantics.
 try:
@@ -282,8 +288,8 @@ print(f"🎯 Finger Accuracy (non-REST): {finger_acc * 100:.2f}%")
 fig, axs = plt.subplots(3, 2, figsize=(14, 14))
 
 # --- Action Confusion Matrix ---
-action_cm = confusion_matrix(y_action_test, action_preds)
-action_labels = [ACTION_NAMES[i] for i in sorted(ACTION_NAMES.keys())]
+action_cm = confusion_matrix(y_action_test, action_preds, labels=ACTION_LABELS)
+action_labels = ACTION_TICK_LABELS
 sns.heatmap(
     action_cm,
     annot=True,
@@ -299,11 +305,10 @@ axs[0, 0].set_ylabel("True")
 
 # --- Finger Confusion Matrix (non-REST) ---
 if mask.any():
-    finger_label_ids = [i for i in sorted(FINGER_NAMES.keys()) if i != 0]
     finger_cm = confusion_matrix(
-        y_finger_test[mask], finger_preds[mask], labels=finger_label_ids
+        y_finger_test[mask], finger_preds[mask], labels=FINGER_LABELS
     )
-    finger_labels = [FINGER_NAMES[i] for i in finger_label_ids]
+    finger_labels = FINGER_TICK_LABELS
     sns.heatmap(
         finger_cm,
         annot=True,
