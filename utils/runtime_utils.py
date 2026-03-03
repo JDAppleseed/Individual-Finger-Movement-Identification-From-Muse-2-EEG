@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,6 +10,20 @@ from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
+
+
+def _ensure_cwd_exists() -> None:
+    try:
+        os.getcwd()
+    except FileNotFoundError:
+        try:
+            os.chdir(Path(__file__).resolve().parents[1])
+        except Exception:
+            pass
+
+
+_ensure_cwd_exists()
+
 import torch
 
 logger = logging.getLogger(__name__)
