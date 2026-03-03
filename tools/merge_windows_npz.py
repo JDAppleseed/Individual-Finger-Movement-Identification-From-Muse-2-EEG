@@ -13,6 +13,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from utils.sequence_data import load_sequence_npz
 
+DROP_SCALAR_MISMATCH_KEYS = {"features_path", "events_path"}
+
 
 def _is_per_window(v, n: int) -> bool:
     return isinstance(v, np.ndarray) and v.ndim >= 1 and len(v) == n
@@ -52,6 +54,18 @@ def merge_npz(npz_paths: list[Path], out_path: Path) -> None:
     for key in sorted(all_keys):
         values = [m.get(key) for m in metas]
         per_window_flags = [_is_per_window(v, n) for v, n in zip(values, lengths)]
+
+        if key in DROP_SCALAR_MISMATCH_KEYS:
+            base = next((v for v in values if v is not None), None)
+            if base is None:
+                continue
+            if all((_eq(base, v) if v is not None else True) for v in values):
+                merged_meta[key] = base
+            else:
+                print(
+                    f"Skipping scalar meta key with per-session values: {key}"
+                )
+            continue
 
         if any(per_window_flags):
             if not all(per_window_flags):

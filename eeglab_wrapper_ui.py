@@ -443,6 +443,19 @@ TOOLTIPS: Dict[str, str] = {
     "raw_dir": "Session root for raw recording.",
     "session_id": "Session ID for raw recording.",
     "finger_weights": "Per-finger loss weights (CSV or JSON). Example: 1,1,1,1,1,0.4 or {\"pinky\":0.4}",
+    "loss_action_weight": "Weight applied to the finger loss term.",
+    "rest_weight": "Class weight for REST actions (0 = ignore).",
+    "test_size": "Fraction of windows held out for testing.",
+    "split_mode": "Split strategy (group_trial or holdout_session).",
+    "purge_seconds": "Purge training windows within this many seconds of any test window.",
+    "hop_seconds": "Window hop override in seconds (0 = auto).",
+    "window_idx_leak_threshold": "Warn if window_idx-only classifier exceeds this accuracy.",
+    "strict_leakage": "Fail training if leakage checks exceed thresholds.",
+    "device": "Training device (auto/cpu/cuda/mps).",
+    "num_workers": "DataLoader worker processes (0 = main process).",
+    "pin_memory": "Pin DataLoader memory (useful for CUDA).",
+    "save_preds": "Output path for test predictions.",
+    "run_dir": "Explicit output directory for training run.",
 }
 
 EEGLAB_STYLE = """
@@ -1021,12 +1034,27 @@ class MainWindow(QMainWindow):
                 ArgSpec("seed", "--seed", "int", "Seed for REST subsampling."),
             ],
             "train": [
+                ArgSpec(
+                    "session_dir",
+                    "--session-dir",
+                    "text",
+                    "Session directory containing processed windows.",
+                ),
+                ArgSpec(
+                    "run_dir",
+                    "--run-dir",
+                    "text",
+                    "Explicit output directory for this run.",
+                ),
                 ArgSpec("npz", "--npz", "text", "Window dataset path."),
                 ArgSpec("subject_id", "--subject-id", "text", "Filter by subject ID."),
                 ArgSpec("epochs", "--epochs", "int", "Training epochs."),
                 ArgSpec("batch_size", "--batch-size", "int", "Training batch size."),
                 ArgSpec("lr", "--lr", "float", "Learning rate."),
                 ArgSpec("seed", "--seed", "int", "Random seed."),
+                ArgSpec("device", "--device", "text", "Training device (auto/cpu/cuda/mps)."),
+                ArgSpec("num_workers", "--num-workers", "int", "DataLoader workers."),
+                ArgSpec("pin_memory", "--pin-memory", "bool", "Pin DataLoader memory."),
                 ArgSpec(
                     "loss_action_weight",
                     "--loss-action-weight",
@@ -1041,7 +1069,37 @@ class MainWindow(QMainWindow):
                     "Per-finger loss weights (CSV/JSON).",
                 ),
                 ArgSpec("test_size", "--test-size", "float", "Test split fraction."),
+                ArgSpec(
+                    "split_mode",
+                    "--split-mode",
+                    "text",
+                    "Split strategy (group_trial or holdout_session).",
+                ),
+                ArgSpec(
+                    "purge_seconds",
+                    "--purge-seconds",
+                    "float",
+                    "Purge train windows near test windows (s).",
+                ),
+                ArgSpec(
+                    "hop_seconds",
+                    "--hop-seconds",
+                    "float",
+                    "Window hop override (s).",
+                ),
                 ArgSpec("non_rest_only", "--non-rest-only", "bool", "Train on non-REST only."),
+                ArgSpec(
+                    "window_idx_leak_threshold",
+                    "--window-idx-leak-threshold",
+                    "float",
+                    "Leakage warning threshold.",
+                ),
+                ArgSpec(
+                    "strict_leakage",
+                    "--strict-leakage",
+                    "bool",
+                    "Fail training on leakage checks.",
+                ),
                 ArgSpec("save_model", "--save-model", "text", "Model output path."),
                 ArgSpec("save_scaler", "--save-scaler", "text", "Scaler output path."),
                 ArgSpec("save_preds", "--save-preds", "text", "Predictions output path."),
@@ -2864,7 +2922,7 @@ class MainWindow(QMainWindow):
         for key in sorted(fields.keys()):
             source_widget = fields[key]
             proxy = self._clone_bound_widget(source_widget, key)
-            label = QLabel(key)
+            label = QLabel(self._friendly_label(step_id, key))
             label.setMinimumWidth(160)
             label.setWordWrap(True)
             layout.addRow(label, proxy)
@@ -3261,16 +3319,6 @@ class MainWindow(QMainWindow):
             self._add_spin(
                 step_id,
                 form,
-                "WINDOW_SEC",
-                "Window sec",
-                defaults,
-                0,
-                10,
-                is_float=True,
-            )
-            self._add_spin(
-                step_id,
-                form,
                 "RAW_SHARD_SAMPLES",
                 "Raw shard samples",
                 defaults,
@@ -3298,6 +3346,16 @@ class MainWindow(QMainWindow):
             self._add_spin(
                 step_id,
                 form,
+                "RAW_SHARD_FLUSH_INTERVAL_S",
+                "Raw shard flush interval (s)",
+                defaults,
+                0,
+                30,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
                 "MAX_BACKPRESSURE_S",
                 "Backpressure abort (s)",
                 defaults,
@@ -3315,38 +3373,94 @@ class MainWindow(QMainWindow):
                 10,
                 is_float=True,
             )
-            self._add_spin(step_id, form, "N_FINGERS", "N fingers", defaults, 1, 50)
-            self._add_spin(step_id, form, "N_ACTIONS", "N actions", defaults, 1, 50)
-            self._add_timebase_dropdown(
-                step_id, form, "TIMEBASE_VERSION", "Timebase", defaults
-            )
-            self._add_slider(
+            self._add_spin(
                 step_id,
                 form,
-                "BASE_CONF_THRESH",
-                "Base conf thresh",
+                "LSL_RESOLVE_TIMEOUT",
+                "LSL resolve timeout (s)",
                 defaults,
                 0,
-                1,
-                decimals=2,
+                30,
+                is_float=True,
             )
-            self._add_slider(
+            self._add_spin(
                 step_id,
                 form,
-                "UNCERTAINTY_WEIGHT",
-                "Uncertainty weight",
+                "LSL_INLET_MAX_BUFLEN_SEC",
+                "LSL inlet max buflen (s)",
                 defaults,
                 0,
-                1,
-                decimals=2,
+                60,
+                is_float=False,
             )
-            self._add_int_dropdown(
+            self._add_spin(
                 step_id,
                 form,
-                "STABILITY_FRAMES",
-                "Stability frames",
+                "LSL_INLET_MAX_CHUNKLEN",
+                "LSL inlet max chunklen",
                 defaults,
-                [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20],
+                0,
+                256,
+                is_float=False,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "HEARTBEAT_INTERVAL_S",
+                "Heartbeat interval (s)",
+                defaults,
+                0,
+                60,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "NO_SAMPLE_TIMEOUT_S",
+                "No sample timeout (s)",
+                defaults,
+                0,
+                60,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "WRITE_STALL_TIMEOUT_S",
+                "Write stall timeout (s)",
+                defaults,
+                0,
+                60,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "WARMUP_SAMPLE_COUNT",
+                "Warmup sample count",
+                defaults,
+                0,
+                1000,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "WARMUP_TIMEOUT_S",
+                "Warmup timeout (s)",
+                defaults,
+                0,
+                60,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "EVENT_FLUSH_INTERVAL_S",
+                "Event flush interval (s)",
+                defaults,
+                0,
+                10,
+                is_float=True,
             )
             self._add_checkbox(step_id, form, "ENABLE_ICA", "Enable ICA", defaults)
             self._add_spin(
@@ -3397,21 +3511,72 @@ class MainWindow(QMainWindow):
             self._add_spin(
                 step_id,
                 form,
-                "DATA_STREAM_TIMEOUT_S",
-                "Stream timeout (s)",
+                "PLOT_FPS",
+                "Plot FPS",
                 defaults,
-                0,
-                60,
+                1,
+                120,
                 is_float=True,
             )
             self._add_spin(
                 step_id,
                 form,
-                "DATA_STREAM_CHECK_INTERVAL_S",
-                "Stream check interval (s)",
+                "PLOT_DISPLAY_FS",
+                "Plot display FS",
+                defaults,
+                1,
+                512,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "PLOT_WINDOW_SEC",
+                "Plot window sec",
                 defaults,
                 0,
-                10,
+                30,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "PLOT_ROBUST_WINDOW_SEC",
+                "Plot robust window sec",
+                defaults,
+                0,
+                30,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "PLOT_ROBUST_EMA",
+                "Plot robust EMA",
+                defaults,
+                0,
+                1,
+                is_float=True,
+                decimals=3,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "PLOT_STARTUP_TIMEOUT_S",
+                "Plot startup timeout (s)",
+                defaults,
+                0,
+                30,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "PLOT_CHANNEL_SPACING_UV",
+                "Plot channel spacing (uV)",
+                defaults,
+                0,
+                1000,
                 is_float=True,
             )
             self._add_spin(
@@ -3423,23 +3588,6 @@ class MainWindow(QMainWindow):
                 0,
                 10,
                 is_float=True,
-            )
-            self._add_spin(
-                step_id,
-                form,
-                "FAILED_WRITE_WINDOW_S",
-                "Failed write window (s)",
-                defaults,
-                0,
-                30,
-                is_float=True,
-            )
-            self._add_text(
-                step_id,
-                form,
-                "FAILED_DIR",
-                "Failed output dir",
-                defaults,
             )
             self._add_text(
                 step_id,
@@ -3455,69 +3603,8 @@ class MainWindow(QMainWindow):
                 "Require exactly 4 channels",
                 defaults,
             )
-            self._add_checkbox(
-                step_id,
-                form,
-                "LIVE_VIZ_ENABLED",
-                "Live viz enabled",
-                defaults,
-            )
-            self._add_spin(
-                step_id,
-                form,
-                "LIVE_VIZ_FPS",
-                "Live viz FPS",
-                defaults,
-                1,
-                10,
-            )
-            self._add_int_dropdown(
-                step_id,
-                form,
-                "MC_DROPOUT_PASSES",
-                "MC dropout passes",
-                defaults,
-                [1, 2, 3, 5, 8, 10, 15, 20, 30, 50],
-            )
-            self._add_file_picker(
-                step_id,
-                form,
-                "EVENTS_CSV_PATH",
-                "Events CSV",
-                defaults,
-                "CSV (*.csv);;All Files (*)",
-                mode="save",
-            )
-            self._add_file_picker(
-                step_id,
-                form,
-                "EVENTS_AUTOSAVE_PATH",
-                "Events autosave",
-                defaults,
-                "CSV (*.csv);;All Files (*)",
-                mode="save",
-            )
-            self._add_editable_combo(
-                step_id,
-                form,
-                "EVENTS_CHANNEL",
-                "Events channel",
-                defaults,
-                ["n/a", "ch1", "ch2", "ch3", "ch4"],
-            )
-            self._add_text(step_id, form, "subject_id", "Subject ID", defaults)
-            self._add_checkbox(
-                step_id, form, "force_new_session", "Force new session", defaults
-            )
+            self._add_text(step_id, form, "EVENT_KEYMAP", "Event keymap", defaults)
             self._add_checkbox(step_id, form, "init_only", "Init only", defaults)
-            self._add_text(
-                step_id,
-                form,
-                "SESSION_ID_OVERRIDE",
-                "Session ID override",
-                defaults,
-                read_only=True,
-            )
         elif step_id == "infer":
             self._add_spin(
                 step_id,
@@ -3719,7 +3806,7 @@ class MainWindow(QMainWindow):
                 step_id,
                 form,
                 "loss_action_weight",
-                "Loss action weight",
+                "Finger loss weight",
                 defaults,
                 0,
                 10,
@@ -3729,7 +3816,7 @@ class MainWindow(QMainWindow):
                 step_id,
                 form,
                 "rest_weight",
-                "REST weight",
+                "REST class weight",
                 defaults,
                 0,
                 10,
@@ -3743,14 +3830,75 @@ class MainWindow(QMainWindow):
                 defaults,
             )
             self._add_spin(
-                step_id, form, "test_size", "Test size", defaults, 0, 1, is_float=True
+                step_id,
+                form,
+                "test_size",
+                "Test split size",
+                defaults,
+                0,
+                1,
+                is_float=True,
+            )
+            self._add_choice_dropdown(
+                step_id,
+                form,
+                "split_mode",
+                "Split mode",
+                defaults,
+                ["group_trial", "holdout_session"],
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "purge_seconds",
+                "Purge seconds",
+                defaults,
+                0,
+                60,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "hop_seconds",
+                "Hop seconds (auto=0)",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "window_idx_leak_threshold",
+                "Window index leak threshold",
+                defaults,
+                0,
+                1,
+                is_float=True,
             )
             self._add_checkbox(
-                step_id, form, "non_rest_only", "Non-REST only", defaults
+                step_id, form, "strict_leakage", "Strict leakage", defaults
             )
-            self._add_text(step_id, form, "save_preds", "Save predictions", defaults)
-            self._add_spin(step_id, form, "N_FINGERS", "N fingers", defaults, 1, 50)
-            self._add_spin(step_id, form, "N_ACTIONS", "N actions", defaults, 1, 50)
+            self._add_checkbox(
+                step_id, form, "non_rest_only", "Train non-REST only", defaults
+            )
+            self._add_choice_dropdown(
+                step_id,
+                form,
+                "device",
+                "Device",
+                defaults,
+                ["auto", "cpu", "cuda", "mps"],
+            )
+            self._add_spin(
+                step_id, form, "num_workers", "DataLoader workers", defaults, 0, 64
+            )
+            self._add_checkbox(step_id, form, "pin_memory", "Pin memory", defaults)
+            self._add_text(step_id, form, "run_dir", "Run dir override", defaults)
+            self._add_text(
+                step_id, form, "save_preds", "Save predictions", defaults
+            )
         else:
             for key, val in defaults.items():
                 if key in self.fields.get(step_id, {}):
@@ -3787,6 +3935,70 @@ class MainWindow(QMainWindow):
             "config",
             "ENABLE_ACTUATION",
         }
+        if step_id == "train":
+            ignored.update(
+                {
+                    "BATCH_SIZE",
+                    "EPOCHS",
+                    "LR",
+                    "SEED",
+                    "LOSS_ACTION_WEIGHT",
+                    "REST_WEIGHT",
+                    "DEFAULT_MODEL",
+                    "DEFAULT_SCALER",
+                    "DEFAULT_PREDS",
+                    "DEFAULT_NPZ",
+                    "MAX_SEARCH_DEPTH",
+                }
+            )
+        if step_id == "step1b":
+            ignored.update(
+                {
+                    "DEFAULT_SUBJECT_ID",
+                    "LEGACY_EVENT_FILE",
+                    "LEGACY_RAW_FILE",
+                    "REST_SUBSAMPLE_PROB",
+                    "REST_SUBSAMPLE_SEED",
+                    "SEED",
+                    "SOURCE_FS_DEFAULT",
+                    "TARGET_FS_DEFAULT",
+                }
+            )
+        if step_id == "step1":
+            ignored.update(
+                {
+                    "DEFAULT_SUBJECT_ID",
+                    "DEFAULT_EVENT_KEYMAP",
+                    "GENDER",
+                    "AGE",
+                    "PLOT_FPS",
+                    "PLOT_DISPLAY_FS",
+                    "PLOT_FIXED_YLIM",
+                    "PLOT_ROBUST_WINDOW_SEC",
+                    "PLOT_ROBUST_EMA",
+                    "PLOT_REFERENCE_OVERLAY",
+                    "PLOT_WINDOW_SEC",
+                    "PLOT_STARTUP_TIMEOUT_S",
+                    "PLOT_CHANNEL_SPACING_UV",
+                    "LSL_RESOLVE_TIMEOUT",
+                    "LSL_INLET_MAX_BUFLEN_SEC",
+                    "LSL_INLET_MAX_CHUNKLEN",
+                    "RAW_SHARD_FLUSH_INTERVAL_S",
+                    "HEARTBEAT_INTERVAL_S",
+                    "NO_SAMPLE_TIMEOUT_S",
+                    "WRITE_STALL_TIMEOUT_S",
+                    "WARMUP_SAMPLE_COUNT",
+                    "WARMUP_TIMEOUT_S",
+                    "EVENT_FLUSH_INTERVAL_S",
+                    "RAW_FLAG_NONFINITE",
+                    "INTEGRITY_GAP_TOLERANCE_MULT",
+                    "ALLOW_DROP",
+                    "subject_id",
+                    "force_new_session",
+                    "SESSION_ID_OVERRIDE",
+                    "session_id",
+                }
+            )
         existing = self.fields.get(step_id, {})
         for name, value in sorted(info.constants.items()):
             if name in ignored or name in existing:
@@ -3863,6 +4075,111 @@ class MainWindow(QMainWindow):
             widget = self.fields[step_id].get(dest)
             if widget:
                 self._apply_tooltip(widget, dest, arg.help)
+
+    def _friendly_label(self, step_id: str, key: str) -> str:
+        if step_id == "train":
+            labels = {
+                "session_dir": "Session Dir (Step 2 override)",
+                "npz": "Window NPZ",
+                "subject_id": "Subject ID",
+                "epochs": "Epochs",
+                "batch_size": "Batch size",
+                "lr": "Learning rate",
+                "save_model": "Save model",
+                "save_scaler": "Save scaler",
+                "seed": "Seed",
+                "loss_action_weight": "Finger loss weight",
+                "rest_weight": "REST class weight",
+                "finger_weights": "Finger weights (CSV/JSON)",
+                "test_size": "Test split size",
+                "split_mode": "Split mode",
+                "purge_seconds": "Purge seconds",
+                "hop_seconds": "Hop seconds (auto=0)",
+                "window_idx_leak_threshold": "Window index leak threshold",
+                "strict_leakage": "Strict leakage",
+                "non_rest_only": "Train non-REST only",
+                "device": "Device",
+                "num_workers": "DataLoader workers",
+                "pin_memory": "Pin memory",
+                "run_dir": "Run dir override",
+                "save_preds": "Save predictions",
+            }
+            return labels.get(key, key)
+        if step_id == "step1":
+            labels = {
+                "MODE": "Mode",
+                "ENABLE_PLOT": "Enable plot",
+                "PLOT_SCALE_MODE": "Plot scale mode",
+                "PLOT_FIXED_UV": "Fixed plot range (±uV)",
+                "PLOT_REFERENCE_LINES": "Reference overlay (±25/50/100 uV)",
+                "SAVE_RAW": "Save raw",
+                "EVENT_MARKING_ENABLED": "Event marking",
+                "EVENT_KEYMAP": "Event keymap",
+                "SAMPLING_RATE": "Sampling rate",
+                "CHANNELS": "Channels",
+                "RAW_SHARD_SAMPLES": "Raw shard samples",
+                "RAW_SHARD_FLUSH_INTERVAL_S": "Raw shard flush interval (s)",
+                "PROCESSING_QUEUE_MAXSIZE": "Processing queue max",
+                "RAW_QUEUE_MAXSIZE": "Raw queue max",
+                "MAX_BACKPRESSURE_S": "Backpressure abort (s)",
+                "QUEUE_PUT_TIMEOUT_S": "Queue put timeout (s)",
+                "LSL_RESOLVE_TIMEOUT": "LSL resolve timeout (s)",
+                "LSL_INLET_MAX_BUFLEN_SEC": "LSL inlet max buflen (s)",
+                "LSL_INLET_MAX_CHUNKLEN": "LSL inlet max chunklen",
+                "HEARTBEAT_INTERVAL_S": "Heartbeat interval (s)",
+                "NO_SAMPLE_TIMEOUT_S": "No sample timeout (s)",
+                "WRITE_STALL_TIMEOUT_S": "Write stall timeout (s)",
+                "WARMUP_SAMPLE_COUNT": "Warmup sample count",
+                "WARMUP_TIMEOUT_S": "Warmup timeout (s)",
+                "EVENT_FLUSH_INTERVAL_S": "Event flush interval (s)",
+                "ENABLE_ICA": "Enable ICA",
+                "ICA_WARMUP_S": "ICA warmup (s)",
+                "ICA_MIN_SAMPLES": "ICA min samples",
+                "ICA_MIN_VAR": "ICA min var",
+                "ICA_FAIL_POLICY": "ICA fail policy",
+                "ICA_MAX_RETRIES_PER_SESSION": "ICA max retries",
+                "LOG_ICA_DIAGNOSTICS": "Log ICA diagnostics",
+                "HARD_STOP_AFTER_UNHEALTHY_S": "Hard stop after unhealthy (s)",
+                "REQUIRED_LSL_LABELS": "Required labels (CSV)",
+                "REQUIRE_EXACTLY_4_CHANNELS": "Require exactly 4 channels",
+                "init_only": "Init only",
+                "PLOT_FPS": "Plot FPS",
+                "PLOT_DISPLAY_FS": "Plot display FS",
+                "PLOT_WINDOW_SEC": "Plot window sec",
+                "PLOT_ROBUST_WINDOW_SEC": "Plot robust window sec",
+                "PLOT_ROBUST_EMA": "Plot robust EMA",
+                "PLOT_STARTUP_TIMEOUT_S": "Plot startup timeout (s)",
+                "PLOT_CHANNEL_SPACING_UV": "Plot channel spacing (uV)",
+            }
+            return labels.get(key, key)
+        if step_id == "step1b":
+            labels = {
+                "session_dir": "Session Directory (sessions/<session_id>)",
+                "features": "Legacy features CSV",
+                "events": "Legacy events CSV",
+                "subject_id": "Subject ID",
+                "target_fs": "Target FS",
+                "allow_gaps": "Allow gaps",
+                "allow_partial": "Allow partial sessions",
+                "ignore_misalignment": "Ignore misalignment",
+                "WINDOW_SEC": "Window sec",
+                "WINDOW_SEC_DEFAULT": "Window sec (default)",
+                "STEP_SEC": "Step sec",
+                "PAD_SEC": "Pad sec",
+                "GAP_THRESHOLD_SEC": "Gap threshold",
+                "DEDUP_POLICY": "Dedupe policy",
+                "INTERPOLATION_POLICY": "Interpolation policy",
+                "LABEL_GATED": "Label gated",
+                "REST_POLICY": "REST policy",
+                "KEEP_BASELINE_REST_EVENTS": "Keep baseline rest",
+                "MIN_OVERLAP_RATIO": "Min overlap ratio",
+                "GUARD_BAND_SEC": "Guard band sec",
+                "ARTIFACT_MIN_OVERLAP_FRAC": "Artifact overlap",
+                "OUT_FILE": "Output CSV",
+                "OUT_NPZ": "Output NPZ",
+            }
+            return labels.get(key, key)
+        return key
 
     def _add_checkbox(
         self,
@@ -5109,6 +5426,9 @@ class MainWindow(QMainWindow):
         fields = self.fields.get(step_id, {})
         for key, widget in fields.items():
             defaults[key] = self._widget_value(widget)
+        if step_id == "train":
+            if defaults.get("hop_seconds") == 0.0:
+                defaults["hop_seconds"] = None
         if "REQUIRED_LSL_LABELS" in defaults:
             defaults["REQUIRED_LSL_LABELS"] = self._parse_label_field(
                 defaults.get("REQUIRED_LSL_LABELS")
