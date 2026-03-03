@@ -360,6 +360,8 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
     defaults = {
         "device": None,
         "session_dir": None,
+        "LIVE_VIZ_ENABLED": False,
+        "LIVE_VIZ_FPS": 2.0,
         "window_sec": 0.25,
         "hop_sec": 0.05,
         "target_fs": 256.0,
@@ -421,6 +423,18 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
     )
     p.add_argument("--allow_drop", action="store_true")
     p.add_argument("--log_every", type=float, help="Log interval (s).")
+    p.add_argument(
+        "--live_viz",
+        dest="LIVE_VIZ_ENABLED",
+        action="store_true",
+        help="Emit live visualization updates (UI model view).",
+    )
+    p.add_argument(
+        "--live_viz_fps",
+        dest="LIVE_VIZ_FPS",
+        type=float,
+        help="Live visualization update rate (Hz).",
+    )
 
     # Postprocess knobs
     post_group = p.add_mutually_exclusive_group()
@@ -608,6 +622,27 @@ def _postprocess_decision(
             "frames_in_state": 1,
         }
     return postprocess_predictions(action_probs, finger_probs, settings, state)
+
+
+def _compute_hidden_mag(model: CNNLSTMFingerActionNet, x: torch.Tensor) -> Optional[float]:
+    """
+    Returns the last-step LSTM hidden magnitude for a window, or None on failure.
+    x: [B, T, C]
+    """
+    try:
+        x = x.permute(0, 2, 1)
+        x = model.conv(x)
+        x = x.permute(0, 2, 1)
+        out, _ = model.lstm(x)
+        hidden_mag = torch.linalg.norm(out, dim=2).squeeze(0)
+        if hidden_mag.numel() == 0:
+            return None
+        value = float(hidden_mag[-1].item())
+        if not np.isfinite(value):
+            return None
+        return value
+    except Exception:
+        return None
 
 
 def _debounced_should_send(
@@ -815,6 +850,13 @@ def main() -> int:
     model, scaler = load_model_and_scaler(model_path, scaler_path, device=device)
     model.eval()
 
+    live_viz_enabled = bool(getattr(args, "LIVE_VIZ_ENABLED", False))
+    live_viz_fps = float(getattr(args, "LIVE_VIZ_FPS", 0.0) or 0.0)
+    if live_viz_fps <= 0.0:
+        live_viz_enabled = False
+    live_viz_interval = (1.0 / live_viz_fps) if live_viz_enabled else 0.0
+    last_live_viz_emit = 0.0
+
     inlet = _resolve_lsl_inlet(lsl_name, lsl_type, timeout_s=8.0)
     info = inlet.info()
     sfreq = float(info.nominal_srate())
@@ -958,10 +1000,18 @@ def main() -> int:
                 window_input = standardize_window_TxC(window.astype(np.float32), scaler)
                 x = torch.tensor(window_input, dtype=torch.float32).unsqueeze(0).to(device)
 
+                emit_viz = False
+                viz_ts = None
+                now_mono = time.monotonic()
+                if live_viz_enabled and (now_mono - last_live_viz_emit) >= live_viz_interval:
+                    emit_viz = True
+                    viz_ts = float(window_end)
+
                 with torch.inference_mode():
                     finger_logits, action_logits = model(x)
                     action_probs_t = torch.softmax(action_logits, dim=1).squeeze(0)
                     finger_probs_t = torch.softmax(finger_logits, dim=1).squeeze(0)
+                    hidden_mag = _compute_hidden_mag(model, x) if emit_viz else None
 
                 action_probs = action_probs_t.detach().cpu().numpy()
                 finger_probs = finger_probs_t.detach().cpu().numpy()
@@ -1011,6 +1061,10 @@ def main() -> int:
                         latency_ms,
                         dropped_windows,
                     )
+
+                if emit_viz and hidden_mag is not None and viz_ts is not None:
+                    last_live_viz_emit = now_mono
+                    print(f"VIZ t={viz_ts:.3f} hidden_mag={hidden_mag:.6f}", flush=True)
 
                 if pred_log is not None:
                     payload = {

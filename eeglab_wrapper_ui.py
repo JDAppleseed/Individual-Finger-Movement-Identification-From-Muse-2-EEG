@@ -861,6 +861,12 @@ class MainWindow(QMainWindow):
         self._auto_scan_timer.timeout.connect(self._auto_scan_lsl_streams)
 
         self.live_hidden_plot: Optional[LiveHiddenMagnitudePlot] = None
+        self.live_viz_status_label: Optional[QLabel] = None
+        self._last_live_viz_mono = 0.0
+        self._live_viz_status_timer = QTimer(self)
+        self._live_viz_status_timer.setInterval(750)
+        self._live_viz_status_timer.timeout.connect(self._update_live_viz_status)
+        self._live_viz_status_timer.start()
         self.replay_viz: Optional[ReplayVisualizer] = None
         self.model_views_window: Optional[QDialog] = None
         self._model_views_root: Optional[QWidget] = None
@@ -1522,6 +1528,9 @@ class MainWindow(QMainWindow):
         fps_row.addWidget(self.live_viz_fps_spin)
         fps_row.addStretch(1)
         layout.addLayout(fps_row)
+        self.live_viz_status_label = QLabel("Live Viz: Disabled")
+        self._apply_text_outline_effect(self.live_viz_status_label)
+        layout.addWidget(self.live_viz_status_label)
 
         if not PYQTGRAPH_AVAILABLE:
             pg_note = QLabel("pyqtgraph not available; model visualizations disabled.")
@@ -1585,7 +1594,10 @@ class MainWindow(QMainWindow):
             self.live_viz_fps_spin.setValue(field.value())
             self.live_viz_fps_spin.valueChanged.connect(field.setValue)
             field.valueChanged.connect(self.live_viz_fps_spin.setValue)
+        self.live_viz_checkbox.toggled.connect(lambda _val: self._update_live_viz_status())
+        self.model_view_mode.currentTextChanged.connect(lambda _val: self._update_live_viz_status())
         self._toggle_model_views("Off")
+        self._update_live_viz_status()
         return widget
 
     def _open_model_views_window(self) -> None:
@@ -1627,6 +1639,31 @@ class MainWindow(QMainWindow):
             self.model_view_tabs.setEnabled(enabled)
         self.live_viz_checkbox.setEnabled(mode == "Live")
         self.live_viz_fps_spin.setEnabled(mode == "Live")
+        self._update_live_viz_status()
+
+    def _live_viz_enabled(self) -> bool:
+        field = self.fields.get("infer", {}).get("LIVE_VIZ_ENABLED")
+        if isinstance(field, QCheckBox):
+            return field.isChecked()
+        return False
+
+    def _update_live_viz_status(self) -> None:
+        if self.live_viz_status_label is None:
+            return
+        mode = None
+        if hasattr(self, "model_view_mode"):
+            mode = self.model_view_mode.currentText()
+        if mode and mode != "Live":
+            self.live_viz_status_label.setText("Live Viz: Off")
+            return
+        if not self._live_viz_enabled():
+            self.live_viz_status_label.setText("Live Viz: Disabled")
+            return
+        now = time.monotonic()
+        if self._last_live_viz_mono and (now - self._last_live_viz_mono) <= 2.5:
+            self.live_viz_status_label.setText("Live Viz: Active")
+        else:
+            self.live_viz_status_label.setText("Live Viz: Waiting")
 
     def _load_replay_data(self) -> None:
         if not PYQTGRAPH_AVAILABLE:
@@ -3182,6 +3219,23 @@ class MainWindow(QMainWindow):
                 is_float=True,
             )
             self._add_checkbox(step_id, form, "allow_drop", "Allow drop", defaults)
+            self._add_checkbox(
+                step_id,
+                form,
+                "LIVE_VIZ_ENABLED",
+                "Enable live visualization output",
+                defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "LIVE_VIZ_FPS",
+                "Live viz FPS",
+                defaults,
+                1,
+                10,
+                is_float=False,
+            )
             self._add_checkbox(
                 step_id,
                 form,
@@ -6253,8 +6307,11 @@ class MainWindow(QMainWindow):
     def _append_log(self, line: str) -> None:
         if line.startswith("VIZ "):
             payload = parse_viz_line(line)
-            if payload and self.live_hidden_plot:
-                self.live_hidden_plot.update(payload)
+            if payload:
+                self._last_live_viz_mono = time.monotonic()
+                self._update_live_viz_status()
+                if self.live_hidden_plot:
+                    self.live_hidden_plot.update(payload)
             return
         self.log_entries.append(line)
         self._append_log_line_to_console(line)

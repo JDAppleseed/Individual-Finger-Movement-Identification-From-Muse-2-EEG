@@ -172,6 +172,8 @@ def default_infer_settings() -> Dict[str, Any]:
         "scaler_path": "scaler.npz",
         "stream_name": "Muse2-EEG",
         "stream_type": "EEG",
+        "LIVE_VIZ_ENABLED": False,
+        "LIVE_VIZ_FPS": 2,
         "window_sec": 0.25,
         "hop_sec": 0.05,
         "target_fs": DEFAULT_TARGET_FS,
