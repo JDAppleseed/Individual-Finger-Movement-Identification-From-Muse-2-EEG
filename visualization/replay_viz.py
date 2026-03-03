@@ -107,3 +107,22 @@ class ReplayVisualizer:
         loss.backward()
         grad = x.grad.detach().cpu().numpy()[0]
         return np.abs(grad)
+
+    def prediction_timeline(self, idx: int) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        """
+        Returns per-timestep (finger_probs, action_probs) for the window.
+        Shapes: [T, n_fingers], [T, n_actions]
+        """
+        torch = self._torch
+        with torch.no_grad():
+            x = self._tensor_from_window(idx)
+            x = x.permute(0, 2, 1)
+            x = self.model.conv(x)
+            x = x.permute(0, 2, 1)
+            out, _ = self.model.lstm(x)
+            out = self.model.head_dropout(out)
+            finger_logits = self.model.finger_head(out)
+            action_logits = self.model.action_head(out)
+            finger_probs = torch.softmax(finger_logits, dim=2).squeeze(0).cpu().numpy()
+            action_probs = torch.softmax(action_logits, dim=2).squeeze(0).cpu().numpy()
+        return finger_probs, action_probs

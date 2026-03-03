@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+import numpy as np
+
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
@@ -99,6 +101,7 @@ from app.repo_probe import discover_scripts
 from app.ui_config_validation import validate_step_settings
 from muse_streaming.config import DEFAULT_STREAM_NAME, DEFAULT_STREAM_TYPE
 from muse_streaming.healthcheck import run_healthcheck
+from utils.label_schema import ACTION_NAMES, FINGER_NAMES
 from utils.session_layout import SessionLayout, resolve_latest_run_dir
 from visualization.live_viz import LiveHiddenMagnitudePlot, parse_viz_line
 from visualization.replay_viz import ReplayVisualizer
@@ -868,6 +871,14 @@ class MainWindow(QMainWindow):
         self._live_viz_status_timer.timeout.connect(self._update_live_viz_status)
         self._live_viz_status_timer.start()
         self.replay_viz: Optional[ReplayVisualizer] = None
+        self.replay_pred_finger_plot = None
+        self.replay_pred_action_plot = None
+        self.replay_auto_checkbox: Optional[QCheckBox] = None
+        self.replay_auto_interval: Optional[QSpinBox] = None
+        self.replay_pred_label: Optional[QLabel] = None
+        self._replay_auto_timer = QTimer(self)
+        self._replay_auto_timer.setInterval(500)
+        self._replay_auto_timer.timeout.connect(self._advance_replay_window)
         self.model_views_window: Optional[QDialog] = None
         self._model_views_root: Optional[QWidget] = None
         self.log_entries: list[str] = []
@@ -1561,6 +1572,22 @@ class MainWindow(QMainWindow):
         replay_controls.addWidget(self.replay_layer_index)
         replay_controls.addStretch(1)
         replay_layout.addLayout(replay_controls)
+
+        replay_auto_row = QHBoxLayout()
+        self.replay_auto_checkbox = QCheckBox("Auto-advance window")
+        self.replay_auto_interval = QSpinBox()
+        self.replay_auto_interval.setRange(50, 5000)
+        self.replay_auto_interval.setValue(500)
+        self.replay_auto_interval.setSuffix(" ms")
+        self.replay_auto_checkbox.toggled.connect(self._toggle_replay_auto)
+        self.replay_auto_interval.valueChanged.connect(self._set_replay_auto_interval)
+        replay_auto_row.addWidget(self.replay_auto_checkbox)
+        replay_auto_row.addWidget(self.replay_auto_interval)
+        replay_auto_row.addStretch(1)
+        replay_layout.addLayout(replay_auto_row)
+        self.replay_pred_label = QLabel("Current prediction: -")
+        self._apply_text_outline_effect(self.replay_pred_label)
+        replay_layout.addWidget(self.replay_pred_label)
         replay_btn_row = QHBoxLayout()
         load_btn = QPushButton("Load Replay Data")
         load_btn.clicked.connect(self._load_replay_data)
@@ -1571,18 +1598,53 @@ class MainWindow(QMainWindow):
         replay_btn_row.addStretch(1)
         replay_layout.addLayout(replay_btn_row)
         self.replay_feature_view = pg.ImageView()
+        try:
+            self.replay_feature_view.getView().setAspectLocked(False)
+        except Exception:
+            pass
         self.replay_hidden_plot = pg.PlotWidget()
         self.replay_saliency_view = pg.ImageView()
-        replay_layout.addWidget(QLabel("Feature Maps"))
+        self._add_section_header(
+            replay_layout,
+            "Feature Maps",
+            "Convolutional feature maps for the selected window/layer.",
+        )
         replay_layout.addWidget(self.replay_feature_view)
-        replay_layout.addWidget(QLabel("Hidden Magnitude"))
+        self._add_section_header(
+            replay_layout,
+            "Hidden Magnitude",
+            "LSTM hidden-state magnitude over time for the selected window.",
+        )
         replay_layout.addWidget(self.replay_hidden_plot)
-        replay_layout.addWidget(QLabel("Saliency"))
+        self._add_section_header(
+            replay_layout,
+            "Prediction Timeline (Fingers)",
+            "Per-timestep finger probabilities from the model.",
+        )
+        self.replay_pred_finger_plot = pg.PlotWidget()
+        replay_layout.addWidget(self.replay_pred_finger_plot)
+        self._add_section_header(
+            replay_layout,
+            "Prediction Timeline (Actions)",
+            "Per-timestep action probabilities from the model.",
+        )
+        self.replay_pred_action_plot = pg.PlotWidget()
+        replay_layout.addWidget(self.replay_pred_action_plot)
+        self._add_section_header(
+            replay_layout,
+            "Saliency",
+            "Input saliency (absolute gradient) for the predicted action.",
+        )
         replay_layout.addWidget(self.replay_saliency_view)
 
         live_tab = QWidget()
         live_layout = QVBoxLayout(live_tab)
         self.live_hidden_plot = LiveHiddenMagnitudePlot()
+        self._add_section_header(
+            live_layout,
+            "Live Hidden Magnitude",
+            "Streaming hidden-state magnitude from live inference (Step 7).",
+        )
         live_layout.addWidget(self.live_hidden_plot.widget)
 
         self.model_view_tabs.addTab(replay_tab, "Replay")
@@ -1598,6 +1660,7 @@ class MainWindow(QMainWindow):
         self.model_view_mode.currentTextChanged.connect(lambda _val: self._update_live_viz_status())
         self._toggle_model_views("Off")
         self._update_live_viz_status()
+        self._autofill_replay_paths()
         return widget
 
     def _open_model_views_window(self) -> None:
@@ -1627,7 +1690,30 @@ class MainWindow(QMainWindow):
         self._model_views_root = content
         dialog.show()
 
+    def _make_info_button(self, title: str, body: str) -> QToolButton:
+        btn = QToolButton()
+        btn.setText("i")
+        btn.setToolTip("Info")
+        btn.setFixedSize(18, 18)
+        btn.setStyleSheet(
+            "QToolButton { border: 1px solid #6b7c92; border-radius: 9px; "
+            "background: #c9d2df; color: #2c3e50; font-weight: 700; }"
+            "QToolButton:hover { background: #d7dee8; }"
+        )
+        btn.clicked.connect(lambda: QMessageBox.information(self, title, body))
+        return btn
+
+    def _add_section_header(self, layout: QVBoxLayout, title: str, body: str) -> None:
+        row = QHBoxLayout()
+        label = QLabel(title)
+        self._apply_text_outline_effect(label)
+        row.addWidget(label)
+        row.addWidget(self._make_info_button(title, body))
+        row.addStretch(1)
+        layout.addLayout(row)
+
     def _on_model_views_window_closed(self, *_args) -> None:
+        self._replay_auto_timer.stop()
         self.model_views_window = None
         self._model_views_root = None
 
@@ -1639,6 +1725,8 @@ class MainWindow(QMainWindow):
             self.model_view_tabs.setEnabled(enabled)
         self.live_viz_checkbox.setEnabled(mode == "Live")
         self.live_viz_fps_spin.setEnabled(mode == "Live")
+        if mode != "Replay":
+            self._replay_auto_timer.stop()
         self._update_live_viz_status()
 
     def _live_viz_enabled(self) -> bool:
@@ -1690,15 +1778,109 @@ class MainWindow(QMainWindow):
             feature_map = self.replay_viz.feature_map(idx, layer_idx)
             hidden_mag = self.replay_viz.hidden_magnitude(idx)
             saliency = self.replay_viz.saliency(idx)
+            timeline = self.replay_viz.prediction_timeline(idx)
             if feature_map is not None:
                 self.replay_feature_view.setImage(feature_map, autoLevels=True)
             if hidden_mag is not None:
                 self.replay_hidden_plot.clear()
                 self.replay_hidden_plot.plot(hidden_mag)
+            if timeline is not None:
+                finger_probs, action_probs = timeline
+                if self.replay_pred_label is not None:
+                    finger_text = "-"
+                    action_text = "-"
+                    if finger_probs.size:
+                        finger_last = finger_probs[-1]
+                        finger_idx = int(np.argmax(finger_last))
+                        finger_prob = float(finger_last[finger_idx])
+                        finger_name = FINGER_NAMES.get(finger_idx, f"finger_{finger_idx}")
+                        finger_text = f"{finger_name} ({finger_prob:.2f})"
+                    if action_probs.size:
+                        action_last = action_probs[-1]
+                        action_idx = int(np.argmax(action_last))
+                        action_prob = float(action_last[action_idx])
+                        action_name = ACTION_NAMES.get(action_idx, f"action_{action_idx}")
+                        action_text = f"{action_name} ({action_prob:.2f})"
+                    self.replay_pred_label.setText(
+                        f"Current prediction: Finger {finger_text}, Action {action_text}"
+                    )
+                self._plot_prediction_timeline(
+                    self.replay_pred_finger_plot,
+                    finger_probs,
+                    FINGER_NAMES,
+                    title="Finger Prob",
+                )
+                self._plot_prediction_timeline(
+                    self.replay_pred_action_plot,
+                    action_probs,
+                    ACTION_NAMES,
+                    title="Action Prob",
+                )
+            elif self.replay_pred_label is not None:
+                self.replay_pred_label.setText("Current prediction: -")
             if saliency is not None:
                 self.replay_saliency_view.setImage(saliency, autoLevels=True)
         except Exception as exc:
             self._append_log(f"⚠️ Replay view refresh failed: {exc}")
+
+    def _toggle_replay_auto(self, enabled: bool) -> None:
+        if enabled:
+            self._replay_auto_timer.start()
+            self._advance_replay_window()
+        else:
+            self._replay_auto_timer.stop()
+
+    def _set_replay_auto_interval(self, value: int) -> None:
+        self._replay_auto_timer.setInterval(int(value))
+        if self._replay_auto_timer.isActive():
+            self._replay_auto_timer.start()
+
+    def _advance_replay_window(self) -> None:
+        if not self.replay_window_index:
+            return
+        if not self.replay_viz:
+            return
+        current = int(self.replay_window_index.value())
+        maximum = int(self.replay_window_index.maximum())
+        if maximum <= 0:
+            return
+        next_idx = 0 if current >= maximum else current + 1
+        self.replay_window_index.setValue(next_idx)
+        self._refresh_replay_views()
+
+    def _plot_prediction_timeline(
+        self,
+        plot_widget: Optional["pg.PlotWidget"],
+        probs: np.ndarray,
+        label_map: Dict[int, str],
+        *,
+        title: str,
+    ) -> None:
+        if plot_widget is None:
+            return
+        if probs is None or probs.size == 0:
+            return
+        plot_item = plot_widget.getPlotItem()
+        if plot_item.legend is not None:
+            try:
+                plot_item.legend.scene().removeItem(plot_item.legend)
+            except Exception:
+                pass
+            plot_item.legend = None
+        plot_item.clear()
+        plot_item.addLegend(offset=(10, 10))
+        plot_item.setLabel("left", title)
+        plot_item.setLabel("bottom", "t")
+
+        steps = int(probs.shape[0])
+        classes = int(probs.shape[1]) if probs.ndim == 2 else 0
+        if classes <= 0 or steps <= 0:
+            return
+        x = np.arange(steps, dtype=float)
+        for idx in range(classes):
+            label = label_map.get(idx, f"class_{idx}")
+            color = pg.intColor(idx, hues=max(6, classes))
+            plot_item.plot(x, probs[:, idx], pen=pg.mkPen(color, width=1), name=label)
 
     def _bind_checkbox(self, dock_cb: QCheckBox, step_id: str, key: str) -> None:
         field_cb = self.fields.get(step_id, {}).get(key)
@@ -4669,6 +4851,7 @@ class MainWindow(QMainWindow):
             str(latest_features) if latest_features else str(features_dir)
         )
         self._update_resume_ui()
+        self._autofill_replay_paths()
 
     def _latest_subject_file(self, base: Path, pattern: str) -> Optional[Path]:
         if not base.exists():
@@ -4771,9 +4954,8 @@ class MainWindow(QMainWindow):
             _maybe_set(train_npz_widget, train_npz, {"eeg_windows.npz"})
 
         if not global_session or not global_session.exists():
+            self._autofill_replay_paths()
             return
-        layout = SessionLayout(global_session)
-        default_npz = str(layout.windows_npz)
 
         infer_model_widget = self.fields.get("infer", {}).get("model_path")
         infer_scaler_widget = self.fields.get("infer", {}).get("scaler_path")
@@ -4784,13 +4966,59 @@ class MainWindow(QMainWindow):
             scaler_path = str(run_dir / "scaler.npz")
             _maybe_set(infer_model_widget, model_path, {"finger_action_model.pt"})
             _maybe_set(infer_scaler_widget, scaler_path, {"scaler.npz"})
-            if hasattr(self, "replay_model_path"):
-                _maybe_set(self.replay_model_path, model_path, {"finger_action_model.pt"})
-            if hasattr(self, "replay_scaler_path"):
-                _maybe_set(self.replay_scaler_path, scaler_path, {"scaler.npz"})
+        self._autofill_replay_paths(session_dir_override=global_session)
 
-        if hasattr(self, "replay_npz_path"):
-            _maybe_set(self.replay_npz_path, default_npz, {"eeg_windows.npz"})
+    def _autofill_replay_paths(
+        self, *, session_dir_override: Optional[Path] = None
+    ) -> None:
+        def _maybe_set(
+            widget: Optional[QLineEdit], value: str, legacy_values: set[str]
+        ) -> None:
+            if not isinstance(widget, QLineEdit):
+                return
+            current = widget.text().strip()
+            if not current or current in legacy_values:
+                widget.setText(value)
+
+        if not hasattr(self, "replay_npz_path"):
+            return
+        if not self.current_project or not self.current_subject:
+            return
+        subject_dir = subject_root(self.current_project, self.current_subject)
+
+        npz_path: Optional[Path] = None
+        if session_dir_override and session_dir_override.exists():
+            layout = SessionLayout(session_dir_override)
+            if layout.windows_npz.exists():
+                npz_path = layout.windows_npz
+            else:
+                legacy = session_dir_override / "windows" / "eeg_windows.npz"
+                if legacy.exists():
+                    npz_path = legacy
+        if npz_path is None:
+            npz_path = self._resolve_windows_npz_for_current(subject_dir)
+        if npz_path is not None:
+            _maybe_set(self.replay_npz_path, str(npz_path), {"eeg_windows.npz"})
+
+        _exp_hash, model_path, scaler_path = self._resolve_latest_model_artifacts(
+            subject_dir, session_dir_override=session_dir_override
+        )
+        if model_path is not None:
+            _maybe_set(self.replay_model_path, str(model_path), {"finger_action_model.pt"})
+        if scaler_path is not None:
+            _maybe_set(self.replay_scaler_path, str(scaler_path), {"scaler.npz"})
+        if model_path is None:
+            infer_model_widget = self.fields.get("infer", {}).get("model_path")
+            if isinstance(infer_model_widget, QLineEdit):
+                text = infer_model_widget.text().strip()
+                if text:
+                    _maybe_set(self.replay_model_path, text, {"finger_action_model.pt"})
+        if scaler_path is None:
+            infer_scaler_widget = self.fields.get("infer", {}).get("scaler_path")
+            if isinstance(infer_scaler_widget, QLineEdit):
+                text = infer_scaler_widget.text().strip()
+                if text:
+                    _maybe_set(self.replay_scaler_path, text, {"scaler.npz"})
 
     def _on_session_dir_changed(self, _text: str) -> None:
         self._update_projects_selected_session_label()
@@ -4811,6 +5039,11 @@ class MainWindow(QMainWindow):
             p = session_root(subject_dir, self.current_session_ui)
             if p.exists():
                 return p
+        # 3) Latest session under subject (best-effort default)
+        sessions_root = subject_dir / "sessions"
+        latest = _latest_dir_by_mtime(sessions_root)
+        if latest and latest.exists():
+            return latest
         return None
 
     def _resolve_windows_npz_for_current(self, subject_dir: Path) -> Optional[Path]:
