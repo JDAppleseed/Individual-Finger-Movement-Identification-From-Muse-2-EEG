@@ -71,7 +71,7 @@ INTERPOLATION_POLICY = "np.interp.linear"
 # Label assignment robustness
 LABEL_GATED = True  # Legacy: drop unlabeled windows instead of REST-by-exclusion
 REST_POLICY: Optional[str] = None  # "label_gated" or "rest_by_exclusion" (preferred)
-KEEP_BASELINE_REST_EVENTS = 2  # Keep REST only if overlapping first N rest events
+KEEP_BASELINE_REST_EVENTS = -1  # <0 keeps all labeled REST events; 0 keeps none; >0 keeps first N
 MIN_OVERLAP_RATIO = 0.20  # fraction of WINDOW_SEC required for non-REST labels
 GUARD_BAND_SEC = (
     0.00  # skip windows within ± this time of any movement boundary (midpoint-based)
@@ -1297,21 +1297,21 @@ def main():
         mid = 0.5 * (window_start + window_end)
         return bool(np.any(np.abs(movement_boundaries_arr - mid) <= GUARD_BAND_SEC))
 
-    # Baseline REST allow-list (first N rest events)
+    # Baseline REST allow-list (label-gated)
     baseline_rest_events: List[Dict[str, Any]] = []
     baseline_rest_event_indices: set = set()
-    if KEEP_BASELINE_REST_EVENTS > 0:
-        rest_events = [
-            e
-            for e in events
-            if int(e.get("action_id", ACTION_REST)) == int(ACTION_REST)
-            and e.get("type") == "rest"
-        ]
-        rest_events.sort(key=lambda x: float(x["onset_s"]))
+    rest_events = [
+        e
+        for e in events
+        if int(e.get("action_id", ACTION_REST)) == int(ACTION_REST)
+        and e.get("type") == "rest"
+    ]
+    rest_events.sort(key=lambda x: float(x["onset_s"]))
+    if KEEP_BASELINE_REST_EVENTS < 0:
+        baseline_rest_events = rest_events
+    elif KEEP_BASELINE_REST_EVENTS > 0:
         baseline_rest_events = rest_events[: int(KEEP_BASELINE_REST_EVENTS)]
-        baseline_rest_event_indices = {
-            e.get("event_index") for e in baseline_rest_events
-        }
+    baseline_rest_event_indices = {e.get("event_index") for e in baseline_rest_events}
 
     # ===== WINDOW LOOP =====
     windows: List[Dict[str, Any]] = []
@@ -1690,6 +1690,8 @@ def main():
     print(f"Kept class distribution (finger_id): {finger_dist}")
     if KEEP_BASELINE_REST_EVENTS == 0:
         print("Sanity: KEEP_BASELINE_REST_EVENTS=0 → no REST windows are kept.")
+    elif KEEP_BASELINE_REST_EVENTS < 0:
+        print("Sanity: KEEP_BASELINE_REST_EVENTS<0 → all labeled REST windows are eligible.")
 
     gap_policy = (
         "allow_gap_interp"
