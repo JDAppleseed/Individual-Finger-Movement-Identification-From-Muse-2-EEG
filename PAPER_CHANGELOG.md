@@ -4,6 +4,7 @@ This changelog summarizes the modifications made to expand `research_paper.tex` 
 
 ## What was added/changed
 
+- Corrected technical statements in `research_paper.tex` to match repository behavior (loss formulation, MC-dropout usage, ECE source/semantics, latency policy status, persistence mode, and sex inference).
 - Added an artifact-driven paper build script: `scripts/build_paper_artifacts.py`
   - Scans `Projects/**/processed/models/*/metrics.json` and `test_predictions.npz`
   - Computes test accuracies, ECE (10-bin), Wilson 95% CIs, and bootstrap 95% CIs directly from saved predictions

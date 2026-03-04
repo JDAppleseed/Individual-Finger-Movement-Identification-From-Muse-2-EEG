@@ -50,7 +50,7 @@ The pipeline provides:
 \item Sliding-window preprocessing with NaN rejection
 \item Multi-head CNN+LSTM classification
 \item REST-aware class weighting
-\item Confidence and reliability evaluation
+\item Deterministic evaluation (ECE) and MC-dropout uncertainty visualization
 \item Artifact-driven reproducibility
 \end{itemize}
 
@@ -63,15 +63,15 @@ For uncertainty, we use MC dropout as a practical Bayesian approximation that en
 
 \section{System Overview}
 
-The repository implements an end-to-end pipeline with persistent artifacts at each stage:
+The repository implements an end-to-end pipeline with persistent artifacts at each stage. Step~3 provides deterministic evaluation when predictions are recomputed, while Step~3c generates MC-dropout uncertainty figures.
 
 \begin{enumerate}
 \item \textbf{Step 1:} stream and record raw EEG (\texttt{1\_stream\_and\_record.py})
 \item \textbf{Step 1b:} extract labeled windows (\texttt{1b\_extract\_windows.py})
-\item \textbf{Step 2:} train a multi-head neural model (\texttt{2\_train\_model.py})
-\item \textbf{Step 3:} evaluate and bundle predictions (\texttt{3\_evaluate\_model.py})
+\item \textbf{Step 2:} train a multi-head neural model and export \texttt{test\_predictions.npz} (\texttt{2\_train\_model.py})
+\item \textbf{Step 3:} deterministic evaluation and report bundling (\texttt{3\_evaluate\_model.py})
 \item \textbf{Step 3b:} dataset checks (\texttt{3b\_deepchecks\_evaluate.py})
-\item \textbf{Step 3c:} paper-ready figures (\texttt{3c\_live\_paper\_figures.py})
+\item \textbf{Step 3c:} MC-dropout paper-ready figures (\texttt{3c\_live\_paper\_figures.py})
 \item \textbf{Step 4:} HTML report generation (\texttt{4\_generate\_reports.py})
 \item \textbf{Step 7:} live inference and (optional) actuation (\texttt{7\_live\_infer\_and\_actuate.py})
 \item UI support: \texttt{eeglab\_wrapper\_ui.py}
@@ -87,8 +87,8 @@ The repository implements an end-to-end pipeline with persistent artifacts at ea
 ]
 \node[box] (s1) {Step 1\\Stream \& Record\\raw shards, events.jsonl};
 \node[box, right=of s1] (s1b) {Step 1b\\Window Extract\\eeg\_windows.npz};
-\node[box, right=of s1b] (s2) {Step 2\\Train\\model.pt, preds.npz};
-\node[box, right=of s2] (s3) {Step 3/3c\\Evaluate\\confusion, ECE};
+\node[box, right=of s1b] (s2) {Step 2\\Train\\model.pt, test\_predictions.npz};
+\node[box, right=of s2] (s3) {Step 3/3c\\Evaluate \& Figures\\confusion, ECE, MC-dropout};
 \node[box, below=of s2] (s7) {Step 7\\Live infer\\(optional actuation)};
 \draw[arr] (s1) -- (s1b);
 \draw[arr] (s1b) -- (s2);
@@ -129,10 +129,10 @@ Raw EEG samples are first captured and stored as binary NumPy arrays (\texttt{.n
 
 The JSON file serves as the authoritative event source to prevent schema drift or CSV parsing ambiguity.
 
-No data paths exist that rely solely on in-memory buffers; all sessions persist to disk.
+By default, sessions persist to disk; however, Step~7 supports an in-memory-only mode via \texttt{--no\_file\_io} that disables all file outputs.
 
 \subsection{Cohort Summary}
-Demographics, session duration, and event label counts are derived directly from \texttt{subject.json}, \texttt{run\_meta.json}, and \texttt{events/events.jsonl}. Sex is inferred from the subject ID string: IDs containing \texttt{M} are treated as male and IDs containing \texttt{F} as female.
+Demographics, session duration, and event label counts are derived directly from \texttt{subject.json}, \texttt{run\_meta.json}, and \texttt{events/events.jsonl}. Sex is read from \texttt{subject.json} when available; otherwise it is inferred from the subject ID string when it contains only \texttt{M} or only \texttt{F}.
 
 \input{paper_artifacts/tables_demographics.tex}
 \input{paper_artifacts/tables_sessions.tex}
@@ -190,14 +190,14 @@ Parameters & \ModelParamCount \\
 The loss function is:
 
 \[
-\mathcal{L} = \text{CE}_{\text{action}} + \text{CE}_{\text{finger}}
+\mathcal{L} = \text{CE}_{\text{action}} + \lambda_f \, \text{CE}_{\text{finger}}(\text{non-REST})
 \]
 
-The action head supports class weighting, including a configurable REST weight (\texttt{rest\_weight}) saved per run in \texttt{train\_config.json}.
+Here \(\lambda_f\) corresponds to \texttt{loss\_action\_weight} in \texttt{2\_train\_model.py} and scales the \emph{finger} loss (not the action loss), which is computed only on non-REST windows. The action head supports class weighting, including a configurable REST weight (\texttt{rest\_weight}) saved per run in \texttt{train\_config.json}.
 
 \section{Monte Carlo Dropout for Uncertainty Estimation}
 
-During offline evaluation, dropout layers remain active at inference time. For \(K\) stochastic passes:
+For MC-dropout uncertainty figures (Step~3c), dropout layers remain active at inference time. For \(K\) stochastic passes:
 
 \[
 \mu = \frac{1}{K}\sum_{k=1}^{K}\hat{y}_k
@@ -207,7 +207,7 @@ During offline evaluation, dropout layers remain active at inference time. For \
 \sigma^2 = \frac{1}{K}\sum_{k=1}^{K}(\hat{y}_k - \mu)^2
 \]
 
-Reliability diagrams and confidence scatter plots evaluate calibration.
+Reliability diagrams evaluate calibration, while confidence--uncertainty scatter plots provide qualitative uncertainty visualization. Step~3 evaluation is deterministic when predictions are recomputed; however, \texttt{test\_predictions.npz} produced by Step~2 is generated with the model still in train mode, so dropout is active for a single pass unless Step~3 recomputes.
 
 Live inference currently uses deterministic forward passes with confidence gating.
 
@@ -215,17 +215,17 @@ Live inference currently uses deterministic forward passes with confidence gatin
 
 Training hyperparameters are saved per run in \texttt{train\_config.json} and summarized in the auto-extracted performance table. In the current artifacts, both runs use 60 epochs, batch size 64, learning rate 0.001, and seed 42. Optimization uses Adam. Early stopping and gradient clipping are \NotAvailable in the current run artifacts (not logged in \texttt{train\_config.json}).
 
-Input normalization is performed using a per-channel normalizer fitted on the training split (\texttt{fit\_channel\_normalizer} in \texttt{2\_train\_model.py}). In the current artifacts, \texttt{loss\_action\_weight}=2.0 and \texttt{rest\_weight}=3.0 (saved in \texttt{train\_config.json}), which biases training toward correctly identifying REST and reduces false non-REST triggers.
+Input normalization is performed using a per-channel normalizer fitted on the training split (\texttt{fit\_channel\_normalizer} in \texttt{2\_train\_model.py}). In the current artifacts, \texttt{loss\_action\_weight} $\in \{1.0, 2.0\}$ and \texttt{rest\_weight} $\in \{0.2, 1.0\}$ (saved per run in \texttt{train\_config.json}); these respectively scale the finger loss and weight the REST class in the action loss, and do not uniformly bias toward REST across runs.
 
 \section{Uncertainty \& Calibration}
-From each run’s saved \texttt{test\_predictions.npz}, we compute ECE using the same binning convention as \texttt{3\_evaluate\_model.py} (10 bins over confidence in $(a,b]$). Table~\ref{tab:perf} reports action ECE over all test windows and finger ECE over non-REST windows (defined by action $\neq$ REST). The per-run reliability diagrams and confidence scatter plots are inserted automatically from \texttt{processed/reports/}.
+From each run’s saved \texttt{test\_predictions.npz}, we compute ECE using the same binning convention as \texttt{3\_evaluate\_model.py} (10 bins over confidence in $(a,b]$). These prediction bundles are generated in Step~2 (single-pass with dropout active in train mode) unless Step~3 recomputes them deterministically. Table~\ref{tab:perf} reports action ECE over all test windows and finger ECE over non-REST windows (defined by action $\neq$ REST). The per-run reliability diagrams (calibration) and MC-dropout confidence scatter plots (uncertainty visualization) are inserted automatically from \texttt{processed/reports/}.
 
 Across subjects, mean action ECE is \ActionECEMean $\pm$ \ActionECESD and mean finger (non-REST) ECE is \FingerECEMean $\pm$ \FingerECESD. Lower ECE indicates better agreement between predicted confidence and empirical accuracy; however, ECE values should be interpreted in light of overlapping-window correlation and potential distribution shift between event segments.
 
 \section{Real-Time Inference and Actuation}
 \texttt{7\_live\_infer\_and\_actuate.py} implements online windowing and inference with optional actuation. Actuation decisions are gated by a joint confidence heuristic (minimum of the selected action and finger probabilities), a minimum probability threshold (default \texttt{actuation\_min\_prob}=0.65), a stability requirement over consecutive windows (default \texttt{actuation\_stability}=2), and a cooldown between sends (default \texttt{actuation\_cooldown\_ms}=150). Hardware safety gates prevent any actuation when the predicted action is REST or the predicted finger is NONE.
 
-The runtime additionally tracks recent window latency and supports policy-based handling when latency exceeds a threshold (\texttt{latency\_threshold\_ms} with \texttt{latency\_policy} in \{\texttt{warn}, \texttt{drop}, \texttt{degrade}\}). These safeguards are designed to prioritize timely decisions and prevent backlog spirals under load.
+The runtime additionally tracks recent window latency and logs summary statistics; configuration flags \texttt{latency\_threshold\_ms} and \texttt{latency\_policy} are recorded, but no drop/degrade behavior is currently implemented.
 
 Latency logs from Step~7 are \NotAvailable in the current run artifacts; therefore mean/p95/max inference latency and dropped-window statistics cannot be reported for the present bundle.
 
@@ -235,7 +235,7 @@ Latency logs from Step~7 are \NotAvailable in the current run artifacts; therefo
 \input{paper_artifacts/tables_generalization_gap.tex}
 
 \subsection{Per-Subject Figures}
-For each run, we include the action and finger confusion matrices, the reliability/calibration summary plot, and an MC-dropout confidence scatter plot produced by the repository’s reporting pipeline.
+For each run, we include the action and finger confusion matrices, the reliability/calibration summary plot, and an MC-dropout confidence--uncertainty scatter plot produced by the repository’s reporting pipeline.
 
 \input{paper_artifacts/figures.tex}
 
