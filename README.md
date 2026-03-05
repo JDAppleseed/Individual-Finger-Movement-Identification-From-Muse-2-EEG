@@ -2,14 +2,16 @@
 
 Real-time EEG-based finger + action (REST/OPEN/CLOSE) classification with uncertainty-aware gating, calibrated confidence, and reporting. The primary pipeline uses a **session directory** with lossless raw shards so all downstream steps are reproducible.
 
+The recommended interface for running the full pipeline (all steps) is `eeglab_wrapper_ui.py`.
+
 ## Requirements
 
-- Python 3.11 (enforced by `scripts/setup_venv.sh`).
+- Python 3.11 (required by `eeglab_wrapper_ui.py`; 3.12 is not currently supported end-to-end).
 - macOS or Linux (tested); Windows is unverified.
 - Muse 2 or any LSL EEG stream with 4 channels for live recording.
-- Python deps are pinned in `requirements.txt`.
+- Python dependencies are listed in `requirements.txt`.
 - Optional: LaTeX for PDF reports (see `SYSTEM_DEPS.md`).
-- Optional: `pyserial` for hardware actuation (`pip install pyserial`).
+- Optional: hardware actuation uses `pyserial` (already in `requirements.txt`).
 
 ## Setup (macOS/Linux)
 
@@ -52,7 +54,7 @@ and snapshots each step to `Projects/<ProjectName>/subjects/<subject_id>/session
 
 ## Session Directory (Core Concept)
 
-Canonical session dirs live under:
+Canonical session directories live under:
 
 ```
 Projects/<project>/subjects/<subject_id>/sessions/<subject_id>_<session_id>/
@@ -64,7 +66,7 @@ Notes:
 - Step 1 creates `meta.json`, `manifest.json`, `timebase_report.json`, and `events/events.jsonl` **before** LSL resolution so partial runs still leave a durable trail.
 - All downstream steps should be run with `--session-dir` for deterministic resolution.
 
-## Pipeline Overview (Session-Dir Flow)
+## Pipeline Overview (Session-Directory Flow)
 
 - Step 1: Stream & Record → creates a new session directory.
 - Step 1b: Extract Windows → reads `<session_dir>/raw/` + `<session_dir>/events/`, writes `<session_dir>/processed/`.
@@ -72,7 +74,7 @@ Notes:
 - Step 3+: Evaluate / Figures / Reports → read from the same session directory and the latest model run.
 - Step 7: Live Infer + Actuate → uses the latest model/scaler unless explicitly overridden.
 
-## CLI Run (Session-Dir Flow)
+## CLI Run (Session-Directory Flow)
 
 Record (Step 1):
 
@@ -156,7 +158,7 @@ Events are written to `events/events.jsonl` during capture (authoritative). `eve
 
 ## Live Inference (Step 7)
 
-Preferred (auto-resolve latest model/scaler from session dir):
+Preferred (auto-resolve latest model/scaler from the session directory):
 
 ```bash
 python 7_live_infer_and_actuate.py \
@@ -164,7 +166,7 @@ python 7_live_infer_and_actuate.py \
   --session-dir <session_dir>
 ```
 
-Explicit override (no session dir):
+Explicit override (no session directory):
 
 ```bash
 python 7_live_infer_and_actuate.py --config <infer_config.json>
@@ -190,7 +192,7 @@ Notes:
 
 ## Muse Streaming CLI (Legacy CSV Pipeline)
 
-This lightweight CLI records legacy CSVs under `data/` (separate from the session-dir pipeline).
+This lightweight CLI records legacy CSVs under `data/` (separate from the session-directory pipeline).
 
 Start a BLE → LSL streamer:
 
@@ -204,7 +206,7 @@ List streams:
 python -m cli list-streams
 ```
 
-Healthcheck:
+Health check:
 
 ```bash
 python -m cli healthcheck --stream-name Muse2-EEG --check-timebase
@@ -253,7 +255,7 @@ Validity rules:
 
 During training, finger loss is masked when action == REST.
 
-## Data Artifacts (Session-Dir)
+## Data Artifacts (Session Directory)
 
 Canonical outputs:
 
@@ -278,8 +280,8 @@ All sessions use a single LSL-aligned timebase (`absolute_v1`).
 Key invariants:
 
 - Single clock domain (LSL timestamps only).
-- `time_s := lsl_ts - stream_start_lsl_ts` for samples, features, and events.
-- LSL timestamps are clamped on backward jumps.
+- `time_s := lsl_ts_mono - stream_start_lsl_ts_mono` for samples, features, and events.
+- LSL timestamps are clamped on backward jumps to produce `lsl_ts_mono`.
 - Latency is `latency_ms := (lsl_now - lsl_ts) * 1000`.
 
 More detail: `docs/TIMEBASE_AND_HEALTH.md`.
