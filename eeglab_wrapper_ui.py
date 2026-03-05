@@ -2412,6 +2412,14 @@ class MainWindow(QMainWindow):
         self.eval_context_label = QLabel("")
         self.eval_context_label.setWordWrap(True)
         target_layout.addRow("Current selection", self.eval_context_label)
+        self.eval_fields.setdefault("evaluate_common", {})
+        common_fields = self.eval_fields["evaluate_common"]
+        run_dir_override = OutlineLineEdit()
+        run_dir_override.setPlaceholderText(
+            "Optional: processed/models/<run_id> or full run dir path"
+        )
+        target_layout.addRow("Run dir override", run_dir_override)
+        common_fields["run_dir"] = run_dir_override
         if hasattr(self, "session_dir_input"):
             session_widget = self._clone_bound_widget(
                 self.session_dir_input, "session_dir"
@@ -5046,6 +5054,25 @@ class MainWindow(QMainWindow):
             return latest
         return None
 
+    def _infer_session_dir_from_run_dir(self, run_dir: str) -> Optional[Path]:
+        p = Path(run_dir).expanduser()
+        try:
+            if p.exists():
+                p = p.resolve()
+        except Exception:
+            pass
+        if p.name == "models":
+            processed_dir = p.parent
+            if processed_dir.name == "processed":
+                return processed_dir.parent
+            return None
+        if p.parent.name != "models":
+            return None
+        processed_dir = p.parent.parent
+        if processed_dir.name != "processed":
+            return None
+        return processed_dir.parent
+
     def _resolve_windows_npz_for_current(self, subject_dir: Path) -> Optional[Path]:
         """Resolve the correct windows NPZ for the currently selected session/subject."""
         # Preferred: canonical session-local windows (sessions/<id>/processed/eeg_windows.npz)
@@ -5892,6 +5919,36 @@ class MainWindow(QMainWindow):
         npz_path = self._resolve_windows_npz_for_current(subject_dir)
         exp_hash, model_path, scaler_path = self._resolve_latest_model_artifacts(subject_dir)
 
+        common_fields = self.eval_fields.get("evaluate_common", {})
+        run_dir_override: Optional[str] = None
+        run_dir_widget = common_fields.get("run_dir")
+        if isinstance(run_dir_widget, QLineEdit):
+            run_dir_override = run_dir_widget.text().strip() or None
+        if run_dir_override:
+            inferred_session_dir = self._infer_session_dir_from_run_dir(run_dir_override)
+            if inferred_session_dir is not None:
+                try:
+                    inferred_resolved = inferred_session_dir.resolve()
+                except Exception:
+                    inferred_resolved = inferred_session_dir
+                try:
+                    session_resolved = session_dir.resolve()
+                except Exception:
+                    session_resolved = session_dir
+                if str(inferred_resolved) != str(session_resolved):
+                    self._append_log(
+                        "WARNING: Run dir override appears to belong to a different session."
+                    )
+                    QMessageBox.warning(
+                        self,
+                        "Run Dir Override Mismatch",
+                        "The run dir override appears to belong to a different session.\n\n"
+                        f"Selected session dir:\n{session_resolved}\n\n"
+                        f"Run dir session:\n{inferred_resolved}\n\n"
+                        "Evaluation will use the selected session's windows with the "
+                        "overridden model artifacts.",
+                    )
+
         args = [str(script_info.path)]
 
         # Preferred: session_dir contract (scripts auto-resolve latest run under processed/models)
@@ -5957,11 +6014,27 @@ class MainWindow(QMainWindow):
                 return text or None
             return None
 
+        common_fields = self.eval_fields.get("evaluate_common", {})
+
+        def _text_value_common(key: str) -> Optional[str]:
+            widget = common_fields.get(key)
+            if isinstance(widget, QLineEdit):
+                text = widget.text().strip()
+                return text or None
+            if isinstance(widget, QTextEdit):
+                text = widget.toPlainText().strip()
+                return text or None
+            return None
+
         def _is_checked(key: str) -> bool:
             widget = fields.get(key)
             return bool(isinstance(widget, QCheckBox) and widget.isChecked())
 
+        common_run_dir = _text_value_common("run_dir")
+
         if script_key == "evaluate":
+            if common_run_dir:
+                args += ["--run-dir", common_run_dir]
             max_samples = _spin_value("max_samples")
             if max_samples and max_samples > 0:
                 args += ["--max-samples", str(int(max_samples))]
@@ -6004,6 +6077,8 @@ class MainWindow(QMainWindow):
             if _is_checked("adjacency"):
                 args.append("--adjacency")
         elif script_key == "evaluate_deepchecks":
+            if common_run_dir:
+                args += ["--run-dir", common_run_dir]
             max_samples = _spin_value("max_samples")
             if max_samples and max_samples > 0:
                 args += ["--max-samples", str(int(max_samples))]
@@ -6021,8 +6096,11 @@ class MainWindow(QMainWindow):
             hop_seconds = _spin_value("hop_seconds")
             if hop_seconds and hop_seconds > 0:
                 args += ["--hop-seconds", f"{hop_seconds:.2f}"]
+        elif script_key == "evaluate_figures":
+            if common_run_dir:
+                args += ["--run-dir", common_run_dir]
         elif script_key == "evaluate_reports":
-            run_dir = _text_value("run_dir")
+            run_dir = _text_value("run_dir") or common_run_dir
             if run_dir:
                 args += ["--run-dir", run_dir]
             exp_hash = _text_value("exp_hash")
