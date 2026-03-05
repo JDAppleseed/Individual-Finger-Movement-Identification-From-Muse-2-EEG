@@ -64,7 +64,7 @@ The following files are the main implementation points:
   In this repo state, the \emph{main} path uses \texttt{CNNLSTMFingerActionNet.mc\_forward} and/or \texttt{utils/inference.\_mc\_predict}.
 
   \item \textbf{Configuration/documentation knobs.}
-  \texttt{Project Structure.ini} records intent (\texttt{bayesian\_mode = mc\_dropout}, \texttt{uncertainty\_measure = mc\_dropout\_std}, \texttt{mc\_samples = 30}; see \texttt{Project Structure.ini:41} and \texttt{Project Structure.ini:49}).
+  \texttt{docs/meta/Project Structure.ini} records intent (\texttt{bayesian\_mode = mc\_dropout}, \texttt{uncertainty\_measure = mc\_dropout\_std}, \texttt{mc\_samples = 30}; see \texttt{docs/meta/Project Structure.ini:41} and \texttt{docs/meta/Project Structure.ini:49}).
   The GUI lists an \texttt{MC\_DROPOUT\_PASSES} setting in \texttt{eeglab\_wrapper\_ui.py:395} and shows it in a dropdown (\texttt{eeglab\_wrapper\_ui.py:2996}).
 \end{itemize}
 
@@ -212,7 +212,7 @@ This is why code explicitly switches the module to training mode inside MC predi
 
 \subsection{Compute/latency tradeoff}
 MC passes increase inference cost roughly linearly with $T$.
-The online defaults are small (\texttt{InferenceConfig.mc\_passes=10} at \texttt{utils/inference.py:13}), while the paper figure script uses \texttt{MC\_SAMPLES} (see \texttt{Project Structure.ini:50} for the intended \texttt{mc\_samples=30}).
+The online defaults are small (\texttt{InferenceConfig.mc\_passes=10} at \texttt{utils/inference.py:13}), while the paper figure script uses \texttt{MC\_SAMPLES} (see \texttt{docs/meta/Project Structure.ini:50} for the intended \texttt{mc\_samples=30}).
 
 \section{How (and where) this is currently wired into the pipeline}
 
@@ -237,7 +237,7 @@ The online defaults are small (\texttt{InferenceConfig.mc\_passes=10} at \texttt
   \texttt{7\_live\_infer\_and\_actuate.py} performs a single forward pass under \texttt{torch.inference\_mode()} and uses softmax probabilities (\texttt{7\_live\_infer\_and\_actuate.py:418}--\texttt{:421}).
   It does not call \texttt{mc\_forward} or \texttt{InferenceEngine}, and it does not compute or log uncertainty.
   \item \textbf{Schema intent vs current wiring.}
-  \texttt{SCHEMAS.md} defines fields such as \texttt{action\_uncertainty} and \texttt{finger\_uncertainty} for feature streams (\texttt{SCHEMAS.md:22}), but in the current repo state, those fields are only produced by \texttt{InferenceEngine} and by the offline MC figure script, not by the live Step 7 loop.
+  \texttt{docs/spec/SCHEMAS.md} defines fields such as \texttt{action\_uncertainty} and \texttt{finger\_uncertainty} for feature streams (\texttt{docs/spec/SCHEMAS.md:22}), but in the current repo state, those fields are only produced by \texttt{InferenceEngine} and by the offline MC figure script, not by the live Step 7 loop.
 \end{itemize}
 
 \section{Recommended integration point (to make live uncertainty end-to-end)}
@@ -248,7 +248,7 @@ If the goal is to compute uncertainty during live inference and use it to gate a
   \item Replace the single deterministic forward pass in \texttt{7\_live\_infer\_and\_actuate.py} with a call to \texttt{InferenceEngine.predict} or \texttt{InferenceEngine.predict\_proba}.
   \item Feed each extracted window (shape $[T,C]$) directly to the engine; it already performs normalization and MC sampling (\texttt{utils/inference.py:110}--\texttt{:137} and \texttt{utils/inference.py:164}--\texttt{:187}).
   \item Use the engine's returned \texttt{adaptive\_threshold}, \texttt{allow\_actuation}, and uncertainty-suppressed \texttt{velocity} (\texttt{utils/inference.py:251}--\texttt{:258}) instead of the current ``min joint prob'' heuristic.
-  \item Log \texttt{action\_confidence}, \texttt{action\_uncertainty}, \texttt{finger\_confidence}, \texttt{finger\_uncertainty} so downstream review/reporting matches \texttt{SCHEMAS.md}.
+  \item Log \texttt{action\_confidence}, \texttt{action\_uncertainty}, \texttt{finger\_confidence}, \texttt{finger\_uncertainty} so downstream review/reporting matches \texttt{docs/spec/SCHEMAS.md}.
 \end{enumerate}
 
 \section{Minimal pseudocode for the intended online uncertainty-aware loop}

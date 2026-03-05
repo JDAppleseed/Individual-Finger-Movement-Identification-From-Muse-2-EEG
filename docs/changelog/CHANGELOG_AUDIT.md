@@ -56,7 +56,7 @@
   - Added block/segment tracking and end-of-stream state persistence.
 - scripts/preflight_check.py
   - Resolved paths via session_meta.json and added alignment/monotonicity checks.
-- SCHEMAS.md
+- docs/spec/SCHEMAS.md
   - Updated Step 1 artifact paths to use session_id and documented session_state metadata.
 
 ## 2025-12-30 (Step 1 timing hardening)
@@ -67,5 +67,5 @@
   - Ensured q/ESC/end_stream share the same clean shutdown path and block_id increment.
 - scripts/preflight_check.py
   - Validates session_meta paths, monotonic time_s, row length consistency, and event alignment.
-- SCHEMAS.md
+- docs/spec/SCHEMAS.md
   - Documented session_state fields and time base alignment.

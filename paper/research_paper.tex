@@ -9,7 +9,7 @@
 \usetikzlibrary{arrows.meta,positioning,shapes.geometric}
 
 % Auto-extracted numbers/figures from repo artifacts (do not hand-edit).
-\input{paper_artifacts/paper_macros.tex}
+\input{../paper_artifacts/paper_macros.tex}
 
 \newcommand{\NotAvailable}{\textit{not available in current run artifacts}}
 
@@ -134,9 +134,9 @@ By default, sessions persist to disk; however, Step~7 supports an in-memory-only
 \subsection{Cohort Summary}
 Demographics, session duration, and event label counts are derived directly from \texttt{subject.json}, \texttt{run\_meta.json}, and \texttt{events/events.jsonl}. Sex is read from \texttt{subject.json} when available; otherwise it is inferred from the subject ID string when it contains only \texttt{M} or only \texttt{F}.
 
-\input{paper_artifacts/tables_demographics.tex}
-\input{paper_artifacts/tables_sessions.tex}
-\input{paper_artifacts/tables_events.tex}
+\input{../paper_artifacts/tables_demographics.tex}
+\input{../paper_artifacts/tables_sessions.tex}
+\input{../paper_artifacts/tables_events.tex}
 
 \section{Preprocessing and Window Extraction}
 
@@ -150,7 +150,7 @@ N = f_s \times T_{\text{window}} = \TargetFsHz \times \WindowSec
 
 Windows containing non-finite values are excluded during training as an additional safety filter (even though extraction attempts to prevent NaNs). The extracted dataset bundles include artifact and gap flags; in the current run artifacts, the stored counts of flagged windows are summarized in Table~\ref{tab:dataset} (auto-generated below). If additional artifact rejection (e.g., ICA) was applied, it is not logged in the current artifacts and is therefore \NotAvailable.
 
-\input{paper_artifacts/tables_dataset.tex}
+\input{../paper_artifacts/tables_dataset.tex}
 
 \subsection{Split Strategy and Leakage Controls}
 Training uses a holdout test split (\texttt{test\_size}=0.2) with group-aware splitting (\texttt{split\_mode}=group\_trial) as configured in each run’s saved \texttt{train\_config.json}. The training CLI also includes explicit leakage guardrails: it asserts no group overlap between train/test, supports optional temporal purging (\texttt{purge\_seconds}), and runs a ``window index'' diagnostic intended to detect suspiciously high performance from ordering artifacts (threshold \texttt{window\_idx\_leak\_threshold}). In the current artifacts, \texttt{purge\_seconds}=0.0; therefore, any additional temporal separation beyond group splitting is not enforced.
@@ -231,18 +231,18 @@ Latency logs from Step~7 are \NotAvailable in the current run artifacts; therefo
 
 \section{Experimental Results}
 
-\input{paper_artifacts/tables_performance.tex}
-\input{paper_artifacts/tables_generalization_gap.tex}
+\input{../paper_artifacts/tables_performance.tex}
+\input{../paper_artifacts/tables_generalization_gap.tex}
 
 \subsection{Per-Subject Figures}
 For each run, we include the action and finger confusion matrices, the reliability/calibration summary plot, and an MC-dropout confidence--uncertainty scatter plot produced by the repository’s reporting pipeline.
 
-\input{paper_artifacts/figures.tex}
+\input{../paper_artifacts/figures.tex}
 
 \subsection{Per-Class Accuracy}
 Per-class test accuracies and counts are derivable from the saved per-window prediction bundles and are reported in Table~\ref{tab:perclass}. These values help diagnose whether performance is driven by dominant classes (e.g., REST) or is sustained across the full action/finger label set.
 
-\input{paper_artifacts/tables_perclass.tex}
+\input{../paper_artifacts/tables_perclass.tex}
 
 \subsection{Across-Subject Summary}
 Across \NumSubjects subjects, action accuracy ranges from \ActionAccMin\% to \ActionAccMax\% and finger (non-REST) accuracy ranges from \FingerAccMin\% to \FingerAccMax\%. The larger cross-subject spread in action accuracy suggests that movement detection (REST vs OPEN/CLOSE) is more sensitive to session-specific factors (e.g., baseline drift, attention, or label timing), whereas finger identity may remain separable once non-REST movement is present.
@@ -250,7 +250,7 @@ Across \NumSubjects subjects, action accuracy ranges from \ActionAccMin\% to \Ac
 \section{Statistical Rigor}
 We report per-subject 95\% confidence intervals (Wilson score) for action accuracy over $n_{test}$ windows and for finger accuracy over $n_{non\text{-}REST}$ windows (Table~\ref{tab:perf}). These intervals reflect finite test-set uncertainty under an i.i.d.\ window assumption; they do not account for temporal correlation induced by overlapping windows and event segments, which can narrow effective sample size.
 
-\input{paper_artifacts/tables_bootstrap_ci.tex}
+\input{../paper_artifacts/tables_bootstrap_ci.tex}
 
 As an additional robustness check, we compute percentile bootstrap confidence intervals over test windows (Table~\ref{tab:bootci}) using the saved per-window correctness vectors. Like the Wilson intervals, these bootstraps assume independent windows and should be interpreted cautiously in the presence of overlap.
 

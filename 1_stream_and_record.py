@@ -400,10 +400,14 @@ def _enqueue_with_overflow(
     packet: SamplePacket,
     *,
     label: str,
-    timeout_s: float,
-    allow_drop: bool,
+    timeout_s: float | None = None,
+    allow_drop: bool | None = None,
 ) -> bool:
     global termination_reason
+    if timeout_s is None:
+        timeout_s = QUEUE_PUT_TIMEOUT_S
+    if allow_drop is None:
+        allow_drop = ALLOW_DROP
     try:
         target_queue.put(packet, timeout=float(timeout_s))
         return True

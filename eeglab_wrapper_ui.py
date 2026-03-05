@@ -1232,7 +1232,8 @@ class MainWindow(QMainWindow):
         help_menu.addAction("Logs", lambda: self.workflow_list.setCurrentRow(8))
         help_menu.addAction("Open README.md", lambda: self._open_doc("README.md"))
         help_menu.addAction(
-            "Open DATA_CONTRACT.md", lambda: self._open_doc("DATA_CONTRACT.md")
+            "Open DATA_CONTRACT.md",
+            lambda: self._open_doc("docs/spec/DATA_CONTRACT.md"),
         )
 
     def _build_status_bar(self) -> QWidget:

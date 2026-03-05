@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build publication artifacts for research_paper.tex from repo run bundles.
+Build publication artifacts for paper/research_paper.tex from repo run bundles.
 
 Strict rule: do not invent numbers. All quantitative claims come from:
   - Projects/**/processed/models/*/metrics.json

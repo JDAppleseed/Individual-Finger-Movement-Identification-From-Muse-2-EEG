@@ -10,7 +10,7 @@ The recommended interface for running the full pipeline (all steps) is `eeglab_w
 - macOS or Linux (tested); Windows is unverified.
 - Muse 2 or any LSL EEG stream with 4 channels for live recording.
 - Python dependencies are listed in `requirements.txt`.
-- Optional: LaTeX for PDF reports (see `SYSTEM_DEPS.md`).
+- Optional: LaTeX for PDF reports (see `docs/ops/SYSTEM_DEPS.md`).
 - Optional: hardware actuation uses `pyserial` (already in `requirements.txt`).
 
 ## Setup (macOS/Linux)
@@ -271,7 +271,7 @@ Supporting files:
 - `raw/raw.csv` and `events/events.csv` (legacy inspection)
 - `logs/step1.log`, `logs/resolved_settings.json`
 
-See `DATA_CONTRACT.md` and `SCHEMAS.md` for detailed schemas.
+See `docs/spec/DATA_CONTRACT.md` and `docs/spec/SCHEMAS.md` for detailed schemas.
 
 ## Timebase & Latency
 
@@ -303,8 +303,8 @@ The `--full` option runs Steps 2–4 after the mock recording (requires training
 
 ## Papers & Figures
 
-- `research_paper.pdf` / `research_paper.tex`
-- `mc_dropout_uncertainty.pdf` / `mc_dropout_uncertainty.tex`
+- `paper/research_paper.tex`
+- `paper/mc_dropout_uncertainty.tex`
 
 ## License & Ethics
 

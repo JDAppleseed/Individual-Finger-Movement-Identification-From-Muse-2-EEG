@@ -47,4 +47,4 @@ python -m pip install -U pip wheel setuptools
 python -m pip install -r requirements.txt
 ```
 
-System-level dependencies (LaTeX/Node) are listed in `SYSTEM_DEPS.md`.
+System-level dependencies (LaTeX/Node) are listed in `docs/ops/SYSTEM_DEPS.md`.
