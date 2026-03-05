@@ -93,6 +93,44 @@ def _session_paths_from_dir(session_dir: Path) -> _SessionPathsCompat:
     )
 
 
+def _session_paths_from_dir_with_run_override(
+    session_dir: Path, run_dir: Optional[Path]
+) -> _SessionPathsCompat:
+    session_dir = resolve_session_dir(session_dir)
+    layout = SessionLayout(session_dir)
+    resolved_run_dir = None
+    if run_dir is not None:
+        resolved_run_dir = resolve_session_dir(run_dir)
+        if resolved_run_dir.name == "models":
+            resolved_run_dir = resolve_latest_run_dir(session_dir)
+    else:
+        resolved_run_dir = resolve_latest_run_dir(session_dir)
+    run_name = resolved_run_dir.name if resolved_run_dir is not None else "latest"
+    model_base = resolved_run_dir if resolved_run_dir is not None else layout.models_root
+    return _SessionPathsCompat(
+        windows_npz=layout.windows_npz,
+        model_file=model_base / "finger_action_model.pt",
+        scaler_file=model_base / "scaler.npz",
+        test_predictions_npz=model_base / "test_predictions.npz",
+        eval_dir=layout.reports_root / run_name,
+    )
+
+
+def _session_dir_from_run_dir(run_dir: Path) -> Optional[Path]:
+    p = resolve_session_dir(run_dir)
+    if p.name == "models":
+        try:
+            return p.parent.parent
+        except Exception:
+            return None
+    if p.parent.name != "models":
+        return None
+    processed_dir = p.parent.parent
+    if processed_dir.name != "processed":
+        return None
+    return processed_dir.parent
+
+
 def _infer_context_from_session_dir(session_dir: Path) -> Tuple[Optional[str], Optional[str], str]:
     resolved = session_dir.expanduser().resolve()
     parts = resolved.parts
@@ -318,6 +356,12 @@ def _dataset_kwargs():
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
+    "--run-dir",
+    type=str,
+    default=None,
+    help="Model run directory override (e.g. .../processed/models/<run_id>).",
+)
+parser.add_argument(
     "--project",
     type=str,
     required=False,
@@ -384,6 +428,28 @@ args = parser.parse_args()
 # describe the same trained model and window dataset.
 # PATCHED: session-aware path
 legacy_session_dir: Optional[Path] = None
+run_dir_override: Optional[Path] = None
+if args.run_dir:
+    run_dir_override = Path(args.run_dir).expanduser()
+    if not run_dir_override.exists():
+        print(f"Run dir not found: {run_dir_override}")
+        raise SystemExit(2)
+    legacy_session_dir = _session_dir_from_run_dir(run_dir_override)
+    if legacy_session_dir is None:
+        print(
+            "Could not infer session dir from --run-dir; "
+            "pass --project/--subject/--session or use --session-dir."
+        )
+        raise SystemExit(2)
+    inferred_project, inferred_subject, inferred_session = _infer_context_from_session_dir(
+        legacy_session_dir
+    )
+    if not args.project and inferred_project:
+        args.project = inferred_project
+    if not args.subject and inferred_subject:
+        args.subject = inferred_subject
+    if args.session is None:
+        args.session = inferred_session
 if args.session_dir:
     legacy_session_dir = resolve_session_dir(args.session_dir)
     inferred_project, inferred_subject, inferred_session = _infer_context_from_session_dir(
@@ -407,7 +473,7 @@ if args.session is None:
     raise SystemExit(2)
 
 paths = (
-    _session_paths_from_dir(legacy_session_dir)
+    _session_paths_from_dir_with_run_override(legacy_session_dir, run_dir_override)
     if legacy_session_dir is not None
     else get_session_paths(args.project, args.subject, args.session)
 )
