@@ -7,6 +7,7 @@ Real-time EEG-based finger + action (REST/OPEN/CLOSE) classification with uncert
 - Python 3.11 (enforced by `scripts/setup_venv.sh`).
 - macOS or Linux (tested); Windows is unverified.
 - Muse 2 or any LSL EEG stream with 4 channels for live recording.
+- Python deps are pinned in `requirements.txt`.
 - Optional: LaTeX for PDF reports (see `SYSTEM_DEPS.md`).
 - Optional: `pyserial` for hardware actuation (`pip install pyserial`).
 
