@@ -1,12 +1,43 @@
 import os
 import sys
+import types
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
-from utils.stream_health import RollingHealthDecision
+
+class DecisionStub:
+    def __init__(
+        self,
+        *,
+        healthy: bool,
+        reason=None,
+        measured_fs=None,
+        write_rate: float = 0.0,
+        event_allowed: bool = False,
+        queue_size: int = 0,
+        backwards_count: int = 0,
+        last_received_lsl_ts=None,
+        last_written_lsl_ts=None,
+    ) -> None:
+        self.healthy = healthy
+        self.reason = reason
+        self.measured_fs = measured_fs
+        self.write_rate = write_rate
+        self.event_allowed = event_allowed
+        self.queue_size = queue_size
+        self.backwards_count = backwards_count
+        self.last_received_lsl_ts = last_received_lsl_ts
+        self.last_written_lsl_ts = last_written_lsl_ts
 
 def _load_stream_module():
     os.environ["STREAM_IMPORT_ONLY"] = "1"
+    packets_mod = types.ModuleType("muse_streaming.packets")
+
+    class SamplePacket:
+        pass
+
+    packets_mod.SamplePacket = SamplePacket
+    sys.modules["muse_streaming.packets"] = packets_mod
     module_path = Path(__file__).resolve().parents[1] / "1_stream_and_record.py"
     spec = spec_from_file_location("stream_module", module_path)
     module = module_from_spec(spec)
@@ -75,7 +106,7 @@ def test_startup_defers_failed_writers_until_health_decision(tmp_path):
     module.health_state.unhealthy_since_mono = None
     module.health_state.failed_write_until_mono = None
     module.health_state.label_check_status = None
-    decision = RollingHealthDecision(
+    decision = DecisionStub(
         healthy=False,
         reason="stall_no_samples",
         measured_fs=None,
@@ -94,3 +125,15 @@ def test_startup_defers_failed_writers_until_health_decision(tmp_path):
     module._route_writers_for_health(1.0, decision)
     assert module.failed_writers.is_open() is True
     module.failed_writers.close_failed_files()
+
+
+def test_healthy_decision_does_not_open_failed_writers(tmp_path):
+    module = _load_stream_module()
+    module.failed_writers.close_failed_files()
+    module.hard_stop_policy.failed_dir = str(tmp_path)
+    module.health_state.has_health_decision = True
+    decision = DecisionStub(healthy=True)
+
+    module._route_writers_for_health(1.0, decision)
+
+    assert module.failed_writers.is_open() is False
