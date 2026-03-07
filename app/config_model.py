@@ -184,6 +184,8 @@ def default_infer_settings() -> Dict[str, Any]:
         "enable_actuation": False,
         "bluetooth_target": "",
         "no_file_io": False,
+        "modulate_actuation_speed": True,
+        "actuation_speed_gamma": 1.0,
         "postprocess": False,
         "smoothing_enabled": False,
         "smoothing_method": "vote",
@@ -196,6 +198,10 @@ def default_infer_settings() -> Dict[str, Any]:
         "hysteresis_margin": 0.05,
         "finger_delta": 0.05,
         "finger_mode": "raw",
+        "use_inference_engine": False,
+        "mc_passes": 10,
+        "uncertainty_base_threshold": 0.75,
+        "uncertainty_weight": 0.5,
         "pred_log": None,
     }
 

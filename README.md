@@ -188,6 +188,11 @@ Notes:
 
 - `--serial_port` is required when `--enable_actuation` is set.
 - Actuation is safety-gated; REST/NONE never actuate.
+- Step 7 logs prediction latency by default in `predictions.jsonl`; actuation events now also record `actuation_sent`, `actuation_latency_ms`, and `actuation_speed_scalar`.
+- Raw shards and prediction logs are preserved by default. They are only disabled when `no_file_io` is set to `true`.
+- Optional MC-dropout backend: set `use_inference_engine: true` in the infer config to route Step 7 through `utils/inference.py`. Relevant keys are `mc_passes`, `uncertainty_base_threshold`, and `uncertainty_weight`.
+- When enabled, live inference uses mean probabilities across MC passes, logs `action_uncertainty` / `finger_uncertainty`, and adds an adaptive uncertainty gate before hardware actuation.
+- Confidence-modulated actuation speed is enabled by default. Use `modulate_actuation_speed` and `actuation_speed_gamma` to adjust it; the Arduino receiver in `hardware/arduino/blue_hand_receive_upload/blue_hand_receive_upload.ino` now accepts an optional third `speed_u8` field.
 - See `docs/actuation_requirements.md` for design constraints.
 
 ## Muse Streaming CLI (Legacy CSV Pipeline)

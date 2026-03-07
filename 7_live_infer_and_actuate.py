@@ -4,10 +4,11 @@
 Adds real actuation support for an Arduino-controlled robotic hand via Serial (USB serial or Bluetooth SPP serial port).
 
 Protocol sent to Arduino (newline-terminated ASCII):
-  "{finger_id},{action_id}\n"
+  "{finger_id},{action_id},{speed_u8}\n"
 Where:
   finger_id: 0=none, 1=thumb, 2=index, 3=middle, 4=ring, 5=pinky
   action_id: 0=rest (midpoint), 1=open, 2=close
+  speed_u8: 0-255 scalar derived from prediction confidence
 
 This matches the project conventions used in event logs (rest down-weighting, etc.).
 
@@ -30,7 +31,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Deque, Optional, Tuple
+from typing import Any, Deque, Optional, Tuple
 
 import numpy as np
 
@@ -51,9 +52,11 @@ except Exception:  # pragma: no cover - optional dependency
 # They exist in the user's original file; we preserve names/structure.
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from muse_streaming.resample import resample_window, verify_alignment
+from utils.command_shaper import CommandShaper, CommandShaperConfig
+from utils.inference import InferenceConfig, InferenceEngine
+from utils.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
 from utils.runtime_utils import apply_channel_normalizer, load_normalizer
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
-from utils.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
 
 # Pipeline handoff: Step 7 runs online inference with the trained Step 2 model
 # and optional hardware actuation, while writing live-session artifacts.
@@ -74,7 +77,7 @@ class SerialHandActuator:
     """
     Best-effort serial actuator.
     - Uses pyserial if installed
-    - Sends ASCII protocol: "{finger},{action}\\n"
+    - Sends ASCII protocol: "{finger},{action},{speed_u8}\\n"
     """
     def __init__(self, port: str, baud: int = 9600, write_timeout: float = 0.2):
         try:
@@ -108,10 +111,20 @@ class SerialHandActuator:
         finally:
             self.ser = None
 
-    def send(self, finger_id: int, action_id: int) -> None:
+    def send(
+        self, finger_id: int, action_id: int, speed_scalar: Optional[float] = None
+    ) -> None:
         if self.ser is None:
             return
-        line = f"{finger_id},{action_id}\n".encode("ascii", errors="ignore")
+        if speed_scalar is None:
+            line = f"{finger_id},{action_id}\n".encode("ascii", errors="ignore")
+        else:
+            speed_u8 = int(
+                max(0, min(255, round(float(speed_scalar) * 255.0)))
+            )
+            line = f"{finger_id},{action_id},{speed_u8}\n".encode(
+                "ascii", errors="ignore"
+            )
         self.ser.write(line)
         # don't force flush; OS buffers are fine for this use-case
 
@@ -357,6 +370,7 @@ def _is_noop_decision(finger_id: int, action_id: int) -> bool:
 
 def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
     pp_defaults = PostprocessSettings()
+    infer_defaults = InferenceConfig()
     defaults = {
         "device": None,
         "session_dir": None,
@@ -375,6 +389,8 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "actuation_min_prob": 0.65,
         "actuation_stability": 2,
         "actuation_cooldown_ms": 150,
+        "modulate_actuation_speed": True,
+        "actuation_speed_gamma": 1.0,
         "allow_outside_base": False,
         "no_file_io": False,
         "subject_id": None,
@@ -391,6 +407,10 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "hysteresis_margin": float(pp_defaults.hysteresis_margin),
         "finger_delta": float(pp_defaults.finger_delta),
         "finger_mode": str(pp_defaults.finger_mode),
+        "use_inference_engine": False,
+        "mc_passes": int(infer_defaults.mc_passes),
+        "uncertainty_base_threshold": float(infer_defaults.base_threshold),
+        "uncertainty_weight": float(infer_defaults.uncertainty_weight),
         "pred_log": None,
     }
     p = argparse.ArgumentParser(description="Live inference + optional robotic hand actuation")
@@ -531,6 +551,30 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         choices=["raw", "smooth"],
         help="Finger smoothing mode (raw/smooth).",
     )
+    p.add_argument(
+        "--use-inference-engine",
+        dest="use_inference_engine",
+        action="store_true",
+        help="Use utils.inference.InferenceEngine for MC-dropout mean probabilities and uncertainty.",
+    )
+    p.add_argument(
+        "--mc-passes",
+        dest="mc_passes",
+        type=int,
+        help="Monte Carlo dropout passes when --use-inference-engine is enabled.",
+    )
+    p.add_argument(
+        "--uncertainty-base-threshold",
+        dest="uncertainty_base_threshold",
+        type=float,
+        help="Base action threshold used for adaptive uncertainty gating.",
+    )
+    p.add_argument(
+        "--uncertainty-weight",
+        dest="uncertainty_weight",
+        type=float,
+        help="Weight applied to action uncertainty for adaptive actuation gating.",
+    )
 
     # New: actuation knobs
     p.add_argument("--enable_actuation", action="store_true", help="Enable sending commands to Arduino hand")
@@ -539,6 +583,18 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
     p.add_argument("--actuation_min_prob", type=float, help="Min joint confidence to actuate")
     p.add_argument("--actuation_stability", type=int, help="Require same decision N windows in a row")
     p.add_argument("--actuation_cooldown_ms", type=int, help="Min time between sends")
+    p.add_argument(
+        "--modulate-actuation-speed",
+        dest="modulate_actuation_speed",
+        action="store_true",
+        help="Scale actuation speed from prediction confidence.",
+    )
+    p.add_argument(
+        "--actuation-speed-gamma",
+        dest="actuation_speed_gamma",
+        type=float,
+        help="Gamma curve applied to confidence-based actuation speed.",
+    )
     p.add_argument("--pred-log", type=str, help="Optional prediction log JSONL path override.")
     p.add_argument(
         "--allow_outside_base",
@@ -624,6 +680,99 @@ def _postprocess_decision(
     return postprocess_predictions(action_probs, finger_probs, settings, state)
 
 
+def _build_inference_engine(
+    model: torch.nn.Module,
+    scaler: object,
+    device: torch.device,
+    args: argparse.Namespace,
+) -> Optional[InferenceEngine]:
+    if not bool(getattr(args, "use_inference_engine", False)):
+        return None
+    config = InferenceConfig(
+        base_threshold=float(args.uncertainty_base_threshold),
+        uncertainty_weight=float(args.uncertainty_weight),
+        stability_frames=max(1, int(args.actuation_stability)),
+        mc_passes=max(1, int(args.mc_passes)),
+    )
+    return InferenceEngine(
+        model=model,
+        normalizer=scaler,
+        device=device,
+        action_names={},
+        finger_names={},
+        config=config,
+    )
+
+
+def _predict_window(
+    window: np.ndarray,
+    *,
+    scaler: object,
+    model: torch.nn.Module,
+    device: torch.device,
+    inference_engine: Optional[InferenceEngine],
+    emit_viz: bool,
+) -> dict[str, Any]:
+    window_f32 = np.asarray(window, dtype=np.float32)
+    hidden_mag: Optional[float] = None
+
+    if inference_engine is None:
+        window_input = standardize_window_TxC(window_f32, scaler)
+        x = torch.tensor(window_input, dtype=torch.float32).unsqueeze(0).to(device)
+        with torch.inference_mode():
+            finger_logits, action_logits = model(x)
+            action_probs_t = torch.softmax(action_logits, dim=1).squeeze(0)
+            finger_probs_t = torch.softmax(finger_logits, dim=1).squeeze(0)
+            if emit_viz:
+                hidden_mag = _compute_hidden_mag(model, x)
+        return {
+            "backend": "direct",
+            "action_probs": action_probs_t.detach().cpu().numpy(),
+            "finger_probs": finger_probs_t.detach().cpu().numpy(),
+            "action_uncertainty": 0.0,
+            "finger_uncertainty": 0.0,
+            "adaptive_threshold": None,
+            "health_score": None,
+            "hidden_mag": hidden_mag,
+        }
+
+    (
+        action_probs,
+        finger_probs,
+        action_uncertainty,
+        finger_uncertainty,
+        diagnostics,
+    ) = inference_engine.predict_proba(window_f32)
+    if action_probs is None or finger_probs is None:
+        raise RuntimeError("InferenceEngine returned empty probabilities for a loaded model.")
+
+    if emit_viz:
+        window_input = standardize_window_TxC(window_f32, scaler)
+        x = torch.tensor(window_input, dtype=torch.float32).unsqueeze(0).to(device)
+        with torch.inference_mode():
+            hidden_mag = _compute_hidden_mag(model, x)
+
+    adaptive_threshold = min(
+        0.99,
+        max(
+            float(inference_engine.config.base_threshold),
+            float(inference_engine.config.base_threshold)
+            + float(inference_engine.config.uncertainty_weight)
+            * float(action_uncertainty),
+        ),
+    )
+    return {
+        "backend": "inference_engine",
+        "action_probs": action_probs,
+        "finger_probs": finger_probs,
+        "action_uncertainty": float(action_uncertainty),
+        "finger_uncertainty": float(finger_uncertainty),
+        "adaptive_threshold": float(adaptive_threshold),
+        "health_score": diagnostics.get("health_score") if isinstance(diagnostics, dict) else None,
+        "hidden_mag": hidden_mag,
+    }
+
+
 def _compute_hidden_mag(model: CNNLSTMFingerActionNet, x: torch.Tensor) -> Optional[float]:
     """
     Returns the last-step LSTM hidden magnitude for a window, or None on failure.
@@ -668,6 +817,39 @@ def _debounced_should_send(
     if (time.monotonic() - last_send_ts) * 1000.0 < float(cooldown_ms):
         return False
     return True
+
+
+def _uncertainty_gate_passed(
+    decision_info: dict[str, Any],
+    inference_result: dict[str, Any],
+) -> bool:
+    adaptive_threshold = inference_result.get("adaptive_threshold")
+    if adaptive_threshold is None:
+        return True
+    return float(decision_info.get("action_conf", 0.0)) >= float(adaptive_threshold)
+
+
+def _build_actuation_speed_mapper(args: argparse.Namespace) -> Optional[CommandShaper]:
+    if not bool(getattr(args, "modulate_actuation_speed", True)):
+        return None
+    return CommandShaper(
+        CommandShaperConfig(
+            base_conf_thresh=0.0,
+            speed_gamma=float(args.actuation_speed_gamma),
+        )
+    )
+
+
+def _compute_actuation_speed_scalar(
+    decision_prob: float,
+    action_uncertainty: float,
+    speed_mapper: Optional[CommandShaper],
+) -> float:
+    confidence = float(max(0.0, min(1.0, decision_prob)))
+    confidence *= max(0.0, 1.0 - float(action_uncertainty))
+    if speed_mapper is None:
+        return 1.0
+    return float(speed_mapper.confidence_to_speed(confidence))
 
 
 # -------------------- Main --------------------
@@ -849,6 +1031,22 @@ def main() -> int:
 
     model, scaler = load_model_and_scaler(model_path, scaler_path, device=device)
     model.eval()
+    inference_engine = _build_inference_engine(model, scaler, device, args)
+    actuation_speed_mapper = _build_actuation_speed_mapper(args)
+    if inference_engine is not None:
+        logger.info(
+            "Inference backend=inference_engine mc_passes=%s uncertainty_base_threshold=%.3f uncertainty_weight=%.3f",
+            args.mc_passes,
+            float(args.uncertainty_base_threshold),
+            float(args.uncertainty_weight),
+        )
+    else:
+        logger.info("Inference backend=direct")
+    logger.info(
+        "Actuation speed modulation=%s gamma=%.3f",
+        bool(args.modulate_actuation_speed),
+        float(args.actuation_speed_gamma),
+    )
 
     live_viz_enabled = bool(getattr(args, "LIVE_VIZ_ENABLED", False))
     live_viz_fps = float(getattr(args, "LIVE_VIZ_FPS", 0.0) or 0.0)
@@ -997,9 +1195,6 @@ def main() -> int:
                     next_window_start_s += args.hop_sec
                     continue
 
-                window_input = standardize_window_TxC(window.astype(np.float32), scaler)
-                x = torch.tensor(window_input, dtype=torch.float32).unsqueeze(0).to(device)
-
                 emit_viz = False
                 viz_ts = None
                 now_mono = time.monotonic()
@@ -1007,14 +1202,23 @@ def main() -> int:
                     emit_viz = True
                     viz_ts = float(window_end)
 
-                with torch.inference_mode():
-                    finger_logits, action_logits = model(x)
-                    action_probs_t = torch.softmax(action_logits, dim=1).squeeze(0)
-                    finger_probs_t = torch.softmax(finger_logits, dim=1).squeeze(0)
-                    hidden_mag = _compute_hidden_mag(model, x) if emit_viz else None
-
-                action_probs = action_probs_t.detach().cpu().numpy()
-                finger_probs = finger_probs_t.detach().cpu().numpy()
+                inference_result = _predict_window(
+                    window,
+                    scaler=scaler,
+                    model=model,
+                    device=device,
+                    inference_engine=inference_engine,
+                    emit_viz=emit_viz,
+                )
+                action_probs = np.asarray(inference_result["action_probs"], dtype=float)
+                finger_probs = np.asarray(inference_result["finger_probs"], dtype=float)
+                hidden_mag = inference_result.get("hidden_mag")
+                action_uncertainty = float(
+                    inference_result.get("action_uncertainty", 0.0) or 0.0
+                )
+                finger_uncertainty = float(
+                    inference_result.get("finger_uncertainty", 0.0) or 0.0
+                )
 
                 decision_info = _postprocess_decision(
                     action_probs,
@@ -1028,6 +1232,15 @@ def main() -> int:
                     action_id=int(decision_info["committed_action_id"]),
                     prob=float(min(decision_info["action_conf"], decision_info["finger_conf"])),
                 )
+                uncertainty_gate_ok = _uncertainty_gate_passed(
+                    decision_info=decision_info,
+                    inference_result=inference_result,
+                )
+                actuation_speed_scalar = _compute_actuation_speed_scalar(
+                    decision.prob,
+                    action_uncertainty,
+                    actuation_speed_mapper,
+                )
 
                 # Latency tracking
                 now = time.monotonic()
@@ -1039,25 +1252,27 @@ def main() -> int:
 
                 if _is_noop_decision(decision.finger_id, decision.action_id):
                     logger.info(
-                        "PREDICT NO-OP finger=%s action=%s joint_prob=%.3f raw_finger=%s raw_action=%s reason=%s latency_ms=%.1f dropped_windows=%s",
+                        "PREDICT NO-OP finger=%s action=%s joint_prob=%.3f raw_finger=%s raw_action=%s reason=%s action_unc=%.4f latency_ms=%.1f dropped_windows=%s",
                         decision.finger_id,
                         decision.action_id,
                         decision.prob,
                         decision_info.get("raw_top_finger_id"),
                         decision_info.get("raw_top_action_id"),
                         decision_info.get("decision_reason"),
+                        action_uncertainty,
                         latency_ms,
                         dropped_windows,
                     )
                 else:
                     logger.info(
-                        "PREDICT ACTUATABLE finger=%s action=%s joint_prob=%.3f raw_finger=%s raw_action=%s reason=%s latency_ms=%.1f dropped_windows=%s",
+                        "PREDICT ACTUATABLE finger=%s action=%s joint_prob=%.3f raw_finger=%s raw_action=%s reason=%s action_unc=%.4f latency_ms=%.1f dropped_windows=%s",
                         decision.finger_id,
                         decision.action_id,
                         decision.prob,
                         decision_info.get("raw_top_finger_id"),
                         decision_info.get("raw_top_action_id"),
                         decision_info.get("decision_reason"),
+                        action_uncertainty,
                         latency_ms,
                         dropped_windows,
                     )
@@ -1066,12 +1281,75 @@ def main() -> int:
                     last_live_viz_emit = now_mono
                     print(f"VIZ t={viz_ts:.3f} hidden_mag={hidden_mag:.6f}", flush=True)
 
+                # Stability / debounce
+                key = (decision.finger_id, decision.action_id)
+                if last_decision == key:
+                    stable_count += 1
+                else:
+                    stable_count = 1
+                    last_decision = key
+
+                # Decide to actuate
+                actuation_sent = False
+                actuation_latency_ms = None
+                actuation_decision_delay_ms = None
+                if args.enable_actuation and actuator is not None:
+                    if decision.prob >= float(args.actuation_min_prob):
+                        # Hard safety gate: NEVER actuate on NONE/REST.
+                        if int(decision.finger_id) == 0 or int(decision.action_id) == 0:
+                            logger.info(
+                                "NO-OP decision suppressed (finger=%s action=%s)",
+                                decision.finger_id,
+                                decision.action_id,
+                            )
+                        elif not uncertainty_gate_ok:
+                            logger.info(
+                                "Actuation suppressed by uncertainty gate action_conf=%.3f adaptive_threshold=%.3f action_unc=%.4f",
+                                float(decision_info.get("action_conf", 0.0)),
+                                float(inference_result.get("adaptive_threshold", 0.0)),
+                                action_uncertainty,
+                            )
+                        elif _debounced_should_send(
+                            decision=decision,
+                            last_sent=last_sent,
+                            stable_count=stable_count,
+                            required_stability=int(args.actuation_stability),
+                            last_send_ts=last_send_ts,
+                            cooldown_ms=int(args.actuation_cooldown_ms),
+                        ):
+                            # Send command
+                            send_start = time.monotonic()
+                            actuator.send(
+                                decision.finger_id,
+                                decision.action_id,
+                                speed_scalar=actuation_speed_scalar,
+                            )
+                            send_end = time.monotonic()
+                            last_sent = key
+                            last_send_ts = send_end
+                            actuation_sent = True
+                            actuation_latency_ms = (send_end - window_center_lsl) * 1000.0
+                            actuation_decision_delay_ms = (send_start - now) * 1000.0
+                            logger.info(
+                                "ACTUATE sent finger=%s action=%s prob=%.3f speed=%.3f prediction_latency_ms=%.1f actuation_latency_ms=%.1f decision_to_send_ms=%.1f",
+                                decision.finger_id,
+                                decision.action_id,
+                                decision.prob,
+                                actuation_speed_scalar,
+                                latency_ms,
+                                actuation_latency_ms,
+                                actuation_decision_delay_ms,
+                            )
+                    else:
+                        logger.debug("Actuation suppressed by min_prob (%.3f < %.3f)", decision.prob, float(args.actuation_min_prob))
+
                 if pred_log is not None:
                     payload = {
                         "ts_utc": time.time(),
                         "window_start_s": float(window_start),
                         "window_end_s": float(window_end),
                         "latency_ms": float(latency_ms),
+                        "prediction_latency_ms": float(latency_ms),
                         "alignment_ok": True,
                         "action_probs": action_probs.tolist(),
                         "finger_probs": finger_probs.tolist(),
@@ -1084,48 +1362,32 @@ def main() -> int:
                         "action_conf": float(decision_info.get("action_conf", 0.0)),
                         "finger_conf": float(decision_info.get("finger_conf", 0.0)),
                         "joint_conf": float(decision.prob),
+                        "action_uncertainty": action_uncertainty,
+                        "finger_uncertainty": finger_uncertainty,
+                        "adaptive_threshold": inference_result.get("adaptive_threshold"),
+                        "uncertainty_gate_ok": bool(uncertainty_gate_ok),
+                        "health_score": inference_result.get("health_score"),
+                        "inference_backend": str(inference_result.get("backend", "direct")),
                         "decision_reason": str(decision_info.get("decision_reason", "")),
                         "postprocess_enabled": bool(postprocess_enabled),
                         "dropped_windows": int(dropped_windows),
+                        "actuation_speed_scalar": float(actuation_speed_scalar),
+                        "actuation_sent": bool(actuation_sent),
+                        "actuation_latency_ms": (
+                            float(actuation_latency_ms)
+                            if actuation_latency_ms is not None
+                            else None
+                        ),
+                        "actuation_decision_delay_ms": (
+                            float(actuation_decision_delay_ms)
+                            if actuation_decision_delay_ms is not None
+                            else None
+                        ),
                     }
                     pred_log.write(json.dumps(payload) + "\n")
                     pred_log_count += 1
                     if pred_log_count % pred_log_flush_every == 0:
                         pred_log.flush()
-
-                # Stability / debounce
-                key = (decision.finger_id, decision.action_id)
-                if last_decision == key:
-                    stable_count += 1
-                else:
-                    stable_count = 1
-                    last_decision = key
-
-                # Decide to actuate
-                if args.enable_actuation and actuator is not None:
-                    if decision.prob >= float(args.actuation_min_prob):
-                        # Hard safety gate: NEVER actuate on NONE/REST.
-                        if int(decision.finger_id) == 0 or int(decision.action_id) == 0:
-                            logger.info(
-                                "NO-OP decision suppressed (finger=%s action=%s)",
-                                decision.finger_id,
-                                decision.action_id,
-                            )
-                        elif _debounced_should_send(
-                            decision=decision,
-                            last_sent=last_sent,
-                            stable_count=stable_count,
-                            required_stability=int(args.actuation_stability),
-                            last_send_ts=last_send_ts,
-                            cooldown_ms=int(args.actuation_cooldown_ms),
-                        ):
-                            # Send command
-                            actuator.send(decision.finger_id, decision.action_id)
-                            last_sent = key
-                            last_send_ts = time.monotonic()
-                            logger.info("ACTUATE sent finger=%s action=%s prob=%.3f", decision.finger_id, decision.action_id, decision.prob)
-                    else:
-                        logger.debug("Actuation suppressed by min_prob (%.3f < %.3f)", decision.prob, float(args.actuation_min_prob))
 
                 next_window_start_s += args.hop_sec
 

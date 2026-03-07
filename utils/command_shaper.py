@@ -57,6 +57,9 @@ class CommandShaper:
             speed = speed**gamma
         return speed
 
+    def confidence_to_speed(self, conf: float) -> float:
+        return self._confidence_to_speed(conf)
+
     def note_valid(self, timebase_ms: Optional[int] = None) -> None:
         if timebase_ms is None:
             return

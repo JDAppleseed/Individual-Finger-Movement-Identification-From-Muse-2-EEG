@@ -50,6 +50,30 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         settings.get("enable_actuation"), bool
     ):
         errors.append("enable_actuation must be a boolean.")
+    if "modulate_actuation_speed" in settings and not isinstance(
+        settings.get("modulate_actuation_speed"), bool
+    ):
+        errors.append("modulate_actuation_speed must be a boolean.")
+    if "use_inference_engine" in settings and not isinstance(
+        settings.get("use_inference_engine"), bool
+    ):
+        errors.append("use_inference_engine must be a boolean.")
+    if "mc_passes" in settings:
+        try:
+            if int(settings.get("mc_passes")) < 1:
+                errors.append("mc_passes must be >= 1.")
+        except Exception:
+            errors.append("mc_passes must be an integer.")
+    for key in (
+        "uncertainty_base_threshold",
+        "uncertainty_weight",
+        "actuation_speed_gamma",
+    ):
+        if key in settings:
+            try:
+                float(settings.get(key))
+            except Exception:
+                errors.append(f"{key} must be numeric.")
     return ValidationResult(ok=not errors, errors=errors, warnings=warnings)
 
 

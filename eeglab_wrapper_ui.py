@@ -440,6 +440,12 @@ TOOLTIPS: Dict[str, str] = {
     "enable_actuation": "Enable robot hand actuation (explicit opt-in, requires confirmation).",
     "bluetooth_target": "Bluetooth device name/address for actuation.",
     "no_file_io": "Disable file outputs during live inference (max performance).",
+    "modulate_actuation_speed": "Modulate actuation speed from prediction confidence.",
+    "actuation_speed_gamma": "Gamma curve for confidence-based actuation speed modulation.",
+    "use_inference_engine": "Use utils.inference.InferenceEngine for MC-dropout mean probabilities and uncertainty-aware actuation gating.",
+    "mc_passes": "Monte Carlo dropout passes for live inference when the inference engine backend is enabled.",
+    "uncertainty_base_threshold": "Base action confidence threshold before uncertainty adjustment.",
+    "uncertainty_weight": "Additional adaptive threshold weight applied to action uncertainty.",
     "infer_subject_override": "Subject override for Step 7 (defaults to current subject).",
     "project_name": "Project name for auto-resolving latest session.",
     "subject_id": "Subject ID for auto-resolving latest session.",
@@ -984,6 +990,30 @@ class MainWindow(QMainWindow):
                 ArgSpec("window_sec", "--window-sec", "float", "Window length (s)."),
                 ArgSpec("hop_sec", "--hop-sec", "float", "Window hop (s)."),
                 ArgSpec("target_fs", "--target-fs", "float", "Target FS for resampling."),
+                ArgSpec(
+                    "use_inference_engine",
+                    "--use-inference-engine",
+                    "bool",
+                    "Use MC-dropout inference backend.",
+                ),
+                ArgSpec(
+                    "mc_passes",
+                    "--mc-passes",
+                    "int",
+                    "Monte Carlo dropout passes.",
+                ),
+                ArgSpec(
+                    "uncertainty_base_threshold",
+                    "--uncertainty-base-threshold",
+                    "float",
+                    "Base action threshold for uncertainty gating.",
+                ),
+                ArgSpec(
+                    "uncertainty_weight",
+                    "--uncertainty-weight",
+                    "float",
+                    "Adaptive threshold weight for action uncertainty.",
+                ),
                 ArgSpec("allow_drop", "--allow-drop", "bool", "Allow dropping windows."),
                 ArgSpec(
                     "latency_threshold_ms",
@@ -1003,6 +1033,18 @@ class MainWindow(QMainWindow):
                     "--enable-actuation",
                     "bool",
                     "Enable robot hand actuation.",
+                ),
+                ArgSpec(
+                    "modulate_actuation_speed",
+                    "--modulate-actuation-speed",
+                    "bool",
+                    "Modulate actuation speed from prediction confidence.",
+                ),
+                ArgSpec(
+                    "actuation_speed_gamma",
+                    "--actuation-speed-gamma",
+                    "float",
+                    "Gamma for confidence-based actuation speed.",
                 ),
                 ArgSpec(
                     "bluetooth_target",
@@ -1891,6 +1933,21 @@ class MainWindow(QMainWindow):
         dock_cb.setChecked(field_cb.isChecked())
         dock_cb.toggled.connect(field_cb.setChecked)
         field_cb.toggled.connect(dock_cb.setChecked)
+
+    def _sync_infer_inference_engine_controls(self) -> None:
+        infer_fields = self.fields.get("infer", {})
+        enabled = False
+        cb = infer_fields.get("use_inference_engine")
+        if isinstance(cb, QCheckBox):
+            enabled = cb.isChecked()
+        for key in (
+            "mc_passes",
+            "uncertainty_base_threshold",
+            "uncertainty_weight",
+        ):
+            widget = infer_fields.get(key)
+            if isinstance(widget, QWidget):
+                widget.setEnabled(enabled)
 
     def _switch_page(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
@@ -2891,7 +2948,10 @@ class MainWindow(QMainWindow):
             "Outputs default to processed/live_infer and auto-version if the folder exists. "
             "Disable file outputs to run inference-only for max performance. "
             "Use the inference subject dropdown to target a different subject for Step 7. "
-            "Actuation is opt-in and requires confirmation before running."
+            "Actuation is opt-in and requires confirmation before running. "
+            "Enable the MC-dropout inference engine to use uncertainty-aware mean probabilities "
+            "and adaptive actuation gating from utils/inference.py. "
+            "Actuation speed is confidence-modulated by default unless you disable it."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -3409,6 +3469,27 @@ class MainWindow(QMainWindow):
                 4096,
                 is_float=True,
             )
+            self._add_checkbox(
+                step_id,
+                form,
+                "use_inference_engine",
+                "Use MC-dropout inference engine",
+                defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "mc_passes",
+                "MC passes",
+                defaults,
+                1,
+                100,
+            )
+            infer_engine_widget = self.fields[step_id].get("use_inference_engine")
+            if isinstance(infer_engine_widget, QCheckBox):
+                infer_engine_widget.toggled.connect(
+                    lambda _checked: self._sync_infer_inference_engine_controls()
+                )
             self._add_checkbox(step_id, form, "allow_drop", "Allow drop", defaults)
             self._add_checkbox(
                 step_id,
@@ -3437,10 +3518,18 @@ class MainWindow(QMainWindow):
             self._add_checkbox(
                 step_id,
                 form,
+                "modulate_actuation_speed",
+                "Modulate actuation speed from confidence",
+                defaults,
+            )
+            self._add_checkbox(
+                step_id,
+                form,
                 "no_file_io",
                 "Disable file outputs (max performance)",
                 defaults,
             )
+            self._sync_infer_inference_engine_controls()
         elif step_id == "step1b":
             self._add_spin(
                 step_id,
@@ -3875,6 +3964,16 @@ class MainWindow(QMainWindow):
             self._add_text(
                 step_id, form, "bluetooth_target", "Bluetooth target", defaults
             )
+            self._add_spin(
+                step_id,
+                form,
+                "actuation_speed_gamma",
+                "Actuation speed gamma",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
             self._add_text(step_id, form, "subject_id", "Subject ID", defaults)
             self._add_text(step_id, form, "session_id", "Session ID", defaults)
             self._add_checkbox(step_id, form, "postprocess", "Enable postprocess", defaults)
@@ -3955,6 +4054,26 @@ class MainWindow(QMainWindow):
                 defaults,
                 ["raw", "smooth"],
             )
+            self._add_slider(
+                step_id,
+                form,
+                "uncertainty_base_threshold",
+                "Uncertainty base threshold",
+                defaults,
+                0,
+                1,
+                decimals=2,
+            )
+            self._add_slider(
+                step_id,
+                form,
+                "uncertainty_weight",
+                "Uncertainty weight",
+                defaults,
+                0,
+                2,
+                decimals=2,
+            )
             self._add_file_picker(
                 step_id,
                 form,
@@ -3964,6 +4083,7 @@ class MainWindow(QMainWindow):
                 "JSONL (*.jsonl);;All Files (*)",
                 mode="save",
             )
+            self._sync_infer_inference_engine_controls()
         elif step_id == "step1b":
             self._add_spin(
                 step_id,
@@ -4322,6 +4442,48 @@ class MainWindow(QMainWindow):
                 self._apply_tooltip(widget, dest, arg.help)
 
     def _friendly_label(self, step_id: str, key: str) -> str:
+        if step_id == "infer":
+            labels = {
+                "model_path": "Model path",
+                "scaler_path": "Scaler path",
+                "out_dir": "Output directory",
+                "stream_name": "Stream name",
+                "stream_type": "Stream type",
+                "window_sec": "Window sec",
+                "hop_sec": "Hop sec",
+                "target_fs": "Target FS",
+                "use_inference_engine": "Use MC-dropout inference engine",
+                "mc_passes": "MC passes",
+                "uncertainty_base_threshold": "Uncertainty base threshold",
+                "uncertainty_weight": "Uncertainty weight",
+                "allow_drop": "Allow drop",
+                "LIVE_VIZ_ENABLED": "Enable live visualization output",
+                "LIVE_VIZ_FPS": "Live viz FPS",
+                "latency_threshold_ms": "Latency threshold (ms)",
+                "latency_policy": "Latency policy",
+                "log_every": "Log every (s)",
+                "enable_actuation": "Enable robot hand actuation",
+                "modulate_actuation_speed": "Modulate actuation speed from confidence",
+                "actuation_speed_gamma": "Actuation speed gamma",
+                "bluetooth_target": "Bluetooth target",
+                "no_file_io": "Disable file outputs (max performance)",
+                "subject_id": "Subject ID",
+                "session_id": "Session ID",
+                "postprocess": "Enable postprocess",
+                "smoothing_enabled": "Smoothing enabled",
+                "smoothing_method": "Smoothing method",
+                "smoothing_window": "Smoothing window",
+                "hysteresis_enabled": "Hysteresis enabled",
+                "hysteresis_frames": "Hysteresis frames",
+                "threshold_action": "Action threshold",
+                "threshold_finger": "Finger threshold",
+                "adjacency_enabled": "Adjacency assist",
+                "hysteresis_margin": "Hysteresis margin",
+                "finger_delta": "Finger delta",
+                "finger_mode": "Finger mode",
+                "pred_log": "Prediction log (JSONL)",
+            }
+            return labels.get(key, key)
         if step_id == "train":
             labels = {
                 "session_dir": "Session Dir (Step 2 override)",
@@ -6190,6 +6352,8 @@ class MainWindow(QMainWindow):
                 if widget.findText(text_val) < 0:
                     widget.addItem(text_val)
                 widget.setCurrentText(text_val)
+        if step_id == "infer":
+            self._sync_infer_inference_engine_controls()
 
     def _stop_process(self) -> None:
         runner_pid = self.runner.process_id() if self.runner.is_running() else 0

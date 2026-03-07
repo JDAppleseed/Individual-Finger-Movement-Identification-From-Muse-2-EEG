@@ -33,3 +33,27 @@ def test_legacy_actuation_key_errors():
 def test_actuation_type_validation():
     result = validate_step_settings("infer", {"enable_actuation": "yes"})
     assert any("must be a boolean" in err for err in result.errors)
+
+
+def test_inference_engine_validation():
+    result = validate_step_settings(
+        "infer",
+        {
+            "use_inference_engine": "yes",
+            "mc_passes": 0,
+            "uncertainty_base_threshold": "high",
+            "modulate_actuation_speed": "yes",
+            "actuation_speed_gamma": "fast",
+        },
+    )
+    assert any("use_inference_engine must be a boolean." in err for err in result.errors)
+    assert any("mc_passes must be >= 1." in err for err in result.errors)
+    assert any(
+        "modulate_actuation_speed must be a boolean." in err
+        for err in result.errors
+    )
+    assert any(
+        "uncertainty_base_threshold must be numeric." in err
+        for err in result.errors
+    )
+    assert any("actuation_speed_gamma must be numeric." in err for err in result.errors)
