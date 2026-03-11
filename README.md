@@ -180,13 +180,13 @@ Actuation (optional):
 python 7_live_infer_and_actuate.py \
   --config <infer_config.json> \
   --session-dir <session_dir> \
-  --enable_actuation \
-  --serial_port /dev/tty.usbmodemXXXX
+  --enable_actuation
 ```
 
 Notes:
 
-- `--serial_port` is required when `--enable_actuation` is set.
+- When `--enable_actuation` is set and `--serial_port` is omitted, Step 7 auto-detects a likely USB serial Arduino port (for example `/dev/cu.usbmodem*` on macOS).
+- Pass `--serial_port` explicitly if multiple candidate serial devices are attached or auto-detection is ambiguous.
 - Actuation is safety-gated; REST/NONE never actuate.
 - Step 7 logs prediction latency by default in `predictions.jsonl`; actuation events now also record `actuation_sent`, `actuation_latency_ms`, and `actuation_speed_scalar`.
 - Raw shards and prediction logs are preserved by default. They are only disabled when `no_file_io` is set to `true`.

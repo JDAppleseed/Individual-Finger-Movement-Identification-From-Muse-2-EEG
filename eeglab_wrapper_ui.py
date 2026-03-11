@@ -4916,7 +4916,7 @@ class MainWindow(QMainWindow):
             infer_model_widget,
             str(run_dir / "finger_action_model.pt"),
             key="infer.model_path",
-            legacy_values={"finger_action_model.pt"},
+            legacy_values={"finger_action_model.pt", "models/finger_action_model.pt"},
         )
         self._maybe_autofill_text(
             infer_scaler_widget,
@@ -5191,7 +5191,7 @@ class MainWindow(QMainWindow):
                 infer_model_widget,
                 model_path,
                 key="infer.model_path",
-                legacy_values={"finger_action_model.pt"},
+                legacy_values={"finger_action_model.pt", "models/finger_action_model.pt"},
             )
             self._maybe_autofill_text(
                 infer_scaler_widget,
@@ -5355,6 +5355,33 @@ class MainWindow(QMainWindow):
                     model_path = run_dir / "finger_action_model.pt"
                     scaler_path = run_dir / "scaler.npz"
                     return run_id, (model_path if model_path.exists() else None), (scaler_path if scaler_path.exists() else None)
+
+        sessions_root = subject_dir / "sessions"
+        if sessions_root.exists():
+            best: Optional[Tuple[float, Path, Path]] = None
+            for candidate_session in sessions_root.iterdir():
+                if not candidate_session.is_dir():
+                    continue
+                models_root = candidate_session / "processed" / "models"
+                if not models_root.exists():
+                    continue
+                runs = [p for p in models_root.iterdir() if p.is_dir()]
+                if not runs:
+                    continue
+                runs.sort(key=lambda p: p.stat().st_mtime)
+                run_dir = runs[-1]
+                try:
+                    score = run_dir.stat().st_mtime
+                except Exception:
+                    score = 0.0
+                if best is None or score > best[0]:
+                    best = (score, candidate_session, run_dir)
+            if best is not None:
+                run_dir = best[2]
+                run_id = run_dir.name
+                model_path = run_dir / "finger_action_model.pt"
+                scaler_path = run_dir / "scaler.npz"
+                return run_id, (model_path if model_path.exists() else None), (scaler_path if scaler_path.exists() else None)
 
         # Legacy fallback: repo-level models (data/models/<subject>/<exp_hash>/)
         subject_id = subject_id_override or self.current_subject or "UNKNOWN"
@@ -5857,14 +5884,25 @@ class MainWindow(QMainWindow):
         # Ensure downstream steps that rely on model/scaler defaults don't accidentally pick up
         # stale root-level files. Prefer latest artifacts for the selected subject.
         if step_id in {"infer"}:
+            def _uses_placeholder_path(value: Optional[str], filename: str) -> bool:
+                if not value:
+                    return True
+                normalized = str(value).strip().replace("\\", "/")
+                return normalized in {
+                    filename,
+                    f"models/{filename}",
+                    f"./{filename}",
+                    f"./models/{filename}",
+                }
+
             exp_hash, model_path, scaler_path = self._resolve_latest_model_artifacts(
                 subject_dir,
                 session_dir_override=infer_session_dir,
                 subject_id_override=subject_for_step,
             )
-            if model_path and not settings.get("model_path"):
+            if model_path and _uses_placeholder_path(settings.get("model_path"), "finger_action_model.pt"):
                 settings["model_path"] = str(model_path)
-            if scaler_path and not settings.get("scaler_path"):
+            if scaler_path and _uses_placeholder_path(settings.get("scaler_path"), "scaler.npz"):
                 settings["scaler_path"] = str(scaler_path)
         config_path = subject_dir / "config" / f"{step_id}.json"
         session_id_value = self.current_session_ui or "UNKNOWN"
@@ -5947,9 +5985,9 @@ class MainWindow(QMainWindow):
             os.environ["LSL_SOURCE_ID"] = str(self.live_lsl_source_id)
         # Also export stream name/type as a convenience for scripts that support env overrides.
         if getattr(self, "live_stream_name", None):
-            os.environ.setdefault("LSL_STREAM_NAME", str(self.live_stream_name))
+            os.environ["LSL_STREAM_NAME"] = str(self.live_stream_name)
         if getattr(self, "live_stream_type", None):
-            os.environ.setdefault("LSL_STREAM_TYPE", str(self.live_stream_type))
+            os.environ["LSL_STREAM_TYPE"] = str(self.live_stream_type)
 
         self.runner.start(sys.executable, args, cwd=cwd)
 

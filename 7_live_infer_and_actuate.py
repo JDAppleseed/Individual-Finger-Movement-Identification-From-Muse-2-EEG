@@ -41,10 +41,15 @@ import torch
 # LSL is required for live stream
 try:
     from pylsl import StreamInlet, resolve_byprop  # type: ignore
+    try:
+        from pylsl import resolve_streams  # type: ignore
+    except Exception:  # pragma: no cover - older pylsl builds
+        resolve_streams = None
     LSL_AVAILABLE = True
 except Exception:  # pragma: no cover - optional dependency
     StreamInlet = None
     resolve_byprop = None
+    resolve_streams = None
     LSL_AVAILABLE = False
 
 # Project-local imports (keep as-is; this file is intended to be a drop-in replacement)
@@ -374,6 +379,9 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
     defaults = {
         "device": None,
         "session_dir": None,
+        "stream_name": None,
+        "stream_type": None,
+        "bluetooth_target": None,
         "LIVE_VIZ_ENABLED": False,
         "LIVE_VIZ_FPS": 2.0,
         "window_sec": 0.25,
@@ -430,19 +438,29 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
     p.add_argument("--subject-id", type=str, help="Subject ID (auto-resolve latest session).")
     p.add_argument("--project-name", type=str, help="Project name (auto-resolve latest session).")
 
-    p.add_argument("--window_sec", type=float, help="Window length (s).")
-    p.add_argument("--hop_sec", type=float, help="Window hop (s).")
-    p.add_argument("--target_fs", type=float, help="Target FS for resampling.")
+    p.add_argument("--stream-name", dest="stream_name", type=str, help="LSL stream name override.")
+    p.add_argument("--stream-type", dest="stream_type", type=str, help="LSL stream type override.")
+    p.add_argument("--window_sec", "--window-sec", dest="window_sec", type=float, help="Window length (s).")
+    p.add_argument("--hop_sec", "--hop-sec", dest="hop_sec", type=float, help="Window hop (s).")
+    p.add_argument("--target_fs", "--target-fs", dest="target_fs", type=float, help="Target FS for resampling.")
 
-    p.add_argument("--latency_threshold_ms", type=float, help="Latency p95 threshold (ms).")
+    p.add_argument(
+        "--latency_threshold_ms",
+        "--latency-threshold-ms",
+        dest="latency_threshold_ms",
+        type=float,
+        help="Latency p95 threshold (ms).",
+    )
     p.add_argument(
         "--latency_policy",
+        "--latency-policy",
+        dest="latency_policy",
         type=str,
         choices=["warn", "drop", "degrade"],
         help="Latency policy (warn/drop/degrade).",
     )
-    p.add_argument("--allow_drop", action="store_true")
-    p.add_argument("--log_every", type=float, help="Log interval (s).")
+    p.add_argument("--allow_drop", "--allow-drop", dest="allow_drop", action="store_true")
+    p.add_argument("--log_every", "--log-every", dest="log_every", type=float, help="Log interval (s).")
     p.add_argument(
         "--live_viz",
         dest="LIVE_VIZ_ENABLED",
@@ -577,12 +595,48 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
     )
 
     # New: actuation knobs
-    p.add_argument("--enable_actuation", action="store_true", help="Enable sending commands to Arduino hand")
-    p.add_argument("--serial_port", type=str, help="Serial port (e.g. /dev/tty.usbmodem*, /dev/tty.*)")
-    p.add_argument("--serial_baud", type=int, help="Baud rate (must match Arduino sketch)")
-    p.add_argument("--actuation_min_prob", type=float, help="Min joint confidence to actuate")
-    p.add_argument("--actuation_stability", type=int, help="Require same decision N windows in a row")
-    p.add_argument("--actuation_cooldown_ms", type=int, help="Min time between sends")
+    p.add_argument(
+        "--enable_actuation",
+        "--enable-actuation",
+        dest="enable_actuation",
+        action="store_true",
+        help="Enable sending commands to Arduino hand",
+    )
+    p.add_argument(
+        "--serial_port",
+        "--serial-port",
+        dest="serial_port",
+        type=str,
+        help="Serial port (auto-detected when omitted and actuation is enabled)",
+    )
+    p.add_argument(
+        "--serial_baud",
+        "--serial-baud",
+        dest="serial_baud",
+        type=int,
+        help="Baud rate (must match Arduino sketch)",
+    )
+    p.add_argument(
+        "--actuation_min_prob",
+        "--actuation-min-prob",
+        dest="actuation_min_prob",
+        type=float,
+        help="Min joint confidence to actuate",
+    )
+    p.add_argument(
+        "--actuation_stability",
+        "--actuation-stability",
+        dest="actuation_stability",
+        type=int,
+        help="Require same decision N windows in a row",
+    )
+    p.add_argument(
+        "--actuation_cooldown_ms",
+        "--actuation-cooldown-ms",
+        dest="actuation_cooldown_ms",
+        type=int,
+        help="Min time between sends",
+    )
     p.add_argument(
         "--modulate-actuation-speed",
         dest="modulate_actuation_speed",
@@ -595,6 +649,12 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         type=float,
         help="Gamma curve applied to confidence-based actuation speed.",
     )
+    p.add_argument(
+        "--bluetooth-target",
+        dest="bluetooth_target",
+        type=str,
+        help="Compatibility option for the UI connector; ignored by the inference script.",
+    )
     p.add_argument("--pred-log", type=str, help="Optional prediction log JSONL path override.")
     p.add_argument(
         "--allow_outside_base",
@@ -603,6 +663,8 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
     )
     p.add_argument(
         "--no_file_io",
+        "--no-file-io",
+        dest="no_file_io",
         action="store_true",
         help="Disable all file outputs (raw shards + log file) for max performance.",
     )
@@ -630,15 +692,271 @@ def _select_device(device_override: Optional[str]) -> torch.device:
     return torch.device("cpu")
 
 
-def _resolve_lsl_inlet(name: str, type_: str, timeout_s: float = 5.0) -> StreamInlet:
-    if not LSL_AVAILABLE or resolve_byprop is None or StreamInlet is None:
+def _safe_lsl_attr(callable_obj) -> str:
+    try:
+        value = callable_obj()
+    except Exception:
+        return ""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _is_default_infer_artifact_path(path_value: Optional[str], filename: str) -> bool:
+    if not path_value:
+        return True
+    normalized = str(path_value).strip().replace("\\", "/")
+    return normalized in {
+        filename,
+        f"models/{filename}",
+        f"./{filename}",
+        f"./models/{filename}",
+    }
+
+
+def _resolve_latest_run_dir_across_subject_sessions(
+    repo_root: Path,
+    project_name: Optional[str],
+    subject_id: Optional[str],
+    *,
+    exclude_session_dir: Optional[Path] = None,
+) -> Optional[tuple[Path, Path]]:
+    if not project_name or not subject_id:
+        return None
+    sessions_root = (
+        repo_root / "Projects" / str(project_name) / "subjects" / str(subject_id) / "sessions"
+    )
+    if not sessions_root.exists():
+        return None
+    best_pair: Optional[tuple[Path, Path]] = None
+    best_mtime = float("-inf")
+    for session_dir in sessions_root.iterdir():
+        if not session_dir.is_dir():
+            continue
+        try:
+            if exclude_session_dir is not None and session_dir.resolve() == exclude_session_dir.resolve():
+                continue
+        except Exception:
+            pass
+        run_dir = resolve_latest_run_dir(session_dir)
+        if run_dir is None or not run_dir.exists():
+            continue
+        try:
+            score = run_dir.stat().st_mtime
+        except Exception:
+            score = float("-inf")
+        if score > best_mtime:
+            best_mtime = score
+            best_pair = (session_dir, run_dir)
+    return best_pair
+
+
+def _stream_source_id(info: Any) -> str:
+    getter = getattr(info, "source_id", None)
+    if getter is None:
+        return ""
+    return _safe_lsl_attr(getter)
+
+
+def _format_lsl_stream(info: Any) -> str:
+    parts = [
+        f"name={_safe_lsl_attr(getattr(info, 'name', lambda: ''))}",
+        f"type={_safe_lsl_attr(getattr(info, 'type', lambda: ''))}",
+    ]
+    try:
+        parts.append(f"ch={int(info.channel_count())}")
+    except Exception:
+        pass
+    try:
+        parts.append(f"rate={float(info.nominal_srate())}")
+    except Exception:
+        pass
+    source_id = _stream_source_id(info)
+    uid = _safe_lsl_attr(getattr(info, "uid", lambda: ""))
+    if source_id:
+        parts.append(f"source_id={source_id}")
+    if uid:
+        parts.append(f"uid={uid}")
+    return ", ".join(parts)
+
+
+def _serial_port_score(port: Any) -> int:
+    device = str(getattr(port, "device", "") or "")
+    text = " ".join(
+        str(getattr(port, attr, "") or "")
+        for attr in ("name", "description", "manufacturer", "product", "interface")
+    ).lower()
+    device_l = device.lower()
+    score = 0
+    if "bluetooth" in text or "bluetooth" in device_l:
+        score -= 200
+    if "arduino" in text:
+        score += 200
+    if "usbmodem" in device_l:
+        score += 140
+    if "usbserial" in device_l:
+        score += 120
+    if "wch" in text or "ch340" in text:
+        score += 100
+    if "cp210" in text or "silicon labs" in text:
+        score += 100
+    if "ftdi" in text:
+        score += 100
+    if "usb serial" in text:
+        score += 80
+    if device_l.startswith("/dev/cu."):
+        score += 10
+    vid = getattr(port, "vid", None)
+    pid = getattr(port, "pid", None)
+    if vid is not None and pid is not None:
+        score += 10
+    return score
+
+
+def _choose_auto_serial_port(ports: list[Any]) -> Optional[str]:
+    if not ports:
+        return None
+    scored = []
+    for port in ports:
+        device = str(getattr(port, "device", "") or "").strip()
+        if not device:
+            continue
+        scored.append((_serial_port_score(port), device))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if len(scored) == 1:
+        return scored[0][1] if scored[0][0] > -100 else None
+    if scored[0][0] <= 0:
+        return None
+    if scored[0][0] == scored[1][0]:
+        return None
+    return scored[0][1]
+
+
+def _autodetect_serial_port() -> str:
+    try:
+        from serial.tools import list_ports  # type: ignore
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "pyserial is required for auto-detecting the Arduino serial port. "
+            "Install with: pip install pyserial"
+        ) from exc
+
+    ports = list(list_ports.comports())
+    chosen = _choose_auto_serial_port(ports)
+    if chosen:
+        return chosen
+    available = ", ".join(str(getattr(port, "device", "") or "?") for port in ports) or "(none)"
+    raise RuntimeError(
+        "Unable to auto-detect Arduino serial port. "
+        f"Available ports: {available}. Pass --serial_port explicitly if needed."
+    )
+
+
+def _resolve_lsl_inlet(
+    name: str,
+    type_: str,
+    timeout_s: float = 5.0,
+    source_id: Optional[str] = None,
+) -> StreamInlet:
+    if not LSL_AVAILABLE or StreamInlet is None or (
+        resolve_streams is None and resolve_byprop is None
+    ):
         raise RuntimeError("pylsl is required for live inference.")
-    streams = resolve_byprop("name", name, timeout=timeout_s)
-    streams = [s for s in streams if (s.type() == type_)]
-    if not streams:
-        raise RuntimeError(f"No LSL streams found for name={name} type={type_}.")
-    # pick first match
-    return StreamInlet(streams[0], max_chunklen=64)
+    timeout_s = max(0.1, float(timeout_s))
+    desired_source_id = str(source_id or os.environ.get("LSL_SOURCE_ID") or "").strip()
+    logger.info(
+        "Resolving LSL stream name=%s type=%s source_id=%s timeout=%.1fs",
+        name,
+        type_,
+        desired_source_id or "-",
+        timeout_s,
+    )
+    deadline = time.monotonic() + timeout_s
+    last_seen: list[Any] = []
+    while True:
+        remaining = max(0.0, deadline - time.monotonic())
+        query_wait = min(0.5, remaining)
+        all_streams: list[Any] = []
+        if resolve_streams is not None:
+            try:
+                all_streams = list(resolve_streams(wait_time=query_wait))
+            except TypeError:
+                try:
+                    all_streams = list(resolve_streams(timeout=query_wait))
+                except TypeError:
+                    all_streams = list(resolve_streams())
+        elif resolve_byprop is not None:
+            all_streams = list(resolve_byprop("name", name, timeout=query_wait))
+        last_seen = all_streams
+
+        candidates: list[Any] = []
+        for stream in all_streams:
+            try:
+                if name and str(stream.name()) != str(name):
+                    continue
+                if type_ and str(stream.type()) != str(type_):
+                    continue
+            except Exception:
+                continue
+            candidates.append(stream)
+
+        if desired_source_id:
+            exact_source = [s for s in candidates if _stream_source_id(s) == desired_source_id]
+            if exact_source:
+                candidates = exact_source
+            elif not candidates:
+                fallback = []
+                for stream in all_streams:
+                    try:
+                        if type_ and str(stream.type()) != str(type_):
+                            continue
+                    except Exception:
+                        continue
+                    if _stream_source_id(stream) == desired_source_id:
+                        fallback.append(stream)
+                if fallback:
+                    candidates = fallback
+
+        if candidates:
+            candidates = sorted(
+                candidates,
+                key=lambda stream: (
+                    1 if desired_source_id and _stream_source_id(stream) == desired_source_id else 0,
+                    1 if name and _safe_lsl_attr(stream.name) == str(name) else 0,
+                    1 if type_ and _safe_lsl_attr(stream.type) == str(type_) else 0,
+                    float(getattr(stream, "nominal_srate", lambda: 0.0)() or 0.0),
+                    float(getattr(stream, "channel_count", lambda: 0)() or 0),
+                ),
+                reverse=True,
+            )
+            chosen = candidates[0]
+            inlet = StreamInlet(chosen, max_chunklen=64)
+            try:
+                sample, ts = inlet.pull_sample(timeout=min(0.25, max(0.05, remaining or 0.25)))
+            except Exception:
+                sample, ts = None, None
+            if sample is not None and ts is not None:
+                logger.info("Resolved LSL stream: %s", _format_lsl_stream(chosen))
+                return inlet
+            logger.info(
+                "LSL stream resolved but not yet producing samples; retrying: %s",
+                _format_lsl_stream(chosen),
+            )
+
+        if remaining <= 0.0:
+            break
+        time.sleep(min(0.25, remaining))
+
+    suffix = ""
+    if last_seen:
+        rendered = "; ".join(_format_lsl_stream(stream) for stream in last_seen[:8])
+        suffix = f" Available streams: {rendered}"
+    raise RuntimeError(
+        f"No LSL streams found for name={name} type={type_} "
+        f"source_id={desired_source_id or '-'} within {timeout_s:.1f}s.{suffix}"
+    )
 
 
 def _choose_actuation(
@@ -862,8 +1180,27 @@ def main() -> int:
     _apply_config_to_args(args, config_settings, defaults)
 
     # Required config keys (as in original file)
-    lsl_name = config_settings.get("lsl_name", config_settings.get("stream_name", "Muse2-EEG"))
-    lsl_type = config_settings.get("lsl_type", config_settings.get("stream_type", "EEG"))
+    lsl_name = (
+        args.stream_name
+        or config_settings.get("lsl_name")
+        or config_settings.get("stream_name")
+        or "Muse2-EEG"
+    )
+    lsl_type = (
+        args.stream_type
+        or config_settings.get("lsl_type")
+        or config_settings.get("stream_type")
+        or "EEG"
+    )
+    lsl_source_id = (
+        config_settings.get("lsl_source_id")
+        or config_settings.get("LSL_SOURCE_ID")
+        or os.environ.get("LSL_SOURCE_ID")
+    )
+    try:
+        lsl_resolve_timeout_s = float(config_settings.get("LSL_RESOLVE_TIMEOUT", 25.0))
+    except Exception:
+        lsl_resolve_timeout_s = 25.0
     session_dir_value = args.session_dir or config_settings.get("session_dir")
     project_name, subject_id = _derive_project_subject(
         config_payload, config_path, args.project_name, args.subject_id, config_settings
@@ -883,9 +1220,9 @@ def main() -> int:
         if latest_session is not None:
             session_dir_value = str(latest_session)
             session_dir_inferred = True
-    model_path = args.model_path or (None if session_dir_value else config_settings.get("model_path"))
-    scaler_path = args.scaler_path or (None if session_dir_value else config_settings.get("scaler_path"))
-    out_dir = args.out_dir or (None if session_dir_value else config_settings.get("out_dir"))
+    model_path = args.model_path or config_settings.get("model_path")
+    scaler_path = args.scaler_path or config_settings.get("scaler_path")
+    out_dir = args.out_dir or config_settings.get("out_dir")
 
     def _resolve_path(path_str: str, base_dir: Optional[Path]) -> str:
         candidate = Path(path_str).expanduser()
@@ -912,12 +1249,36 @@ def main() -> int:
             print(f"Session dir not found: {session_dir_path}")
             return 2
         base_dir = session_dir_path
+        resolved_model_override = None
+        resolved_scaler_override = None
         explicit_overrides = []
-        if args.model_path:
-            explicit_overrides.append("model_path")
-        if args.scaler_path:
-            explicit_overrides.append("scaler_path")
-        if args.out_dir:
+        if model_path:
+            resolved_candidate = _resolve_path(str(model_path), config_path.parent)
+            if Path(resolved_candidate).exists():
+                resolved_model_override = resolved_candidate
+                explicit_overrides.append("model_path")
+            elif args.model_path:
+                print("Session selection source: session_dir")
+                print(f"Model path not found: {resolved_candidate}")
+                return 2
+            elif not _is_default_infer_artifact_path(str(model_path), "finger_action_model.pt"):
+                print(
+                    f"⚠️ Config model_path not found; falling back to latest session model: {resolved_candidate}"
+                )
+        if scaler_path:
+            resolved_candidate = _resolve_path(str(scaler_path), config_path.parent)
+            if Path(resolved_candidate).exists():
+                resolved_scaler_override = resolved_candidate
+                explicit_overrides.append("scaler_path")
+            elif args.scaler_path:
+                print("Session selection source: session_dir")
+                print(f"Scaler path not found: {resolved_candidate}")
+                return 2
+            elif not _is_default_infer_artifact_path(str(scaler_path), "scaler.npz"):
+                print(
+                    f"⚠️ Config scaler_path not found; falling back to latest session scaler: {resolved_candidate}"
+                )
+        if out_dir:
             explicit_overrides.append("out_dir")
         if explicit_overrides:
             print(
@@ -927,26 +1288,46 @@ def main() -> int:
         else:
             selection_source = "subject_latest" if session_dir_inferred else "session_dir"
 
-        run_dir = resolve_latest_run_dir(session_dir_path)
-        if run_dir is None or not run_dir.exists():
+        run_dir = None
+        if resolved_model_override is None or resolved_scaler_override is None:
+            run_dir = resolve_latest_run_dir(session_dir_path)
+            if (run_dir is None or not run_dir.exists()) and (project_name and subject_id):
+                fallback_pair = _resolve_latest_run_dir_across_subject_sessions(
+                    _resolve_repo_root(config_path),
+                    project_name,
+                    subject_id,
+                    exclude_session_dir=session_dir_path,
+                )
+                if fallback_pair is not None:
+                    fallback_session_dir, fallback_run_dir = fallback_pair
+                    print(
+                        "⚠️ Selected session has no model run; "
+                        f"using latest trained session for artifacts: {fallback_session_dir}"
+                    )
+                    run_dir = fallback_run_dir
+        if (resolved_model_override is None or resolved_scaler_override is None) and (
+            run_dir is None or not run_dir.exists()
+        ):
             print("Session selection source: session_dir")
             print(
                 "No model run directory found. Train a model first (Step 2), or pass explicit model_path/scaler_path."
             )
             return 2
         base_dir = session_dir_path
-        if not model_path:
+        if resolved_model_override is not None:
+            model_path = resolved_model_override
+        else:
+            assert run_dir is not None
             model_path = str(run_dir / "finger_action_model.pt")
+        if resolved_scaler_override is not None:
+            scaler_path = resolved_scaler_override
         else:
-            model_path = _resolve_path(str(model_path), base_dir)
-        if not scaler_path:
+            assert run_dir is not None
             scaler_path = str(run_dir / "scaler.npz")
-        else:
-            scaler_path = _resolve_path(str(scaler_path), base_dir)
         if not out_dir:
             out_dir = str(SessionLayout(session_dir_path).processed_dir / "live_infer")
         else:
-            out_dir = _resolve_path(str(out_dir), base_dir)
+            out_dir = _resolve_path(str(out_dir), config_path.parent)
     else:
         config_dir = Path(args.config).expanduser().resolve().parent
         if not model_path or not scaler_path or not out_dir:
@@ -1055,7 +1436,12 @@ def main() -> int:
     live_viz_interval = (1.0 / live_viz_fps) if live_viz_enabled else 0.0
     last_live_viz_emit = 0.0
 
-    inlet = _resolve_lsl_inlet(lsl_name, lsl_type, timeout_s=8.0)
+    inlet = _resolve_lsl_inlet(
+        lsl_name,
+        lsl_type,
+        timeout_s=lsl_resolve_timeout_s,
+        source_id=str(lsl_source_id) if lsl_source_id else None,
+    )
     info = inlet.info()
     sfreq = float(info.nominal_srate())
     ch = int(info.channel_count())
@@ -1078,11 +1464,13 @@ def main() -> int:
     # Serial actuator
     actuator: Optional[SerialHandActuator] = None
     if args.enable_actuation:
-        if not args.serial_port:
-            raise RuntimeError("--enable_actuation requires --serial_port (e.g. /dev/tty.usbmodem*, /dev/tty.*)")
-        actuator = SerialHandActuator(args.serial_port, baud=args.serial_baud)
+        serial_port = args.serial_port or config_settings.get("serial_port")
+        if not serial_port:
+            serial_port = _autodetect_serial_port()
+            logger.info("Actuation serial port auto-detected: %s", serial_port)
+        actuator = SerialHandActuator(str(serial_port), baud=args.serial_baud)
         actuator.open()
-        logger.info("Actuation enabled via serial port %s @ %s baud", args.serial_port, args.serial_baud)
+        logger.info("Actuation enabled via serial port %s @ %s baud", serial_port, args.serial_baud)
         _warmup_actuation(actuator)
 
     # Live buffers
