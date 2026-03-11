@@ -105,7 +105,7 @@ from muse_streaming.config import DEFAULT_STREAM_NAME, DEFAULT_STREAM_TYPE
 from muse_streaming.healthcheck import run_healthcheck
 from utils.label_schema import ACTION_NAMES, FINGER_NAMES
 from utils.session_layout import SessionLayout, resolve_latest_run_dir
-from visualization.live_viz import LiveHiddenMagnitudePlot, parse_viz_line
+from visualization.live_viz import parse_viz_line
 from visualization.replay_viz import ReplayVisualizer
 
 try:
@@ -422,8 +422,8 @@ TOOLTIPS: Dict[str, str] = {
     "FAILED_DIR": "Directory for failed debug writes.",
     "REQUIRED_LSL_LABELS": "Required LSL channel labels (case-insensitive).",
     "REQUIRE_EXACTLY_4_CHANNELS": "Require exactly 4 EEG channels from LSL.",
-    "LIVE_VIZ_ENABLED": "Enable lightweight live visualization output.",
-    "LIVE_VIZ_FPS": "Live visualization update rate (Hz).",
+    "LIVE_VIZ_ENABLED": "Emit Step 7 live model-view data for the Model Views window.",
+    "LIVE_VIZ_FPS": "Step 7 live model-view update rate (Hz).",
     "STREAMER_INTERNAL": "Internal streamer enabled.",
     "STREAMER_STREAM_NAME": "Internal streamer LSL name.",
     "STREAMER_STREAM_TYPE": "Internal streamer LSL type.",
@@ -872,8 +872,15 @@ class MainWindow(QMainWindow):
         self._auto_scan_timer.setInterval(1500)
         self._auto_scan_timer.timeout.connect(self._auto_scan_lsl_streams)
 
-        self.live_hidden_plot: Optional[LiveHiddenMagnitudePlot] = None
+        self.live_feature_view = None
+        self.live_hidden_plot = None
+        self.live_saliency_view = None
+        self.live_pred_finger_plot = None
+        self.live_pred_action_plot = None
+        self.live_pred_label: Optional[QLabel] = None
+        self.live_viz_tab_index: Optional[int] = None
         self.live_viz_status_label: Optional[QLabel] = None
+        self._latest_live_viz_payload: Optional[Dict[str, Any]] = None
         self._last_live_viz_mono = 0.0
         self._live_viz_status_timer = QTimer(self)
         self._live_viz_status_timer.setInterval(750)
@@ -1562,30 +1569,19 @@ class MainWindow(QMainWindow):
         self._apply_text_outline_effect(model_views_header)
         layout.addWidget(model_views_header)
 
-        mode_row = QHBoxLayout()
-        mode_label = QLabel("Mode")
-        self._apply_text_outline_effect(mode_label)
-        mode_row.addWidget(mode_label)
-        self.model_view_mode = QComboBox()
-        self.model_view_mode.addItems(["Off", "Replay", "Live"])
-        self.model_view_mode.currentTextChanged.connect(self._toggle_model_views)
-        mode_row.addWidget(self.model_view_mode)
-        mode_row.addStretch(1)
-        layout.addLayout(mode_row)
-
-        self.live_viz_checkbox = QCheckBox("Enable live visualization")
+        self.live_viz_checkbox = QCheckBox("Emit Step 7 live model views")
         layout.addWidget(self.live_viz_checkbox)
         self.live_viz_fps_spin = QSpinBox()
         self.live_viz_fps_spin.setRange(1, 10)
         self.live_viz_fps_spin.setValue(2)
         fps_row = QHBoxLayout()
-        fps_label = QLabel("Live viz FPS")
+        fps_label = QLabel("Step 7 live viz FPS")
         self._apply_text_outline_effect(fps_label)
         fps_row.addWidget(fps_label)
         fps_row.addWidget(self.live_viz_fps_spin)
         fps_row.addStretch(1)
         layout.addLayout(fps_row)
-        self.live_viz_status_label = QLabel("Live Viz: Disabled")
+        self.live_viz_status_label = QLabel("Live Model View: Step 7 inactive")
         self._apply_text_outline_effect(self.live_viz_status_label)
         layout.addWidget(self.live_viz_status_label)
 
@@ -1685,16 +1681,55 @@ class MainWindow(QMainWindow):
 
         live_tab = QWidget()
         live_layout = QVBoxLayout(live_tab)
-        self.live_hidden_plot = LiveHiddenMagnitudePlot()
+        live_notice = QLabel("Available only while Step 7 Live Infer + Actuate is actively running.")
+        live_notice.setWordWrap(True)
+        self._apply_text_outline_effect(live_notice)
+        live_layout.addWidget(live_notice)
+        self.live_pred_label = QLabel("Current prediction: -")
+        self._apply_text_outline_effect(self.live_pred_label)
+        live_layout.addWidget(self.live_pred_label)
+        self.live_feature_view = pg.ImageView()
+        try:
+            self.live_feature_view.getView().setAspectLocked(False)
+        except Exception:
+            pass
+        self.live_hidden_plot = pg.PlotWidget()
+        self.live_saliency_view = pg.ImageView()
         self._add_section_header(
             live_layout,
-            "Live Hidden Magnitude",
-            "Streaming hidden-state magnitude from live inference (Step 7).",
+            "Feature Maps",
+            "Latest convolutional feature maps from the active Step 7 inference window.",
         )
-        live_layout.addWidget(self.live_hidden_plot.widget)
+        live_layout.addWidget(self.live_feature_view)
+        self._add_section_header(
+            live_layout,
+            "Hidden Magnitude",
+            "Streaming LSTM hidden-state magnitude from the active Step 7 inference window.",
+        )
+        live_layout.addWidget(self.live_hidden_plot)
+        self._add_section_header(
+            live_layout,
+            "Prediction Timeline (Fingers)",
+            "Per-timestep finger probabilities for the latest Step 7 inference window.",
+        )
+        self.live_pred_finger_plot = pg.PlotWidget()
+        live_layout.addWidget(self.live_pred_finger_plot)
+        self._add_section_header(
+            live_layout,
+            "Prediction Timeline (Actions)",
+            "Per-timestep action probabilities for the latest Step 7 inference window.",
+        )
+        self.live_pred_action_plot = pg.PlotWidget()
+        live_layout.addWidget(self.live_pred_action_plot)
+        self._add_section_header(
+            live_layout,
+            "Saliency",
+            "Input saliency for the latest Step 7 inference window.",
+        )
+        live_layout.addWidget(self.live_saliency_view)
 
         self.model_view_tabs.addTab(replay_tab, "Replay")
-        self.model_view_tabs.addTab(live_tab, "Live")
+        self.live_viz_tab_index = self.model_view_tabs.addTab(live_tab, "Step 7 Live")
         layout.addWidget(self.model_view_tabs)
         self._bind_checkbox(self.live_viz_checkbox, "infer", "LIVE_VIZ_ENABLED")
         field = self.fields.get("infer", {}).get("LIVE_VIZ_FPS")
@@ -1703,9 +1738,6 @@ class MainWindow(QMainWindow):
             self.live_viz_fps_spin.valueChanged.connect(field.setValue)
             field.valueChanged.connect(self.live_viz_fps_spin.setValue)
         self.live_viz_checkbox.toggled.connect(lambda _val: self._update_live_viz_status())
-        self.model_view_mode.currentTextChanged.connect(lambda _val: self._update_live_viz_status())
-        self.model_view_mode.setCurrentText("Replay")
-        self._toggle_model_views("Replay")
         self._update_live_viz_status()
         self._autofill_replay_paths()
         return widget
@@ -1764,41 +1796,108 @@ class MainWindow(QMainWindow):
         self.model_views_window = None
         self._model_views_root = None
 
-    def _toggle_model_views(self, mode: str) -> None:
-        if not PYQTGRAPH_AVAILABLE:
-            return
-        enabled = mode != "Off"
-        if hasattr(self, "model_view_tabs"):
-            self.model_view_tabs.setEnabled(enabled)
-        self.live_viz_checkbox.setEnabled(mode == "Live")
-        self.live_viz_fps_spin.setEnabled(mode == "Live")
-        if mode != "Replay":
-            self._replay_auto_timer.stop()
-        self._update_live_viz_status()
-
     def _live_viz_enabled(self) -> bool:
         field = self.fields.get("infer", {}).get("LIVE_VIZ_ENABLED")
         if isinstance(field, QCheckBox):
             return field.isChecked()
         return False
 
+    def _live_model_view_active(self) -> bool:
+        return bool(self.runner.is_running() and self.active_step == "infer")
+
+    def _update_model_view_access(self) -> None:
+        if not PYQTGRAPH_AVAILABLE:
+            return
+        if not hasattr(self, "model_view_tabs") or self.live_viz_tab_index is None:
+            return
+        live_enabled = self._live_model_view_active()
+        self.model_view_tabs.setTabEnabled(self.live_viz_tab_index, live_enabled)
+        if not live_enabled and self.model_view_tabs.currentIndex() == self.live_viz_tab_index:
+            self.model_view_tabs.setCurrentIndex(0)
+
+    def _render_model_visualization(
+        self,
+        *,
+        feature_view: Any,
+        hidden_plot: Any,
+        pred_label: Optional[QLabel],
+        pred_finger_plot: Any,
+        pred_action_plot: Any,
+        saliency_view: Any,
+        feature_map: Optional[np.ndarray],
+        hidden_mag: Optional[np.ndarray],
+        finger_probs: Optional[np.ndarray],
+        action_probs: Optional[np.ndarray],
+        saliency: Optional[np.ndarray],
+    ) -> None:
+        if not PYQTGRAPH_AVAILABLE:
+            return
+        if feature_view is not None:
+            if feature_map is not None and feature_map.size:
+                feature_view.setImage(feature_map, autoLevels=True)
+            else:
+                try:
+                    feature_view.clear()
+                except Exception:
+                    pass
+        if hidden_plot is not None:
+            hidden_plot.clear()
+            if hidden_mag is not None and hidden_mag.size:
+                hidden_plot.plot(hidden_mag)
+        if pred_label is not None:
+            finger_text = "-"
+            action_text = "-"
+            if finger_probs is not None and finger_probs.size:
+                finger_last = finger_probs[-1]
+                finger_idx = int(np.argmax(finger_last))
+                finger_prob = float(finger_last[finger_idx])
+                finger_name = FINGER_NAMES.get(finger_idx, f"finger_{finger_idx}")
+                finger_text = f"{finger_name} ({finger_prob:.2f})"
+            if action_probs is not None and action_probs.size:
+                action_last = action_probs[-1]
+                action_idx = int(np.argmax(action_last))
+                action_prob = float(action_last[action_idx])
+                action_name = ACTION_NAMES.get(action_idx, f"action_{action_idx}")
+                action_text = f"{action_name} ({action_prob:.2f})"
+            pred_label.setText(
+                f"Current prediction: Finger {finger_text}, Action {action_text}"
+            )
+        self._plot_prediction_timeline(
+            pred_finger_plot,
+            finger_probs if finger_probs is not None else np.array([]),
+            FINGER_NAMES,
+            title="Finger Prob",
+        )
+        self._plot_prediction_timeline(
+            pred_action_plot,
+            action_probs if action_probs is not None else np.array([]),
+            ACTION_NAMES,
+            title="Action Prob",
+        )
+        if saliency_view is not None:
+            if saliency is not None and saliency.size:
+                saliency_view.setImage(saliency, autoLevels=True)
+            else:
+                try:
+                    saliency_view.clear()
+                except Exception:
+                    pass
+
     def _update_live_viz_status(self) -> None:
         if self.live_viz_status_label is None:
             return
-        mode = None
-        if hasattr(self, "model_view_mode"):
-            mode = self.model_view_mode.currentText()
-        if mode and mode != "Live":
-            self.live_viz_status_label.setText("Live Viz: Off")
+        self._update_model_view_access()
+        if not self._live_model_view_active():
+            self.live_viz_status_label.setText("Live Model View: Step 7 inactive")
             return
         if not self._live_viz_enabled():
-            self.live_viz_status_label.setText("Live Viz: Disabled")
+            self.live_viz_status_label.setText("Live Model View: Disabled")
             return
         now = time.monotonic()
         if self._last_live_viz_mono and (now - self._last_live_viz_mono) <= 2.5:
-            self.live_viz_status_label.setText("Live Viz: Active")
+            self.live_viz_status_label.setText("Live Model View: Active")
         else:
-            self.live_viz_status_label.setText("Live Viz: Waiting")
+            self.live_viz_status_label.setText("Live Model View: Waiting for Step 7 payloads")
 
     def _load_replay_data(self) -> None:
         if not PYQTGRAPH_AVAILABLE:
@@ -1856,49 +1955,57 @@ class MainWindow(QMainWindow):
             hidden_mag = self.replay_viz.hidden_magnitude(idx)
             saliency = self.replay_viz.saliency(idx)
             timeline = self.replay_viz.prediction_timeline(idx)
-            if feature_map is not None:
-                self.replay_feature_view.setImage(feature_map, autoLevels=True)
-            if hidden_mag is not None:
-                self.replay_hidden_plot.clear()
-                self.replay_hidden_plot.plot(hidden_mag)
-            if timeline is not None:
-                finger_probs, action_probs = timeline
-                if self.replay_pred_label is not None:
-                    finger_text = "-"
-                    action_text = "-"
-                    if finger_probs.size:
-                        finger_last = finger_probs[-1]
-                        finger_idx = int(np.argmax(finger_last))
-                        finger_prob = float(finger_last[finger_idx])
-                        finger_name = FINGER_NAMES.get(finger_idx, f"finger_{finger_idx}")
-                        finger_text = f"{finger_name} ({finger_prob:.2f})"
-                    if action_probs.size:
-                        action_last = action_probs[-1]
-                        action_idx = int(np.argmax(action_last))
-                        action_prob = float(action_last[action_idx])
-                        action_name = ACTION_NAMES.get(action_idx, f"action_{action_idx}")
-                        action_text = f"{action_name} ({action_prob:.2f})"
-                    self.replay_pred_label.setText(
-                        f"Current prediction: Finger {finger_text}, Action {action_text}"
-                    )
-                self._plot_prediction_timeline(
-                    self.replay_pred_finger_plot,
-                    finger_probs,
-                    FINGER_NAMES,
-                    title="Finger Prob",
-                )
-                self._plot_prediction_timeline(
-                    self.replay_pred_action_plot,
-                    action_probs,
-                    ACTION_NAMES,
-                    title="Action Prob",
-                )
-            elif self.replay_pred_label is not None:
-                self.replay_pred_label.setText("Current prediction: -")
-            if saliency is not None:
-                self.replay_saliency_view.setImage(saliency, autoLevels=True)
+            finger_probs = timeline[0] if timeline is not None else None
+            action_probs = timeline[1] if timeline is not None else None
+            self._render_model_visualization(
+                feature_view=self.replay_feature_view,
+                hidden_plot=self.replay_hidden_plot,
+                pred_label=self.replay_pred_label,
+                pred_finger_plot=self.replay_pred_finger_plot,
+                pred_action_plot=self.replay_pred_action_plot,
+                saliency_view=self.replay_saliency_view,
+                feature_map=feature_map,
+                hidden_mag=hidden_mag,
+                finger_probs=finger_probs,
+                action_probs=action_probs,
+                saliency=saliency,
+            )
         except Exception as exc:
             self._append_log(f"⚠️ Replay view refresh failed: {exc}")
+
+    def _refresh_live_model_views(self) -> None:
+        if not PYQTGRAPH_AVAILABLE or not self._live_model_view_active():
+            return
+        payload = self._latest_live_viz_payload
+        if not payload:
+            return
+
+        def _as_array(name: str) -> Optional[np.ndarray]:
+            value = payload.get(name)
+            if value is None:
+                return None
+            arr = np.asarray(value, dtype=float)
+            return arr if arr.size else None
+
+        hidden_mag = _as_array("hidden_timeline")
+        if hidden_mag is None:
+            hidden_scalar = payload.get("hidden_mag")
+            if hidden_scalar is not None:
+                hidden_mag = np.asarray([float(hidden_scalar)], dtype=float)
+
+        self._render_model_visualization(
+            feature_view=self.live_feature_view,
+            hidden_plot=self.live_hidden_plot,
+            pred_label=self.live_pred_label,
+            pred_finger_plot=self.live_pred_finger_plot,
+            pred_action_plot=self.live_pred_action_plot,
+            saliency_view=self.live_saliency_view,
+            feature_map=_as_array("feature_map"),
+            hidden_mag=hidden_mag,
+            finger_probs=_as_array("finger_probs"),
+            action_probs=_as_array("action_probs"),
+            saliency=_as_array("saliency"),
+        )
 
     def _toggle_replay_auto(self, enabled: bool) -> None:
         if enabled:
@@ -1935,8 +2042,6 @@ class MainWindow(QMainWindow):
     ) -> None:
         if plot_widget is None:
             return
-        if probs is None or probs.size == 0:
-            return
         plot_item = plot_widget.getPlotItem()
         if plot_item.legend is not None:
             try:
@@ -1948,6 +2053,8 @@ class MainWindow(QMainWindow):
         plot_item.addLegend(offset=(10, 10))
         plot_item.setLabel("left", title)
         plot_item.setLabel("bottom", "t")
+        if probs is None or probs.size == 0:
+            return
 
         steps = int(probs.shape[0])
         classes = int(probs.shape[1]) if probs.ndim == 2 else 0
@@ -3529,14 +3636,14 @@ class MainWindow(QMainWindow):
                 step_id,
                 form,
                 "LIVE_VIZ_ENABLED",
-                "Enable live visualization output",
+                "Emit Step 7 live model views",
                 defaults,
             )
             self._add_spin(
                 step_id,
                 form,
                 "LIVE_VIZ_FPS",
-                "Live viz FPS",
+                "Step 7 live viz FPS",
                 defaults,
                 1,
                 10,
@@ -4491,8 +4598,8 @@ class MainWindow(QMainWindow):
                 "uncertainty_base_threshold": "Uncertainty base threshold",
                 "uncertainty_weight": "Uncertainty weight",
                 "allow_drop": "Allow drop",
-                "LIVE_VIZ_ENABLED": "Enable live visualization output",
-                "LIVE_VIZ_FPS": "Live viz FPS",
+                "LIVE_VIZ_ENABLED": "Emit Step 7 live model views",
+                "LIVE_VIZ_FPS": "Step 7 live viz FPS",
                 "latency_threshold_ms": "Latency threshold (ms)",
                 "latency_policy": "Latency policy",
                 "log_every": "Log every (s)",
@@ -6804,6 +6911,10 @@ class MainWindow(QMainWindow):
             self._set_step_status(self.active_step, "Running")
         if self.active_step == "step1":
             self.stream_state_label.setText("Stream: running")
+        if self.active_step == "infer":
+            self._latest_live_viz_payload = None
+            self._last_live_viz_mono = 0.0
+        self._update_live_viz_status()
         self._set_live_buttons_state()
 
     def _on_process_finished(self, exit_code: int, exit_status: int) -> None:
@@ -6835,6 +6946,7 @@ class MainWindow(QMainWindow):
             self._update_resume_ui()
             self._refresh_status_summary()
         self.active_step = None
+        self._update_live_viz_status()
         self._set_live_buttons_state()
         self._maybe_continue_eval_queue(step, exit_code, exit_status)
         self._maybe_finalize_stop()
@@ -6897,13 +7009,12 @@ class MainWindow(QMainWindow):
             label.setText(f"Status: {text}")
 
     def _append_log(self, line: str) -> None:
-        if line.startswith("VIZ "):
-            payload = parse_viz_line(line)
-            if payload:
-                self._last_live_viz_mono = time.monotonic()
-                self._update_live_viz_status()
-                if self.live_hidden_plot:
-                    self.live_hidden_plot.update(payload)
+        payload = parse_viz_line(line)
+        if payload:
+            self._latest_live_viz_payload = payload
+            self._last_live_viz_mono = time.monotonic()
+            self._update_live_viz_status()
+            self._refresh_live_model_views()
             return
         self.log_entries.append(line)
         self._append_log_line_to_console(line)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+import json
 from typing import Any, Dict, Optional
 
 try:
@@ -36,6 +37,13 @@ class LiveHiddenMagnitudePlot:
 
 
 def parse_viz_line(line: str) -> Optional[Dict[str, Any]]:
+    if line.startswith("VIZJSON "):
+        try:
+            payload = json.loads(line[len("VIZJSON ") :].strip())
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            return None
     if not line.startswith("VIZ "):
         return None
     try:

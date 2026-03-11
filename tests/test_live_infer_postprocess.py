@@ -8,6 +8,7 @@ import torch
 
 from utils.inference import InferenceConfig, InferenceEngine
 from utils.postprocess import PostprocessSettings, PostprocessState
+from visualization.live_viz import parse_viz_line
 
 
 def _load_live_module():
@@ -359,3 +360,14 @@ def test_main_falls_back_to_latest_trained_sibling_session(tmp_path, monkeypatch
 
     assert captured["model_path"] == str(model_path)
     assert captured["scaler_path"] == str(scaler_path)
+
+
+def test_parse_viz_line_accepts_vizjson():
+    payload = parse_viz_line(
+        'VIZJSON {"t":1.25,"hidden_mag":0.42,"finger_probs":[[0.1,0.9]],"action_probs":[[0.7,0.3]]}'
+    )
+
+    assert payload is not None
+    assert payload["t"] == 1.25
+    assert payload["hidden_mag"] == 0.42
+    assert payload["finger_probs"][0][1] == 0.9
