@@ -82,6 +82,7 @@ from app.config_model import (
     default_train_settings,
     write_json,
 )
+from app.autofill_utils import should_replace_autofilled_text
 from app.paths import (
     SubjectInfo,
     ensure_project,
@@ -97,6 +98,7 @@ from app.paths import (
     ui_session_id,
 )
 from app.process_runner import ProcessRunner
+from app.replay_path_utils import resolve_replay_artifact_paths
 from app.repo_probe import discover_scripts
 from app.ui_config_validation import validate_step_settings
 from muse_streaming.config import DEFAULT_STREAM_NAME, DEFAULT_STREAM_TYPE
@@ -825,6 +827,7 @@ class MainWindow(QMainWindow):
         self.current_session_ui: Optional[str] = None
         self.current_session_backend: Optional[str] = None
         self._auto_session_dir_value: Optional[str] = None
+        self._auto_field_values: Dict[str, str] = {}
 
         self.fields: Dict[str, Dict[str, QWidget]] = {}
         self.defaults: Dict[str, Dict[str, Any]] = {}
@@ -1701,7 +1704,8 @@ class MainWindow(QMainWindow):
             field.valueChanged.connect(self.live_viz_fps_spin.setValue)
         self.live_viz_checkbox.toggled.connect(lambda _val: self._update_live_viz_status())
         self.model_view_mode.currentTextChanged.connect(lambda _val: self._update_live_viz_status())
-        self._toggle_model_views("Off")
+        self.model_view_mode.setCurrentText("Replay")
+        self._toggle_model_views("Replay")
         self._update_live_viz_status()
         self._autofill_replay_paths()
         return widget
@@ -1798,13 +1802,43 @@ class MainWindow(QMainWindow):
 
     def _load_replay_data(self) -> None:
         if not PYQTGRAPH_AVAILABLE:
+            self._append_log(
+                "⚠️ Replay views require pyqtgraph in the active Python environment."
+            )
             return
-        npz_path = self.replay_npz_path.text().strip()
-        model_path = self.replay_model_path.text().strip() or "finger_action_model.pt"
-        scaler_path = self.replay_scaler_path.text().strip() or "scaler.npz"
+        session_dir = self._resolve_effective_session_dir(step_id=None)
+        sessions_root = None
+        if self.current_project and self.current_subject:
+            sessions_root = subject_root(self.current_project, self.current_subject) / "sessions"
+        npz_path, model_path, scaler_path = resolve_replay_artifact_paths(
+            session_dir=session_dir,
+            sessions_root=sessions_root,
+            npz_text=self.replay_npz_path.text().strip(),
+            model_text=self.replay_model_path.text().strip(),
+            scaler_text=self.replay_scaler_path.text().strip(),
+        )
+        if npz_path is None or model_path is None or scaler_path is None:
+            missing = []
+            if npz_path is None:
+                missing.append("windows NPZ")
+            if model_path is None:
+                missing.append("model")
+            if scaler_path is None:
+                missing.append("scaler")
+            details = ", ".join(missing)
+            session_text = str(session_dir) if session_dir is not None else "(none)"
+            self._append_log(
+                f"⚠️ Failed to resolve replay data paths for: {details}. Session dir: {session_text}"
+            )
+            return
+        self.replay_npz_path.setText(str(npz_path))
+        self.replay_model_path.setText(str(model_path))
+        self.replay_scaler_path.setText(str(scaler_path))
         try:
             self.replay_viz = ReplayVisualizer(
-                npz_path=npz_path, model_path=model_path, scaler_path=scaler_path
+                npz_path=str(npz_path),
+                model_path=str(model_path),
+                scaler_path=str(scaler_path),
             )
             self.replay_window_index.setMaximum(max(0, self.replay_viz.window_count - 1))
             self._refresh_replay_views()
@@ -4878,15 +4912,18 @@ class MainWindow(QMainWindow):
             return
         infer_model_widget = self.fields.get("infer", {}).get("model_path")
         infer_scaler_widget = self.fields.get("infer", {}).get("scaler_path")
-        def _maybe_set(widget: Optional[QLineEdit], value: str, legacy_values: set[str]) -> None:
-            if not isinstance(widget, QLineEdit):
-                return
-            current = widget.text().strip()
-            if not current or current in legacy_values:
-                widget.setText(value)
-
-        _maybe_set(infer_model_widget, str(run_dir / "finger_action_model.pt"), {"finger_action_model.pt"})
-        _maybe_set(infer_scaler_widget, str(run_dir / "scaler.npz"), {"scaler.npz"})
+        self._maybe_autofill_text(
+            infer_model_widget,
+            str(run_dir / "finger_action_model.pt"),
+            key="infer.model_path",
+            legacy_values={"finger_action_model.pt"},
+        )
+        self._maybe_autofill_text(
+            infer_scaler_widget,
+            str(run_dir / "scaler.npz"),
+            key="infer.scaler_path",
+            legacy_values={"scaler.npz"},
+        )
 
     def _select_subject(self, subject_id: str) -> None:
         if subject_id == "-" or not subject_id:
@@ -5057,6 +5094,25 @@ class MainWindow(QMainWindow):
         if not current or (prev_value and current == prev_value):
             self.train_session_dir_input.setText(new_value)
 
+    def _maybe_autofill_text(
+        self,
+        widget: Optional[QLineEdit],
+        value: str,
+        *,
+        key: str,
+        legacy_values: set[str],
+    ) -> None:
+        if not isinstance(widget, QLineEdit):
+            return
+        current = widget.text().strip()
+        previous_auto = self._auto_field_values.get(key)
+        if should_replace_autofilled_text(current, previous_auto, legacy_values):
+            widget.setText(value)
+            self._auto_field_values[key] = value
+            return
+        if current == value:
+            self._auto_field_values[key] = value
+
     def _auto_select_latest_session_for_subject(self) -> None:
         if not self.current_project or not self.current_subject:
             return
@@ -5100,15 +5156,6 @@ class MainWindow(QMainWindow):
         self.projects_selected_session_value.setText(str(display_path))
 
     def _autofill_dependent_paths_from_session_dir(self) -> None:
-        def _maybe_set(
-            widget: Optional[QLineEdit], value: str, legacy_values: set[str]
-        ) -> None:
-            if not isinstance(widget, QLineEdit):
-                return
-            current = widget.text().strip()
-            if not current or current in legacy_values:
-                widget.setText(value)
-
         global_session = self._resolve_effective_session_dir(step_id=None)
         train_session = self._resolve_effective_session_dir(step_id="train")
 
@@ -5122,7 +5169,12 @@ class MainWindow(QMainWindow):
             train_layout = SessionLayout(train_source)
             train_npz = str(train_layout.windows_npz)
             train_npz_widget = self.fields.get("train", {}).get("npz")
-            _maybe_set(train_npz_widget, train_npz, {"eeg_windows.npz"})
+            self._maybe_autofill_text(
+                train_npz_widget,
+                train_npz,
+                key="train.npz",
+                legacy_values={"eeg_windows.npz"},
+            )
 
         if not global_session or not global_session.exists():
             self._autofill_replay_paths()
@@ -5135,22 +5187,23 @@ class MainWindow(QMainWindow):
         if run_dir:
             model_path = str(run_dir / "finger_action_model.pt")
             scaler_path = str(run_dir / "scaler.npz")
-            _maybe_set(infer_model_widget, model_path, {"finger_action_model.pt"})
-            _maybe_set(infer_scaler_widget, scaler_path, {"scaler.npz"})
+            self._maybe_autofill_text(
+                infer_model_widget,
+                model_path,
+                key="infer.model_path",
+                legacy_values={"finger_action_model.pt"},
+            )
+            self._maybe_autofill_text(
+                infer_scaler_widget,
+                scaler_path,
+                key="infer.scaler_path",
+                legacy_values={"scaler.npz"},
+            )
         self._autofill_replay_paths(session_dir_override=global_session)
 
     def _autofill_replay_paths(
         self, *, session_dir_override: Optional[Path] = None
     ) -> None:
-        def _maybe_set(
-            widget: Optional[QLineEdit], value: str, legacy_values: set[str]
-        ) -> None:
-            if not isinstance(widget, QLineEdit):
-                return
-            current = widget.text().strip()
-            if not current or current in legacy_values:
-                widget.setText(value)
-
         if not hasattr(self, "replay_npz_path"):
             return
         if not self.current_project or not self.current_subject:
@@ -5169,27 +5222,52 @@ class MainWindow(QMainWindow):
         if npz_path is None:
             npz_path = self._resolve_windows_npz_for_current(subject_dir)
         if npz_path is not None:
-            _maybe_set(self.replay_npz_path, str(npz_path), {"eeg_windows.npz"})
+            self._maybe_autofill_text(
+                self.replay_npz_path,
+                str(npz_path),
+                key="replay.npz",
+                legacy_values={"eeg_windows.npz"},
+            )
 
         _exp_hash, model_path, scaler_path = self._resolve_latest_model_artifacts(
             subject_dir, session_dir_override=session_dir_override
         )
         if model_path is not None:
-            _maybe_set(self.replay_model_path, str(model_path), {"finger_action_model.pt"})
+            self._maybe_autofill_text(
+                self.replay_model_path,
+                str(model_path),
+                key="replay.model_path",
+                legacy_values={"finger_action_model.pt"},
+            )
         if scaler_path is not None:
-            _maybe_set(self.replay_scaler_path, str(scaler_path), {"scaler.npz"})
+            self._maybe_autofill_text(
+                self.replay_scaler_path,
+                str(scaler_path),
+                key="replay.scaler_path",
+                legacy_values={"scaler.npz"},
+            )
         if model_path is None:
             infer_model_widget = self.fields.get("infer", {}).get("model_path")
             if isinstance(infer_model_widget, QLineEdit):
                 text = infer_model_widget.text().strip()
                 if text:
-                    _maybe_set(self.replay_model_path, text, {"finger_action_model.pt"})
+                    self._maybe_autofill_text(
+                        self.replay_model_path,
+                        text,
+                        key="replay.model_path",
+                        legacy_values={"finger_action_model.pt"},
+                    )
         if scaler_path is None:
             infer_scaler_widget = self.fields.get("infer", {}).get("scaler_path")
             if isinstance(infer_scaler_widget, QLineEdit):
                 text = infer_scaler_widget.text().strip()
                 if text:
-                    _maybe_set(self.replay_scaler_path, text, {"scaler.npz"})
+                    self._maybe_autofill_text(
+                        self.replay_scaler_path,
+                        text,
+                        key="replay.scaler_path",
+                        legacy_values={"scaler.npz"},
+                    )
 
     def _on_session_dir_changed(self, _text: str) -> None:
         self._update_projects_selected_session_label()

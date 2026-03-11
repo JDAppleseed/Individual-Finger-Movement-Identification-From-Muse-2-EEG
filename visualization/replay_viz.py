@@ -6,8 +6,6 @@ from typing import Any, Optional, TYPE_CHECKING
 
 import numpy as np
 
-from utils.runtime_utils import apply_channel_normalizer, load_normalizer
-
 if TYPE_CHECKING:
     import torch
 
@@ -26,6 +24,20 @@ def _load_torch() -> Any:
     return torch
 
 
+def _load_runtime_utils() -> tuple[Any, Any]:
+    try:
+        from utils.runtime_utils import apply_channel_normalizer, load_normalizer
+    except Exception as exc:
+        message = (
+            "Replay visualization dependencies failed to import. "
+            "Recreate the Python 3.11 environment with ./scripts/setup_venv.sh. "
+            "Original error: "
+            f"{exc.__class__.__name__}: {exc}"
+        )
+        raise RuntimeError(message) from exc
+    return apply_channel_normalizer, load_normalizer
+
+
 @dataclass
 class ReplayVisualizer:
     npz_path: str
@@ -34,9 +46,11 @@ class ReplayVisualizer:
 
     def __post_init__(self) -> None:
         torch = _load_torch()
+        apply_channel_normalizer, load_normalizer = _load_runtime_utils()
         from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 
         self._torch = torch
+        self._apply_channel_normalizer = apply_channel_normalizer
         npz = np.load(self.npz_path, allow_pickle=True)
         if "X" not in npz:
             raise ValueError("NPZ file missing 'X' windows array.")
@@ -63,7 +77,7 @@ class ReplayVisualizer:
         return window
 
     def _standardize(self, window: np.ndarray) -> np.ndarray:
-        return apply_channel_normalizer(window, self.scaler)
+        return self._apply_channel_normalizer(window, self.scaler)
 
     def _tensor_from_window(self, idx: int) -> Any:
         window = self._standardize(self._get_window(idx))
