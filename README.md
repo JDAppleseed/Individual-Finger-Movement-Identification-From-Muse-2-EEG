@@ -49,6 +49,12 @@ Suggested UI flow:
 2. Run **Step 1: Record** to create a session directory with raw shards + events.
 3. Validate the session, extract windows, train, evaluate, and generate reports.
 
+Connection model:
+
+- Step 1 and Step 7 both read live EEG from an LSL stream. They do not talk to the Muse over BLE by themselves.
+- To use a Muse 2, start a separate BLE -> LSL streamer first, then point Step 1 or Step 7 at that LSL stream.
+- In Step 7, `--session-dir` is for resolving the trained model/scaler and output paths; it is not the live EEG source, as is the case for other instances of `--session-dir`.
+
 The UI writes per-step configs under `Projects/<ProjectName>/subjects/<subject_id>/config/`
 and snapshots each step to `Projects/<ProjectName>/subjects/<subject_id>/sessions/<session_id>/session_config.json`.
 
@@ -80,6 +86,15 @@ Record (Step 1):
 
 ```bash
 python 1_stream_and_record.py --enable-plot --plot-scale fixed --plot-fixed-ylim -200 200
+```
+
+Step 1 connection note:
+
+- Step 1 records from an existing LSL EEG stream.
+- If you are using a Muse 2, start the BLE -> LSL bridge first, for example:
+
+```bash
+python -m cli start-streamer
 ```
 
 Validate + extract (Step 1b):
@@ -178,6 +193,11 @@ python 7_live_infer_and_actuate.py --config <infer_config.json>
 ```
 
 When `--session-dir` is omitted, `model_path`, `scaler_path`, and `out_dir` must be present in the config JSON.
+
+Step 7 connection note:
+
+- Step 7 also reads from a live LSL EEG stream, typically the same `Muse2-EEG` stream produced by the BLE -> LSL streamer.
+- `--session-dir` only selects the trained artifacts and output location for inference; it does not replace the live stream, same as other instances of `--session-dir`.
 
 Actuation (optional):
 
