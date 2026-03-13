@@ -45,6 +45,9 @@ calibration_state*.json
 # Generated exercises/outputs
 exercises/
 figs/*.pdf
+paper/
+paper_artifacts/
+paper_figures/
 
 # Demo app dependencies
 demo_app/node_modules/

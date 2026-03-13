@@ -99,6 +99,11 @@ python 3c_live_paper_figures.py --session-dir <session_dir>
 python 4_generate_reports.py --session-dir <session_dir>
 ```
 
+Paper/manuscript note:
+
+- `3c_live_paper_figures.py` and `scripts/build_paper_artifacts.py` generate local manuscript inputs and figures.
+- The repository intentionally does not track `paper/`, `paper_artifacts/`, or `paper_figures/`; keep those outputs local unless you have a specific reason to publish them elsewhere.
+
 Optional flags:
 
 - Use `--run-dir` with Steps 2–4 to target a specific model run.
@@ -308,8 +313,11 @@ The `--full` option runs Steps 2–4 after the mock recording (requires training
 
 ## Papers & Figures
 
-- `paper/research_paper.tex`
-- `paper/mc_dropout_uncertainty.tex`
+Paper sources and generated figure assets are kept local and are ignored by Git:
+
+- `paper/`
+- `paper_artifacts/`
+- `paper_figures/`
 
 ## License & Ethics
 

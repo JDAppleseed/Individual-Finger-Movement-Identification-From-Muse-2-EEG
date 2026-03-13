@@ -1,6 +1,6 @@
 # Actuation and Timestamp Requirements (Design Spec Rev A)
 
-Source: /Users/jonathandavanzo/ISEF Robot Hand Code/EEG_BCI_Prosthetic_Hand_Design_Spec_RevA.pdf
+Source: internal Design Spec Rev A PDF (not committed in this repo)
 
 ## MUST requirements (backend actuation/timestamps)
 
