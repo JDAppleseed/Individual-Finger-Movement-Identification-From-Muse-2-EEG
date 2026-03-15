@@ -19,6 +19,11 @@ from typing import Dict, Any, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from utils.runtime_utils import (
+    apply_channel_normalizer as _apply_saved_normalizer,
+    normalize_preprocess_config,
+    preprocess_eeg_windows,
+)
 from utils.splitting import split_indices as _safe_split_indices
 
 
@@ -194,7 +199,9 @@ def split_indices(
     )
 
 
-def fit_channel_normalizer(X_train: np.ndarray) -> Dict[str, Any]:
+def fit_channel_normalizer(
+    X_train: np.ndarray, preprocess: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """
     Per-channel z-score stats over (N,T, C). Works with memmaps.
     """
@@ -202,8 +209,10 @@ def fit_channel_normalizer(X_train: np.ndarray) -> Dict[str, Any]:
     if X_train.ndim != 3:
         raise ValueError(f"X_train must be 3D (N,T,C), got shape {X_train.shape}")
 
-    mean = X_train.mean(axis=(0, 1)).astype(np.float32)
-    std = X_train.std(axis=(0, 1)).astype(np.float32)
+    preprocess_cfg = normalize_preprocess_config(preprocess)
+    X_proc = preprocess_eeg_windows(X_train, preprocess_cfg)
+    mean = X_proc.mean(axis=(0, 1)).astype(np.float32)
+    std = X_proc.std(axis=(0, 1)).astype(np.float32)
     std = np.where(std < 1e-6, 1.0, std).astype(np.float32)
 
     return {
@@ -211,6 +220,7 @@ def fit_channel_normalizer(X_train: np.ndarray) -> Dict[str, Any]:
         "mean": mean,
         "std": std,
         "channels": int(X_train.shape[-1]),
+        "preprocess": preprocess_cfg,
     }
 
 
@@ -218,10 +228,7 @@ def apply_channel_normalizer(X: np.ndarray, normalizer: Dict[str, Any]) -> np.nd
     """
     Apply per-channel normalization. Returns float32.
     """
-    X = np.asarray(X, dtype=np.float32)
-    mean = np.asarray(normalizer["mean"], dtype=np.float32)
-    std = np.asarray(normalizer["std"], dtype=np.float32)
-    return ((X - mean) / std).astype(np.float32)
+    return _apply_saved_normalizer(X, normalizer)
 
 
 def summarize_windows(X: np.ndarray) -> pd.DataFrame:

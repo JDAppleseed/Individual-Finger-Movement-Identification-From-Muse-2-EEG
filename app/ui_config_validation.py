@@ -80,6 +80,16 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
 def validate_train(settings: Dict[str, Any]) -> ValidationResult:
     errors: List[str] = []
     warnings: List[str] = []
+    if "rest_balance_mode" in settings:
+        value = str(settings.get("rest_balance_mode"))
+        if value not in {"none", "session_equalized"}:
+            errors.append("rest_balance_mode must be 'none' or 'session_equalized'.")
+    if "window_preprocess" in settings:
+        value = str(settings.get("window_preprocess"))
+        if value not in {"none", "center", "center_detrend"}:
+            errors.append(
+                "window_preprocess must be one of: none, center, center_detrend."
+            )
     if "calibration_size" in settings:
         try:
             calibration_size = float(settings.get("calibration_size"))

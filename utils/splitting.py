@@ -254,6 +254,7 @@ def _split_score(
     y_action: np.ndarray,
     test_idx: np.ndarray,
     test_size: float,
+    session_ids: Optional[np.ndarray] = None,
 ) -> float:
     overall = np.bincount(label_ids)
     test_counts = np.bincount(label_ids[test_idx], minlength=len(overall))
@@ -270,6 +271,40 @@ def _split_score(
 
     actual_test = len(test_idx) / max(1, len(label_ids))
     score += abs(actual_test - test_size)
+
+    if session_ids is not None:
+        session_ids = np.asarray(session_ids).reshape(-1)
+        session_label_ids = _factorize(session_ids)
+        overall_sessions = np.bincount(session_label_ids)
+        test_sessions = np.bincount(
+            session_label_ids[test_idx], minlength=len(overall_sessions)
+        )
+        overall_session_freq = overall_sessions / max(1, overall_sessions.sum())
+        test_session_freq = test_sessions / max(1, test_sessions.sum())
+        score += 0.5 * float(np.sum(np.abs(test_session_freq - overall_session_freq)))
+
+        if ACTION_REST is not None:
+            rest_mask = np.asarray(y_action).astype(int) == int(ACTION_REST)
+            if np.any(rest_mask):
+                overall_rest_sessions = np.bincount(
+                    session_label_ids[rest_mask], minlength=len(overall_sessions)
+                )
+                test_rest_idx = test_idx[rest_mask[test_idx]]
+                if len(test_rest_idx) == 0:
+                    score += 5.0
+                else:
+                    test_rest_sessions = np.bincount(
+                        session_label_ids[test_rest_idx], minlength=len(overall_sessions)
+                    )
+                    overall_rest_freq = overall_rest_sessions / max(
+                        1, overall_rest_sessions.sum()
+                    )
+                    test_rest_freq = test_rest_sessions / max(
+                        1, test_rest_sessions.sum()
+                    )
+                    score += 2.0 * float(
+                        np.sum(np.abs(test_rest_freq - overall_rest_freq))
+                    )
     return score
 
 
@@ -280,6 +315,7 @@ def _choose_group_split(
     groups: np.ndarray,
     test_size: float,
     random_state: int,
+    session_ids: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     groups = np.asarray(groups).reshape(-1)
     n_groups = len(np.unique(groups))
@@ -297,7 +333,13 @@ def _choose_group_split(
     best_score = None
     best_split = None
     for train_idx, test_idx in splitter.split(indices, y_action, groups=groups):
-        score = _split_score(label_ids, y_action, test_idx, test_size)
+        score = _split_score(
+            label_ids,
+            y_action,
+            test_idx,
+            test_size,
+            session_ids=session_ids,
+        )
         if best_score is None or score < best_score:
             best_score = score
             best_split = (train_idx, test_idx)
@@ -429,9 +471,18 @@ def split_indices(
         groups = session
     else:
         groups = infer_groups(meta, n)
+    session_ids = _get_meta_array(meta, _SESSION_KEYS, n)
+    if session_ids is not None and not _is_usable_group(session_ids):
+        session_ids = None
 
     train_idx, test_idx = _choose_group_split(
-        indices, y_action, y_finger, groups, test_size, random_state
+        indices,
+        y_action,
+        y_finger,
+        groups,
+        test_size,
+        random_state,
+        session_ids=session_ids,
     )
 
     if purge_seconds > 0:

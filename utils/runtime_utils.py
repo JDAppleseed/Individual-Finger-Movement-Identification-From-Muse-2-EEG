@@ -28,7 +28,48 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-NORMALIZER_VERSION = 1
+NORMALIZER_VERSION = 2
+
+
+def normalize_preprocess_config(preprocess: Any) -> dict:
+    if preprocess is None:
+        preprocess = {}
+    if not isinstance(preprocess, dict):
+        raise ValueError("preprocess config must be a dict when provided.")
+    return {
+        "per_window_center": bool(preprocess.get("per_window_center", False)),
+        "per_window_detrend": bool(preprocess.get("per_window_detrend", False)),
+    }
+
+
+def _apply_preprocess_inplace(arr: np.ndarray, preprocess: Any) -> np.ndarray:
+    cfg = normalize_preprocess_config(preprocess)
+    if not cfg["per_window_center"] and not cfg["per_window_detrend"]:
+        return arr
+
+    view = arr if arr.ndim == 3 else arr[None, ...]
+    if view.ndim != 3:
+        raise ValueError(f"Expected 2D or 3D EEG array, got shape {arr.shape}")
+
+    if cfg["per_window_detrend"]:
+        view -= view.mean(axis=1, keepdims=True)
+        n_time = int(view.shape[1])
+        if n_time > 1:
+            x = np.arange(n_time, dtype=np.float32)
+            x -= x.mean()
+            denom = float(np.sum(x * x))
+            if denom > 0.0:
+                slopes = np.sum(view * x[None, :, None], axis=1, keepdims=True) / denom
+                view -= slopes * x[None, :, None]
+        return arr
+
+    view -= view.mean(axis=1, keepdims=True)
+    return arr
+
+
+def preprocess_eeg_windows(window_TxC: np.ndarray, preprocess: Any) -> np.ndarray:
+    arr = np.array(window_TxC, dtype=np.float32, copy=True)
+    return _apply_preprocess_inplace(arr, preprocess)
 
 
 def repo_root() -> Path:
@@ -63,12 +104,14 @@ def _normalize_payload(normalizer: Any) -> Optional[dict]:
         raise ValueError(f"Normalizer mean/std shape mismatch: {mean.shape} vs {std.shape}")
     channels = int(normalizer.get("channels", mean.shape[0]))
     norm_type = str(normalizer.get("type", "per_channel"))
+    preprocess = normalize_preprocess_config(normalizer.get("preprocess"))
     return {
         "version": NORMALIZER_VERSION,
         "type": norm_type,
         "mean": mean,
         "std": std,
         "channels": channels,
+        "preprocess": preprocess,
     }
 
 
@@ -87,6 +130,8 @@ def save_normalizer(path: Path, normalizer: Any) -> None:
         mean=payload["mean"],
         std=payload["std"],
         channels=np.array(payload["channels"], dtype=np.int32),
+        preprocess_center=np.array(payload["preprocess"]["per_window_center"], dtype=np.int8),
+        preprocess_detrend=np.array(payload["preprocess"]["per_window_detrend"], dtype=np.int8),
     )
 
 
@@ -107,31 +152,55 @@ def load_normalizer(path: Path) -> Optional[Any]:
             if mean.shape != std.shape:
                 raise ValueError(f"Normalizer mean/std shape mismatch: {mean.shape} vs {std.shape}")
             channels = int(npz["channels"]) if "channels" in npz else int(mean.shape[-1])
+            preprocess = {
+                "per_window_center": bool(
+                    int(npz["preprocess_center"]) if "preprocess_center" in npz else 0
+                ),
+                "per_window_detrend": bool(
+                    int(npz["preprocess_detrend"]) if "preprocess_detrend" in npz else 0
+                ),
+            }
             return {
                 "type": "per_channel",
                 "mean": mean,
                 "std": std,
                 "channels": channels,
+                "preprocess": preprocess,
             }
     except Exception as exc:
         logger.warning("Failed to load normalizer from %s: %s", path, exc)
         return None
 
 
-def apply_channel_normalizer(window_TxC: np.ndarray, normalizer: Any) -> np.ndarray:
+def apply_channel_normalizer(
+    window_TxC: np.ndarray, normalizer: Any, *, out: Optional[np.ndarray] = None
+) -> np.ndarray:
+    arr = np.asarray(window_TxC, dtype=np.float32)
+    if out is None:
+        work = np.array(arr, dtype=np.float32, copy=True)
+    else:
+        if out.shape != arr.shape:
+            raise ValueError(f"out shape {out.shape} does not match input shape {arr.shape}")
+        np.copyto(out, arr)
+        work = out
     if normalizer is None:
-        return window_TxC
+        return work
     if isinstance(normalizer, dict) and "mean" in normalizer and "std" in normalizer:
+        _apply_preprocess_inplace(work, normalizer.get("preprocess"))
         mean = np.asarray(normalizer["mean"], dtype=np.float32)
         std = np.asarray(normalizer["std"], dtype=np.float32)
         std = np.where(std == 0, 1.0, std)
-        return (window_TxC - mean) / std
+        work -= mean
+        work /= std
+        return work
     if hasattr(normalizer, "mean_") and hasattr(normalizer, "scale_"):
         mean = np.asarray(normalizer.mean_, dtype=np.float32)
         scale = np.asarray(normalizer.scale_, dtype=np.float32)
         scale = np.where(scale == 0, 1.0, scale)
-        return (window_TxC - mean) / scale
-    return window_TxC
+        work -= mean
+        work /= scale
+        return work
+    return work
 
 
 def compute_health_score(window_TxC: np.ndarray) -> float:

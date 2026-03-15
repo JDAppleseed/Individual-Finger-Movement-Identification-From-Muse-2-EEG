@@ -143,28 +143,7 @@ class InferenceEngine:
         self._ensure_buffers(window.shape)
         if self._input_np is None:
             return window
-        np.copyto(self._input_np, window)
-        if self.normalizer is None:
-            return self._input_np
-        if (
-            isinstance(self.normalizer, dict)
-            and "mean" in self.normalizer
-            and "std" in self.normalizer
-        ):
-            mean = np.asarray(self.normalizer["mean"], dtype=np.float32)
-            std = np.asarray(self.normalizer["std"], dtype=np.float32)
-            std = np.where(std == 0, 1.0, std)
-            self._input_np -= mean
-            self._input_np /= std
-            return self._input_np
-        if hasattr(self.normalizer, "mean_") and hasattr(self.normalizer, "scale_"):
-            mean = np.asarray(self.normalizer.mean_, dtype=np.float32)
-            scale = np.asarray(self.normalizer.scale_, dtype=np.float32)
-            scale = np.where(scale == 0, 1.0, scale)
-            self._input_np -= mean
-            self._input_np /= scale
-            return self._input_np
-        return apply_channel_normalizer(window, self.normalizer)
+        return apply_channel_normalizer(window, self.normalizer, out=self._input_np)
 
     def _to_tensor(self, window_TxC: np.ndarray) -> torch.Tensor:
         if self._input_np is not None and window_TxC is self._input_np:

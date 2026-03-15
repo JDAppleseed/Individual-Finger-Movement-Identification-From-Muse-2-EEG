@@ -62,3 +62,15 @@ def test_inference_engine_validation():
 def test_train_calibration_size_validation():
     result = validate_step_settings("train", {"calibration_size": 1.0})
     assert any("calibration_size must be in [0.0, 1.0)." in err for err in result.errors)
+
+
+def test_train_new_mode_validation():
+    result = validate_step_settings(
+        "train",
+        {
+            "rest_balance_mode": "bad",
+            "window_preprocess": "weird",
+        },
+    )
+    assert any("rest_balance_mode" in err for err in result.errors)
+    assert any("window_preprocess" in err for err in result.errors)

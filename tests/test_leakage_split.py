@@ -1,6 +1,11 @@
 import numpy as np
 
-from utils.splitting import split_indices, infer_groups, assert_no_group_overlap
+from utils.splitting import (
+    _split_score,
+    split_indices,
+    infer_groups,
+    assert_no_group_overlap,
+)
 
 
 def test_group_overlap_empty():
@@ -73,3 +78,30 @@ def test_infer_groups_uses_event_id():
     groups = infer_groups(meta, n)
     assert len(np.unique(groups)) == 4
     assert np.all(groups == event_ids)
+
+
+def test_split_score_prefers_representative_rest_session_mix():
+    y_action = np.array([0] * 8 + [0] * 8 + [1] * 8 + [2] * 8, dtype=np.int64)
+    y_finger = np.array([0] * 16 + [1] * 8 + [2] * 8, dtype=np.int64)
+    label_ids = y_action * 10 + y_finger
+    session_ids = np.array(["A"] * 8 + ["B"] * 8 + ["A"] * 8 + ["B"] * 8, dtype="U")
+
+    balanced_test = np.array([0, 1, 8, 9, 16, 17, 24, 25], dtype=np.int64)
+    rest_skewed_test = np.array([0, 1, 2, 3, 16, 17, 24, 25], dtype=np.int64)
+
+    balanced_score = _split_score(
+        label_ids,
+        y_action,
+        balanced_test,
+        test_size=0.25,
+        session_ids=session_ids,
+    )
+    skewed_score = _split_score(
+        label_ids,
+        y_action,
+        rest_skewed_test,
+        test_size=0.25,
+        session_ids=session_ids,
+    )
+
+    assert balanced_score < skewed_score

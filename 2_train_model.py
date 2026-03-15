@@ -19,7 +19,7 @@ from typing import Optional, Dict, Any, List, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from sklearn.model_selection import train_test_split
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
@@ -51,6 +51,8 @@ LOSS_ACTION_WEIGHT = 1.0
 # early, REST-imbalanced datasets. Current default uses parity weighting so the
 # action head does not systematically under-emphasize REST.
 REST_WEIGHT = 1.0
+REST_BALANCE_MODE = "session_equalized"
+WINDOW_PREPROCESS = "center_detrend"
 
 DEFAULT_NPZ = "eeg_windows.npz"
 DEFAULT_MODEL = "finger_action_model.pt"
@@ -200,6 +202,22 @@ def _first_nonempty_meta_value(
         if unique:
             return unique[0]
     return None
+
+
+def _meta_text_array(
+    meta: Dict[str, Any], key: str, n_expected: int
+) -> Optional[np.ndarray]:
+    if not meta or key not in meta:
+        return None
+    try:
+        arr = np.asarray(meta[key])
+    except Exception:
+        return None
+    if arr.ndim == 0:
+        return None
+    if len(arr) != n_expected:
+        return None
+    return arr.astype("U")
 
 
 def resolve_experiment_hash(meta: Dict[str, Any], n_expected: int) -> str:
@@ -426,6 +444,75 @@ def _log_split_diagnostics(
         print("Test finger (non-REST) counts: none")
 
 
+def _preprocess_config_from_mode(mode: str) -> Dict[str, bool]:
+    mode = str(mode or "none").strip().lower()
+    if mode == "none":
+        return {"per_window_center": False, "per_window_detrend": False}
+    if mode == "center":
+        return {"per_window_center": True, "per_window_detrend": False}
+    if mode == "center_detrend":
+        return {"per_window_center": True, "per_window_detrend": True}
+    raise ValueError(f"Unsupported window preprocess mode: {mode}")
+
+
+def _build_train_sample_weights(
+    y_action: np.ndarray,
+    meta: Dict[str, Any],
+    *,
+    balance_mode: str,
+) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
+    y_action = np.asarray(y_action, dtype=np.int64).reshape(-1)
+    summary: Dict[str, Any] = {"mode": str(balance_mode or "none")}
+    if len(y_action) == 0 or str(balance_mode or "none") == "none":
+        summary["enabled"] = False
+        return None, summary
+
+    if str(balance_mode) != "session_equalized":
+        raise ValueError(f"Unsupported rest balance mode: {balance_mode}")
+
+    session_id = _meta_text_array(meta, "session_id", len(y_action))
+    if session_id is None:
+        summary["enabled"] = False
+        summary["reason"] = "missing_session_id"
+        return None, summary
+
+    rest_mask = y_action == ACTION_REST
+    if not np.any(rest_mask):
+        summary["enabled"] = False
+        summary["reason"] = "no_rest_samples"
+        return None, summary
+
+    rest_sessions = session_id[rest_mask]
+    valid_mask = (rest_sessions != "") & (rest_sessions != "UNKNOWN")
+    rest_sessions = rest_sessions[valid_mask]
+    if len(rest_sessions) == 0:
+        summary["enabled"] = False
+        summary["reason"] = "unknown_rest_sessions"
+        return None, summary
+
+    unique_sessions, counts = np.unique(rest_sessions, return_counts=True)
+    if len(unique_sessions) < 2:
+        summary["enabled"] = False
+        summary["reason"] = "single_rest_session"
+        return None, summary
+
+    weights = np.ones(len(y_action), dtype=np.float32)
+    target_per_session = float(np.sum(counts)) / float(len(unique_sessions))
+    rest_counts = {sid: int(count) for sid, count in zip(unique_sessions, counts)}
+    for sid, count in rest_counts.items():
+        sid_mask = rest_mask & (session_id == sid)
+        weights[sid_mask] = target_per_session / float(count)
+
+    summary["enabled"] = True
+    summary["rest_counts"] = rest_counts
+    summary["target_per_session"] = target_per_session
+    summary["expected_rest_mass"] = {
+        sid: float(np.sum(weights[rest_mask & (session_id == sid)])) for sid in rest_counts
+    }
+    summary["weight_range"] = [float(weights.min()), float(weights.max())]
+    return weights, summary
+
+
 def _window_idx_leakage_check(
     meta: Dict[str, Any],
     y_action: np.ndarray,
@@ -575,6 +662,26 @@ def build_arg_parser():
             "Per-finger loss weights. Provide a comma/space list for finger IDs "
             "0..N-1 (e.g. '1,1,1,1,1,0.5' to downweight pinky), or JSON list/dict "
             "(e.g. '[1,1,1,1,1,0.5]' or '{\"pinky\":0.5}')."
+        ),
+    )
+    training_group.add_argument(
+        "--rest-balance-mode",
+        type=str,
+        default=REST_BALANCE_MODE,
+        choices=["none", "session_equalized"],
+        help=(
+            "Reweight REST windows within each training epoch. "
+            "'session_equalized' keeps total REST mass constant while balancing it across source sessions."
+        ),
+    )
+    training_group.add_argument(
+        "--window-preprocess",
+        type=str,
+        default=WINDOW_PREPROCESS,
+        choices=["none", "center", "center_detrend"],
+        help=(
+            "Per-window preprocessing applied before fitting and applying the channel normalizer. "
+            "'center_detrend' removes DC offset and linear drift within each window."
         ),
     )
     split_group = p.add_argument_group("split and leakage controls")
@@ -1207,23 +1314,53 @@ def main():
         X_calib = X[calib_idx] if len(calib_idx) else None
         y_action_calib = y_action[calib_idx] if len(calib_idx) else None
         y_finger_calib = y_finger[calib_idx] if len(calib_idx) else None
+        train_meta = _subset_meta(meta, train_fit_idx, len(y_action)) if meta else {}
 
         n_fingers = int(np.max(y_finger)) + 1
         n_actions = int(np.max(y_action)) + 1
 
         # ===== NORMALIZE =====
-        normalizer = fit_channel_normalizer(X_train)
+        preprocess_cfg = _preprocess_config_from_mode(args.window_preprocess)
+        normalizer = fit_channel_normalizer(X_train, preprocess=preprocess_cfg)
         X_train = apply_channel_normalizer(X_train, normalizer)
         if X_calib is not None:
             X_calib = apply_channel_normalizer(X_calib, normalizer)
         X_test = apply_channel_normalizer(X_test, normalizer)
         save_normalizer(save_scaler_path, normalizer)
 
+        sample_weights, sample_weight_summary = _build_train_sample_weights(
+            y_action_train,
+            train_meta,
+            balance_mode=args.rest_balance_mode,
+        )
+        train_sampler = None
+        train_shuffle = True
+        if sample_weights is not None:
+            train_sampler = WeightedRandomSampler(
+                torch.as_tensor(sample_weights, dtype=torch.double),
+                num_samples=len(sample_weights),
+                replacement=True,
+            )
+            train_shuffle = False
+            print(
+                "REST balancing enabled: "
+                f"mode={args.rest_balance_mode} "
+                f"rest_counts={sample_weight_summary.get('rest_counts', {})} "
+                f"expected_rest_mass={sample_weight_summary.get('expected_rest_mass', {})}"
+            )
+        else:
+            print(
+                "REST balancing disabled: "
+                f"mode={args.rest_balance_mode} "
+                f"reason={sample_weight_summary.get('reason', 'not_requested')}"
+            )
+
         # ===== DATALOADERS =====
         train_loader = DataLoader(
             EEGWindowDataset(X_train, y_finger_train, y_action_train),
             batch_size=args.batch_size,
-            shuffle=True,
+            shuffle=train_shuffle,
+            sampler=train_sampler,
             drop_last=False,
             num_workers=max(0, int(args.num_workers)),
             pin_memory=bool(args.pin_memory),
@@ -1345,7 +1482,9 @@ def main():
             "calibration_size": float(args.calibration_size),
             "loss_action_weight": args.loss_action_weight,
             "rest_weight": float(args.rest_weight),
+            "rest_balance_mode": args.rest_balance_mode,
             "finger_weights": finger_weights.tolist() if finger_weights is not None else None,
+            "window_preprocess": args.window_preprocess,
             "test_size": args.test_size,
             "split_mode": args.split_mode,
             "purge_seconds": float(args.purge_seconds),
@@ -1362,7 +1501,9 @@ def main():
             "normalizer": {
                 "type": normalizer.get("type", "unknown"),
                 "channels": normalizer.get("channels", None),
+                "preprocess": normalizer.get("preprocess", {}),
             },
+            "train_sampler": sample_weight_summary,
             "device": str(device),
             "model": "CNNLSTMFingerActionNet",
             "subject_id_filter": args.subject_id or "",
