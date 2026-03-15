@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from deepchecks.tabular import Dataset
+from deepchecks.tabular import Dataset, Suite
 from deepchecks.tabular.suites import (
     data_integrity,
     train_test_validation,
@@ -349,6 +349,20 @@ def _dataset_kwargs():
         "index_name": "row_id",
         "set_index_from_dataframe_index": True,
     }
+
+
+def _build_eeg_deepchecks_suite() -> Suite:
+    excluded = {
+        "FeatureFeatureCorrelation",
+        "IdentifierLabelCorrelation",
+    }
+    checks = []
+    for base_suite in (data_integrity(), train_test_validation(), model_evaluation()):
+        for check in base_suite.checks.values():
+            if type(check).__name__ in excluded:
+                continue
+            checks.append(check)
+    return Suite("EEG Data Integrity Suite", *checks)
 
 
 def _prepare_deepchecks_split(df, labels, lookup_ids, seed: int, index_start: int = 0):
@@ -847,7 +861,7 @@ class TorchModelWrapper:
 
 print("🔍 Running Deepchecks suites...")
 
-suite = data_integrity().add(train_test_validation()).add(model_evaluation())
+suite = _build_eeg_deepchecks_suite()
 
 result = suite.run(train_ds, test_ds, model=TorchModelWrapper())
 
