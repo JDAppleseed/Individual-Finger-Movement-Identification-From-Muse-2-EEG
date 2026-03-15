@@ -76,8 +76,8 @@ Notes:
 
 - Step 1: Stream & Record → creates a new session directory.
 - Step 1b: Extract Windows → reads `<session_dir>/raw/` + `<session_dir>/events/`, writes `<session_dir>/processed/`.
-- Step 2: Train Model → reads `<session_dir>/processed/eeg_windows.npz`, writes `<session_dir>/processed/models/<run_id>/`.
-- Step 3+: Evaluate / Figures / Reports → read from the same session directory and the latest model run.
+- Step 2: Train Model → reads `<session_dir>/processed/eeg_windows.npz`, writes `<session_dir>/processed/models/<run_id>/` including `temperature_scaling.json`.
+- Step 3+: Evaluate / Figures / Reports → read from the same session directory and the latest model run, and report action/finger/joint metrics plus raw invalid-pair rate.
 - Step 7: Live Infer + Actuate → uses the latest model/scaler unless explicitly overridden.
 
 ## CLI Run (Session-Directory Flow)
@@ -104,6 +104,11 @@ python -m muse_streaming.validate_session --session <session_dir>
 python 1b_extract_windows.py --session-dir <session_dir>
 ```
 
+Step 1b label constraint:
+
+- Extraction now fails fast if any event encodes `OPEN` or `CLOSE` with `finger_id=NONE`.
+- Fix or prune those events first; they are no longer silently accepted into the dataset.
+
 Train + evaluate + reports:
 
 ```bash
@@ -113,6 +118,12 @@ python 3b_deepchecks_evaluate.py --session-dir <session_dir>
 python 3c_live_paper_figures.py --session-dir <session_dir>
 python 4_generate_reports.py --session-dir <session_dir>
 ```
+
+Training/evaluation notes:
+
+- Step 2 now reserves a calibration holdout from the training split by default (`--calibration-size 0.1`) and fits post-hoc temperature scaling.
+- Each run saves `finger_action_model.pt`, `scaler.npz`, `test_predictions.npz`, and `temperature_scaling.json`.
+- Step 3 applies the saved temperature scaling when recomputing predictions and reports raw invalid-pair rate, joint accuracy, and smoothed joint accuracy in addition to the existing action/finger metrics.
 
 Paper/manuscript note:
 
@@ -176,6 +187,12 @@ Usage:
 
 Events are written to `events/events.jsonl` during capture (authoritative). `events.csv` is optional and for inspection only.
 
+Labeling constraint:
+
+- `rest` must pair with finger `none`.
+- Finger-specific movement events should pair `open`/`close` with one of `thumb/index/middle/ring/pinky`.
+- `open`/`close` with finger `none` is now treated as an invalid dataset label during Step 1b extraction.
+
 ## Live Inference (Step 7)
 
 Preferred (auto-resolve latest model/scaler from the session directory):
@@ -217,6 +234,8 @@ Notes:
 - Raw shards and prediction logs are preserved by default. They are only disabled when `no_file_io` is set to `true`.
 - Optional MC-dropout backend: set `use_inference_engine: true` in the infer config to route Step 7 through `utils/inference.py`. Relevant keys are `mc_passes`, `uncertainty_base_threshold`, and `uncertainty_weight`.
 - When enabled, live inference uses mean probabilities across MC passes, logs `action_uncertainty` / `finger_uncertainty`, and adds an adaptive uncertainty gate before hardware actuation.
+- Step 7 automatically loads `temperature_scaling.json` from the selected run when present and applies it before softmax in both direct and MC-dropout inference modes.
+- The deployed decode path now enforces `REST => finger NONE`, so exported/live commands are always valid action-finger pairs.
 - Confidence-modulated actuation speed is enabled by default. Use `modulate_actuation_speed` and `actuation_speed_gamma` to adjust it; the Arduino receiver in `hardware/arduino/blue_hand_receive_upload/blue_hand_receive_upload.ino` now accepts an optional third `speed_u8` field.
 - See `docs/actuation_requirements.md` for design constraints.
 
@@ -280,7 +299,7 @@ Validity rules:
 
 - REST + NONE is valid
 - REST + any finger is invalid
-- OPEN/CLOSE + NONE is valid (whole-hand open/close)
+- OPEN/CLOSE + NONE is invalid for extracted/trainable datasets and Step 1b now fails fast on it
 - OPEN/CLOSE + finger 1–5 is valid
 
 During training, finger loss is masked when action == REST.

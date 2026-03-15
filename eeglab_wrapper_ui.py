@@ -458,6 +458,7 @@ TOOLTIPS: Dict[str, str] = {
     "rest_weight": "Class weight for REST actions (0 = ignore).",
     "test_size": "Fraction of windows held out for testing.",
     "split_mode": "Split strategy (group_trial or holdout_session).",
+    "calibration_size": "Fraction of the training split reserved for post-hoc temperature scaling (0 disables).",
     "purge_seconds": "Purge training windows within this many seconds of any test window.",
     "hop_seconds": "Window hop override in seconds (0 = auto).",
     "window_idx_leak_threshold": "Warn if window_idx-only classifier exceeds this accuracy.",
@@ -466,6 +467,7 @@ TOOLTIPS: Dict[str, str] = {
     "num_workers": "DataLoader worker processes (0 = main process).",
     "pin_memory": "Pin DataLoader memory (useful for CUDA).",
     "save_preds": "Output path for test predictions.",
+    "save_temperature": "Output path for fitted post-hoc temperature scaling parameters.",
     "run_dir": "Explicit output directory for training run.",
 }
 
@@ -2649,8 +2651,9 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Step 3: Evaluate Model + Calibration (3_evaluate_model.py)")
         layout = QVBoxLayout(box)
         desc = QLabel(
-            "Core evaluation: accuracy, confusion matrices, calibration curves, "
-            "and cached predictions. Uses the latest model under the selected session."
+            "Core evaluation: action/finger/joint accuracy, raw invalid-pair rate, "
+            "confusion matrices, calibration curves, and cached predictions. "
+            "Uses the latest model under the selected session."
         )
         desc.setWordWrap(True)
         desc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -2660,7 +2663,8 @@ class MainWindow(QMainWindow):
             self._make_info_button(
                 "Step 3: Evaluate Model",
                 "Deterministic evaluation of the latest model using the session's "
-                "window dataset. Writes an eval manifest and plots under "
+                "window dataset. Applies saved temperature scaling when available and writes "
+                "an eval manifest and plots under "
                 "`processed/reports/<run_id>/`.",
             )
         )
@@ -3035,7 +3039,8 @@ class MainWindow(QMainWindow):
     def _build_step1b_page(self) -> QWidget:
         note = QLabel(
             "Extract windows from a lossless session directory (raw/ + events.jsonl). "
-            "Use the Session Directory (sessions/<session_id>) field or select a session on the Validate Session page."
+            "Use the Session Directory (sessions/<session_id>) field or select a session on the Validate Session page. "
+            "Step 1b rejects OPEN/CLOSE events labeled with finger NONE, so fix or prune those events before extraction."
         )
         note.setWordWrap(True)
         return self._build_step_page(
@@ -3059,12 +3064,19 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_train_page(self) -> QWidget:
+        note = QLabel(
+            "Step 2 trains the model, then fits post-hoc temperature scaling on a held-out "
+            "calibration subset of the training split. The run now saves model, scaler, "
+            "test predictions, and `temperature_scaling.json` together."
+        )
+        note.setWordWrap(True)
         return self._build_step_page(
             step_id="train",
             title="Step 2: Train Model",
             defaults=default_train_settings(),
             script_key="train",
             include_event_tools=False,
+            custom_controls=note,
         )
 
     def _build_infer_page(self) -> QWidget:
@@ -3092,6 +3104,7 @@ class MainWindow(QMainWindow):
             "Actuation is opt-in and requires confirmation before running. "
             "Enable the MC-dropout inference engine to use uncertainty-aware mean probabilities "
             "and adaptive actuation gating from utils/inference.py. "
+            "Saved run-specific temperature scaling is auto-loaded and applied before softmax. "
             "Actuation speed is confidence-modulated by default unless you disable it."
         )
         note.setWordWrap(True)
@@ -3190,15 +3203,18 @@ class MainWindow(QMainWindow):
             ),
             "step1b": (
                 "Extract fixed windows from a session directory and generate `eeg_windows.npz`. "
-                "Performs manifest continuity validation by default."
+                "Performs manifest continuity validation by default and rejects OPEN/CLOSE "
+                "labels that use finger NONE."
             ),
             "train": (
                 "Train the CNN+LSTM model from `eeg_windows.npz` and write model/scaler artifacts "
-                "under `sessions/<id>/processed/models/<run_id>/`."
+                "under `sessions/<id>/processed/models/<run_id>/`, including post-hoc "
+                "temperature scaling."
             ),
             "infer": (
                 "Run live inference on an LSL stream or CSV input. Optional actuation is opt-in "
-                "with safety confirmation and latency logging."
+                "with safety confirmation, latency logging, and auto-loaded run-specific "
+                "temperature scaling."
             ),
         }
         return descriptions.get(step_id, "")
@@ -4256,7 +4272,13 @@ class MainWindow(QMainWindow):
             self._add_text(
                 step_id, form, "INTERPOLATION_POLICY", "Interpolation policy", defaults
             )
-            self._add_checkbox(step_id, form, "LABEL_GATED", "Label gated", defaults)
+            self._add_checkbox(
+                step_id,
+                form,
+                "LABEL_GATED",
+                "Label gated (OPEN/CLOSE+NONE invalid)",
+                defaults,
+            )
             self._add_choice_dropdown(
                 step_id,
                 form,
@@ -4345,6 +4367,16 @@ class MainWindow(QMainWindow):
                 1,
                 is_float=True,
             )
+            self._add_spin(
+                step_id,
+                form,
+                "calibration_size",
+                "Calibration holdout",
+                defaults,
+                0,
+                0.99,
+                is_float=True,
+            )
             self._add_choice_dropdown(
                 step_id,
                 form,
@@ -4404,6 +4436,13 @@ class MainWindow(QMainWindow):
             self._add_text(step_id, form, "run_dir", "Run dir override", defaults)
             self._add_text(
                 step_id, form, "save_preds", "Save predictions", defaults
+            )
+            self._add_text(
+                step_id,
+                form,
+                "save_temperature",
+                "Save temperature scaling",
+                defaults,
             )
         else:
             for key, val in defaults.items():
@@ -4640,6 +4679,7 @@ class MainWindow(QMainWindow):
                 "rest_weight": "REST class weight",
                 "finger_weights": "Finger weights (CSV/JSON)",
                 "test_size": "Test split size",
+                "calibration_size": "Calibration holdout",
                 "split_mode": "Split mode",
                 "purge_seconds": "Purge seconds",
                 "hop_seconds": "Hop seconds (auto=0)",
@@ -4651,6 +4691,7 @@ class MainWindow(QMainWindow):
                 "pin_memory": "Pin memory",
                 "run_dir": "Run dir override",
                 "save_preds": "Save predictions",
+                "save_temperature": "Save temperature scaling",
             }
             return labels.get(key, key)
         if step_id == "step1":
@@ -4717,7 +4758,7 @@ class MainWindow(QMainWindow):
                 "GAP_THRESHOLD_SEC": "Gap threshold",
                 "DEDUP_POLICY": "Dedupe policy",
                 "INTERPOLATION_POLICY": "Interpolation policy",
-                "LABEL_GATED": "Label gated",
+                "LABEL_GATED": "Label gated (OPEN/CLOSE+NONE invalid)",
                 "REST_POLICY": "REST policy",
                 "KEEP_BASELINE_REST_EVENTS": "Keep baseline rest",
                 "MIN_OVERLAP_RATIO": "Min overlap ratio",

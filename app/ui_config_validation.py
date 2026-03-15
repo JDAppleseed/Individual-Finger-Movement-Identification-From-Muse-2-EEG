@@ -77,9 +77,24 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
     return ValidationResult(ok=not errors, errors=errors, warnings=warnings)
 
 
+def validate_train(settings: Dict[str, Any]) -> ValidationResult:
+    errors: List[str] = []
+    warnings: List[str] = []
+    if "calibration_size" in settings:
+        try:
+            calibration_size = float(settings.get("calibration_size"))
+            if calibration_size < 0.0 or calibration_size >= 1.0:
+                errors.append("calibration_size must be in [0.0, 1.0).")
+        except Exception:
+            errors.append("calibration_size must be numeric.")
+    return ValidationResult(ok=not errors, errors=errors, warnings=warnings)
+
+
 def validate_step_settings(step_id: str, settings: Dict[str, Any]) -> ValidationResult:
     if step_id == "step1":
         return validate_train_record(settings)
+    if step_id == "train":
+        return validate_train(settings)
     if step_id == "infer":
         return validate_live_infer(settings)
     errors: List[str] = []

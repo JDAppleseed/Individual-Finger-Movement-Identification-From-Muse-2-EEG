@@ -57,3 +57,8 @@ def test_inference_engine_validation():
         for err in result.errors
     )
     assert any("actuation_speed_gamma must be numeric." in err for err in result.errors)
+
+
+def test_train_calibration_size_validation():
+    result = validate_step_settings("train", {"calibration_size": 1.0})
+    assert any("calibration_size must be in [0.0, 1.0)." in err for err in result.errors)
