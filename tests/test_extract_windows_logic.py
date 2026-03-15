@@ -1,4 +1,5 @@
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -119,3 +120,58 @@ def test_rest_by_exclusion_no_overlap():
     assert action_id == mod.ACTION_REST
     assert finger_id == mod.FINGER_NONE
     assert assigned_type == "rest_by_exclusion"
+
+
+def test_step1b_rejects_open_close_with_none_finger(tmp_path, monkeypatch, capsys):
+    mod = _load_extract_module()
+    features_path = tmp_path / "features.csv"
+    events_path = tmp_path / "events.csv"
+
+    np = pytest.importorskip("numpy")
+    pd = pytest.importorskip("pandas")
+
+    times = np.arange(0.0, 1.0, 0.01)
+    pd.DataFrame(
+        {
+            "lsl_timestamp": 10.0 + times,
+            "time_s": times,
+            "ch1": np.sin(times),
+            "ch2": np.cos(times),
+            "ch3": np.sin(times * 2.0),
+            "ch4": np.cos(times * 2.0),
+        }
+    ).to_csv(features_path, index=False)
+
+    pd.DataFrame(
+        [
+            {
+                "onset_s": 0.1,
+                "duration_s": 0.2,
+                "action_id": mod.ACTION_OPEN,
+                "finger_id": mod.FINGER_NONE,
+                "type": "none_open",
+                "event_id": 7,
+            }
+        ]
+    ).to_csv(events_path, index=False)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "1b_extract_windows.py",
+            "--features",
+            str(features_path),
+            "--events",
+            str(events_path),
+        ],
+    )
+
+    assert mod.main() == 2
+    out = capsys.readouterr().out
+    assert (
+        "cannot have event open or close with none finger class, fix train/test dataset by correcting or pruning events"
+        in out
+    )
+    assert "event_id=7" in out

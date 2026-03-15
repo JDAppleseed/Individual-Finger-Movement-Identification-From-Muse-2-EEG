@@ -47,6 +47,8 @@ def _is_finite_array(arr):
 import pandas as pd
 
 from utils.label_schema import (
+    ACTION_CLOSE,
+    ACTION_OPEN,
     ACTION_REST,
     FINGER_NONE,
     is_valid_action_finger,
@@ -1221,6 +1223,9 @@ def main():
         else:
             events = []
 
+    # Reject semantically invalid movement labels before any window extraction.
+    invalid_none_events: List[Dict[str, Any]] = []
+
     # Drop/normalize malformed events to prevent NaNs entering training.
     before_n = len(events)
     cleaned: List[Dict[str, Any]] = []
@@ -1239,6 +1244,16 @@ def main():
 
             action_id = _safe_int(ev.get("action_id", ACTION_REST), int(ACTION_REST))
             finger_id = _safe_int(ev.get("finger_id", FINGER_NONE), int(FINGER_NONE))
+            if action_id in {ACTION_OPEN, ACTION_CLOSE} and finger_id == FINGER_NONE:
+                invalid_none_events.append(
+                    {
+                        "event_id": ev.get("event_id"),
+                        "event_index": ev.get("event_index"),
+                        "type": ev.get("type", ""),
+                        "onset_s": float(onset_s),
+                    }
+                )
+                continue
             if not is_valid_action_finger(int(action_id), int(finger_id)):
                 action_id = int(ACTION_REST)
                 finger_id = int(FINGER_NONE)
@@ -1254,6 +1269,19 @@ def main():
             dropped += 1
             continue
     events = cleaned
+    if invalid_none_events:
+        preview = ", ".join(
+            f"event_id={item.get('event_id')!r} event_index={item.get('event_index')!r} "
+            f"type={item.get('type')!r} onset_s={item.get('onset_s'):.3f}"
+            for item in invalid_none_events[:5]
+        )
+        print(
+            "❌ cannot have event open or close with none finger class, "
+            "fix train/test dataset by correcting or pruning events"
+        )
+        if preview:
+            print(f"Offending events ({len(invalid_none_events)}): {preview}")
+        return 2
     if dropped:
         print(f"⚠️ Dropped {dropped}/{before_n} malformed events (pre-windowing).")
     if label_gated and not events:
