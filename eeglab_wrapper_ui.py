@@ -6031,15 +6031,22 @@ class MainWindow(QMainWindow):
                 self._append_log("Actuation confirmation cancelled; run aborted.")
                 return
 
+        reserve_session_dir = not (
+            step_id == "step1" and bool(settings.get("force_new_session", True))
+        )
         if backend_session:
             self.current_session_backend = backend_session
             self.current_session_ui = ui_session_id(
                 self.current_subject, backend_session
             )
             self._set_session_label(f"Session: {self.current_session_ui}")
-            # Ensure the session directory exists and becomes the single source of truth for every step.
             session_dir = session_root(subject_dir, self.current_session_ui)
-            ensure_session_dirs(session_dir)
+            # For a brand-new Step 1 run, do not pre-create the session dir.
+            # The recorder owns final session allocation and would otherwise
+            # detect this placeholder as a collision, creating an unnecessary
+            # `_01` sibling session.
+            if reserve_session_dir:
+                ensure_session_dirs(session_dir)
             self.session_dir_input.setText(str(session_dir))
             settings["session_dir"] = str(session_dir)
 
@@ -6080,7 +6087,8 @@ class MainWindow(QMainWindow):
         )
         write_json(config_path, config.to_dict())
 
-        self._write_session_snapshot(subject_dir, config.to_dict(), step_id)
+        if reserve_session_dir:
+            self._write_session_snapshot(subject_dir, config.to_dict(), step_id)
 
         args = [str(script_info.path), "--config", str(config_path)]
         if step_id == "step1":
