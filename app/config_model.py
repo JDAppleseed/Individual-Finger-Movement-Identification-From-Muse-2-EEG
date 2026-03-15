@@ -191,6 +191,8 @@ def default_infer_settings() -> Dict[str, Any]:
         "actuation_min_prob": 0.75,
         "actuation_stability": 3,
         "actuation_cooldown_ms": 250,
+        "actuation_repeat_ms": 500,
+        "actuation_min_speed": 0.45,
         "modulate_actuation_speed": True,
         "actuation_speed_gamma": 1.0,
         "postprocess": False,

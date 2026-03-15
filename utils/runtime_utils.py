@@ -230,6 +230,15 @@ class TemperatureScalingState:
     metrics: Optional[dict] = None
 
 
+@dataclass
+class LogitBiasState:
+    action_bias: np.ndarray
+    finger_bias: np.ndarray
+    fit_sample_count: int = 0
+    source: str = "unavailable"
+    metrics: Optional[dict] = None
+
+
 def load_calibration_state(path: Path) -> Optional[CalibrationState]:
     if not path.exists():
         return None
@@ -247,6 +256,19 @@ def apply_temperature_to_logits(logits: Any, temperature: float) -> Any:
     if torch.is_tensor(logits):
         return logits / temp
     return np.asarray(logits) / temp
+
+
+def apply_logit_bias(logits: Any, bias: Any) -> Any:
+    if bias is None:
+        return logits
+    if torch.is_tensor(logits):
+        bias_t = torch.as_tensor(
+            bias,
+            dtype=logits.dtype,
+            device=logits.device,
+        )
+        return logits + bias_t
+    return np.asarray(logits) + np.asarray(bias, dtype=np.float32)
 
 
 def save_temperature_scaling(path: Path, state: TemperatureScalingState) -> None:
@@ -279,4 +301,35 @@ def load_temperature_scaling(path: Path) -> Optional[TemperatureScalingState]:
         )
     except Exception as exc:
         logger.warning("Failed to load temperature scaling from %s: %s", path, exc)
+        return None
+
+
+def save_logit_bias_state(path: Path, state: LogitBiasState) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "action_bias": np.asarray(state.action_bias, dtype=np.float32).tolist(),
+        "finger_bias": np.asarray(state.finger_bias, dtype=np.float32).tolist(),
+        "fit_sample_count": int(state.fit_sample_count),
+        "source": str(state.source),
+        "metrics": state.metrics or {},
+    }
+    path.write_text(json.dumps(payload, indent=2))
+
+
+def load_logit_bias_state(path: Path) -> Optional[LogitBiasState]:
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+        return LogitBiasState(
+            action_bias=np.asarray(payload.get("action_bias", []), dtype=np.float32),
+            finger_bias=np.asarray(payload.get("finger_bias", []), dtype=np.float32),
+            fit_sample_count=int(payload.get("fit_sample_count", 0)),
+            source=str(payload.get("source", "loaded")),
+            metrics=payload.get("metrics", {}) or {},
+        )
+    except Exception as exc:
+        logger.warning("Failed to load logit bias state from %s: %s", path, exc)
         return None

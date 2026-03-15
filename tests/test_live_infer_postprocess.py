@@ -241,6 +241,26 @@ def test_compute_actuation_speed_scalar_uses_uncertainty():
     assert np.isclose(speed, 0.6)
 
 
+def test_compute_actuation_speed_scalar_applies_min_speed_floor():
+    mod = _load_live_module()
+    mapper = mod._build_actuation_speed_mapper(
+        type(
+            "Args",
+            (),
+            {"modulate_actuation_speed": True, "actuation_speed_gamma": 1.0},
+        )()
+    )
+
+    speed = mod._compute_actuation_speed_scalar(
+        decision_prob=0.2,
+        action_uncertainty=0.0,
+        speed_mapper=mapper,
+        min_speed=0.45,
+    )
+
+    assert np.isclose(speed, 0.45)
+
+
 def test_parser_accepts_ui_hyphenated_flags():
     mod = _load_live_module()
     parser, _ = mod._build_arg_parser()
@@ -491,6 +511,25 @@ def test_parse_viz_line_accepts_vizjson():
     assert payload["finger_probs"][0][1] == 0.9
 
 
+def test_debounced_should_send_allows_repeat_for_same_command(monkeypatch):
+    mod = _load_live_module()
+    decision = mod.ActuationDecision(finger_id=1, action_id=1, prob=0.9)
+    monkeypatch.setattr(mod.time, "monotonic", lambda: 10.0)
+
+    assert (
+        mod._debounced_should_send(
+            decision=decision,
+            last_sent=(1, 1),
+            stable_count=1,
+            required_stability=1,
+            last_send_ts=9.0,
+            cooldown_ms=250,
+            repeat_same_ms=500,
+        )
+        is True
+    )
+
+
 def test_resolve_live_sample_time_prefers_lsl_spacing_over_chunk_arrival_time():
     mod = _load_live_module()
 
@@ -600,6 +639,7 @@ def test_resolve_actuation_candidate_votes_close_when_two_of_three_close():
     assert out["decision"].finger_id == 3
     assert out["decision"].action_id == 2
     assert out["reason"] == "finger_majority_action_vote"
+
 
 
 def test_actuation_command_shaper_holds_unstable_changes():

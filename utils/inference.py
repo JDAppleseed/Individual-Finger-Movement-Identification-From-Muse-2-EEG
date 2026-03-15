@@ -9,8 +9,10 @@ import torch
 
 from utils.label_schema import decode_prediction_pair
 from utils.runtime_utils import (
+    LogitBiasState,
     TemperatureScalingState,
     apply_channel_normalizer,
+    apply_logit_bias,
     apply_temperature_to_logits,
     compute_health_score,
 )
@@ -30,6 +32,7 @@ def _mc_predict(
     passes: int,
     *,
     temperature_state: Optional[TemperatureScalingState] = None,
+    logit_bias_state: Optional[LogitBiasState] = None,
 ) -> Dict[str, torch.Tensor]:
     action_temp = (
         float(temperature_state.action_temperature)
@@ -43,6 +46,7 @@ def _mc_predict(
     )
     use_native_mc = (
         hasattr(model, "mc_forward")
+        and logit_bias_state is None
         and abs(action_temp - 1.0) < 1e-6
         and abs(finger_temp - 1.0) < 1e-6
     )
@@ -59,6 +63,13 @@ def _mc_predict(
             finger_logits, action_logits = model(x_BTC)
             finger_logits = apply_temperature_to_logits(finger_logits, finger_temp)
             action_logits = apply_temperature_to_logits(action_logits, action_temp)
+            if logit_bias_state is not None:
+                finger_logits = apply_logit_bias(
+                    finger_logits, logit_bias_state.finger_bias
+                )
+                action_logits = apply_logit_bias(
+                    action_logits, logit_bias_state.action_bias
+                )
             finger_probs.append(torch.softmax(finger_logits, dim=1))
             action_probs.append(torch.softmax(action_logits, dim=1))
     if not was_training:
@@ -90,6 +101,7 @@ class InferenceEngine:
         finger_names: Dict[int, str],
         config: Optional[InferenceConfig] = None,
         temperature_state: Optional[TemperatureScalingState] = None,
+        logit_bias_state: Optional[LogitBiasState] = None,
     ) -> None:
         self.model = model
         self.normalizer = normalizer
@@ -98,6 +110,7 @@ class InferenceEngine:
         self.finger_names = finger_names
         self.config = config or InferenceConfig()
         self.temperature_state = temperature_state
+        self.logit_bias_state = logit_bias_state
         self._stability: Deque[int] = deque(maxlen=self.config.stability_frames)
         self._input_np: Optional[np.ndarray] = None
         self._input_tensor: Optional[torch.Tensor] = None
@@ -189,6 +202,13 @@ class InferenceEngine:
                     if self.temperature_state is not None
                     else 1.0,
                 )
+                if self.logit_bias_state is not None:
+                    finger_logits = apply_logit_bias(
+                        finger_logits, self.logit_bias_state.finger_bias
+                    )
+                    action_logits = apply_logit_bias(
+                        action_logits, self.logit_bias_state.action_bias
+                    )
                 finger_probs = torch.softmax(finger_logits, dim=1)
                 action_probs = torch.softmax(action_logits, dim=1)
             if was_training:
@@ -203,6 +223,7 @@ class InferenceEngine:
                 x,
                 passes=passes,
                 temperature_state=self.temperature_state,
+                logit_bias_state=self.logit_bias_state,
             )
             action_mean = mc["action_mean"].squeeze(0).detach().cpu().numpy()
             finger_mean = mc["finger_mean"].squeeze(0).detach().cpu().numpy()

@@ -464,6 +464,8 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "actuation_min_prob": 0.75,
         "actuation_stability": 3,
         "actuation_cooldown_ms": 250,
+        "actuation_repeat_ms": 500,
+        "actuation_min_speed": 0.45,
         "modulate_actuation_speed": True,
         "actuation_speed_gamma": 1.0,
         "allow_outside_base": False,
@@ -800,6 +802,21 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         type=int,
         metavar="MS",
         help="Minimum time, in milliseconds, between actuation commands.",
+    )
+    actuation_group.add_argument(
+        "--actuation-repeat-ms",
+        "--actuation_repeat_ms",
+        dest="actuation_repeat_ms",
+        type=int,
+        metavar="MS",
+        help="Milliseconds after which the same stable command may be resent.",
+    )
+    actuation_group.add_argument(
+        "--actuation-min-speed",
+        "--actuation_min_speed",
+        dest="actuation_min_speed",
+        type=float,
+        help="Minimum non-zero speed scalar to use for any actuated command.",
     )
     actuation_group.add_argument(
         "--modulate-actuation-speed",
@@ -1413,6 +1430,7 @@ def _debounced_should_send(
     required_stability: int,
     last_send_ts: float,
     cooldown_ms: int,
+    repeat_same_ms: int = 0,
 ) -> bool:
     if decision.prob <= 0.0:
         return False
@@ -1424,9 +1442,10 @@ def _debounced_should_send(
         return False
     if stable_count < required_stability:
         return False
+    elapsed_ms = (time.monotonic() - last_send_ts) * 1000.0
     if last_sent is not None and (decision.finger_id, decision.action_id) == last_sent:
-        return False
-    if (time.monotonic() - last_send_ts) * 1000.0 < float(cooldown_ms):
+        return elapsed_ms >= float(max(0, int(repeat_same_ms)))
+    if elapsed_ms < float(cooldown_ms):
         return False
     return True
 
@@ -1456,12 +1475,17 @@ def _compute_actuation_speed_scalar(
     decision_prob: float,
     action_uncertainty: float,
     speed_mapper: Optional[CommandShaper],
+    min_speed: float = 0.0,
 ) -> float:
     confidence = float(max(0.0, min(1.0, decision_prob)))
     confidence *= max(0.0, 1.0 - float(action_uncertainty))
     if speed_mapper is None:
         return 1.0
-    return float(speed_mapper.confidence_to_speed(confidence))
+    speed = float(speed_mapper.confidence_to_speed(confidence))
+    min_speed = float(max(0.0, min(1.0, min_speed)))
+    if speed > 0.0 and min_speed > 0.0:
+        speed = max(min_speed, speed)
+    return speed
 
 
 def _build_actuation_command_shaper(args: argparse.Namespace) -> CommandShaper:
@@ -1602,12 +1626,12 @@ def main() -> int:
     except Exception:
         lsl_resolve_timeout_s = 25.0
     session_dir_value = args.session_dir or config_settings.get("session_dir")
+    repo_root = _resolve_repo_root(config_path)
     project_name, subject_id = _derive_project_subject(
         config_payload, config_path, args.project_name, args.subject_id, config_settings
     )
     session_dir_inferred = False
     if not session_dir_value and project_name and subject_id:
-        repo_root = _resolve_repo_root(config_path)
         sessions_root = (
             repo_root
             / "Projects"
@@ -2065,6 +2089,7 @@ def main() -> int:
                     decision.prob,
                     action_uncertainty,
                     actuation_speed_mapper,
+                    min_speed=float(args.actuation_min_speed),
                 )
 
                 # Latency tracking
@@ -2185,6 +2210,11 @@ def main() -> int:
                         actuation_target_finger_id = int(shaped_command.finger_id)
                         actuation_target_action_id = int(shaped_command.action_id)
                         actuation_speed_scalar = float(shaped_command.speed_scalar)
+                        if actuation_speed_scalar > 0.0:
+                            actuation_speed_scalar = max(
+                                float(args.actuation_min_speed),
+                                actuation_speed_scalar,
+                            )
                         actuation_decision = ActuationDecision(
                             finger_id=actuation_target_finger_id,
                             action_id=actuation_target_action_id,
@@ -2210,6 +2240,7 @@ def main() -> int:
                             required_stability=1,
                             last_send_ts=last_send_ts,
                             cooldown_ms=int(args.actuation_cooldown_ms),
+                            repeat_same_ms=int(args.actuation_repeat_ms),
                         ):
                             send_start = time.monotonic()
                             actuator.send(

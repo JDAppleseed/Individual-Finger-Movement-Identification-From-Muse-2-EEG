@@ -5559,6 +5559,7 @@ class MainWindow(QMainWindow):
         model_path = run_dir / "finger_action_model.pt"
         scaler_path = run_dir / "scaler.npz"
         return exp_hash, (model_path if model_path.exists() else None), (scaler_path if scaler_path.exists() else None)
+
     def _update_resume_ui(self) -> None:
         if not hasattr(self, "resume_status_label") or not hasattr(
             self, "resume_checkbox"
