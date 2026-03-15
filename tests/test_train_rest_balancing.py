@@ -51,3 +51,48 @@ def test_session_equalized_rest_weights_disable_without_multiple_rest_sessions()
     assert weights is None
     assert summary["enabled"] is False
     assert summary["reason"] == "single_rest_session"
+
+
+def test_auxiliary_rest_session_policy_moves_rest_only_session_to_train_only():
+    mod = _load_train_module()
+    y_action = np.array([0, 1, 2, 1, 2, 0, 0, 0], dtype=np.int64)
+    meta = {
+        "session_id": np.array(
+            ["move_a"] * 3 + ["move_b"] * 2 + ["rest_only"] * 3,
+            dtype="U",
+        )
+    }
+
+    summary = mod._resolve_auxiliary_rest_sessions(
+        y_action,
+        meta,
+        policy="auto_train_only",
+    )
+
+    assert summary["enabled"] is True
+    assert summary["aux_sessions"] == ["rest_only"]
+    assert sorted(summary["core_sessions"]) == ["move_a", "move_b"]
+    assert np.array_equal(summary["aux_idx"], np.array([5, 6, 7], dtype=np.int64))
+    assert np.array_equal(summary["core_idx"], np.array([0, 1, 2, 3, 4], dtype=np.int64))
+
+
+def test_auxiliary_rest_session_policy_noops_when_no_rest_only_session():
+    mod = _load_train_module()
+    y_action = np.array([0, 1, 2, 0, 1, 2], dtype=np.int64)
+    meta = {
+        "session_id": np.array(
+            ["sess_a"] * 3 + ["sess_b"] * 3,
+            dtype="U",
+        )
+    }
+
+    summary = mod._resolve_auxiliary_rest_sessions(
+        y_action,
+        meta,
+        policy="auto_train_only",
+    )
+
+    assert summary["enabled"] is False
+    assert summary["reason"] == "no_rest_only_sessions"
+    assert np.array_equal(summary["core_idx"], np.arange(len(y_action), dtype=np.int64))
+    assert summary["aux_sessions"] == []

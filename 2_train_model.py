@@ -37,7 +37,11 @@ from utils.runtime_utils import (
 )
 from utils.experiment_logger import log_experiment, get_latest_experiment_hash
 from utils.label_schema import ACTION_REST, FINGER_NAMES
-from utils.splitting import infer_groups, assert_no_group_overlap
+from utils.splitting import (
+    infer_groups,
+    assert_no_group_overlap,
+    resolve_auxiliary_rest_sessions,
+)
 from utils.session_layout import SessionLayout, resolve_session_dir
 
 # Pipeline handoff: Step 2 consumes Step 1b NPZ windows, then writes model/scaler
@@ -53,6 +57,7 @@ LOSS_ACTION_WEIGHT = 1.0
 REST_WEIGHT = 1.0
 REST_BALANCE_MODE = "session_equalized"
 WINDOW_PREPROCESS = "center_detrend"
+AUX_REST_SESSION_POLICY = "auto_train_only"
 
 DEFAULT_NPZ = "eeg_windows.npz"
 DEFAULT_MODEL = "finger_action_model.pt"
@@ -455,6 +460,15 @@ def _preprocess_config_from_mode(mode: str) -> Dict[str, bool]:
     raise ValueError(f"Unsupported window preprocess mode: {mode}")
 
 
+def _resolve_auxiliary_rest_sessions(
+    y_action: np.ndarray,
+    meta: Dict[str, Any],
+    *,
+    policy: str,
+) -> Dict[str, Any]:
+    return resolve_auxiliary_rest_sessions(y_action, meta, policy=policy)
+
+
 def _build_train_sample_weights(
     y_action: np.ndarray,
     meta: Dict[str, Any],
@@ -703,6 +717,17 @@ def build_arg_parser():
         default="group_trial",
         choices=["group_trial", "holdout_session"],
         help="How train/test data are separated: by trial/event groups or by session_id.",
+    )
+    split_group.add_argument(
+        "--aux-rest-session-policy",
+        type=str,
+        default=AUX_REST_SESSION_POLICY,
+        choices=["none", "auto_train_only"],
+        help=(
+            "How to use source sessions that contain only REST windows. "
+            "'auto_train_only' excludes pure-rest sessions from the main test/calibration split "
+            "and appends them back into training as auxiliary REST."
+        ),
     )
     split_group.add_argument(
         "--purge-seconds",
@@ -1231,12 +1256,41 @@ def main():
             f"preds={save_preds_path}, temperature={save_temperature_path}"
         )
 
+        aux_rest_plan = _resolve_auxiliary_rest_sessions(
+            y_action,
+            meta if meta else {},
+            policy=args.aux_rest_session_policy,
+        )
+        split_idx = np.asarray(aux_rest_plan["core_idx"], dtype=np.int64)
+        aux_train_idx = np.asarray(aux_rest_plan["aux_idx"], dtype=np.int64)
+        if aux_rest_plan.get("enabled"):
+            print(
+                "Auxiliary REST-only sessions: "
+                f"train_only={aux_rest_plan.get('aux_sessions', [])} "
+                f"core={aux_rest_plan.get('core_sessions', [])}"
+            )
+            if args.split_mode == "holdout_session" and len(aux_rest_plan.get("core_sessions", [])) < 2:
+                print(
+                    "❌ split_mode=holdout_session requires at least two non-rest sessions "
+                    "after excluding REST-only auxiliary sessions."
+                )
+                return 2
+        else:
+            print(
+                "Auxiliary REST-only session policy: "
+                f"disabled reason={aux_rest_plan.get('reason', 'not_requested')}"
+            )
+        if len(split_idx) == 0:
+            print("❌ No core windows remain after applying the auxiliary REST session policy.")
+            return 2
+
         # ===== SPLIT =====
+        split_meta = _subset_meta(meta, split_idx, len(y_action)) if meta else {}
         try:
-            train_idx, test_idx = split_indices(
-                y_action,
-                y_finger,
-                meta=meta if meta else None,
+            train_local_idx, test_local_idx = split_indices(
+                y_action[split_idx],
+                y_finger[split_idx],
+                meta=split_meta if split_meta else None,
                 test_size=args.test_size,
                 random_state=args.seed,
                 split_mode=args.split_mode,
@@ -1248,29 +1302,45 @@ def main():
             print(f"❌ Split failed: {exc}")
             return 2
 
-        train_idx = np.asarray(train_idx, dtype=np.int64)
+        train_core_idx = split_idx[np.asarray(train_local_idx, dtype=np.int64)]
+        test_idx = split_idx[np.asarray(test_local_idx, dtype=np.int64)]
+        if len(aux_train_idx):
+            train_idx = np.concatenate([train_core_idx, aux_train_idx]).astype(np.int64)
+        else:
+            train_idx = np.asarray(train_core_idx, dtype=np.int64)
+        train_idx = np.unique(train_idx)
         test_idx = np.asarray(test_idx, dtype=np.int64)
         n_samples = len(y_action)
         _validate_indices(train_idx, n_samples, "train")
         _validate_indices(test_idx, n_samples, "test")
 
         try:
-            groups = _split_groups_from_meta(meta, len(y_action), args.split_mode)
+            groups = _split_groups_from_meta(split_meta, len(split_idx), args.split_mode)
         except ValueError as exc:
             print(f"❌ Split diagnostics failed: {exc}")
             return 2
         try:
-            assert_no_group_overlap(groups, train_idx, test_idx)
+            assert_no_group_overlap(
+                groups,
+                np.asarray(train_local_idx, dtype=np.int64),
+                np.asarray(test_local_idx, dtype=np.int64),
+            )
         except RuntimeError as exc:
             print(f"❌ Leakage guard tripped: {exc}")
             return 2
 
-        _log_split_diagnostics(groups, y_action, y_finger, train_idx, test_idx)
+        _log_split_diagnostics(
+            groups,
+            y_action[split_idx],
+            y_finger[split_idx],
+            np.asarray(train_local_idx, dtype=np.int64),
+            np.asarray(test_local_idx, dtype=np.int64),
+        )
         _window_idx_leakage_check(
-            meta,
-            y_action,
-            train_idx,
-            test_idx,
+            split_meta,
+            y_action[split_idx],
+            np.asarray(train_local_idx, dtype=np.int64),
+            np.asarray(test_local_idx, dtype=np.int64),
             seed=args.seed,
             threshold=args.window_idx_leak_threshold,
             strict=args.strict_leakage,
@@ -1290,8 +1360,13 @@ def main():
         train_fit_idx = np.asarray(train_idx, dtype=np.int64)
         calibration_size = max(0.0, float(args.calibration_size))
         if calibration_size > 0.0:
+            aux_mask = np.isin(train_fit_idx, aux_train_idx) if len(aux_train_idx) else np.zeros(
+                len(train_fit_idx), dtype=bool
+            )
+            calib_candidate_idx = train_fit_idx[~aux_mask]
+            train_aux_only_idx = train_fit_idx[aux_mask]
             train_fit_idx, calib_idx = _split_calibration_indices(
-                train_fit_idx,
+                calib_candidate_idx,
                 y_action,
                 y_finger,
                 meta if meta else {},
@@ -1299,6 +1374,11 @@ def main():
                 random_state=args.seed,
                 split_mode=args.split_mode,
             )
+            if len(train_aux_only_idx):
+                train_fit_idx = np.concatenate(
+                    [np.asarray(train_fit_idx, dtype=np.int64), train_aux_only_idx]
+                ).astype(np.int64)
+                train_fit_idx = np.unique(train_fit_idx)
             if len(calib_idx) == 0:
                 print("Temperature scaling: skipped (no calibration fold available).")
             else:
@@ -1487,6 +1567,7 @@ def main():
             "window_preprocess": args.window_preprocess,
             "test_size": args.test_size,
             "split_mode": args.split_mode,
+            "aux_rest_session_policy": args.aux_rest_session_policy,
             "purge_seconds": float(args.purge_seconds),
             "hop_seconds": float(args.hop_seconds) if args.hop_seconds is not None else None,
             "window_idx_leak_threshold": float(args.window_idx_leak_threshold),
@@ -1502,6 +1583,16 @@ def main():
                 "type": normalizer.get("type", "unknown"),
                 "channels": normalizer.get("channels", None),
                 "preprocess": normalizer.get("preprocess", {}),
+            },
+            "auxiliary_rest_sessions": {
+                "enabled": bool(aux_rest_plan.get("enabled", False)),
+                "reason": str(aux_rest_plan.get("reason", "")),
+                "aux_sessions": [str(v) for v in aux_rest_plan.get("aux_sessions", [])],
+                "core_sessions": [str(v) for v in aux_rest_plan.get("core_sessions", [])],
+                "aux_train_count": int(len(aux_train_idx)),
+                "core_split_count": int(len(split_idx)),
+                "test_count": int(len(test_idx)),
+                "session_action_counts": aux_rest_plan.get("session_action_counts", {}),
             },
             "train_sampler": sample_weight_summary,
             "device": str(device),

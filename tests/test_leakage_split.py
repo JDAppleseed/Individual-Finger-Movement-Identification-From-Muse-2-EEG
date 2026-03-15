@@ -5,6 +5,7 @@ from utils.splitting import (
     split_indices,
     infer_groups,
     assert_no_group_overlap,
+    resolve_auxiliary_rest_sessions,
 )
 
 
@@ -105,3 +106,25 @@ def test_split_score_prefers_representative_rest_session_mix():
     )
 
     assert balanced_score < skewed_score
+
+
+def test_resolve_auxiliary_rest_sessions_marks_rest_only_sessions_train_only():
+    y_action = np.array([0, 1, 2, 1, 2, 0, 0, 0], dtype=np.int64)
+    meta = {
+        "session_id": np.array(
+            ["move_a"] * 3 + ["move_b"] * 2 + ["rest_only"] * 3,
+            dtype="U",
+        )
+    }
+
+    plan = resolve_auxiliary_rest_sessions(
+        y_action,
+        meta,
+        policy="auto_train_only",
+    )
+
+    assert plan["enabled"] is True
+    assert plan["aux_sessions"] == ["rest_only"]
+    assert sorted(plan["core_sessions"]) == ["move_a", "move_b"]
+    assert np.array_equal(plan["core_idx"], np.array([0, 1, 2, 3, 4], dtype=np.int64))
+    assert np.array_equal(plan["aux_idx"], np.array([5, 6, 7], dtype=np.int64))

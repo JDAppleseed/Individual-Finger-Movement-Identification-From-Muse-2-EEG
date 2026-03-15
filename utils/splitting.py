@@ -249,6 +249,79 @@ def _factorize(labels: np.ndarray) -> np.ndarray:
     return inv
 
 
+def resolve_auxiliary_rest_sessions(
+    y_action: np.ndarray,
+    meta: Optional[Dict[str, Any]],
+    *,
+    policy: str = "none",
+) -> Dict[str, Any]:
+    y_action = _as_1d_int64(y_action, "y_action")
+    result: Dict[str, Any] = {
+        "policy": str(policy or "none"),
+        "enabled": False,
+        "reason": "not_requested",
+        "core_idx": np.arange(len(y_action), dtype=np.int64),
+        "aux_idx": np.array([], dtype=np.int64),
+        "core_sessions": [],
+        "aux_sessions": [],
+        "session_action_counts": {},
+    }
+    policy = str(policy or "none").strip().lower()
+    if policy == "none":
+        return result
+    if policy != "auto_train_only":
+        raise ValueError(f"Unsupported auxiliary rest session policy: {policy}")
+    if ACTION_REST is None:
+        result["reason"] = "missing_action_rest"
+        return result
+
+    session_id = _get_meta_array(meta, _SESSION_KEYS, len(y_action))
+    if session_id is None:
+        result["reason"] = "missing_session_id"
+        return result
+    session_id = np.asarray(session_id).astype("U")
+
+    valid_mask = (session_id != "") & (session_id != "UNKNOWN")
+    unique_sessions = np.unique(session_id[valid_mask]) if np.any(valid_mask) else np.array([])
+    if len(unique_sessions) < 2:
+        result["reason"] = "insufficient_sessions"
+        return result
+
+    aux_sessions = []
+    core_sessions = []
+    session_action_counts: Dict[str, Dict[int, int]] = {}
+    for sid in unique_sessions.tolist():
+        sid_mask = session_id == sid
+        sid_actions = y_action[sid_mask]
+        unique_actions, counts = np.unique(sid_actions, return_counts=True)
+        session_action_counts[str(sid)] = {
+            int(action_id): int(count)
+            for action_id, count in zip(unique_actions.tolist(), counts.tolist())
+        }
+        if len(unique_actions) == 1 and int(unique_actions[0]) == int(ACTION_REST):
+            aux_sessions.append(str(sid))
+        else:
+            core_sessions.append(str(sid))
+
+    result["session_action_counts"] = session_action_counts
+    result["core_sessions"] = core_sessions
+    result["aux_sessions"] = aux_sessions
+
+    if not aux_sessions:
+        result["reason"] = "no_rest_only_sessions"
+        return result
+    if not core_sessions:
+        result["reason"] = "all_sessions_rest_only"
+        return result
+
+    aux_mask = np.isin(session_id, np.asarray(aux_sessions, dtype="U"))
+    result["enabled"] = True
+    result["reason"] = "rest_only_sessions_train_only"
+    result["core_idx"] = np.flatnonzero(~aux_mask).astype(np.int64)
+    result["aux_idx"] = np.flatnonzero(aux_mask).astype(np.int64)
+    return result
+
+
 def _split_score(
     label_ids: np.ndarray,
     y_action: np.ndarray,

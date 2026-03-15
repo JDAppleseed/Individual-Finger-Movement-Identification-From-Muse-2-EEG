@@ -45,6 +45,7 @@ from utils.sequence_data import (
     split_indices,
     apply_channel_normalizer,
 )
+from utils.splitting import resolve_auxiliary_rest_sessions
 from utils.postprocess import (
     PostprocessSettings,
     PostprocessState,
@@ -649,6 +650,33 @@ def _split_with_checks(
     return None, None, MAX_SPLIT_ATTEMPTS
 
 
+def _subset_meta(meta: Dict[str, Any], idx: np.ndarray, n_expected: int) -> Dict[str, Any]:
+    if not meta:
+        return {}
+    idx = np.asarray(idx, dtype=np.int64)
+    out: Dict[str, Any] = {}
+    for key, val in meta.items():
+        if isinstance(val, dict) or isinstance(val, (str, bytes)):
+            out[key] = val
+            continue
+        try:
+            arr = np.asarray(val)
+        except Exception:
+            out[key] = val
+            continue
+        if arr.ndim == 0:
+            out[key] = val
+            continue
+        try:
+            if len(arr) == n_expected:
+                out[key] = arr[idx]
+            else:
+                out[key] = val
+        except Exception:
+            out[key] = val
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -958,6 +986,9 @@ def main():
         if cli_flags["hop_seconds"] and args.hop_seconds is not None
         else train_cfg.get("hop_seconds", None)
     )
+    aux_rest_session_policy = str(
+        train_cfg.get("aux_rest_session_policy", "none") or "none"
+    ).strip()
     if split_seed_effective != split_seed:
         split_seed = int(split_seed_effective)
         if args.deterministic:
@@ -970,7 +1001,8 @@ def main():
     print(
         "Split config: "
         f"test_size={test_size}, seed={split_seed}, mode={split_mode}, "
-        f"purge_seconds={purge_seconds}, hop_seconds={hop_seconds}"
+        f"purge_seconds={purge_seconds}, hop_seconds={hop_seconds}, "
+        f"aux_rest_session_policy={aux_rest_session_policy}"
     )
     manifest_enabled = not args.no_manifest
     manifest_name = Path(args.save_manifest).name if args.save_manifest else "eval_manifest.json"
@@ -1022,6 +1054,7 @@ def main():
             "seed": split_seed,
             "test_size": float(test_size),
             "split_mode": str(split_mode),
+            "aux_rest_session_policy": str(aux_rest_session_policy),
             "purge_seconds": float(purge_seconds),
             "hop_seconds": float(hop_seconds) if hop_seconds is not None else None,
             "attempts": None,
@@ -1188,6 +1221,32 @@ def main():
         else "none"
     )
 
+    aux_rest_plan = resolve_auxiliary_rest_sessions(
+        y_action,
+        meta if meta else {},
+        policy=aux_rest_session_policy,
+    )
+    split_idx = np.asarray(aux_rest_plan["core_idx"], dtype=np.int64)
+    aux_idx = np.asarray(aux_rest_plan["aux_idx"], dtype=np.int64)
+    manifest["split"]["auxiliary_rest_sessions"] = {
+        "enabled": bool(aux_rest_plan.get("enabled", False)),
+        "reason": str(aux_rest_plan.get("reason", "")),
+        "aux_sessions": [str(v) for v in aux_rest_plan.get("aux_sessions", [])],
+        "core_sessions": [str(v) for v in aux_rest_plan.get("core_sessions", [])],
+        "aux_count": int(len(aux_idx)),
+        "core_count": int(len(split_idx)),
+    }
+    if aux_rest_plan.get("enabled"):
+        print(
+            "Auxiliary REST-only sessions excluded from main evaluation split: "
+            f"{aux_rest_plan.get('aux_sessions', [])}"
+        )
+    if len(split_idx) == 0:
+        print("⚠️ No core windows remain after applying the auxiliary REST session policy.")
+        manifest["abort_reason"] = "no_core_windows_after_aux_rest_filter"
+        _maybe_write_manifest()
+        return 2
+
     # =========================
     # ===== TEST SPLIT =========
     # =========================
@@ -1254,6 +1313,11 @@ def main():
                             cache_ok = False
                             reject_reasons.append("cache_temperature_scaling_mismatch")
 
+            if cache_ok and aux_rest_plan.get("enabled"):
+                if np.any(np.isin(test_idx, aux_idx)):
+                    cache_ok = False
+                    reject_reasons.append("cache_includes_aux_rest_test_indices")
+
             if not cache_ok:
                 print(
                     "⚠️ Cached predictions rejected; recomputing. "
@@ -1266,23 +1330,26 @@ def main():
                 print(f"✅ Using cached predictions: {pred_npz_path}")
 
     if cached is None:
-        train_idx, test_idx, split_attempts = _split_with_checks(
-            y_action,
-            y_finger,
-            meta=meta,
+        split_meta = _subset_meta(meta, split_idx, len(y_action)) if meta else {}
+        train_local_idx, test_local_idx, split_attempts = _split_with_checks(
+            y_action[split_idx],
+            y_finger[split_idx],
+            meta=split_meta,
             seed=split_seed,
             test_size=float(test_size),
             split_mode=str(split_mode),
             purge_seconds=float(purge_seconds),
             hop_seconds=hop_seconds,
         )
-        if train_idx is None or test_idx is None:
+        if train_local_idx is None or test_local_idx is None:
             print(
                 "⚠️ Unable to create a split with multiple classes. Aborting evaluation."
             )
             manifest["abort_reason"] = "split_failed"
             _maybe_write_manifest()
             return 2
+        train_idx = split_idx[np.asarray(train_local_idx, dtype=np.int64)]
+        test_idx = split_idx[np.asarray(test_local_idx, dtype=np.int64)]
 
         y_action_test = y_action[test_idx]
         y_finger_test = y_finger[test_idx]
