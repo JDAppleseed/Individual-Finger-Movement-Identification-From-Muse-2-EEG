@@ -98,6 +98,16 @@ class CommandShaper:
 
         flags = 0
         hold_requested = False
+        if not bool(stability_ok):
+            if self._last_cmd is not None:
+                hold_requested = True
+                self._hold_until_ms = max(
+                    self._hold_until_ms, timebase_ms + int(self.config.hold_ms)
+                )
+            else:
+                target_action = 0
+                target_finger = 0
+                speed = 0.0
         if self._last_cmd is not None:
             changed = (
                 target_action != self._last_cmd.action_id

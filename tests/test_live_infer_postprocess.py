@@ -532,3 +532,62 @@ def test_resolve_live_sample_time_falls_back_when_lsl_missing():
 
     assert np.isclose(out0[0], 0.0)
     assert np.isclose(out1[0], 0.25)
+
+
+def test_estimate_window_center_mono_tracks_latest_sample_clock():
+    mod = _load_live_module()
+
+    center = mod._estimate_window_center_mono(
+        latest_sample_mono=12.0,
+        latest_stream_time_s=5.0,
+        window_center_stream_s=4.75,
+    )
+
+    assert np.isclose(center, 11.75)
+
+
+def test_latency_gate_rejects_negative_and_stale_predictions():
+    mod = _load_live_module()
+
+    assert mod._latency_gate_passed(35.0, 750.0) is True
+    assert mod._latency_gate_passed(-75.0, 750.0) is False
+    assert mod._latency_gate_passed(900.0, 750.0) is False
+
+
+def test_actuation_command_shaper_holds_unstable_changes():
+    mod = _load_live_module()
+    shaper = mod._build_actuation_command_shaper(
+        type(
+            "Args",
+            (),
+            {
+                "actuation_min_prob": 0.75,
+                "actuation_speed_gamma": 1.0,
+                "actuation_cooldown_ms": 250,
+                "hop_sec": 0.05,
+                "actuation_stability": 4,
+            },
+        )()
+    )
+
+    steady = shaper.shape(
+        action_id=1,
+        finger_id=2,
+        action_conf=0.9,
+        timestamp_stream_ms=1000,
+        stability_ok=True,
+        timebase_ms=1000,
+    )
+    held = shaper.shape(
+        action_id=1,
+        finger_id=4,
+        action_conf=0.92,
+        timestamp_stream_ms=1050,
+        stability_ok=False,
+        timebase_ms=1050,
+    )
+
+    assert steady.action_id == 1
+    assert steady.finger_id == 2
+    assert held.action_id == 1
+    assert held.finger_id == 2

@@ -460,9 +460,9 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "enable_actuation": False,
         "serial_port": None,
         "serial_baud": 9600,
-        "actuation_min_prob": 0.65,
-        "actuation_stability": 2,
-        "actuation_cooldown_ms": 150,
+        "actuation_min_prob": 0.75,
+        "actuation_stability": 4,
+        "actuation_cooldown_ms": 250,
         "modulate_actuation_speed": True,
         "actuation_speed_gamma": 1.0,
         "allow_outside_base": False,
@@ -1463,6 +1463,46 @@ def _compute_actuation_speed_scalar(
     return float(speed_mapper.confidence_to_speed(confidence))
 
 
+def _build_actuation_command_shaper(args: argparse.Namespace) -> CommandShaper:
+    min_hold_ms = max(
+        int(args.actuation_cooldown_ms),
+        int(round(float(args.hop_sec) * 1000.0 * max(1, int(args.actuation_stability)))),
+    )
+    return CommandShaper(
+        CommandShaperConfig(
+            base_conf_thresh=float(args.actuation_min_prob),
+            speed_gamma=float(args.actuation_speed_gamma),
+            hold_ms=max(150, min_hold_ms),
+            hold_conf_margin=0.05,
+        )
+    )
+
+
+def _estimate_window_center_mono(
+    *,
+    latest_sample_mono: Optional[float],
+    latest_stream_time_s: float,
+    window_center_stream_s: float,
+    fallback_mono: Optional[float] = None,
+) -> float:
+    if latest_sample_mono is None:
+        if fallback_mono is not None:
+            return float(fallback_mono)
+        return time.monotonic()
+    stream_delta_s = float(latest_stream_time_s) - float(window_center_stream_s)
+    if not np.isfinite(stream_delta_s):
+        return float(latest_sample_mono)
+    if stream_delta_s < 0.0:
+        stream_delta_s = 0.0
+    return float(latest_sample_mono) - stream_delta_s
+
+
+def _latency_gate_passed(latency_ms: float, threshold_ms: float) -> bool:
+    latency_ms = float(latency_ms)
+    threshold_ms = float(threshold_ms)
+    return -50.0 <= latency_ms <= threshold_ms
+
+
 # -------------------- Main --------------------
 
 def main() -> int:
@@ -1788,6 +1828,7 @@ def main() -> int:
     stream_origin_mono: Optional[float] = None
     stream_origin_lsl: Optional[float] = None
     prev_lsl_mono: Optional[float] = None
+    latest_sample_mono: Optional[float] = None
     latest_stream_time_s = 0.0
     dropped_windows = 0
     last_log = time.monotonic()
@@ -1800,6 +1841,7 @@ def main() -> int:
     last_sent: Optional[Tuple[int, int]] = None
     last_send_ts = 0.0
     sample_seq = 0
+    actuation_command_shaper = _build_actuation_command_shaper(args)
 
     termination_reason = "ok"
     try:
@@ -1809,6 +1851,7 @@ def main() -> int:
             if timestamps:
                 for sample, lsl_ts in zip(chunk, timestamps):
                     sample_mono = time.monotonic()
+                    latest_sample_mono = float(sample_mono)
                     (
                         time_s,
                         lsl_ts_mono,
@@ -1956,12 +1999,13 @@ def main() -> int:
 
                 # Latency tracking
                 now = time.monotonic()
-                if stream_origin_mono is None:
-                    window_center_mono = now
-                else:
-                    window_center_mono = (
-                        float(stream_origin_mono) + window_start + args.window_sec / 2.0
-                    )
+                window_center_stream_s = window_start + args.window_sec / 2.0
+                window_center_mono = _estimate_window_center_mono(
+                    latest_sample_mono=latest_sample_mono,
+                    latest_stream_time_s=float(latest_stream_time_s),
+                    window_center_stream_s=float(window_center_stream_s),
+                    fallback_mono=stream_origin_mono,
+                )
                 latency_ms = (now - window_center_mono) * 1000.0
                 latency_window.append(latency_ms)
 
@@ -2020,55 +2064,100 @@ def main() -> int:
                 actuation_sent = False
                 actuation_latency_ms = None
                 actuation_decision_delay_ms = None
+                actuation_target_finger_id = int(decision.finger_id)
+                actuation_target_action_id = int(decision.action_id)
+                actuation_suppressed_reason = None
+                actuation_latency_gate_ok = _latency_gate_passed(
+                    latency_ms, float(args.latency_threshold_ms)
+                )
                 if args.enable_actuation and actuator is not None:
-                    if decision.prob >= float(args.actuation_min_prob):
-                        # Hard safety gate: NEVER actuate on NONE/REST.
-                        if int(decision.finger_id) == 0 or int(decision.action_id) == 0:
+                    shaped_command = actuation_command_shaper.shape(
+                        action_id=int(decision.action_id),
+                        finger_id=int(decision.finger_id),
+                        action_conf=float(decision.prob),
+                        timestamp_stream_ms=int(round(window_center_stream_s * 1000.0)),
+                        stability_ok=stable_count >= int(args.actuation_stability),
+                        timebase_ms=int(round(window_center_stream_s * 1000.0)),
+                    )
+                    actuation_target_finger_id = int(shaped_command.finger_id)
+                    actuation_target_action_id = int(shaped_command.action_id)
+                    actuation_speed_scalar = float(shaped_command.speed_scalar)
+                    actuation_decision = ActuationDecision(
+                        finger_id=actuation_target_finger_id,
+                        action_id=actuation_target_action_id,
+                        prob=float(decision.prob),
+                    )
+                    actuation_key = (
+                        int(actuation_decision.finger_id),
+                        int(actuation_decision.action_id),
+                    )
+
+                    if not actuation_latency_gate_ok:
+                        actuation_suppressed_reason = "latency_gate"
+                        logger.info(
+                            "Actuation suppressed by latency gate latency_ms=%.1f threshold_ms=%.1f",
+                            latency_ms,
+                            float(args.latency_threshold_ms),
+                        )
+                    elif _is_noop_decision(
+                        actuation_decision.finger_id, actuation_decision.action_id
+                    ):
+                        if decision.prob < float(args.actuation_min_prob):
+                            actuation_suppressed_reason = "min_prob"
+                            logger.debug(
+                                "Actuation suppressed by min_prob (%.3f < %.3f)",
+                                decision.prob,
+                                float(args.actuation_min_prob),
+                            )
+                        elif stable_count < int(args.actuation_stability):
+                            actuation_suppressed_reason = "stability_hold"
+                        else:
+                            actuation_suppressed_reason = "noop"
                             logger.info(
                                 "NO-OP decision suppressed (finger=%s action=%s)",
-                                decision.finger_id,
-                                decision.action_id,
+                                actuation_decision.finger_id,
+                                actuation_decision.action_id,
                             )
-                        elif not uncertainty_gate_ok:
-                            logger.info(
-                                "Actuation suppressed by uncertainty gate action_conf=%.3f adaptive_threshold=%.3f action_unc=%.4f",
-                                float(decision_info.get("action_conf", 0.0)),
-                                float(inference_result.get("adaptive_threshold", 0.0)),
-                                action_uncertainty,
-                            )
-                        elif _debounced_should_send(
-                            decision=decision,
-                            last_sent=last_sent,
-                            stable_count=stable_count,
-                            required_stability=int(args.actuation_stability),
-                            last_send_ts=last_send_ts,
-                            cooldown_ms=int(args.actuation_cooldown_ms),
-                        ):
-                            # Send command
-                            send_start = time.monotonic()
-                            actuator.send(
-                                decision.finger_id,
-                                decision.action_id,
-                                speed_scalar=actuation_speed_scalar,
-                            )
-                            send_end = time.monotonic()
-                            last_sent = key
-                            last_send_ts = send_end
-                            actuation_sent = True
-                            actuation_latency_ms = (send_end - window_center_mono) * 1000.0
-                            actuation_decision_delay_ms = (send_start - now) * 1000.0
-                            logger.info(
-                                "ACTUATE sent finger=%s action=%s prob=%.3f speed=%.3f prediction_latency_ms=%.1f actuation_latency_ms=%.1f decision_to_send_ms=%.1f",
-                                decision.finger_id,
-                                decision.action_id,
-                                decision.prob,
-                                actuation_speed_scalar,
-                                latency_ms,
-                                actuation_latency_ms,
-                                actuation_decision_delay_ms,
-                            )
+                    elif not uncertainty_gate_ok:
+                        actuation_suppressed_reason = "uncertainty_gate"
+                        logger.info(
+                            "Actuation suppressed by uncertainty gate action_conf=%.3f adaptive_threshold=%.3f action_unc=%.4f",
+                            float(decision_info.get("action_conf", 0.0)),
+                            float(inference_result.get("adaptive_threshold", 0.0)),
+                            action_uncertainty,
+                        )
+                    elif _debounced_should_send(
+                        decision=actuation_decision,
+                        last_sent=last_sent,
+                        stable_count=1,
+                        required_stability=1,
+                        last_send_ts=last_send_ts,
+                        cooldown_ms=int(args.actuation_cooldown_ms),
+                    ):
+                        send_start = time.monotonic()
+                        actuator.send(
+                            actuation_decision.finger_id,
+                            actuation_decision.action_id,
+                            speed_scalar=actuation_speed_scalar,
+                        )
+                        send_end = time.monotonic()
+                        last_sent = actuation_key
+                        last_send_ts = send_end
+                        actuation_sent = True
+                        actuation_latency_ms = (send_end - window_center_mono) * 1000.0
+                        actuation_decision_delay_ms = (send_start - now) * 1000.0
+                        logger.info(
+                            "ACTUATE sent finger=%s action=%s prob=%.3f speed=%.3f prediction_latency_ms=%.1f actuation_latency_ms=%.1f decision_to_send_ms=%.1f",
+                            actuation_decision.finger_id,
+                            actuation_decision.action_id,
+                            decision.prob,
+                            actuation_speed_scalar,
+                            latency_ms,
+                            actuation_latency_ms,
+                            actuation_decision_delay_ms,
+                        )
                     else:
-                        logger.debug("Actuation suppressed by min_prob (%.3f < %.3f)", decision.prob, float(args.actuation_min_prob))
+                        actuation_suppressed_reason = "cooldown_or_duplicate"
 
                 if pred_log is not None:
                     payload = {
@@ -2099,6 +2188,10 @@ def main() -> int:
                         "postprocess_enabled": bool(postprocess_enabled),
                         "dropped_windows": int(dropped_windows),
                         "actuation_speed_scalar": float(actuation_speed_scalar),
+                        "actuation_target_finger_id": int(actuation_target_finger_id),
+                        "actuation_target_action_id": int(actuation_target_action_id),
+                        "actuation_latency_gate_ok": bool(actuation_latency_gate_ok),
+                        "actuation_suppressed_reason": actuation_suppressed_reason,
                         "actuation_sent": bool(actuation_sent),
                         "actuation_latency_ms": (
                             float(actuation_latency_ms)
