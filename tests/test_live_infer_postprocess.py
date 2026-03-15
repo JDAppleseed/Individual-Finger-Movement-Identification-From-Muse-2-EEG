@@ -554,6 +554,54 @@ def test_latency_gate_rejects_negative_and_stale_predictions():
     assert mod._latency_gate_passed(900.0, 750.0) is False
 
 
+def test_resolve_actuation_candidate_requires_same_finger_for_three():
+    mod = _load_live_module()
+
+    history = [
+        mod.ActuationDecision(finger_id=1, action_id=1, prob=0.9),
+        mod.ActuationDecision(finger_id=2, action_id=1, prob=0.9),
+        mod.ActuationDecision(finger_id=1, action_id=1, prob=0.9),
+    ]
+
+    out = mod._resolve_actuation_candidate(history, required_finger_stability=3)
+
+    assert out["decision"].finger_id == 0
+    assert out["decision"].action_id == 0
+    assert out["reason"] == "finger_stability"
+
+
+def test_resolve_actuation_candidate_votes_open_when_two_of_three_open():
+    mod = _load_live_module()
+
+    history = [
+        mod.ActuationDecision(finger_id=2, action_id=1, prob=0.8),
+        mod.ActuationDecision(finger_id=2, action_id=2, prob=0.95),
+        mod.ActuationDecision(finger_id=2, action_id=1, prob=0.9),
+    ]
+
+    out = mod._resolve_actuation_candidate(history, required_finger_stability=3)
+
+    assert out["decision"].finger_id == 2
+    assert out["decision"].action_id == 1
+    assert out["reason"] == "finger_majority_action_vote"
+
+
+def test_resolve_actuation_candidate_votes_close_when_two_of_three_close():
+    mod = _load_live_module()
+
+    history = [
+        mod.ActuationDecision(finger_id=3, action_id=2, prob=0.82),
+        mod.ActuationDecision(finger_id=3, action_id=1, prob=0.97),
+        mod.ActuationDecision(finger_id=3, action_id=2, prob=0.88),
+    ]
+
+    out = mod._resolve_actuation_candidate(history, required_finger_stability=3)
+
+    assert out["decision"].finger_id == 3
+    assert out["decision"].action_id == 2
+    assert out["reason"] == "finger_majority_action_vote"
+
+
 def test_actuation_command_shaper_holds_unstable_changes():
     mod = _load_live_module()
     shaper = mod._build_actuation_command_shaper(
@@ -565,7 +613,7 @@ def test_actuation_command_shaper_holds_unstable_changes():
                 "actuation_speed_gamma": 1.0,
                 "actuation_cooldown_ms": 250,
                 "hop_sec": 0.05,
-                "actuation_stability": 4,
+                "actuation_stability": 3,
             },
         )()
     )
@@ -604,7 +652,7 @@ def test_actuation_command_shaper_recovers_after_initial_unstable_noops():
                 "actuation_speed_gamma": 1.0,
                 "actuation_cooldown_ms": 250,
                 "hop_sec": 0.05,
-                "actuation_stability": 4,
+                "actuation_stability": 3,
             },
         )()
     )

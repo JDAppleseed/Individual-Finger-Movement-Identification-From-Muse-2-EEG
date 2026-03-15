@@ -24,6 +24,7 @@ Manual test (serial):
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import logging
 import os
@@ -461,7 +462,7 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "serial_port": None,
         "serial_baud": 9600,
         "actuation_min_prob": 0.75,
-        "actuation_stability": 4,
+        "actuation_stability": 3,
         "actuation_cooldown_ms": 250,
         "modulate_actuation_speed": True,
         "actuation_speed_gamma": 1.0,
@@ -1503,6 +1504,72 @@ def _latency_gate_passed(latency_ms: float, threshold_ms: float) -> bool:
     return -50.0 <= latency_ms <= threshold_ms
 
 
+def _resolve_actuation_candidate(
+    history: Deque[ActuationDecision],
+    *,
+    required_finger_stability: int,
+) -> dict[str, Any]:
+    required = max(1, int(required_finger_stability))
+    if len(history) < required:
+        return {
+            "decision": ActuationDecision(finger_id=0, action_id=0, prob=0.0),
+            "reason": "finger_stability",
+            "finger_votes": {},
+            "action_votes": {},
+            "resolved_finger_id": 0,
+        }
+
+    tail = list(history)[-required:]
+    finger_ids = [int(d.finger_id) for d in tail]
+    nonzero_fingers = [fid for fid in finger_ids if fid != 0]
+    if len(nonzero_fingers) != required:
+        return {
+            "decision": ActuationDecision(finger_id=0, action_id=0, prob=0.0),
+            "reason": "finger_stability",
+            "finger_votes": dict(collections.Counter(finger_ids)),
+            "action_votes": {},
+            "resolved_finger_id": 0,
+        }
+    if len(set(nonzero_fingers)) != 1:
+        return {
+            "decision": ActuationDecision(finger_id=0, action_id=0, prob=0.0),
+            "reason": "finger_stability",
+            "finger_votes": dict(collections.Counter(finger_ids)),
+            "action_votes": {},
+            "resolved_finger_id": 0,
+        }
+
+    resolved_finger_id = int(nonzero_fingers[0])
+    action_counts = collections.Counter(int(d.action_id) for d in tail)
+    action_prob_sums: dict[int, float] = {}
+    for d in tail:
+        action_id = int(d.action_id)
+        action_prob_sums[action_id] = action_prob_sums.get(action_id, 0.0) + float(
+            d.prob
+        )
+    chosen_action_id = max(
+        action_counts,
+        key=lambda action_id: (
+            int(action_counts[action_id]),
+            float(action_prob_sums.get(action_id, 0.0)),
+            int(action_id),
+        ),
+    )
+    chosen_probs = [float(d.prob) for d in tail if int(d.action_id) == chosen_action_id]
+    chosen_prob = float(np.mean(chosen_probs)) if chosen_probs else 0.0
+    return {
+        "decision": ActuationDecision(
+            finger_id=resolved_finger_id,
+            action_id=int(chosen_action_id),
+            prob=chosen_prob,
+        ),
+        "reason": "finger_majority_action_vote",
+        "finger_votes": dict(collections.Counter(finger_ids)),
+        "action_votes": dict(action_counts),
+        "resolved_finger_id": resolved_finger_id,
+    }
+
+
 # -------------------- Main --------------------
 
 def main() -> int:
@@ -1841,6 +1908,9 @@ def main() -> int:
     last_sent: Optional[Tuple[int, int]] = None
     last_send_ts = 0.0
     sample_seq = 0
+    actuation_history: Deque[ActuationDecision] = deque(
+        maxlen=max(3, int(args.actuation_stability))
+    )
     actuation_command_shaper = _build_actuation_command_shaper(args)
 
     termination_reason = "ok"
@@ -2059,39 +2129,24 @@ def main() -> int:
                 else:
                     stable_count = 1
                     last_decision = key
+                actuation_history.append(decision)
 
                 # Decide to actuate
                 actuation_sent = False
                 actuation_latency_ms = None
                 actuation_decision_delay_ms = None
-                actuation_target_finger_id = int(decision.finger_id)
-                actuation_target_action_id = int(decision.action_id)
+                actuation_vote = _resolve_actuation_candidate(
+                    actuation_history,
+                    required_finger_stability=int(args.actuation_stability),
+                )
+                voted_decision = actuation_vote["decision"]
+                actuation_target_finger_id = int(voted_decision.finger_id)
+                actuation_target_action_id = int(voted_decision.action_id)
                 actuation_suppressed_reason = None
                 actuation_latency_gate_ok = _latency_gate_passed(
                     latency_ms, float(args.latency_threshold_ms)
                 )
                 if args.enable_actuation and actuator is not None:
-                    shaped_command = actuation_command_shaper.shape(
-                        action_id=int(decision.action_id),
-                        finger_id=int(decision.finger_id),
-                        action_conf=float(decision.prob),
-                        timestamp_stream_ms=int(round(window_center_stream_s * 1000.0)),
-                        stability_ok=stable_count >= int(args.actuation_stability),
-                        timebase_ms=int(round(window_center_stream_s * 1000.0)),
-                    )
-                    actuation_target_finger_id = int(shaped_command.finger_id)
-                    actuation_target_action_id = int(shaped_command.action_id)
-                    actuation_speed_scalar = float(shaped_command.speed_scalar)
-                    actuation_decision = ActuationDecision(
-                        finger_id=actuation_target_finger_id,
-                        action_id=actuation_target_action_id,
-                        prob=float(decision.prob),
-                    )
-                    actuation_key = (
-                        int(actuation_decision.finger_id),
-                        int(actuation_decision.action_id),
-                    )
-
                     if not actuation_latency_gate_ok:
                         actuation_suppressed_reason = "latency_gate"
                         logger.info(
@@ -2100,24 +2155,16 @@ def main() -> int:
                             float(args.latency_threshold_ms),
                         )
                     elif _is_noop_decision(
-                        actuation_decision.finger_id, actuation_decision.action_id
+                        voted_decision.finger_id, voted_decision.action_id
                     ):
-                        if decision.prob < float(args.actuation_min_prob):
-                            actuation_suppressed_reason = "min_prob"
-                            logger.debug(
-                                "Actuation suppressed by min_prob (%.3f < %.3f)",
-                                decision.prob,
-                                float(args.actuation_min_prob),
-                            )
-                        elif stable_count < int(args.actuation_stability):
-                            actuation_suppressed_reason = "stability_hold"
-                        else:
-                            actuation_suppressed_reason = "noop"
-                            logger.info(
-                                "NO-OP decision suppressed (finger=%s action=%s)",
-                                actuation_decision.finger_id,
-                                actuation_decision.action_id,
-                            )
+                        actuation_suppressed_reason = str(
+                            actuation_vote.get("reason", "noop")
+                        )
+                        logger.info(
+                            "NO-OP decision suppressed (finger=%s action=%s)",
+                            voted_decision.finger_id,
+                            voted_decision.action_id,
+                        )
                     elif not uncertainty_gate_ok:
                         actuation_suppressed_reason = "uncertainty_gate"
                         logger.info(
@@ -2126,38 +2173,68 @@ def main() -> int:
                             float(inference_result.get("adaptive_threshold", 0.0)),
                             action_uncertainty,
                         )
-                    elif _debounced_should_send(
-                        decision=actuation_decision,
-                        last_sent=last_sent,
-                        stable_count=1,
-                        required_stability=1,
-                        last_send_ts=last_send_ts,
-                        cooldown_ms=int(args.actuation_cooldown_ms),
-                    ):
-                        send_start = time.monotonic()
-                        actuator.send(
-                            actuation_decision.finger_id,
-                            actuation_decision.action_id,
-                            speed_scalar=actuation_speed_scalar,
-                        )
-                        send_end = time.monotonic()
-                        last_sent = actuation_key
-                        last_send_ts = send_end
-                        actuation_sent = True
-                        actuation_latency_ms = (send_end - window_center_mono) * 1000.0
-                        actuation_decision_delay_ms = (send_start - now) * 1000.0
-                        logger.info(
-                            "ACTUATE sent finger=%s action=%s prob=%.3f speed=%.3f prediction_latency_ms=%.1f actuation_latency_ms=%.1f decision_to_send_ms=%.1f",
-                            actuation_decision.finger_id,
-                            actuation_decision.action_id,
-                            decision.prob,
-                            actuation_speed_scalar,
-                            latency_ms,
-                            actuation_latency_ms,
-                            actuation_decision_delay_ms,
-                        )
                     else:
-                        actuation_suppressed_reason = "cooldown_or_duplicate"
+                        shaped_command = actuation_command_shaper.shape(
+                            action_id=int(voted_decision.action_id),
+                            finger_id=int(voted_decision.finger_id),
+                            action_conf=float(voted_decision.prob),
+                            timestamp_stream_ms=int(round(window_center_stream_s * 1000.0)),
+                            stability_ok=True,
+                            timebase_ms=int(round(window_center_stream_s * 1000.0)),
+                        )
+                        actuation_target_finger_id = int(shaped_command.finger_id)
+                        actuation_target_action_id = int(shaped_command.action_id)
+                        actuation_speed_scalar = float(shaped_command.speed_scalar)
+                        actuation_decision = ActuationDecision(
+                            finger_id=actuation_target_finger_id,
+                            action_id=actuation_target_action_id,
+                            prob=float(voted_decision.prob),
+                        )
+                        actuation_key = (
+                            int(actuation_decision.finger_id),
+                            int(actuation_decision.action_id),
+                        )
+                        if _is_noop_decision(
+                            actuation_decision.finger_id, actuation_decision.action_id
+                        ):
+                            actuation_suppressed_reason = "min_prob"
+                            logger.debug(
+                                "Actuation suppressed by min_prob (%.3f < %.3f)",
+                                voted_decision.prob,
+                                float(args.actuation_min_prob),
+                            )
+                        elif _debounced_should_send(
+                            decision=actuation_decision,
+                            last_sent=last_sent,
+                            stable_count=1,
+                            required_stability=1,
+                            last_send_ts=last_send_ts,
+                            cooldown_ms=int(args.actuation_cooldown_ms),
+                        ):
+                            send_start = time.monotonic()
+                            actuator.send(
+                                actuation_decision.finger_id,
+                                actuation_decision.action_id,
+                                speed_scalar=actuation_speed_scalar,
+                            )
+                            send_end = time.monotonic()
+                            last_sent = actuation_key
+                            last_send_ts = send_end
+                            actuation_sent = True
+                            actuation_latency_ms = (send_end - window_center_mono) * 1000.0
+                            actuation_decision_delay_ms = (send_start - now) * 1000.0
+                            logger.info(
+                                "ACTUATE sent finger=%s action=%s prob=%.3f speed=%.3f prediction_latency_ms=%.1f actuation_latency_ms=%.1f decision_to_send_ms=%.1f",
+                                actuation_decision.finger_id,
+                                actuation_decision.action_id,
+                                voted_decision.prob,
+                                actuation_speed_scalar,
+                                latency_ms,
+                                actuation_latency_ms,
+                                actuation_decision_delay_ms,
+                            )
+                        else:
+                            actuation_suppressed_reason = "cooldown_or_duplicate"
 
                 if pred_log is not None:
                     payload = {
@@ -2190,6 +2267,15 @@ def main() -> int:
                         "actuation_speed_scalar": float(actuation_speed_scalar),
                         "actuation_target_finger_id": int(actuation_target_finger_id),
                         "actuation_target_action_id": int(actuation_target_action_id),
+                        "actuation_vote_reason": str(
+                            actuation_vote.get("reason", "")
+                        ),
+                        "actuation_vote_finger_counts": actuation_vote.get(
+                            "finger_votes", {}
+                        ),
+                        "actuation_vote_action_counts": actuation_vote.get(
+                            "action_votes", {}
+                        ),
                         "actuation_latency_gate_ok": bool(actuation_latency_gate_ok),
                         "actuation_suppressed_reason": actuation_suppressed_reason,
                         "actuation_sent": bool(actuation_sent),
