@@ -96,10 +96,18 @@ class CommandShaper:
                 target_finger = 0
                 speed = 0.0
 
+        previous_effective_cmd: Optional[ActuationCommand] = None
+        if (
+            self._last_cmd is not None
+            and int(self._last_cmd.action_id) != 0
+            and int(self._last_cmd.finger_id) != 0
+        ):
+            previous_effective_cmd = self._last_cmd
+
         flags = 0
         hold_requested = False
         if not bool(stability_ok):
-            if self._last_cmd is not None:
+            if previous_effective_cmd is not None:
                 hold_requested = True
                 self._hold_until_ms = max(
                     self._hold_until_ms, timebase_ms + int(self.config.hold_ms)
@@ -108,10 +116,10 @@ class CommandShaper:
                 target_action = 0
                 target_finger = 0
                 speed = 0.0
-        if self._last_cmd is not None:
+        if previous_effective_cmd is not None:
             changed = (
-                target_action != self._last_cmd.action_id
-                or target_finger != self._last_cmd.finger_id
+                target_action != previous_effective_cmd.action_id
+                or target_finger != previous_effective_cmd.finger_id
             )
             near_thresh = conf < float(self.config.base_conf_thresh) and conf >= (
                 float(self.config.base_conf_thresh)
@@ -134,13 +142,13 @@ class CommandShaper:
 
         if (
             hold_requested
-            and self._last_cmd is not None
+            and previous_effective_cmd is not None
             and timebase_ms < self._hold_until_ms
         ):
             flags |= FLAG_HOLD
-            target_action = self._last_cmd.action_id
-            target_finger = self._last_cmd.finger_id
-            speed = self._last_cmd.speed_scalar
+            target_action = previous_effective_cmd.action_id
+            target_finger = previous_effective_cmd.finger_id
+            speed = previous_effective_cmd.speed_scalar
 
         if thermal_c is not None and thermal_c >= float(self.config.thermal_limit_c):
             flags |= FLAG_THERMAL

@@ -591,3 +591,42 @@ def test_actuation_command_shaper_holds_unstable_changes():
     assert steady.finger_id == 2
     assert held.action_id == 1
     assert held.finger_id == 2
+
+
+def test_actuation_command_shaper_recovers_after_initial_unstable_noops():
+    mod = _load_live_module()
+    shaper = mod._build_actuation_command_shaper(
+        type(
+            "Args",
+            (),
+            {
+                "actuation_min_prob": 0.75,
+                "actuation_speed_gamma": 1.0,
+                "actuation_cooldown_ms": 250,
+                "hop_sec": 0.05,
+                "actuation_stability": 4,
+            },
+        )()
+    )
+
+    first = shaper.shape(
+        action_id=1,
+        finger_id=3,
+        action_conf=0.95,
+        timestamp_stream_ms=1000,
+        stability_ok=False,
+        timebase_ms=1000,
+    )
+    second = shaper.shape(
+        action_id=1,
+        finger_id=3,
+        action_conf=0.96,
+        timestamp_stream_ms=1200,
+        stability_ok=True,
+        timebase_ms=1200,
+    )
+
+    assert first.action_id == 0
+    assert first.finger_id == 0
+    assert second.action_id == 1
+    assert second.finger_id == 3
