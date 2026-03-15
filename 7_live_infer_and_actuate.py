@@ -69,6 +69,7 @@ from utils.runtime_utils import (
     load_temperature_scaling,
 )
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
+from utils.stream_timebase import clamp_lsl_timestamp
 
 # Pipeline handoff: Step 7 runs online inference with the trained Step 2 model
 # and optional hardware actuation, while writing live-session artifacts.
@@ -233,6 +234,45 @@ def _resample_window(
             "Resampling failed for window [%.3f, %.3f]: %s", start_s, end_s, exc
         )
         return None
+
+
+def _resolve_live_sample_time(
+    *,
+    lsl_ts: float,
+    sample_mono: float,
+    stream_origin_mono: Optional[float],
+    stream_origin_lsl: Optional[float],
+    prev_lsl_mono: Optional[float],
+) -> Tuple[float, float, bool, Optional[float], Optional[float], Optional[float]]:
+    lsl_ts_mono = float(lsl_ts)
+    if np.isfinite(lsl_ts_mono):
+        clamp_result = clamp_lsl_timestamp(prev_lsl_mono, lsl_ts_mono)
+        lsl_ts_mono = float(clamp_result.mono_ts)
+        prev_lsl_mono = lsl_ts_mono
+        if stream_origin_lsl is None:
+            stream_origin_lsl = lsl_ts_mono
+            stream_origin_mono = float(sample_mono)
+        time_s = lsl_ts_mono - float(stream_origin_lsl)
+        return (
+            float(time_s),
+            lsl_ts_mono,
+            bool(clamp_result.clamped),
+            stream_origin_mono,
+            stream_origin_lsl,
+            prev_lsl_mono,
+        )
+
+    if stream_origin_mono is None:
+        stream_origin_mono = float(sample_mono)
+    time_s = float(sample_mono) - float(stream_origin_mono)
+    return (
+        float(time_s),
+        lsl_ts_mono,
+        False,
+        stream_origin_mono,
+        stream_origin_lsl,
+        prev_lsl_mono,
+    )
 
 
 @dataclass(frozen=True)
@@ -1745,12 +1785,14 @@ def main() -> int:
     buffer: Deque[Tuple[float, np.ndarray]] = deque(maxlen=int(max(5, args.window_sec * args.target_fs * 4)))
     latency_window: Deque[float] = deque(maxlen=200)
 
-    stream_start = time.monotonic()  # approximate, for latency calculation
+    stream_origin_mono: Optional[float] = None
+    stream_origin_lsl: Optional[float] = None
+    prev_lsl_mono: Optional[float] = None
+    latest_stream_time_s = 0.0
     dropped_windows = 0
     last_log = time.monotonic()
 
     next_window_start_s = 0.0
-    start_ts = time.monotonic()
 
     # Debounce state
     last_decision: Optional[Tuple[int, int]] = None
@@ -1766,8 +1808,22 @@ def main() -> int:
             chunk, timestamps = inlet.pull_chunk(timeout=0.0, max_samples=64)
             if timestamps:
                 for sample, lsl_ts in zip(chunk, timestamps):
-                    # time since start (monotonic-based)
-                    time_s = time.monotonic() - start_ts
+                    sample_mono = time.monotonic()
+                    (
+                        time_s,
+                        lsl_ts_mono,
+                        clamped,
+                        stream_origin_mono,
+                        stream_origin_lsl,
+                        prev_lsl_mono,
+                    ) = _resolve_live_sample_time(
+                        lsl_ts=float(lsl_ts),
+                        sample_mono=float(sample_mono),
+                        stream_origin_mono=stream_origin_mono,
+                        stream_origin_lsl=stream_origin_lsl,
+                        prev_lsl_mono=prev_lsl_mono,
+                    )
+                    latest_stream_time_s = max(float(latest_stream_time_s), float(time_s))
                     vec = np.asarray(sample, dtype=np.float32)
                     buffer.append((time_s, vec))
 
@@ -1777,12 +1833,12 @@ def main() -> int:
                             Packet(
                                 seq=sample_seq,
                                 lsl_ts_raw=lsl_ts,
-                                lsl_ts_mono=lsl_ts,
+                                lsl_ts_mono=lsl_ts_mono,
                                 local_ts=time.time(),
                                 sample=np.asarray(sample, dtype=float),
                                 flags=0,
                                 segment_id=0,
-                                clamped=False,
+                                clamped=clamped,
                                 raw_path=None,
                                 segment_break_reason=None,
                             )
@@ -1793,7 +1849,7 @@ def main() -> int:
                             raw_buffer = []
 
             # Infer over available windows
-            time_s = time.monotonic() - start_ts
+            time_s = float(latest_stream_time_s)
             while (next_window_start_s + args.window_sec) <= time_s:
                 window_start = next_window_start_s
                 window_end = window_start + args.window_sec
@@ -1900,8 +1956,13 @@ def main() -> int:
 
                 # Latency tracking
                 now = time.monotonic()
-                window_center_lsl = stream_start + window_start + args.window_sec / 2.0
-                latency_ms = (now - window_center_lsl) * 1000.0
+                if stream_origin_mono is None:
+                    window_center_mono = now
+                else:
+                    window_center_mono = (
+                        float(stream_origin_mono) + window_start + args.window_sec / 2.0
+                    )
+                latency_ms = (now - window_center_mono) * 1000.0
                 latency_window.append(latency_ms)
 
                 p95_latency = float(np.percentile(latency_window, 95)) if latency_window else float(latency_ms)
@@ -1994,7 +2055,7 @@ def main() -> int:
                             last_sent = key
                             last_send_ts = send_end
                             actuation_sent = True
-                            actuation_latency_ms = (send_end - window_center_lsl) * 1000.0
+                            actuation_latency_ms = (send_end - window_center_mono) * 1000.0
                             actuation_decision_delay_ms = (send_start - now) * 1000.0
                             logger.info(
                                 "ACTUATE sent finger=%s action=%s prob=%.3f speed=%.3f prediction_latency_ms=%.1f actuation_latency_ms=%.1f decision_to_send_ms=%.1f",

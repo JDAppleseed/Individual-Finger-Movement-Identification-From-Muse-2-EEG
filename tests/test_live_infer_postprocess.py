@@ -489,3 +489,46 @@ def test_parse_viz_line_accepts_vizjson():
     assert payload["t"] == 1.25
     assert payload["hidden_mag"] == 0.42
     assert payload["finger_probs"][0][1] == 0.9
+
+
+def test_resolve_live_sample_time_prefers_lsl_spacing_over_chunk_arrival_time():
+    mod = _load_live_module()
+
+    stream_origin_mono = None
+    stream_origin_lsl = None
+    prev_lsl_mono = None
+    resolved = []
+    for lsl_ts in [100.0, 100.00390625, 100.0078125]:
+        out = mod._resolve_live_sample_time(
+            lsl_ts=lsl_ts,
+            sample_mono=1.0,
+            stream_origin_mono=stream_origin_mono,
+            stream_origin_lsl=stream_origin_lsl,
+            prev_lsl_mono=prev_lsl_mono,
+        )
+        time_s, _, _, stream_origin_mono, stream_origin_lsl, prev_lsl_mono = out
+        resolved.append(time_s)
+
+    assert np.allclose(resolved, [0.0, 0.00390625, 0.0078125])
+
+
+def test_resolve_live_sample_time_falls_back_when_lsl_missing():
+    mod = _load_live_module()
+
+    out0 = mod._resolve_live_sample_time(
+        lsl_ts=float("nan"),
+        sample_mono=10.0,
+        stream_origin_mono=None,
+        stream_origin_lsl=None,
+        prev_lsl_mono=None,
+    )
+    out1 = mod._resolve_live_sample_time(
+        lsl_ts=float("nan"),
+        sample_mono=10.25,
+        stream_origin_mono=out0[3],
+        stream_origin_lsl=out0[4],
+        prev_lsl_mono=out0[5],
+    )
+
+    assert np.isclose(out0[0], 0.0)
+    assert np.isclose(out1[0], 0.25)
