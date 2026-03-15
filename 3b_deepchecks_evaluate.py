@@ -351,13 +351,14 @@ def _dataset_kwargs():
     }
 
 
-def _prepare_deepchecks_split(df, labels, lookup_ids, seed: int):
+def _prepare_deepchecks_split(df, labels, lookup_ids, seed: int, index_start: int = 0):
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(df))
     df = df.iloc[order].reset_index(drop=True).copy()
     labels = np.asarray(labels)[order]
     lookup_ids = np.asarray(lookup_ids, dtype=np.int64)[order]
-    df.index = pd.Index(rng.permutation(len(df)), name="row_id")
+    row_ids = np.arange(index_start, index_start + len(df), dtype=np.int64)
+    df.index = pd.Index(rng.permutation(row_ids), name="row_id")
     return df, labels, lookup_ids
 
 
@@ -737,10 +738,14 @@ test_lookup_ids = np.arange(len(X_train), len(X_train) + len(X_test), dtype=np.i
 train_df = summarize_windows(X_train)
 test_df = summarize_windows(X_test)
 train_df, y_train, train_lookup_ids = _prepare_deepchecks_split(
-    train_df, y_train, train_lookup_ids, int(split_seed) + 101
+    train_df, y_train, train_lookup_ids, int(split_seed) + 101, index_start=0
 )
 test_df, y_test, test_lookup_ids = _prepare_deepchecks_split(
-    test_df, y_test, test_lookup_ids, int(split_seed) + 202
+    test_df,
+    y_test,
+    test_lookup_ids,
+    int(split_seed) + 202,
+    index_start=len(train_df),
 )
 train_labels = pd.Series(y_train, index=train_df.index)
 test_labels = pd.Series(y_test, index=test_df.index)
