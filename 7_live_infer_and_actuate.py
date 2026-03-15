@@ -61,7 +61,13 @@ from utils.command_shaper import CommandShaper, CommandShaperConfig
 from utils.inference import InferenceConfig, InferenceEngine
 from utils.label_schema import decode_prediction_pair
 from utils.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
-from utils.runtime_utils import apply_channel_normalizer, load_normalizer
+from utils.runtime_utils import (
+    TemperatureScalingState,
+    apply_channel_normalizer,
+    apply_temperature_to_logits,
+    load_normalizer,
+    load_temperature_scaling,
+)
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 
 # Pipeline handoff: Step 7 runs online inference with the trained Step 2 model
@@ -164,6 +170,25 @@ def _load_config_file(path: Path) -> tuple[dict, dict]:
     if isinstance(settings, dict):
         return payload, settings
     return payload, payload
+
+
+def _load_train_config(run_dir: Path) -> dict:
+    path = Path(run_dir).expanduser().resolve() / "train_config.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text())
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _resolve_temperature_path(run_dir: Path) -> Path:
+    train_cfg = _load_train_config(run_dir)
+    candidate = train_cfg.get("save_temperature_path")
+    if candidate:
+        return Path(str(candidate)).expanduser()
+    return run_dir / "temperature_scaling.json"
 
 
 def setup_logger(log_path: str, level: int = logging.INFO) -> None:
@@ -1016,6 +1041,7 @@ def _build_inference_engine(
     scaler: object,
     device: torch.device,
     args: argparse.Namespace,
+    temperature_state: Optional[TemperatureScalingState],
 ) -> Optional[InferenceEngine]:
     if not bool(getattr(args, "use_inference_engine", False)):
         return None
@@ -1032,6 +1058,7 @@ def _build_inference_engine(
         action_names={},
         finger_names={},
         config=config,
+        temperature_state=temperature_state,
     )
 
 
@@ -1042,6 +1069,7 @@ def _predict_window(
     model: torch.nn.Module,
     device: torch.device,
     inference_engine: Optional[InferenceEngine],
+    temperature_state: Optional[TemperatureScalingState] = None,
     emit_viz: bool,
 ) -> dict[str, Any]:
     window_f32 = np.asarray(window, dtype=np.float32)
@@ -1053,6 +1081,14 @@ def _predict_window(
         x = torch.tensor(window_input, dtype=torch.float32).unsqueeze(0).to(device)
         with torch.inference_mode():
             finger_logits, action_logits = model(x)
+            finger_logits = apply_temperature_to_logits(
+                finger_logits,
+                temperature_state.finger_temperature if temperature_state is not None else 1.0,
+            )
+            action_logits = apply_temperature_to_logits(
+                action_logits,
+                temperature_state.action_temperature if temperature_state is not None else 1.0,
+            )
             action_probs_t = torch.softmax(action_logits, dim=1).squeeze(0)
             finger_probs_t = torch.softmax(finger_logits, dim=1).squeeze(0)
             if emit_viz:
@@ -1524,7 +1560,21 @@ def main() -> int:
 
     model, scaler = load_model_and_scaler(model_path, scaler_path, device=device)
     model.eval()
-    inference_engine = _build_inference_engine(model, scaler, device, args)
+    temperature_state = load_temperature_scaling(
+        _resolve_temperature_path(Path(model_path).resolve().parent)
+    )
+    if temperature_state is not None:
+        logger.info(
+            "Temperature scaling loaded: action=%.4f finger=%.4f source=%s",
+            float(temperature_state.action_temperature),
+            float(temperature_state.finger_temperature),
+            str(temperature_state.source),
+        )
+    else:
+        logger.info("Temperature scaling: not found; using identity.")
+    inference_engine = _build_inference_engine(
+        model, scaler, device, args, temperature_state
+    )
     actuation_speed_mapper = _build_actuation_speed_mapper(args)
     if inference_engine is not None:
         logger.info(
@@ -1708,6 +1758,7 @@ def main() -> int:
                     model=model,
                     device=device,
                     inference_engine=inference_engine,
+                    temperature_state=temperature_state,
                     emit_viz=emit_viz,
                 )
                 action_probs = np.asarray(inference_result["action_probs"], dtype=float)

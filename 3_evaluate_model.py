@@ -51,6 +51,7 @@ from utils.postprocess import (
     postprocess_predictions,
 )
 from utils.runtime_utils import load_normalizer
+from utils.runtime_utils import apply_temperature_to_logits, load_temperature_scaling
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 
 # Fixed label ordering for standardized confusion matrices
@@ -512,6 +513,13 @@ def _load_train_config(run_dir: Path) -> Dict[str, Any]:
         return {}
 
 
+def _resolve_temperature_path(run_dir: Path, train_cfg: Dict[str, Any]) -> Path:
+    candidate = train_cfg.get("save_temperature_path")
+    if candidate:
+        return Path(str(candidate)).expanduser()
+    return run_dir / "temperature_scaling.json"
+
+
 def _format_label_counts(values: np.ndarray, name_map: Optional[dict] = None):
     if values.size == 0:
         return "none"
@@ -864,6 +872,7 @@ def main():
         print(f"NPZ file not found: {npz_path}")
         return 2
     train_cfg = _load_train_config(model_path.parent)
+    temperature_path = _resolve_temperature_path(model_path.parent, train_cfg)
     split_seed_effective = (
         int(args.split_seed)
         if cli_flags["split_seed"] and args.split_seed is not None
@@ -934,6 +943,7 @@ def main():
             "npz": _path_info(npz_path),
             "model": _path_info(model_path),
             "scaler": _path_info(scaler_path),
+            "temperature_scaling": _path_info(temperature_path),
             "pred_npz": _path_info(pred_npz_path, used=False),
         },
         "filters": {
@@ -1130,6 +1140,7 @@ def main():
     # =========================
     cached = _load_predictions_if_present(pred_npz_path)
     cache_rejected_reasons: Optional[List[str]] = None
+    temperature_state = load_temperature_scaling(temperature_path)
 
     cached_used = False
     split_attempts = 0
@@ -1168,6 +1179,27 @@ def main():
                 spotcheck_k=10,
                 rng_seed=0,
             )
+
+            if cache_ok and temperature_state is not None:
+                cached_action_temp = cached.get("action_temperature")
+                cached_finger_temp = cached.get("finger_temperature")
+                if cached_action_temp is None or cached_finger_temp is None:
+                    cache_ok = False
+                    reject_reasons.append("cache_missing_temperature_scaling")
+                else:
+                    try:
+                        action_temp_val = float(np.asarray(cached_action_temp).reshape(-1)[0])
+                        finger_temp_val = float(np.asarray(cached_finger_temp).reshape(-1)[0])
+                    except Exception:
+                        cache_ok = False
+                        reject_reasons.append("cache_temperature_scaling_invalid")
+                    else:
+                        if (
+                            abs(action_temp_val - float(temperature_state.action_temperature)) > 1e-6
+                            or abs(finger_temp_val - float(temperature_state.finger_temperature)) > 1e-6
+                        ):
+                            cache_ok = False
+                            reject_reasons.append("cache_temperature_scaling_mismatch")
 
             if not cache_ok:
                 print(
@@ -1236,6 +1268,13 @@ def main():
                 X_batch = apply_channel_normalizer(X_batch, normalizer)
                 X_t = torch.tensor(X_batch, dtype=torch.float32)
                 finger_logits, action_logits = model(X_t)
+                if temperature_state is not None:
+                    action_logits = apply_temperature_to_logits(
+                        action_logits, temperature_state.action_temperature
+                    )
+                    finger_logits = apply_temperature_to_logits(
+                        finger_logits, temperature_state.finger_temperature
+                    )
                 action_probs[start:end] = (
                     torch.softmax(action_logits, dim=1).cpu().numpy()
                 )
@@ -1280,6 +1319,22 @@ def main():
             "test_indices": np.asarray(test_idx, dtype=np.int64),
             "test_indices_local": np.asarray(test_idx, dtype=np.int64),
             "dataset_info": np.array([json.dumps(dataset_info_current)], dtype="U"),
+            "action_temperature": np.array(
+                [
+                    float(temperature_state.action_temperature)
+                    if temperature_state is not None
+                    else 1.0
+                ],
+                dtype=np.float32,
+            ),
+            "finger_temperature": np.array(
+                [
+                    float(temperature_state.finger_temperature)
+                    if temperature_state is not None
+                    else 1.0
+                ],
+                dtype=np.float32,
+            ),
         }
         optional_keys = [
             "window_start",

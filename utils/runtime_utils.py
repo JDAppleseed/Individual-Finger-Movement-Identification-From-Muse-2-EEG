@@ -151,6 +151,16 @@ class CalibrationState:
     config: dict
 
 
+@dataclass
+class TemperatureScalingState:
+    action_temperature: float = 1.0
+    finger_temperature: float = 1.0
+    fit_sample_count: int = 0
+    fit_non_rest_count: int = 0
+    source: str = "unavailable"
+    metrics: Optional[dict] = None
+
+
 def load_calibration_state(path: Path) -> Optional[CalibrationState]:
     if not path.exists():
         return None
@@ -160,4 +170,44 @@ def load_calibration_state(path: Path) -> Optional[CalibrationState]:
         config = payload.get("config", {})
         return CalibrationState(threshold=threshold, config=config)
     except Exception:
+        return None
+
+
+def apply_temperature_to_logits(logits: Any, temperature: float) -> Any:
+    temp = max(1e-3, float(temperature))
+    if torch.is_tensor(logits):
+        return logits / temp
+    return np.asarray(logits) / temp
+
+
+def save_temperature_scaling(path: Path, state: TemperatureScalingState) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "action_temperature": float(state.action_temperature),
+        "finger_temperature": float(state.finger_temperature),
+        "fit_sample_count": int(state.fit_sample_count),
+        "fit_non_rest_count": int(state.fit_non_rest_count),
+        "source": str(state.source),
+        "metrics": state.metrics or {},
+    }
+    path.write_text(json.dumps(payload, indent=2))
+
+
+def load_temperature_scaling(path: Path) -> Optional[TemperatureScalingState]:
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+        return TemperatureScalingState(
+            action_temperature=float(payload.get("action_temperature", 1.0)),
+            finger_temperature=float(payload.get("finger_temperature", 1.0)),
+            fit_sample_count=int(payload.get("fit_sample_count", 0)),
+            fit_non_rest_count=int(payload.get("fit_non_rest_count", 0)),
+            source=str(payload.get("source", "loaded")),
+            metrics=payload.get("metrics", {}) or {},
+        )
+    except Exception as exc:
+        logger.warning("Failed to load temperature scaling from %s: %s", path, exc)
         return None

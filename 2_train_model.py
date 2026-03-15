@@ -20,6 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
+from sklearn.model_selection import train_test_split
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from utils.sequence_data import (
@@ -28,7 +29,12 @@ from utils.sequence_data import (
     fit_channel_normalizer,
     apply_channel_normalizer,
 )
-from utils.runtime_utils import save_normalizer
+from utils.runtime_utils import (
+    TemperatureScalingState,
+    apply_temperature_to_logits,
+    save_normalizer,
+    save_temperature_scaling,
+)
 from utils.experiment_logger import log_experiment, get_latest_experiment_hash
 from utils.label_schema import ACTION_REST, FINGER_NAMES
 from utils.splitting import infer_groups, assert_no_group_overlap
@@ -50,6 +56,7 @@ DEFAULT_NPZ = "eeg_windows.npz"
 DEFAULT_MODEL = "finger_action_model.pt"
 DEFAULT_SCALER = "scaler.npz"
 DEFAULT_PREDS = "test_predictions.npz"
+DEFAULT_TEMPERATURE = "temperature_scaling.json"
 MAX_SEARCH_DEPTH = 4
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -221,6 +228,146 @@ def _class_counts(values: np.ndarray) -> Dict[int, int]:
         return {}
     unique, counts = np.unique(values, return_counts=True)
     return dict(zip(unique.tolist(), counts.tolist()))
+
+
+def _subset_meta(meta: Dict[str, Any], idx: np.ndarray, n_expected: int) -> Dict[str, Any]:
+    if not meta:
+        return {}
+    idx = np.asarray(idx, dtype=np.int64)
+    out: Dict[str, Any] = {}
+    for key, val in meta.items():
+        if isinstance(val, dict):
+            out[key] = val
+            continue
+        if isinstance(val, (str, bytes)):
+            out[key] = val
+            continue
+        try:
+            arr = np.asarray(val)
+        except Exception:
+            out[key] = val
+            continue
+        if arr.ndim == 0:
+            out[key] = val
+            continue
+        try:
+            if len(arr) == n_expected:
+                out[key] = arr[idx]
+            else:
+                out[key] = val
+        except Exception:
+            out[key] = val
+    return out
+
+
+def _calibration_stratify_labels(y_action: np.ndarray, y_finger: np.ndarray) -> np.ndarray:
+    y_action = np.asarray(y_action, dtype=np.int64).reshape(-1)
+    y_finger = np.asarray(y_finger, dtype=np.int64).reshape(-1)
+    max_finger = int(np.max(y_finger)) if y_finger.size else 0
+    return (y_action * (max_finger + 1)) + y_finger
+
+
+def _split_calibration_indices(
+    train_idx: np.ndarray,
+    y_action: np.ndarray,
+    y_finger: np.ndarray,
+    meta: Dict[str, Any],
+    *,
+    calibration_size: float,
+    random_state: int,
+    split_mode: str,
+) -> Tuple[np.ndarray, np.ndarray]:
+    train_idx = np.asarray(train_idx, dtype=np.int64)
+    if calibration_size <= 0.0 or len(train_idx) < 8:
+        return train_idx, np.array([], dtype=np.int64)
+
+    y_action_train = y_action[train_idx]
+    y_finger_train = y_finger[train_idx]
+    train_meta = _subset_meta(meta, train_idx, len(y_action)) if meta else {}
+
+    try:
+        fit_local, calib_local = split_indices(
+            y_action_train,
+            y_finger_train,
+            meta=train_meta if train_meta else None,
+            test_size=float(calibration_size),
+            random_state=int(random_state),
+            split_mode=str(split_mode),
+            purge_seconds=0.0,
+            hop_seconds=None,
+            allow_fallback=True,
+        )
+        fit_idx = train_idx[np.asarray(fit_local, dtype=np.int64)]
+        calib_idx = train_idx[np.asarray(calib_local, dtype=np.int64)]
+        if len(fit_idx) and len(calib_idx):
+            return fit_idx, calib_idx
+    except Exception:
+        pass
+
+    try:
+        fit_local, calib_local = train_test_split(
+            np.arange(len(train_idx), dtype=np.int64),
+            test_size=float(calibration_size),
+            random_state=int(random_state),
+            stratify=_calibration_stratify_labels(y_action_train, y_finger_train),
+        )
+    except ValueError:
+        fit_local, calib_local = train_test_split(
+            np.arange(len(train_idx), dtype=np.int64),
+            test_size=float(calibration_size),
+            random_state=int(random_state),
+            stratify=None,
+        )
+    return train_idx[np.asarray(fit_local, dtype=np.int64)], train_idx[
+        np.asarray(calib_local, dtype=np.int64)
+    ]
+
+
+def _fit_temperature(
+    logits: np.ndarray,
+    labels: np.ndarray,
+    *,
+    device: torch.device,
+    max_iter: int = 50,
+) -> Tuple[float, Dict[str, Optional[float]]]:
+    logits = np.asarray(logits, dtype=np.float32)
+    labels = np.asarray(labels, dtype=np.int64).reshape(-1)
+    if logits.ndim != 2 or len(logits) != len(labels) or len(labels) == 0:
+        return 1.0, {"nll_before": None, "nll_after": None}
+    if len(np.unique(labels)) < 2:
+        return 1.0, {"nll_before": None, "nll_after": None}
+
+    fit_device = torch.device("cpu")
+    logits_t = torch.tensor(logits, dtype=torch.float32, device=fit_device)
+    labels_t = torch.tensor(labels, dtype=torch.long, device=fit_device)
+    criterion = nn.CrossEntropyLoss()
+    nll_before = float(criterion(logits_t, labels_t).item())
+
+    log_temp = torch.nn.Parameter(torch.zeros((), dtype=torch.float32, device=device))
+    opt = torch.optim.LBFGS(
+        [log_temp],
+        lr=0.1,
+        max_iter=int(max_iter),
+        line_search_fn="strong_wolfe",
+    )
+
+    def closure():
+        opt.zero_grad()
+        temp = torch.exp(log_temp).clamp(min=1e-3, max=100.0)
+        loss = criterion(logits_t / temp, labels_t)
+        loss.backward()
+        return loss
+
+    try:
+        opt.step(closure)
+        temp = float(torch.exp(log_temp).clamp(min=1e-3, max=100.0).item())
+        nll_after = float(criterion(logits_t / temp, labels_t).item())
+    except Exception:
+        temp = 1.0
+        nll_after = nll_before
+    if not np.isfinite(temp) or temp <= 0.0:
+        temp = 1.0
+    return temp, {"nll_before": nll_before, "nll_after": nll_after}
 
 
 def _split_groups_from_meta(
@@ -411,6 +558,12 @@ def build_arg_parser():
     )
     p.add_argument("--test-size", type=float, default=0.2, help="Test split fraction")
     p.add_argument(
+        "--calibration-size",
+        type=float,
+        default=0.1,
+        help="Fraction of the training split held out for post-hoc temperature scaling (0 disables).",
+    )
+    p.add_argument(
         "--split-mode",
         type=str,
         default="group_trial",
@@ -451,6 +604,12 @@ def build_arg_parser():
     )
     p.add_argument(
         "--save-preds", type=str, default=DEFAULT_PREDS, help="Predictions output path"
+    )
+    p.add_argument(
+        "--save-temperature",
+        type=str,
+        default=DEFAULT_TEMPERATURE,
+        help="Temperature scaling output path",
     )
     return p
 
@@ -666,7 +825,8 @@ def resolve_output_paths(
     model_path = _resolve(args.save_model, DEFAULT_MODEL)
     scaler_path = _resolve(args.save_scaler, DEFAULT_SCALER)
     preds_path = _resolve(args.save_preds, DEFAULT_PREDS)
-    return run_dir, model_path, scaler_path, preds_path
+    temperature_path = _resolve(args.save_temperature, DEFAULT_TEMPERATURE)
+    return run_dir, model_path, scaler_path, preds_path, temperature_path
 
 
 def _validate_indices(idx: np.ndarray, n_samples: int, name: str):
@@ -910,14 +1070,15 @@ def main():
 
         # Save all training artifacts together; downstream eval/report steps resolve
         # this run folder and read model/scaler/predictions from it.
-        run_dir, save_model_path, save_scaler_path, save_preds_path = resolve_output_paths(
+        run_dir, save_model_path, save_scaler_path, save_preds_path, save_temperature_path = resolve_output_paths(
             args, subject, exp_hash, session_dir=session_dir_path
         )
-        for path in [save_model_path, save_scaler_path, save_preds_path]:
+        for path in [save_model_path, save_scaler_path, save_preds_path, save_temperature_path]:
             path.parent.mkdir(parents=True, exist_ok=True)
         print(f"Saving outputs to: {run_dir}")
         print(
-            f"Output paths: model={save_model_path}, scaler={save_scaler_path}, preds={save_preds_path}"
+            f"Output paths: model={save_model_path}, scaler={save_scaler_path}, "
+            f"preds={save_preds_path}, temperature={save_temperature_path}"
         )
 
         # ===== SPLIT =====
@@ -975,10 +1136,34 @@ def main():
                 return 2
             train_idx = train_idx[keep_mask]
 
+        calib_idx = np.array([], dtype=np.int64)
+        train_fit_idx = np.asarray(train_idx, dtype=np.int64)
+        calibration_size = max(0.0, float(args.calibration_size))
+        if calibration_size > 0.0:
+            train_fit_idx, calib_idx = _split_calibration_indices(
+                train_fit_idx,
+                y_action,
+                y_finger,
+                meta if meta else {},
+                calibration_size=calibration_size,
+                random_state=args.seed,
+                split_mode=args.split_mode,
+            )
+            if len(calib_idx) == 0:
+                print("Temperature scaling: skipped (no calibration fold available).")
+            else:
+                print(
+                    f"Temperature scaling split: fit={len(train_fit_idx)} calib={len(calib_idx)} "
+                    f"(requested={calibration_size:.3f})"
+                )
+
         # ===== SLICE =====
-        X_train, X_test = X[train_idx], X[test_idx]
-        y_action_train, y_action_test = y_action[train_idx], y_action[test_idx]
-        y_finger_train, y_finger_test = y_finger[train_idx], y_finger[test_idx]
+        X_train, X_test = X[train_fit_idx], X[test_idx]
+        y_action_train, y_action_test = y_action[train_fit_idx], y_action[test_idx]
+        y_finger_train, y_finger_test = y_finger[train_fit_idx], y_finger[test_idx]
+        X_calib = X[calib_idx] if len(calib_idx) else None
+        y_action_calib = y_action[calib_idx] if len(calib_idx) else None
+        y_finger_calib = y_finger[calib_idx] if len(calib_idx) else None
 
         n_fingers = int(np.max(y_finger)) + 1
         n_actions = int(np.max(y_action)) + 1
@@ -986,6 +1171,8 @@ def main():
         # ===== NORMALIZE =====
         normalizer = fit_channel_normalizer(X_train)
         X_train = apply_channel_normalizer(X_train, normalizer)
+        if X_calib is not None:
+            X_calib = apply_channel_normalizer(X_calib, normalizer)
         X_test = apply_channel_normalizer(X_test, normalizer)
         save_normalizer(save_scaler_path, normalizer)
 
@@ -1006,6 +1193,16 @@ def main():
             num_workers=max(0, int(args.num_workers)),
             pin_memory=bool(args.pin_memory),
         )
+        calib_loader = None
+        if X_calib is not None and y_action_calib is not None and y_finger_calib is not None and len(y_action_calib):
+            calib_loader = DataLoader(
+                EEGWindowDataset(X_calib, y_finger_calib, y_action_calib),
+                batch_size=args.batch_size,
+                shuffle=False,
+                drop_last=False,
+                num_workers=max(0, int(args.num_workers)),
+                pin_memory=bool(args.pin_memory),
+            )
 
         # ===== MODEL =====
         model = CNNLSTMFingerActionNet(
@@ -1102,6 +1299,7 @@ def main():
             "batch_size": args.batch_size,
             "epochs": args.epochs,
             "learning_rate": args.lr,
+            "calibration_size": float(args.calibration_size),
             "loss_action_weight": args.loss_action_weight,
             "rest_weight": float(args.rest_weight),
             "finger_weights": finger_weights.tolist() if finger_weights is not None else None,
@@ -1128,6 +1326,7 @@ def main():
             "save_model_path": str(save_model_path),
             "save_scaler_path": str(save_scaler_path),
             "save_preds_path": str(save_preds_path),
+            "save_temperature_path": str(save_temperature_path),
         }
         train_config_path = save_model_path.parent / "train_config.json"
         train_config_path.write_text(json.dumps(train_config, indent=2))
@@ -1137,12 +1336,83 @@ def main():
         log_config_path.write_text(json.dumps(train_config, indent=2))
 
         # ===== INFERENCE ON TEST SET =====
+        temperature_state = TemperatureScalingState(
+            action_temperature=1.0,
+            finger_temperature=1.0,
+            fit_sample_count=int(len(calib_idx)),
+            fit_non_rest_count=int(
+                np.sum(np.asarray(y_action_calib, dtype=np.int64) != int(ACTION_REST))
+            )
+            if y_action_calib is not None
+            else 0,
+            source="disabled" if calibration_size <= 0.0 else "identity",
+            metrics={},
+        )
+
+        if calib_loader is not None:
+            calib_action_logits = []
+            calib_finger_logits = []
+            calib_action_labels = []
+            calib_finger_labels = []
+            with torch.no_grad():
+                for Xb, yfb, yab in calib_loader:
+                    Xb = Xb.to(device)
+                    f_out, a_out = model(Xb)
+                    calib_action_logits.append(a_out.detach().cpu().numpy())
+                    calib_finger_logits.append(f_out.detach().cpu().numpy())
+                    calib_action_labels.append(yab.numpy())
+                    calib_finger_labels.append(yfb.numpy())
+
+            action_logits_calib = np.concatenate(calib_action_logits, axis=0).astype(np.float32)
+            finger_logits_calib = np.concatenate(calib_finger_logits, axis=0).astype(np.float32)
+            y_action_calib_np = np.concatenate(calib_action_labels, axis=0).astype(np.int64)
+            y_finger_calib_np = np.concatenate(calib_finger_labels, axis=0).astype(np.int64)
+            finger_mask_calib = y_action_calib_np != int(ACTION_REST)
+
+            action_temp, action_metrics = _fit_temperature(
+                action_logits_calib,
+                y_action_calib_np,
+                device=device,
+            )
+            if np.any(finger_mask_calib):
+                finger_temp, finger_metrics = _fit_temperature(
+                    finger_logits_calib[finger_mask_calib],
+                    y_finger_calib_np[finger_mask_calib],
+                    device=device,
+                )
+            else:
+                finger_temp, finger_metrics = 1.0, {"nll_before": None, "nll_after": None}
+
+            temperature_state = TemperatureScalingState(
+                action_temperature=float(action_temp),
+                finger_temperature=float(finger_temp),
+                fit_sample_count=int(len(y_action_calib_np)),
+                fit_non_rest_count=int(np.sum(finger_mask_calib)),
+                source="fit_on_holdout",
+                metrics={
+                    "action": action_metrics,
+                    "finger": finger_metrics,
+                },
+            )
+            print(
+                "Temperature scaling: "
+                f"action={temperature_state.action_temperature:.4f} "
+                f"finger={temperature_state.finger_temperature:.4f}"
+            )
+        save_temperature_scaling(save_temperature_path, temperature_state)
+
         all_action_probs = []
         all_finger_probs = []
         with torch.no_grad():
             for Xb, yfb, yab in test_loader:
                 Xb = Xb.to(device)
                 f_out, a_out = model(Xb)
+                a_out = apply_temperature_to_logits(
+                    a_out, temperature_state.action_temperature
+                )
+                f_out = apply_temperature_to_logits(
+                    f_out, temperature_state.finger_temperature
+                )
                 all_finger_probs.append(torch.softmax(f_out, dim=1).cpu().numpy())
                 all_action_probs.append(torch.softmax(a_out, dim=1).cpu().numpy())
 
@@ -1171,6 +1441,14 @@ def main():
                 "lr": float(args.lr),
                 "seed": int(args.seed),
             },
+            "temperature_scaling": {
+                "action_temperature": float(temperature_state.action_temperature),
+                "finger_temperature": float(temperature_state.finger_temperature),
+                "fit_sample_count": int(temperature_state.fit_sample_count),
+                "fit_non_rest_count": int(temperature_state.fit_non_rest_count),
+                "source": str(temperature_state.source),
+                "metrics": temperature_state.metrics or {},
+            },
             "test": {
                 "action_acc": float(test_action_acc),
                 "finger_acc_non_rest": test_finger_acc,
@@ -1181,6 +1459,7 @@ def main():
                 "model": str(save_model_path.name),
                 "scaler": str(save_scaler_path.name),
                 "preds": str(save_preds_path.name),
+                "temperature_scaling": str(save_temperature_path.name),
             },
         }
         try:
@@ -1234,6 +1513,12 @@ def main():
             test_indices_local=test_indices_local,
             test_indices_global=test_indices_global,
             dataset_info=np.array([json.dumps(dataset_info)], dtype="U"),
+            action_temperature=np.array(
+                [float(temperature_state.action_temperature)], dtype=np.float32
+            ),
+            finger_temperature=np.array(
+                [float(temperature_state.finger_temperature)], dtype=np.float32
+            ),
         )
 
         if test_window_start is not None:
@@ -1254,7 +1539,9 @@ def main():
         log_experiment(subject, exp_hash, "STEP_2_COMPLETE", f"loss={avg_loss:.4f}")
         print("✅ Training complete")
         print(f"DECISION: TRAINED (epochs={args.epochs})")
-        print(f"✅ Saved: {save_model_path}, {save_scaler_path}, {save_preds_path}")
+        print(
+            f"✅ Saved: {save_model_path}, {save_scaler_path}, {save_preds_path}, {save_temperature_path}"
+        )
         return 0
 
 

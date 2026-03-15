@@ -8,7 +8,12 @@ import numpy as np
 import torch
 
 from utils.label_schema import decode_prediction_pair
-from utils.runtime_utils import apply_channel_normalizer, compute_health_score
+from utils.runtime_utils import (
+    TemperatureScalingState,
+    apply_channel_normalizer,
+    apply_temperature_to_logits,
+    compute_health_score,
+)
 
 
 @dataclass
@@ -19,8 +24,29 @@ class InferenceConfig:
     mc_passes: int = 10
 
 
-def _mc_predict(model, x_BTC: torch.Tensor, passes: int) -> Dict[str, torch.Tensor]:
-    if hasattr(model, "mc_forward"):
+def _mc_predict(
+    model,
+    x_BTC: torch.Tensor,
+    passes: int,
+    *,
+    temperature_state: Optional[TemperatureScalingState] = None,
+) -> Dict[str, torch.Tensor]:
+    action_temp = (
+        float(temperature_state.action_temperature)
+        if temperature_state is not None
+        else 1.0
+    )
+    finger_temp = (
+        float(temperature_state.finger_temperature)
+        if temperature_state is not None
+        else 1.0
+    )
+    use_native_mc = (
+        hasattr(model, "mc_forward")
+        and abs(action_temp - 1.0) < 1e-6
+        and abs(finger_temp - 1.0) < 1e-6
+    )
+    if use_native_mc:
         with torch.inference_mode():
             return model.mc_forward(x_BTC, passes=passes)
 
@@ -31,6 +57,8 @@ def _mc_predict(model, x_BTC: torch.Tensor, passes: int) -> Dict[str, torch.Tens
     with torch.inference_mode():
         for _ in range(passes):
             finger_logits, action_logits = model(x_BTC)
+            finger_logits = apply_temperature_to_logits(finger_logits, finger_temp)
+            action_logits = apply_temperature_to_logits(action_logits, action_temp)
             finger_probs.append(torch.softmax(finger_logits, dim=1))
             action_probs.append(torch.softmax(action_logits, dim=1))
     if not was_training:
@@ -61,6 +89,7 @@ class InferenceEngine:
         action_names: Dict[int, str],
         finger_names: Dict[int, str],
         config: Optional[InferenceConfig] = None,
+        temperature_state: Optional[TemperatureScalingState] = None,
     ) -> None:
         self.model = model
         self.normalizer = normalizer
@@ -68,6 +97,7 @@ class InferenceEngine:
         self.action_names = action_names
         self.finger_names = finger_names
         self.config = config or InferenceConfig()
+        self.temperature_state = temperature_state
         self._stability: Deque[int] = deque(maxlen=self.config.stability_frames)
         self._input_np: Optional[np.ndarray] = None
         self._input_tensor: Optional[torch.Tensor] = None
@@ -168,6 +198,18 @@ class InferenceEngine:
             self.model.eval()
             with torch.inference_mode():
                 finger_logits, action_logits = self.model(x)
+                finger_logits = apply_temperature_to_logits(
+                    finger_logits,
+                    self.temperature_state.finger_temperature
+                    if self.temperature_state is not None
+                    else 1.0,
+                )
+                action_logits = apply_temperature_to_logits(
+                    action_logits,
+                    self.temperature_state.action_temperature
+                    if self.temperature_state is not None
+                    else 1.0,
+                )
                 finger_probs = torch.softmax(finger_logits, dim=1)
                 action_probs = torch.softmax(action_logits, dim=1)
             if was_training:
@@ -177,7 +219,12 @@ class InferenceEngine:
             action_std = np.zeros_like(action_mean)
             finger_std = np.zeros_like(finger_mean)
         else:
-            mc = _mc_predict(self.model, x, passes=passes)
+            mc = _mc_predict(
+                self.model,
+                x,
+                passes=passes,
+                temperature_state=self.temperature_state,
+            )
             action_mean = mc["action_mean"].squeeze(0).detach().cpu().numpy()
             finger_mean = mc["finger_mean"].squeeze(0).detach().cpu().numpy()
             action_std = mc["action_std"].squeeze(0).detach().cpu().numpy()

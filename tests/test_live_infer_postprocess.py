@@ -8,6 +8,7 @@ import torch
 
 from utils.inference import InferenceConfig, InferenceEngine
 from utils.postprocess import PostprocessSettings, PostprocessState
+from utils.runtime_utils import TemperatureScalingState
 from visualization.live_viz import parse_viz_line
 
 
@@ -152,6 +153,46 @@ def test_predict_window_uses_inference_engine_backend():
         out["finger_uncertainty"], np.mean([0.01, 0.01, 0.05, 0.01, 0.01, 0.01])
     )
     assert out["adaptive_threshold"] > 0.7
+
+
+class _DirectLogitModel(torch.nn.Module):
+    def forward(self, x):
+        finger_logits = torch.tensor(
+            [[0.0, 0.0, 2.0, 0.0, 0.0, 0.0]], dtype=torch.float32
+        )
+        action_logits = torch.tensor([[0.0, 2.0, 0.0]], dtype=torch.float32)
+        return finger_logits, action_logits
+
+
+def test_predict_window_direct_applies_temperature_scaling():
+    mod = _load_live_module()
+    model = _DirectLogitModel()
+
+    out_raw = mod._predict_window(
+        np.zeros((64, 4), dtype=np.float32),
+        scaler=None,
+        model=model,
+        device=torch.device("cpu"),
+        inference_engine=None,
+        temperature_state=None,
+        emit_viz=False,
+    )
+    out_temp = mod._predict_window(
+        np.zeros((64, 4), dtype=np.float32),
+        scaler=None,
+        model=model,
+        device=torch.device("cpu"),
+        inference_engine=None,
+        temperature_state=TemperatureScalingState(
+            action_temperature=2.0,
+            finger_temperature=2.0,
+            source="test",
+        ),
+        emit_viz=False,
+    )
+
+    assert out_raw["action_probs"][1] > out_temp["action_probs"][1]
+    assert out_raw["finger_probs"][2] > out_temp["finger_probs"][2]
 
 
 def test_inference_engine_predict_gates_rest_to_none():
