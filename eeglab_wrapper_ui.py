@@ -3003,6 +3003,26 @@ class MainWindow(QMainWindow):
         layout.addWidget(note)
 
         form = QFormLayout()
+        self.event_session_dir_override = OutlineLineEdit()
+        self.event_session_dir_override.setPlaceholderText(
+            "Optional override for the auto-selected session"
+        )
+        self.event_session_dir_override.textChanged.connect(
+            lambda _text: self._update_checklist("event_tools")
+        )
+        event_session_btn = QPushButton("Browse")
+        event_session_btn.clicked.connect(
+            lambda: self._browse_dir(
+                self.event_session_dir_override, "Select Event Review Session Directory"
+            )
+        )
+        event_session_row = QHBoxLayout()
+        event_session_row.setContentsMargins(0, 0, 0, 0)
+        event_session_row.addWidget(self.event_session_dir_override)
+        event_session_row.addWidget(event_session_btn)
+        event_session_widget = QWidget()
+        event_session_widget.setLayout(event_session_row)
+        form.addRow("Session Dir Override", event_session_widget)
         self.event_features_path = OutlineLineEdit()
         self.event_events_path = OutlineLineEdit()
         form.addRow("Legacy Features CSV", self.event_features_path)
@@ -5208,12 +5228,8 @@ class MainWindow(QMainWindow):
         latest_features = preferred_features or self._latest_subject_file(
             features_dir, f"{self.current_subject}_*_eeg_features.csv"
         )
-        self.event_events_path.setText(
-            str(latest_events) if latest_events else str(events_dir)
-        )
-        self.event_features_path.setText(
-            str(latest_features) if latest_features else str(features_dir)
-        )
+        self.event_events_path.setText(str(latest_events) if latest_events else "")
+        self.event_features_path.setText(str(latest_features) if latest_features else "")
         self.diag_events_path.setText(
             str(latest_events) if latest_events else str(events_dir)
         )
@@ -5246,6 +5262,49 @@ class MainWindow(QMainWindow):
             except Exception:
                 return p
         return p
+
+    def _existing_file_path(self, value: str) -> Optional[Path]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        path = Path(text).expanduser()
+        try:
+            if path.exists():
+                path = path.resolve()
+        except Exception:
+            pass
+        if path.exists() and path.is_file():
+            return path
+        return None
+
+    def _resolve_event_tools_session_dir(self) -> Optional[Path]:
+        override = ""
+        if hasattr(self, "event_session_dir_override"):
+            override = self.event_session_dir_override.text().strip()
+        if override:
+            path = Path(override).expanduser()
+            try:
+                if path.exists():
+                    return path.resolve()
+            except Exception:
+                pass
+            return path
+        session_dir = self._resolve_effective_session_dir(step_id=None)
+        if session_dir is not None and session_dir.exists():
+            return session_dir
+        if self.current_project and self.current_subject:
+            subject_dir = subject_root(self.current_project, self.current_subject)
+            return self._resolve_session_dir_for_current(subject_dir)
+        return None
+
+    def _event_file_for_session(self, session_dir: Optional[Path]) -> Optional[Path]:
+        if session_dir is None:
+            return None
+        for rel in ("events/events.jsonl", "events/events.json", "events/events.csv"):
+            candidate = session_dir / rel
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        return None
 
     def _propagate_session_dir_autofill(
         self, prev_value: Optional[str], new_value: str
@@ -7438,8 +7497,8 @@ class MainWindow(QMainWindow):
     def _sync_event_outputs(self) -> None:
         if not self.current_project or not self.current_subject:
             return
-        events_path = Path(self.event_events_path.text().strip())
-        if not events_path.exists():
+        events_path = self._existing_file_path(self.event_events_path.text())
+        if events_path is None:
             return
         subject_dir = subject_root(self.current_project, self.current_subject)
         self._safe_copy(
@@ -7624,17 +7683,13 @@ class MainWindow(QMainWindow):
 
     def _expected_event_outputs(self) -> list[tuple[str, str]]:
         outputs: list[tuple[str, str]] = []
-        if not self.current_project or not self.current_subject:
-            return outputs
-        subject_dir = subject_root(self.current_project, self.current_subject)
-        outputs.append(("Events dir", str(subject_dir / "events")))
-        if self.current_session_ui:
-            outputs.append(
-                (
-                    "Session events",
-                    str(session_root(subject_dir, self.current_session_ui) / "events"),
-                )
-            )
+        session_dir = self._resolve_event_tools_session_dir()
+        if session_dir is not None:
+            outputs.append(("Event session", str(session_dir)))
+            outputs.append(("Session events", str(session_dir / "events")))
+        elif self.current_project and self.current_subject:
+            subject_dir = subject_root(self.current_project, self.current_subject)
+            outputs.append(("Events dir", str(subject_dir / "events")))
         return outputs
 
     def _run_event_review(self) -> None:
@@ -7648,13 +7703,33 @@ class MainWindow(QMainWindow):
             self._append_log("Event review script not found.")
             return
         args = [str(script_info.path)]
-        if self.current_subject:
-            args += ["--subject-id", self.current_subject]
-        if self.event_events_path.text().strip():
-            args += ["--events", self.event_events_path.text().strip()]
-        if self.event_features_path.text().strip():
-            args += ["--features", self.event_features_path.text().strip()]
+        session_dir = self._resolve_event_tools_session_dir()
+        if session_dir:
+            args += ["--session-dir", str(session_dir)]
+        events_override = self._existing_file_path(self.event_events_path.text())
+        features_override = self._existing_file_path(self.event_features_path.text())
+        session_events = self._event_file_for_session(session_dir)
+        if events_override is not None:
+            args += ["--events", str(events_override)]
+        if features_override is not None:
+            args += ["--features", str(features_override)]
+        if session_dir and session_events is None and events_override is None:
+            QMessageBox.warning(
+                self,
+                "No Events In Session",
+                "The selected session does not contain events/events.jsonl.\n\n"
+                "Choose a recorded source session with raw/ and events/, not a combined processed session.",
+            )
+            return
+        if not session_dir and events_override is None:
+            QMessageBox.warning(
+                self,
+                "Session Dir Required",
+                "Select a session directory or provide an explicit events file before launching event review.",
+            )
+            return
         self.active_step = "event_tools"
+        self._append_log(f"Running: {args} (cwd={self.repo_root})")
         self.runner.start(sys.executable, args, cwd=str(self.repo_root))
 
     def _run_event_validate(self) -> None:
@@ -7668,19 +7743,39 @@ class MainWindow(QMainWindow):
             self._append_log("Event validation script not found.")
             return
         args = [str(script_info.path)]
-        if self.current_subject:
-            args += ["--subject-id", self.current_subject]
-        if self.event_events_path.text().strip():
-            args += ["--events", self.event_events_path.text().strip()]
-        if self.event_features_path.text().strip():
-            args += ["--features", self.event_features_path.text().strip()]
+        session_dir = self._resolve_event_tools_session_dir()
+        if session_dir:
+            args += ["--session-dir", str(session_dir)]
+        events_override = self._existing_file_path(self.event_events_path.text())
+        features_override = self._existing_file_path(self.event_features_path.text())
+        session_events = self._event_file_for_session(session_dir)
+        if events_override is not None:
+            args += ["--events", str(events_override)]
+        if features_override is not None:
+            args += ["--features", str(features_override)]
         if self.event_apply_fix.isChecked():
             args.append("--apply")
         if self.event_strict.isChecked():
             args.append("--strict")
         if self.event_json_report.text().strip():
             args += ["--json-report", self.event_json_report.text().strip()]
+        if session_dir and session_events is None and events_override is None:
+            QMessageBox.warning(
+                self,
+                "No Events In Session",
+                "The selected session does not contain events/events.jsonl.\n\n"
+                "Choose a recorded source session with raw/ and events/, not a combined processed session.",
+            )
+            return
+        if not session_dir and events_override is None:
+            QMessageBox.warning(
+                self,
+                "Session Dir Required",
+                "Select a session directory or provide an explicit events file before validating events.",
+            )
+            return
         self.active_step = "event_tools"
+        self._append_log(f"Running: {args} (cwd={self.repo_root})")
         self.runner.start(sys.executable, args, cwd=str(self.repo_root))
 
     def _finalize_event_review(self) -> None:

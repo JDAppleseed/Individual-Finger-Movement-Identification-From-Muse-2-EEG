@@ -6,7 +6,6 @@ Use --apply to fix issues in-place and write edit logs.
 
 import argparse
 import json
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +19,13 @@ from utils.label_schema import (
     FINGER_NONE,
     is_valid_action_finger,
     event_type_for,
+)
+from utils.session_event_io import (
+    event_rows_to_flat_records,
+    event_rows_to_payloads,
+    json_safe_dict,
+    load_events_dataframe,
+    resolve_raw_shard_paths,
 )
 
 DEFAULT_FS = 256
@@ -45,102 +51,24 @@ def _resolve_events_path(session_dir, events_override):
     return None
 
 
-def _load_events_records(path: Path) -> list[dict]:
-    if not path or not path.exists():
-        return []
-    suffix = path.suffix.lower()
-    if suffix == ".json":
-        try:
-            payload = json.loads(path.read_text())
-        except Exception:
-            return []
-        if isinstance(payload, dict) and isinstance(payload.get("events"), list):
-            payload = payload.get("events")
-        if not isinstance(payload, list):
-            return []
-        return [dict(ev) for ev in payload if isinstance(ev, dict)]
-    if suffix == ".jsonl":
-        events = []
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-            except Exception:
-                continue
-            if isinstance(payload, dict):
-                events.append(payload)
-        return events
-    if suffix == ".csv":
-        df = pd.read_csv(path)
-        return df.to_dict(orient="records")
-    return []
-
-
-def _normalize_events_df(events_df: pd.DataFrame) -> pd.DataFrame:
-    if events_df.empty:
-        return events_df
-    if "onset_s" not in events_df.columns and "event_time_s" in events_df.columns:
-        events_df["onset_s"] = events_df["event_time_s"]
-    if "type" not in events_df.columns and "label" in events_df.columns:
-        events_df["type"] = events_df["label"]
-    defaults = {
-        "duration_s": 0.0,
-        "type": "",
-        "finger_id": 0,
-        "action_id": 0,
-        "channel": "n/a",
-        "confidence": "",
-        "notes": "",
-        "source": "unknown",
-        "trial_id": 0,
-        "block_id": 0,
-    }
-    for col, value in defaults.items():
-        if col not in events_df.columns:
-            events_df[col] = value
-    for col in ("onset_s", "duration_s", "finger_id", "action_id"):
-        events_df[col] = pd.to_numeric(events_df[col], errors="coerce")
-        if col in ("finger_id", "action_id"):
-            events_df[col] = events_df[col].fillna(0).astype(int)
-        else:
-            events_df[col] = events_df[col].fillna(0.0).astype(float)
-    return events_df
-
-
-def _events_to_records(events_df: pd.DataFrame) -> list[dict]:
-    records = []
-    for row in events_df.to_dict(orient="records"):
-        record = json_safe_dict(row)
-        onset = float(record.get("onset_s", record.get("event_time_s", 0.0)) or 0.0)
-        duration = float(record.get("duration_s", 0.0) or 0.0)
-        record["onset_s"] = onset
-        record["event_time_s"] = onset
-        record["duration_s"] = max(0.0, duration)
-        record["end_s"] = onset + max(0.0, duration)
-        if "type" not in record and "label" in record:
-            record["type"] = record.get("label", "")
-        records.append(record)
-    return records
-
-
 def _write_events_files(events_df: pd.DataFrame, events_path: Path, session_dir):
-    records = _events_to_records(events_df)
+    rows = [dict(row) for row in events_df.to_dict(orient="records")]
+    payload_records = event_rows_to_payloads(rows)
+    flat_records = event_rows_to_flat_records(rows)
     if session_dir:
         events_jsonl_path = Path(session_dir) / "events" / "events.jsonl"
     else:
         events_jsonl_path = events_path.with_suffix(".jsonl")
     events_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
     with events_jsonl_path.open("w", encoding="utf-8") as handle:
-        for record in records:
+        for record in payload_records:
             handle.write(json.dumps(record) + "\n")
 
     events_json_path = None
     if events_path.suffix.lower() == ".json":
         events_json_path = events_path
         events_json_path.parent.mkdir(parents=True, exist_ok=True)
-        events_json_path.write_text(json.dumps(records, indent=2))
+        events_json_path.write_text(json.dumps(payload_records, indent=2))
 
     legacy_csv_path = None
     if events_path.suffix.lower() == ".csv":
@@ -150,25 +78,14 @@ def _write_events_files(events_df: pd.DataFrame, events_path: Path, session_dir)
         if candidate.exists():
             legacy_csv_path = candidate
     if legacy_csv_path is not None:
-        pd.DataFrame(records).to_csv(legacy_csv_path, index=False)
+        pd.DataFrame(flat_records).to_csv(legacy_csv_path, index=False)
 
     return events_json_path, events_jsonl_path, legacy_csv_path
 
 
-def _sorted_raw_shards(raw_dir: Path) -> list[Path]:
-    shard_paths = list(raw_dir.glob("eeg_raw_shard_*.npy"))
-    if not shard_paths:
-        return []
-    def _key(path: Path) -> tuple[int, str]:
-        match = re.search(r"eeg_raw_shard_(\d+)\.npy$", path.name)
-        if match:
-            return int(match.group(1)), path.name
-        return (10**12, path.name)
-    return sorted(shard_paths, key=_key)
-
-
 def _raw_time_range(raw_dir: Path):
-    shard_paths = _sorted_raw_shards(raw_dir)
+    session_dir = raw_dir.parent if raw_dir.name == "raw" else raw_dir
+    shard_paths = resolve_raw_shard_paths(session_dir)
     if not shard_paths:
         return None
     start = None
@@ -204,7 +121,7 @@ def resolve_paths(session_dir=None, events_override=None, features_override=None
             events_path = _resolve_events_path(session_path, None)
         if features_path is None:
             raw_dir = session_path / "raw"
-            has_shards = raw_dir.exists() and bool(_sorted_raw_shards(raw_dir))
+            has_shards = raw_dir.exists() and bool(resolve_raw_shard_paths(session_path))
             if has_shards:
                 features_path = raw_dir
             else:
@@ -405,19 +322,6 @@ def alignment_check(features_path, events):
     return metrics, warnings
 
 
-def json_safe_dict(data):
-    safe = {}
-    for key, value in data.items():
-        if hasattr(value, "item"):
-            try:
-                safe[key] = value.item()
-                continue
-            except Exception:
-                pass
-        safe[key] = value
-    return safe
-
-
 def summary_counts(events):
     summary = {
         "total_events": int(len(events)),
@@ -550,8 +454,7 @@ def main():
         else:
             print(f"Using features file: {path}")
 
-    events_records = _load_events_records(Path(events_path))
-    events = _normalize_events_df(pd.DataFrame(events_records))
+    events = load_events_dataframe(Path(events_path))
     if events.empty:
         warnings = ["events file is empty; nothing to validate"]
         summary = summary_counts(events)
@@ -676,8 +579,7 @@ def main():
                 print(f"↪︎ Updated legacy CSV: {legacy_csv_path}")
             print(f"✅ Backup saved to {backup_path}")
 
-            events_records = _load_events_records(events_jsonl_path)
-            events = _normalize_events_df(pd.DataFrame(events_records))
+            events = load_events_dataframe(events_jsonl_path)
             issues, warnings, missing_required, missing_optional = validate_events(
                 events
             )

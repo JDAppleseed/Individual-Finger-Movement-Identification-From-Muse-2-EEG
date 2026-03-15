@@ -5,15 +5,20 @@ Keyboard controls:
   Left/Right: move cursor by 0.1s
   Up/Down: move cursor by 1.0s
   n/p: next/previous event
+  [/]: shrink/grow visible window
   e: edit selected event (terminal prompts)
   d: delete selected event
   s: save events.jsonl
   q: quit
+
+Mouse controls:
+  Drag main EEG view: pan visible window
+  Click/drag timeline: jump quickly through the full session
+  Scroll wheel: zoom visible window in/out
 """
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -21,6 +26,7 @@ from typing import Any, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.widgets import Slider
 
 from utils.events_audit import log_event_edit
 from utils.label_schema import (
@@ -28,11 +34,21 @@ from utils.label_schema import (
     FINGER_NONE,
     event_type_for,
 )
+from utils.session_event_io import (
+    event_rows_to_flat_records,
+    event_rows_to_payloads,
+    load_events_dataframe,
+    resolve_raw_shard_paths,
+)
 
 EVENTS_PATH = Path("events.jsonl")
 DEFAULT_FS = 256.0
 PLOT_FIXED_YLIM = (-200.0, 200.0)
 PLOT_CHANNEL_SPACING_UV = 120.0
+DEFAULT_WINDOW_SEC = 5.0
+MIN_WINDOW_SEC = 0.5
+MAX_WINDOW_SEC = 10.0
+MAX_OVERVIEW_POINTS = 3000
 
 
 def latest_subject_file(subject_id, suffix, base_dir):
@@ -56,86 +72,10 @@ def _resolve_events_path(
     return EVENTS_PATH
 
 
-def _load_events_records(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    suffix = path.suffix.lower()
-    if suffix == ".json":
-        try:
-            payload = json.loads(path.read_text())
-        except Exception:
-            return []
-        if isinstance(payload, dict) and isinstance(payload.get("events"), list):
-            payload = payload.get("events")
-        if not isinstance(payload, list):
-            return []
-        return [dict(ev) for ev in payload if isinstance(ev, dict)]
-    if suffix == ".jsonl":
-        events = []
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-            except Exception:
-                continue
-            if isinstance(payload, dict):
-                events.append(payload)
-        return events
-    if suffix == ".csv":
-        df = pd.read_csv(path)
-        return df.to_dict(orient="records")
-    return []
-
-
-def _normalize_events_df(events_df: pd.DataFrame) -> pd.DataFrame:
-    if events_df.empty:
-        return events_df
-    if "onset_s" not in events_df.columns and "event_time_s" in events_df.columns:
-        events_df["onset_s"] = events_df["event_time_s"]
-    if "type" not in events_df.columns and "label" in events_df.columns:
-        events_df["type"] = events_df["label"]
-    defaults = {
-        "duration_s": 0.0,
-        "type": "",
-        "channel": "n/a",
-        "confidence": "",
-        "notes": "",
-        "finger_id": 0,
-        "action_id": 0,
-        "trial_id": 0,
-        "block_id": 0,
-        "source": "unknown",
-    }
-    for col, value in defaults.items():
-        if col not in events_df.columns:
-            events_df[col] = value
-    for col in ("onset_s", "duration_s", "finger_id", "action_id"):
-        events_df[col] = pd.to_numeric(events_df[col], errors="coerce")
-        if col in ("finger_id", "action_id"):
-            events_df[col] = events_df[col].fillna(0).astype(int)
-        else:
-            events_df[col] = events_df[col].fillna(0.0).astype(float)
-    return events_df
-
-
-def _sorted_raw_shards(raw_dir: Path) -> list[Path]:
-    shard_paths = list(raw_dir.glob("eeg_raw_shard_*.npy"))
+def _load_raw_shards(session_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+    shard_paths = resolve_raw_shard_paths(session_dir)
     if not shard_paths:
-        return []
-    def _key(path: Path) -> tuple[int, str]:
-        match = re.search(r"eeg_raw_shard_(\d+)\.npy$", path.name)
-        if match:
-            return int(match.group(1)), path.name
-        return (10**12, path.name)
-    return sorted(shard_paths, key=_key)
-
-
-def _load_raw_shards(raw_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    shard_paths = _sorted_raw_shards(raw_dir)
-    if not shard_paths:
-        raise FileNotFoundError(f"No raw shards found in {raw_dir}")
+        raise FileNotFoundError(f"No raw shards found in {session_dir / 'raw'}")
     records = [np.load(path) for path in shard_paths]
     raw = np.concatenate(records) if len(records) > 1 else records[0]
     if raw.size < 1 or "lsl_ts_mono" not in raw.dtype.names:
@@ -217,13 +157,13 @@ def _load_signal(
         times, signal, labels = _load_features_csv(Path(features_override))
         return times, signal, "legacy_features_csv", labels
     if session_dir:
-        raw_dir = session_dir / "raw"
         try:
-            times, signal = _load_raw_shards(raw_dir)
+            times, signal = _load_raw_shards(session_dir)
             labels = _channel_labels_from_session_meta(session_dir, signal.shape[1])
             return times, signal, "raw_shards", labels
         except Exception:
             pass
+        raw_dir = session_dir / "raw"
         raw_csv = raw_dir / "raw.csv"
         if raw_csv.exists():
             times, signal, labels = _load_features_csv(raw_csv)
@@ -233,31 +173,6 @@ def _load_signal(
             times, signal, labels = _load_features_csv(features_csv)
             return times, signal, "legacy_features_csv", labels
     raise FileNotFoundError("No raw shards or legacy features CSV found.")
-
-
-def _json_safe(value: Any) -> Any:
-    if hasattr(value, "item"):
-        try:
-            return value.item()
-        except Exception:
-            pass
-    return value
-
-
-def _events_to_records(events_df: pd.DataFrame) -> list[dict]:
-    records = []
-    for row in events_df.to_dict(orient="records"):
-        record = {k: _json_safe(v) for k, v in row.items()}
-        onset = float(record.get("onset_s", record.get("event_time_s", 0.0)) or 0.0)
-        duration = float(record.get("duration_s", 0.0) or 0.0)
-        record["onset_s"] = onset
-        record["event_time_s"] = onset
-        record["duration_s"] = max(0.0, duration)
-        record["end_s"] = onset + max(0.0, duration)
-        if "type" not in record and "label" in record:
-            record["type"] = record.get("label", "")
-        records.append(record)
-    return records
 
 
 parser = argparse.ArgumentParser(
@@ -331,6 +246,13 @@ plot_group.add_argument(
     default=PLOT_CHANNEL_SPACING_UV,
     help="Vertical spacing between plotted EEG channels.",
 )
+plot_group.add_argument(
+    "--window-sec",
+    type=float,
+    default=DEFAULT_WINDOW_SEC,
+    metavar="SECONDS",
+    help="Initial visible window width in seconds.",
+)
 args = parser.parse_args()
 subject_id_provided = "--subject-id" in sys.argv
 
@@ -384,8 +306,7 @@ except FileNotFoundError as exc:
 print(f"Using signal source: {signal_source}")
 print(f"Saving edits to: {EVENTS_PATH}")
 
-events_records = _load_events_records(EVENTS_PATH)
-events_df = _normalize_events_df(pd.DataFrame(events_records))
+events_df = load_events_dataframe(EVENTS_PATH)
 
 # If timestamps are flat/invalid, fall back to sample-derived time.
 if np.nanmax(times) - np.nanmin(times) < 1e-6:
@@ -429,7 +350,22 @@ if events:
     if events_start > times_end or events_end < times_start:
         times = times - times_start + events_start
 
-fig, ax = plt.subplots(figsize=(12, 4))
+time_min = float(times[0])
+time_max = float(times[-1])
+time_span = max(0.0, float(time_max - time_min))
+window_sec = float(args.window_sec) if np.isfinite(args.window_sec) else DEFAULT_WINDOW_SEC
+window_sec = float(max(MIN_WINDOW_SEC, window_sec))
+if time_span > 0:
+    window_sec = float(min(window_sec, min(MAX_WINDOW_SEC, max(MIN_WINDOW_SEC, time_span))))
+else:
+    window_sec = float(min(window_sec, MAX_WINDOW_SEC))
+
+fig = plt.figure(figsize=(12, 6))
+gs = fig.add_gridspec(3, 1, height_ratios=[8.0, 1.35, 0.6], hspace=0.18)
+ax = fig.add_subplot(gs[0])
+timeline_ax = fig.add_subplot(gs[1], sharex=None)
+slider_ax = fig.add_subplot(gs[2])
+slider_ax.set_facecolor("#f2f2f2")
 plot_scale = _normalize_scale_mode(args.plot_scale)
 plot_fixed_ylim = _resolve_plot_fixed_ylim(list(args.plot_fixed_ylim))
 channel_count = int(signal.shape[1]) if signal.ndim == 2 else 1
@@ -442,9 +378,8 @@ if (not np.isfinite(spacing_uv)) or spacing_uv <= 0.0:
 plot_offsets = np.arange(channel_count, dtype=float) * spacing_uv
 lines: list[Any] = []
 for _ in range(channel_count):
-    line, = ax.plot([], [], lw=0.6, color="black")
+    line, = ax.plot([], [], lw=1.0, color="black")
     lines.append(line)
-_apply_plot_lines(lines, times, signal, plot_offsets, plot_channels)
 overlay_lines = []
 if args.plot_reference_overlay:
     for off in plot_offsets[:plot_channels]:
@@ -456,6 +391,7 @@ try:
     ax.set_yticklabels([str(v) for v in channel_labels[:plot_channels]])
 except Exception:
     pass
+base_half = max(abs(plot_fixed_ylim[0]), abs(plot_fixed_ylim[1]))
 if plot_scale == "robust":
     lows = np.nanpercentile(signal[:, :plot_channels], 5, axis=0)
     highs = np.nanpercentile(signal[:, :plot_channels], 95, axis=0)
@@ -463,31 +399,162 @@ if plot_scale == "robust":
     high_off = highs + plot_offsets[:plot_channels]
     ax.set_ylim(float(np.min(low_off)), float(np.max(high_off)))
 else:
-    lo, hi = float(plot_fixed_ylim[0]), float(plot_fixed_ylim[1])
-    ax.set_ylim(float(lo + plot_offsets[0]), float(hi + plot_offsets[plot_channels - 1]))
+    ax.set_ylim(float(plot_offsets[0] - base_half), float(plot_offsets[-1] + base_half))
 cursor_line = ax.axvline(cursor_t, color="red", linestyle="--")
 span_patches: list[Any] = []
+timeline_span_patches: list[Any] = []
+timeline_cursor_line = timeline_ax.axvline(cursor_t, color="red", linestyle="--", linewidth=1.0)
+timeline_selected_line = timeline_ax.axvline(
+    cursor_t, color="#ff9800", linestyle="-", linewidth=0.8, alpha=0.0
+)
+timeline_view_patch = None
+
+overview_stride = max(1, int(np.ceil(len(times) / float(MAX_OVERVIEW_POINTS))))
+overview_times = times[::overview_stride]
+if plot_channels > 0:
+    overview_signal = np.nanmean(np.abs(signal[:, :plot_channels]), axis=1)
+else:
+    overview_signal = np.nanmean(np.abs(np.atleast_2d(signal)), axis=1)
+overview_values = overview_signal[::overview_stride]
+if overview_values.size == 0:
+    overview_values = np.zeros(1, dtype=float)
+    overview_times = np.array([time_min], dtype=float)
+timeline_ax.plot(overview_times, overview_values, color="#606060", linewidth=0.7, alpha=0.9)
+timeline_ax.set_xlim(time_min, time_max if time_max > time_min else time_min + 1.0)
+timeline_ax.set_yticks([])
+timeline_ax.set_ylabel("Nav")
+timeline_ax.set_xlabel("Timeline (s)")
+
+window_slider_max = MAX_WINDOW_SEC
+window_slider = Slider(
+    ax=slider_ax,
+    label="Window (s)",
+    valmin=MIN_WINDOW_SEC,
+    valmax=window_slider_max,
+    valinit=window_sec,
+)
+interaction_state = {
+    "mode": None,
+    "anchor_x": None,
+    "cursor_start": cursor_t,
+    "suspend_slider": False,
+}
+
+
+def _clamp_window_sec(value: float) -> float:
+    max_window = min(
+        MAX_WINDOW_SEC,
+        max(MIN_WINDOW_SEC, time_span) if time_span > 0 else DEFAULT_WINDOW_SEC,
+    )
+    return float(min(max_window, max(MIN_WINDOW_SEC, float(value))))
+
+
+def _view_bounds(center_t: float) -> tuple[float, float]:
+    if time_span <= 0.0:
+        return time_min, max(time_min + window_sec, time_min)
+    width = _clamp_window_sec(window_sec)
+    half = width / 2.0
+    start = max(time_min, float(center_t) - half)
+    end = start + width
+    if end > time_max:
+        end = time_max
+        start = max(time_min, end - width)
+    return float(start), float(end)
+
+
+def _nearest_sample_time(value: float) -> float:
+    if len(times) == 0:
+        return float(value)
+    idx = int(np.searchsorted(times, value, side="left"))
+    idx = max(0, min(idx, len(times) - 1))
+    return float(times[idx])
+
+
+def _visible_slice(start_t: float, end_t: float) -> slice:
+    if len(times) == 0:
+        return slice(0, 0)
+    left = max(0, int(np.searchsorted(times, start_t, side="left")) - 1)
+    right = min(len(times), int(np.searchsorted(times, end_t, side="right")) + 1)
+    if right <= left:
+        right = min(len(times), left + 1)
+    return slice(left, right)
 
 
 def redraw_spans():
-    global span_patches
+    global span_patches, timeline_span_patches, timeline_view_patch
     for patch in span_patches:
         patch.remove()
     span_patches = []
+    view_start, view_end = _view_bounds(cursor_t)
     for idx, e in enumerate(events):
         start = e["onset_s"]
         end = start + e["duration_s"]
+        if end < view_start or start > view_end:
+            continue
         color = "orange" if idx == selected_idx else "blue"
         patch = ax.axvspan(start, end, alpha=0.15, color=color)
         span_patches.append(patch)
+    for patch in timeline_span_patches:
+        patch.remove()
+    timeline_span_patches = []
+    for idx, e in enumerate(events):
+        start = e["onset_s"]
+        end = start + e["duration_s"]
+        color = "#ffb74d" if idx == selected_idx else "#7f7fff"
+        alpha = 0.35 if idx == selected_idx else 0.18
+        timeline_span_patches.append(
+            timeline_ax.axvspan(start, end, alpha=alpha, color=color)
+        )
+    if timeline_view_patch is not None:
+        timeline_view_patch.remove()
+    timeline_view_patch = timeline_ax.axvspan(
+        view_start, view_end, alpha=0.2, color="#ffcc80"
+    )
+    timeline_cursor_line.set_xdata([cursor_t, cursor_t])
+    if selected_idx is not None and events:
+        selected_time = float(events[selected_idx]["onset_s"])
+        timeline_selected_line.set_xdata([selected_time, selected_time])
+        timeline_selected_line.set_alpha(0.9)
+    else:
+        timeline_selected_line.set_alpha(0.0)
     fig.canvas.draw_idle()
 
 
 def update_cursor(new_t):
     global cursor_t
-    cursor_t = max(times[0], min(times[-1], new_t))
+    cursor_t = max(time_min, min(time_max, float(new_t)))
+    view_start, view_end = _view_bounds(cursor_t)
+    visible = _visible_slice(view_start, view_end)
+    t_view = times[visible]
+    y_view = signal[visible]
+    _apply_plot_lines(lines, t_view, y_view, plot_offsets, plot_channels)
+    ax.set_xlim(view_start, view_end if view_end > view_start else view_start + 1.0)
     cursor_line.set_xdata([cursor_t, cursor_t])
+    if plot_scale == "robust" and len(t_view) > 0:
+        visible_signal = y_view[:, :plot_channels]
+        lows = np.nanpercentile(visible_signal, 5, axis=0)
+        highs = np.nanpercentile(visible_signal, 95, axis=0)
+        low_off = lows + plot_offsets[:plot_channels]
+        high_off = highs + plot_offsets[:plot_channels]
+        ax.set_ylim(float(np.min(low_off)), float(np.max(high_off)))
+    elif plot_scale != "robust":
+        ax.set_ylim(float(plot_offsets[0] - base_half), float(plot_offsets[-1] + base_half))
+    title_suffix = f"window={window_sec:.1f}s cursor={cursor_t:.2f}s"
+    ax.set_title(f"EEG (uV) [{title_suffix}]")
+    redraw_spans()
     fig.canvas.draw_idle()
+
+
+def set_window_sec(new_window_sec: float):
+    global window_sec
+    window_sec = _clamp_window_sec(new_window_sec)
+    if not interaction_state["suspend_slider"]:
+        interaction_state["suspend_slider"] = True
+        try:
+            window_slider.set_val(window_sec)
+        finally:
+            interaction_state["suspend_slider"] = False
+    update_cursor(cursor_t)
 
 
 def select_event(idx):
@@ -501,21 +568,22 @@ def select_event(idx):
 
 
 def save_events():
-    events_df = pd.DataFrame(events)
-    records = _events_to_records(events_df)
+    rows = [dict(event) for event in events]
+    payload_records = event_rows_to_payloads(rows)
+    flat_records = event_rows_to_flat_records(rows)
     if session_dir:
         events_jsonl_path = session_dir / "events" / "events.jsonl"
     else:
         events_jsonl_path = EVENTS_PATH.with_suffix(".jsonl")
     events_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
     with events_jsonl_path.open("w", encoding="utf-8") as handle:
-        for record in records:
+        for record in payload_records:
             handle.write(json.dumps(record) + "\n")
 
     if EVENTS_PATH.suffix.lower() == ".json":
         events_json_path = EVENTS_PATH
         events_json_path.parent.mkdir(parents=True, exist_ok=True)
-        events_json_path.write_text(json.dumps(records, indent=2))
+        events_json_path.write_text(json.dumps(payload_records, indent=2))
     else:
         events_json_path = None
 
@@ -527,9 +595,9 @@ def save_events():
         if candidate.exists():
             legacy_csv_path = candidate
     if legacy_csv_path is not None:
-        pd.DataFrame(records).to_csv(legacy_csv_path, index=False)
+        pd.DataFrame(flat_records).to_csv(legacy_csv_path, index=False)
 
-    print(f"✅ Saved {len(records)} events to {events_jsonl_path}")
+    print(f"✅ Saved {len(payload_records)} events to {events_jsonl_path}")
     if events_json_path is not None:
         print(f"↪︎ Updated legacy JSON: {events_json_path}")
     if legacy_csv_path is not None:
@@ -615,6 +683,10 @@ def on_key(event):
     elif event.key == "p":
         if selected_idx is not None:
             select_event(selected_idx - 1)
+    elif event.key == "[":
+        set_window_sec(window_sec * 0.8)
+    elif event.key == "]":
+        set_window_sec(window_sec * 1.25)
     elif event.key == "e":
         edit_event()
     elif event.key == "d":
@@ -626,18 +698,72 @@ def on_key(event):
         plt.close(fig)
 
 
+def on_scroll(event):
+    if event.inaxes not in {ax, timeline_ax}:
+        return
+    factor = 0.8 if event.button == "up" else 1.25
+    if event.xdata is not None and np.isfinite(event.xdata):
+        update_cursor(event.xdata)
+    set_window_sec(window_sec * factor)
+
+
+def on_button_press(event):
+    if event.button != 1:
+        return
+    if event.inaxes == timeline_ax and event.xdata is not None:
+        interaction_state["mode"] = "timeline"
+        update_cursor(event.xdata)
+    elif event.inaxes == ax and event.xdata is not None:
+        interaction_state["mode"] = "main"
+        interaction_state["anchor_x"] = float(event.xdata)
+        interaction_state["cursor_start"] = float(cursor_t)
+
+
+def on_motion(event):
+    mode = interaction_state.get("mode")
+    if mode == "timeline":
+        if event.xdata is not None and np.isfinite(event.xdata):
+            update_cursor(event.xdata)
+    elif mode == "main":
+        if event.xdata is None or not np.isfinite(event.xdata):
+            return
+        anchor_x = interaction_state.get("anchor_x")
+        cursor_start = interaction_state.get("cursor_start", cursor_t)
+        if anchor_x is None:
+            return
+        delta = float(event.xdata - anchor_x)
+        update_cursor(cursor_start - delta)
+
+
+def on_button_release(_event):
+    interaction_state["mode"] = None
+    interaction_state["anchor_x"] = None
+
+
+def on_slider_change(value):
+    if interaction_state["suspend_slider"]:
+        return
+    set_window_sec(float(value))
+
+
 fig.canvas.mpl_connect("key_press_event", on_key)
+fig.canvas.mpl_connect("scroll_event", on_scroll)
+fig.canvas.mpl_connect("button_press_event", on_button_press)
+fig.canvas.mpl_connect("motion_notify_event", on_motion)
+fig.canvas.mpl_connect("button_release_event", on_button_release)
+window_slider.on_changed(on_slider_change)
 
 if events:
     select_event(0)
 else:
-    redraw_spans()
+    update_cursor(_nearest_sample_time(cursor_t))
 
-ax.set_title("EEG Event Review")
+fig.suptitle("EEG Event Review")
 ax.set_xlabel("Time (s)")
 ax.set_ylabel("Amplitude (uV)")
-if events:
-    ax.set_xlim(min(times[0], events_start), max(times[-1], events_end))
 
-print("Event review started. Focus the plot window for keyboard controls.")
+print(
+    "Event review started. Focus the plot window for keyboard controls. "
+    "Drag the main plot to pan, drag/click the timeline to jump, and use the wheel or [/] to resize the window."
+)
 plt.show()
