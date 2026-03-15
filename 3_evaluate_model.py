@@ -979,9 +979,13 @@ def main():
             "smooth_action_only": bool(args.smooth_action_only),
         },
         "metrics": {
+            "raw_valid_pair_rate": None,
+            "raw_invalid_pair_rate": None,
             "action_acc": None,
             "action_f1_macro": None,
             "action_f1_weighted": None,
+            "joint_acc": None,
+            "joint_acc_non_rest": None,
             "finger_acc_non_rest": None,
             "finger_acc_overall": None,
             "finger_f1_non_rest_macro": None,
@@ -997,6 +1001,8 @@ def main():
             "smoothed_action_acc": None,
             "smoothed_action_f1_macro": None,
             "smoothed_action_f1_weighted": None,
+            "smoothed_joint_acc": None,
+            "smoothed_joint_acc_non_rest": None,
             "smoothed_finger_acc_non_rest": None,
             "smoothed_finger_acc_overall": None,
             "smoothed_finger_f1_non_rest_macro": None,
@@ -1335,9 +1341,14 @@ def main():
     action_preds = np.argmax(action_probs, axis=1)
     action_conf = np.max(action_probs, axis=1)
 
-    _, finger_preds = enforce_prediction_pairs(
-        action_preds, np.argmax(finger_probs, axis=1)
+    raw_finger_preds = np.argmax(finger_probs, axis=1)
+    raw_valid_pair_rate = float(
+        np.mean((action_preds != ACTION_REST) | (raw_finger_preds == 0))
+    ) if len(action_preds) else None
+    raw_invalid_pair_rate = (
+        float(1.0 - raw_valid_pair_rate) if raw_valid_pair_rate is not None else None
     )
+    _, finger_preds = enforce_prediction_pairs(action_preds, raw_finger_preds)
     finger_conf = finger_probs[np.arange(len(finger_probs)), finger_preds]
 
     # =========================
@@ -1351,6 +1362,11 @@ def main():
         y_action_test, action_preds, average="weighted", zero_division=0
     )
     mask = y_action_test != ACTION_REST
+    joint_correct = (action_preds == y_action_test) & (finger_preds == y_finger_test)
+    joint_acc = float(np.mean(joint_correct)) if len(joint_correct) else None
+    joint_acc_non_rest = (
+        float(np.mean(joint_correct[mask])) if mask.any() else None
+    )
     if not mask.any():
         print("⚠️ No non-REST windows in test set; skipping finger metrics.")
         finger_metrics_ok = False
@@ -1413,6 +1429,19 @@ def main():
     print(
         f"🎯 Action F1 (macro/weighted): {action_f1_macro:.3f} / {action_f1_weighted:.3f}"
     )
+    if raw_invalid_pair_rate is not None:
+        print(
+            f"🎯 Raw invalid pair rate: {raw_invalid_pair_rate * 100:.2f}%"
+        )
+    if joint_acc is not None:
+        joint_non_rest_str = (
+            f"{joint_acc_non_rest * 100:.2f}%"
+            if joint_acc_non_rest is not None
+            else "n/a"
+        )
+        print(
+            f"🎯 Joint Accuracy (overall/non-REST): {joint_acc * 100:.2f}% / {joint_non_rest_str}"
+        )
     if finger_acc is not None:
         print(f"🎯 Finger Accuracy (non-REST): {finger_acc * 100:.2f}%")
         if finger_f1_non_rest_macro is not None:
@@ -1436,6 +1465,8 @@ def main():
     action_f1_macro_s = None
     action_f1_weighted_s = None
     finger_acc_s = None
+    joint_acc_s = None
+    joint_acc_non_rest_s = None
     finger_acc_overall_s = None
     finger_f1_non_rest_macro_s = None
     finger_f1_non_rest_weighted_s = None
@@ -1496,6 +1527,14 @@ def main():
             y_action_test[order], smoothed_action, average="weighted", zero_division=0
         )
         mask_s = y_action_test[order] != ACTION_REST
+        joint_correct_s = (
+            (smoothed_action == y_action_test[order])
+            & (smoothed_finger == y_finger_test[order])
+        )
+        joint_acc_s = float(np.mean(joint_correct_s)) if len(joint_correct_s) else None
+        joint_acc_non_rest_s = (
+            float(np.mean(joint_correct_s[mask_s])) if mask_s.any() else None
+        )
         finger_acc_s = (
             accuracy_score(y_finger_test[order][mask_s], smoothed_finger[mask_s])
             if (finger_metrics_ok and mask_s.any())
@@ -1577,6 +1616,16 @@ def main():
             f"🎯 Smoothed Action F1 (macro/weighted): "
             f"{action_f1_macro_s:.3f} / {action_f1_weighted_s:.3f}"
         )
+        if joint_acc_s is not None:
+            joint_non_rest_s_str = (
+                f"{joint_acc_non_rest_s * 100:.2f}%"
+                if joint_acc_non_rest_s is not None
+                else "n/a"
+            )
+            print(
+                f"🎯 Smoothed Joint Accuracy (overall/non-REST): "
+                f"{joint_acc_s * 100:.2f}% / {joint_non_rest_s_str}"
+            )
         if finger_acc_s is not None:
             print(f"🎯 Smoothed Finger Accuracy (non-REST): {finger_acc_s * 100:.2f}%")
             if finger_f1_non_rest_macro_s is not None:
@@ -1614,9 +1663,19 @@ def main():
         )
         print(f"📏 Finger ECE (non-REST): {finger_ece:.4f}")
 
+    manifest["metrics"]["raw_valid_pair_rate"] = (
+        float(raw_valid_pair_rate) if raw_valid_pair_rate is not None else None
+    )
+    manifest["metrics"]["raw_invalid_pair_rate"] = (
+        float(raw_invalid_pair_rate) if raw_invalid_pair_rate is not None else None
+    )
     manifest["metrics"]["action_acc"] = float(action_acc)
     manifest["metrics"]["action_f1_macro"] = float(action_f1_macro)
     manifest["metrics"]["action_f1_weighted"] = float(action_f1_weighted)
+    manifest["metrics"]["joint_acc"] = float(joint_acc) if joint_acc is not None else None
+    manifest["metrics"]["joint_acc_non_rest"] = (
+        float(joint_acc_non_rest) if joint_acc_non_rest is not None else None
+    )
     manifest["metrics"]["finger_acc_non_rest"] = (
         float(finger_acc) if finger_acc is not None else None
     )
@@ -1661,6 +1720,12 @@ def main():
     )
     manifest["metrics"]["smoothed_action_f1_weighted"] = (
         float(action_f1_weighted_s) if action_f1_weighted_s is not None else None
+    )
+    manifest["metrics"]["smoothed_joint_acc"] = (
+        float(joint_acc_s) if joint_acc_s is not None else None
+    )
+    manifest["metrics"]["smoothed_joint_acc_non_rest"] = (
+        float(joint_acc_non_rest_s) if joint_acc_non_rest_s is not None else None
     )
     manifest["metrics"]["smoothed_finger_acc_non_rest"] = (
         float(finger_acc_s) if finger_acc_s is not None else None

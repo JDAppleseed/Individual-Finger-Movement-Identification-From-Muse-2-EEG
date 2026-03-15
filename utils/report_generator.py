@@ -134,6 +134,8 @@ def generate_subject_report(subject_id, experiment_hash):
     subject_report_dir.mkdir(parents=True, exist_ok=True)
 
     action_acc = None
+    joint_acc = None
+    joint_acc_non_rest = None
     finger_acc = None
     action_cm = None
     finger_cm = None
@@ -169,6 +171,13 @@ def generate_subject_report(subject_id, experiment_hash):
             )
 
             mask = y_action_subj != 0
+            joint_correct = (
+                (action_preds_subj == y_action_subj)
+                & (finger_preds_subj == y_finger_subj)
+            )
+            joint_acc = float(np.mean(joint_correct)) if len(joint_correct) else None
+            if mask.any():
+                joint_acc_non_rest = float(np.mean(joint_correct[mask]))
             if mask.any():
                 finger_acc = accuracy_score(
                     y_finger_subj[mask], finger_preds_subj[mask]
@@ -261,6 +270,7 @@ def generate_subject_report(subject_id, experiment_hash):
         <li>Calibration Accuracy: {_safe_pct(acc)}</li>
         <li>Expected Calibration Error (ECE): {ece_str}</li>
         <li>Action Accuracy (test set): {_safe_pct(action_acc)}</li>
+        <li>Joint Accuracy (test set, overall/non-REST): {_safe_pct(joint_acc)} / {_safe_pct(joint_acc_non_rest)}</li>
         <li>Finger Accuracy (test set, non-REST): {_safe_pct(finger_acc)}</li>
     </ul>
 
@@ -374,6 +384,10 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     action_acc = None
     action_f1_macro = None
     action_f1_weighted = None
+    raw_valid_pair_rate = None
+    raw_invalid_pair_rate = None
+    joint_acc = None
+    joint_acc_non_rest = None
     finger_acc_non_rest = None
     finger_acc_overall = None
     finger_f1_non_rest_macro = None
@@ -389,8 +403,19 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     if preds is not None:
         action_probs, finger_probs, y_action, y_finger = preds
         action_pred = np.argmax(action_probs, axis=1).astype(int)
+        raw_finger_pred = np.argmax(finger_probs, axis=1).astype(int)
+        raw_valid_pair_rate = (
+            float(np.mean((action_pred != ACTION_REST) | (raw_finger_pred == 0)))
+            if y_action.size
+            else None
+        )
+        raw_invalid_pair_rate = (
+            float(1.0 - raw_valid_pair_rate)
+            if raw_valid_pair_rate is not None
+            else None
+        )
         _, finger_pred = enforce_prediction_pairs(
-            action_pred, np.argmax(finger_probs, axis=1).astype(int)
+            action_pred, raw_finger_pred
         )
         if y_action.size:
             action_acc = float(accuracy_score(y_action, action_pred))
@@ -416,6 +441,11 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
                     denom = rest_precision + rest_tpr
                     rest_f1 = float(2 * rest_precision * rest_tpr / denom) if denom else None
         mask = y_action != ACTION_REST
+        if y_action.size:
+            joint_correct = (action_pred == y_action) & (finger_pred == y_finger)
+            joint_acc = float(np.mean(joint_correct))
+            if np.any(mask):
+                joint_acc_non_rest = float(np.mean(joint_correct[mask]))
         if np.any(mask):
             finger_acc_non_rest = float(accuracy_score(y_finger[mask], finger_pred[mask]))
             finger_f1_non_rest_macro = float(
@@ -488,6 +518,8 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     <ul>
       <li>Action accuracy: {_safe_pct(action_acc)}</li>
       <li>Action F1 (macro/weighted): {_safe_float(action_f1_macro)} / {_safe_float(action_f1_weighted)}</li>
+      <li>Raw valid/invalid pair rate: {_safe_pct(raw_valid_pair_rate)} / {_safe_pct(raw_invalid_pair_rate)}</li>
+      <li>Joint accuracy (overall/non-REST): {_safe_pct(joint_acc)} / {_safe_pct(joint_acc_non_rest)}</li>
       <li>Finger accuracy (non-REST): {_safe_pct(finger_acc_non_rest)}</li>
       <li>Finger F1 (non-REST macro/weighted): {_safe_float(finger_f1_non_rest_macro)} / {_safe_float(finger_f1_non_rest_weighted)}</li>
       <li>Finger accuracy (overall): {_safe_pct(finger_acc_overall)}</li>
