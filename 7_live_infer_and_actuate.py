@@ -59,6 +59,7 @@ from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from muse_streaming.resample import resample_window, verify_alignment
 from utils.command_shaper import CommandShaper, CommandShaperConfig
 from utils.inference import InferenceConfig, InferenceEngine
+from utils.label_schema import decode_prediction_pair
 from utils.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
 from utils.runtime_utils import apply_channel_normalizer, load_normalizer
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
@@ -963,10 +964,17 @@ def _choose_actuation(
     finger_probs: torch.Tensor,
     action_probs: torch.Tensor,
 ) -> ActuationDecision:
-    pred_finger = int(torch.argmax(finger_probs).item())
-    pred_action = int(torch.argmax(action_probs).item())
+    pred_action, pred_finger = decode_prediction_pair(
+        action_probs.detach().cpu().numpy(),
+        finger_probs.detach().cpu().numpy(),
+    )
     # Joint confidence heuristic: min of the two max probs
-    conf = float(min(float(finger_probs[pred_finger].item()), float(action_probs[pred_action].item())))
+    conf = float(
+        min(
+            float(finger_probs[pred_finger].item()),
+            float(action_probs[pred_action].item()),
+        )
+    )
     return ActuationDecision(finger_id=pred_finger, action_id=pred_action, prob=conf)
 
 
@@ -981,18 +989,23 @@ def _postprocess_decision(
     if not enabled:
         raw_action = int(np.argmax(action_probs)) if action_probs.size else 0
         raw_finger = int(np.argmax(finger_probs)) if finger_probs.size else 0
+        committed_action, committed_finger = decode_prediction_pair(
+            action_probs, finger_probs
+        )
         action_conf = float(np.max(action_probs)) if action_probs.size else 0.0
-        finger_conf = float(np.max(finger_probs)) if finger_probs.size else 0.0
+        finger_conf = (
+            float(finger_probs[committed_finger]) if finger_probs.size else 0.0
+        )
         return {
-            "committed_action_id": raw_action,
-            "committed_finger_id": raw_finger,
+            "committed_action_id": committed_action,
+            "committed_finger_id": committed_finger,
             "raw_top_action_id": raw_action,
             "raw_top_finger_id": raw_finger,
             "action_conf": action_conf,
             "finger_conf": finger_conf,
-            "smoothed_action_id": raw_action,
-            "smoothed_finger_id": raw_finger,
-            "decision_reason": "raw_argmax",
+            "smoothed_action_id": committed_action,
+            "smoothed_finger_id": committed_finger,
+            "decision_reason": "raw_argmax_gated",
             "frames_in_state": 1,
         }
     return postprocess_predictions(action_probs, finger_probs, settings, state)

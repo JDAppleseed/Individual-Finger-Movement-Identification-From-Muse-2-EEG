@@ -25,7 +25,7 @@ def main():
         postprocess_predictions,
     )
     from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
-    from utils.label_schema import ACTION_NAMES, FINGER_NAMES
+    from utils.label_schema import ACTION_NAMES, FINGER_NAMES, decode_prediction_pair
     from utils.sequence_data import load_sequence_npz
 
     parser = argparse.ArgumentParser(description="Smoke inference on a single window")
@@ -94,8 +94,7 @@ def main():
     state = PostprocessState()
     post = postprocess_predictions(action_probs, finger_probs, settings, state)
 
-    raw_action = int(np.argmax(action_probs)) if action_probs.size else 0
-    raw_finger = int(np.argmax(finger_probs)) if finger_probs.size else 0
+    raw_action, raw_finger = decode_prediction_pair(action_probs, finger_probs)
     committed_action = int(post.get("committed_action_id", raw_action))
     committed_finger = int(post.get("committed_finger_id", raw_finger))
 

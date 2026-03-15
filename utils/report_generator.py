@@ -15,7 +15,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 
-from utils.label_schema import ACTION_REST, ACTION_NAMES, FINGER_NAMES
+from utils.label_schema import (
+    ACTION_REST,
+    ACTION_NAMES,
+    FINGER_NAMES,
+    enforce_prediction_pairs,
+)
 from utils.per_subject_calibration import expected_calibration_error
 from utils.sequence_data import load_sequence_npz
 
@@ -139,7 +144,9 @@ def generate_subject_report(subject_id, experiment_hash):
         action_probs = preds["action_probs"]
         finger_probs = preds["finger_probs"]
         action_preds = np.argmax(action_probs, axis=1)
-        finger_preds = np.argmax(finger_probs, axis=1)
+        _, finger_preds = enforce_prediction_pairs(
+            action_preds, np.argmax(finger_probs, axis=1)
+        )
 
         subj_ids = meta.get("subject_id")
         exp_hashes = meta.get("experiment_hash")
@@ -382,7 +389,9 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     if preds is not None:
         action_probs, finger_probs, y_action, y_finger = preds
         action_pred = np.argmax(action_probs, axis=1).astype(int)
-        finger_pred = np.argmax(finger_probs, axis=1).astype(int)
+        _, finger_pred = enforce_prediction_pairs(
+            action_pred, np.argmax(finger_probs, axis=1).astype(int)
+        )
         if y_action.size:
             action_acc = float(accuracy_score(y_action, action_pred))
             action_f1_macro = float(

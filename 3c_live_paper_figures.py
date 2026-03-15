@@ -17,7 +17,12 @@ from typing import Optional, Tuple
 from sklearn.metrics import confusion_matrix, accuracy_score
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
-from utils.label_schema import ACTION_REST, ACTION_NAMES, FINGER_NAMES
+from utils.label_schema import (
+    ACTION_REST,
+    ACTION_NAMES,
+    FINGER_NAMES,
+    enforce_prediction_pairs,
+)
 from utils.experiment_logger import get_latest_experiment_hash, LOG_DIR
 from utils.per_subject_calibration import plot_subject_calibration
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
@@ -316,8 +321,8 @@ action_preds = np.argmax(action_mean, axis=1)
 action_conf = np.max(action_mean, axis=1)
 action_uncertainty = np.mean(action_std, axis=1)
 
-finger_preds = np.argmax(finger_mean, axis=1)
-finger_conf = np.max(finger_mean, axis=1)
+_, finger_preds = enforce_prediction_pairs(action_preds, np.argmax(finger_mean, axis=1))
+finger_conf = finger_mean[np.arange(len(finger_mean)), finger_preds]
 finger_uncertainty = np.mean(finger_std, axis=1)
 
 # =========================

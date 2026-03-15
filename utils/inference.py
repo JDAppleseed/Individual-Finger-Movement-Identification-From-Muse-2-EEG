@@ -7,6 +7,7 @@ from typing import Any, Deque, Dict, Optional, Tuple
 import numpy as np
 import torch
 
+from utils.label_schema import decode_prediction_pair
 from utils.runtime_utils import apply_channel_normalizer, compute_health_score
 
 
@@ -212,11 +213,10 @@ class InferenceEngine:
         if action_mean is None or finger_mean is None:
             return self._empty_prediction(window_TxC)
 
-        action_id = int(np.argmax(action_mean))
-        finger_id = int(np.argmax(finger_mean))
+        action_id, finger_id = decode_prediction_pair(action_mean, finger_mean)
 
         action_confidence = float(action_mean[action_id])
-        finger_confidence = float(finger_mean[finger_id])
+        finger_confidence = float(finger_mean[finger_id]) if finger_mean.size else 0.0
 
         adaptive = min(
             0.99,

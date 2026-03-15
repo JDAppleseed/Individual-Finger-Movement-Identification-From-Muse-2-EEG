@@ -47,6 +47,35 @@ def test_postprocess_decision_deterministic():
     assert out["committed_finger_id"] == 2
 
 
+def test_postprocess_decision_raw_argmax_gates_rest_to_none():
+    mod = _load_live_module()
+    settings = PostprocessSettings(
+        smoothing_enabled=False,
+        hysteresis_enabled=False,
+        threshold_action=0.0,
+        threshold_finger=0.0,
+        adjacency_enabled=False,
+    )
+    state = PostprocessState()
+    action_probs = np.array([0.9, 0.05, 0.05], dtype=float)
+    finger_probs = np.array([0.01, 0.02, 0.90, 0.03, 0.02, 0.02], dtype=float)
+
+    out = mod._postprocess_decision(
+        action_probs,
+        finger_probs,
+        enabled=False,
+        settings=settings,
+        state=state,
+    )
+
+    assert out["raw_top_action_id"] == 0
+    assert out["raw_top_finger_id"] == 2
+    assert out["committed_action_id"] == 0
+    assert out["committed_finger_id"] == 0
+    assert np.isclose(out["finger_conf"], 0.01)
+    assert out["decision_reason"] == "raw_argmax_gated"
+
+
 class _DummyMCModel(torch.nn.Module):
     def forward(self, x):
         finger_logits = torch.tensor(
@@ -65,6 +94,27 @@ class _DummyMCModel(torch.nn.Module):
                 [[0.01, 0.01, 0.05, 0.01, 0.01, 0.01]], dtype=torch.float32
             ),
             "action_std": torch.tensor([[0.02, 0.10, 0.03]], dtype=torch.float32),
+        }
+
+
+class _DummyRestMCModel(torch.nn.Module):
+    def forward(self, x):
+        finger_logits = torch.tensor(
+            [[0.0, 0.0, 2.0, 0.0, 0.0, 0.0]], dtype=torch.float32
+        )
+        action_logits = torch.tensor([[2.0, 0.0, 0.0]], dtype=torch.float32)
+        return finger_logits, action_logits
+
+    def mc_forward(self, x, passes=20):
+        return {
+            "finger_mean": torch.tensor(
+                [[0.05, 0.05, 0.80, 0.04, 0.03, 0.03]], dtype=torch.float32
+            ),
+            "action_mean": torch.tensor([[0.75, 0.10, 0.15]], dtype=torch.float32),
+            "finger_std": torch.tensor(
+                [[0.01, 0.01, 0.05, 0.01, 0.01, 0.01]], dtype=torch.float32
+            ),
+            "action_std": torch.tensor([[0.10, 0.02, 0.03]], dtype=torch.float32),
         }
 
 
@@ -102,6 +152,33 @@ def test_predict_window_uses_inference_engine_backend():
         out["finger_uncertainty"], np.mean([0.01, 0.01, 0.05, 0.01, 0.01, 0.01])
     )
     assert out["adaptive_threshold"] > 0.7
+
+
+def test_inference_engine_predict_gates_rest_to_none():
+    model = _DummyRestMCModel()
+    engine = InferenceEngine(
+        model=model,
+        normalizer=None,
+        device=torch.device("cpu"),
+        action_names={0: "REST"},
+        finger_names={0: "NONE", 2: "INDEX"},
+        config=InferenceConfig(
+            base_threshold=0.7,
+            uncertainty_weight=0.5,
+            stability_frames=1,
+            mc_passes=5,
+        ),
+    )
+
+    prediction, safety, diagnostics = engine.predict(
+        np.zeros((64, 4), dtype=np.float32)
+    )
+
+    assert prediction["action_id"] == 0
+    assert prediction["finger_id"] == 0
+    assert np.isclose(prediction["finger_confidence"], 0.05)
+    assert safety["allow_actuation"] is True
+    assert diagnostics["health_score"] >= 0.0
 
 
 def test_compute_actuation_speed_scalar_uses_uncertainty():

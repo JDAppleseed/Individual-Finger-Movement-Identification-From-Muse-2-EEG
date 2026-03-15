@@ -30,7 +30,12 @@ from sklearn.metrics import confusion_matrix, accuracy_score, f1_score
 from sklearn.model_selection import StratifiedShuffleSplit
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
-from utils.label_schema import ACTION_REST, ACTION_NAMES, FINGER_NAMES
+from utils.label_schema import (
+    ACTION_REST,
+    ACTION_NAMES,
+    FINGER_NAMES,
+    enforce_prediction_pairs,
+)
 from utils.eval_utils import (
     resolve_cached_test_indices,
     validate_cached_predictions_with_dataset_info,
@@ -1330,8 +1335,10 @@ def main():
     action_preds = np.argmax(action_probs, axis=1)
     action_conf = np.max(action_probs, axis=1)
 
-    finger_preds = np.argmax(finger_probs, axis=1)
-    finger_conf = np.max(finger_probs, axis=1)
+    _, finger_preds = enforce_prediction_pairs(
+        action_preds, np.argmax(finger_probs, axis=1)
+    )
+    finger_conf = finger_probs[np.arange(len(finger_probs)), finger_preds]
 
     # =========================
     # ===== METRICS ===========

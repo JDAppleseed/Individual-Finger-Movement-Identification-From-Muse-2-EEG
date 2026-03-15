@@ -2,7 +2,9 @@
 Shared label schema for action/finger classification.
 """
 
-from typing import Optional
+from typing import Optional, Tuple
+
+import numpy as np
 
 ACTION_REST = 0
 ACTION_OPEN = 1
@@ -55,3 +57,30 @@ def event_type_for(
     finger_name = FINGER_NAMES.get(finger_id, "unknown").lower()
     action_name = ACTION_NAMES.get(action_id, "action").lower()
     return f"{finger_name}_{action_name}"
+
+
+def enforce_prediction_pair(action_id: int, finger_id: int) -> Tuple[int, int]:
+    action_id = int(action_id)
+    finger_id = int(finger_id)
+    if action_id == ACTION_REST:
+        return action_id, int(FINGER_NONE)
+    return action_id, finger_id
+
+
+def enforce_prediction_pairs(action_ids, finger_ids):
+    action_arr = np.asarray(action_ids, dtype=np.int64).reshape(-1)
+    finger_arr = np.asarray(finger_ids, dtype=np.int64).reshape(-1).copy()
+    if action_arr.shape != finger_arr.shape:
+        raise ValueError(
+            f"action_ids and finger_ids shape mismatch: {action_arr.shape} vs {finger_arr.shape}"
+        )
+    finger_arr[action_arr == ACTION_REST] = int(FINGER_NONE)
+    return action_arr, finger_arr
+
+
+def decode_prediction_pair(action_scores, finger_scores) -> Tuple[int, int]:
+    action_arr = np.asarray(action_scores)
+    finger_arr = np.asarray(finger_scores)
+    action_id = int(np.argmax(action_arr)) if action_arr.size else int(ACTION_REST)
+    finger_id = int(np.argmax(finger_arr)) if finger_arr.size else int(FINGER_NONE)
+    return enforce_prediction_pair(action_id, finger_id)
