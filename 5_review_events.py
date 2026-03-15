@@ -31,6 +31,8 @@ from utils.label_schema import (
 
 EVENTS_PATH = Path("events.jsonl")
 DEFAULT_FS = 256.0
+PLOT_FIXED_YLIM = (-200.0, 200.0)
+PLOT_CHANNEL_SPACING_UV = 120.0
 
 
 def latest_subject_file(subject_id, suffix, base_dir):
@@ -144,7 +146,24 @@ def _load_raw_shards(raw_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     return time_s, signal
 
 
-def _load_features_csv(path: Path) -> tuple[np.ndarray, np.ndarray]:
+def _channel_labels_from_session_meta(session_dir: Optional[Path], count: int) -> list[str]:
+    if session_dir:
+        meta_path = session_dir / "meta.json"
+        if meta_path.exists():
+            try:
+                payload = json.loads(meta_path.read_text())
+                labels = payload.get("channel_labels")
+                if isinstance(labels, list) and len(labels) >= count:
+                    return [str(v) for v in labels[:count]]
+            except Exception:
+                pass
+    fallback = ["TP9", "AF7", "AF8", "TP10"]
+    if count <= len(fallback):
+        return fallback[:count]
+    return [f"ch{i + 1}" for i in range(count)]
+
+
+def _load_features_csv(path: Path) -> tuple[np.ndarray, np.ndarray, list[str]]:
     df = pd.read_csv(path)
     if "time_s" in df.columns:
         times = df["time_s"].to_numpy(dtype=float)
@@ -156,30 +175,63 @@ def _load_features_csv(path: Path) -> tuple[np.ndarray, np.ndarray]:
     if not channel_cols:
         raise ValueError(f"No channel columns found in {path}")
     signal = df[channel_cols].values
-    return times, signal
+    return times, signal, [str(c) for c in channel_cols]
+
+
+def _resolve_plot_fixed_ylim(value: Optional[list[float]]) -> tuple[float, float]:
+    if not value or len(value) != 2:
+        return float(PLOT_FIXED_YLIM[0]), float(PLOT_FIXED_YLIM[1])
+    low = float(value[0])
+    high = float(value[1])
+    if low == high:
+        if low == 0:
+            return (-200.0, 200.0)
+        return (low - abs(low), low + abs(low))
+    return (min(low, high), max(low, high))
+
+
+def _normalize_scale_mode(value: str) -> str:
+    val = (value or "").strip().lower()
+    if val in {"robust", "robust_auto", "auto"}:
+        return "robust"
+    return "fixed"
+
+
+def _apply_plot_lines(
+    lines: list[Any],
+    t_arr: np.ndarray,
+    y_arr: np.ndarray,
+    offsets: np.ndarray,
+    plot_channels: int,
+) -> None:
+    for idx in range(plot_channels):
+        lines[idx].set_data(t_arr, y_arr[:, idx] + offsets[idx])
+    for idx in range(plot_channels, len(lines)):
+        lines[idx].set_data([], [])
 
 
 def _load_signal(
     session_dir: Optional[Path], features_override: Optional[str]
-) -> tuple[np.ndarray, np.ndarray, str]:
+) -> tuple[np.ndarray, np.ndarray, str, list[str]]:
     if features_override:
-        times, signal = _load_features_csv(Path(features_override))
-        return times, signal, "legacy_features_csv"
+        times, signal, labels = _load_features_csv(Path(features_override))
+        return times, signal, "legacy_features_csv", labels
     if session_dir:
         raw_dir = session_dir / "raw"
         try:
             times, signal = _load_raw_shards(raw_dir)
-            return times, signal, "raw_shards"
+            labels = _channel_labels_from_session_meta(session_dir, signal.shape[1])
+            return times, signal, "raw_shards", labels
         except Exception:
             pass
         raw_csv = raw_dir / "raw.csv"
         if raw_csv.exists():
-            times, signal = _load_features_csv(raw_csv)
-            return times, signal, "legacy_raw_csv"
+            times, signal, labels = _load_features_csv(raw_csv)
+            return times, signal, "legacy_raw_csv", labels
         features_csv = session_dir / "features" / "eeg_features.csv"
         if features_csv.exists():
-            times, signal = _load_features_csv(features_csv)
-            return times, signal, "legacy_features_csv"
+            times, signal, labels = _load_features_csv(features_csv)
+            return times, signal, "legacy_features_csv", labels
     raise FileNotFoundError("No raw shards or legacy features CSV found.")
 
 
@@ -252,6 +304,33 @@ input_group.add_argument(
     metavar="PATH",
     help="Optional raw/features path override used for plotting alignment.",
 )
+plot_group = parser.add_argument_group("plot options")
+plot_group.add_argument(
+    "--plot-scale",
+    type=str,
+    default="fixed",
+    choices=["fixed", "robust"],
+    help="Plot scaling mode matching Step 1 semantics.",
+)
+plot_group.add_argument(
+    "--plot-fixed-ylim",
+    type=float,
+    nargs=2,
+    metavar=("MIN_UV", "MAX_UV"),
+    default=list(PLOT_FIXED_YLIM),
+    help="Y-axis limits in microvolts when --plot-scale=fixed.",
+)
+plot_group.add_argument(
+    "--plot-reference-overlay",
+    action="store_true",
+    help="Overlay per-channel reference guides like Step 1.",
+)
+plot_group.add_argument(
+    "--plot-channel-spacing-uv",
+    type=float,
+    default=PLOT_CHANNEL_SPACING_UV,
+    help="Vertical spacing between plotted EEG channels.",
+)
 args = parser.parse_args()
 subject_id_provided = "--subject-id" in sys.argv
 
@@ -297,7 +376,7 @@ if not EVENTS_PATH.exists():
     raise SystemExit(2)
 
 try:
-    times, signal, signal_source = _load_signal(session_dir, args.features)
+    times, signal, signal_source, channel_labels = _load_signal(session_dir, args.features)
 except FileNotFoundError as exc:
     print(str(exc))
     raise SystemExit(2)
@@ -311,8 +390,6 @@ events_df = _normalize_events_df(pd.DataFrame(events_records))
 # If timestamps are flat/invalid, fall back to sample-derived time.
 if np.nanmax(times) - np.nanmin(times) < 1e-6:
     times = np.arange(len(signal), dtype=float) / DEFAULT_FS
-
-signal_mean = signal.mean(axis=1)
 
 events = events_df.to_dict(orient="records")
 
@@ -353,7 +430,41 @@ if events:
         times = times - times_start + events_start
 
 fig, ax = plt.subplots(figsize=(12, 4))
-ax.plot(times, signal_mean, linewidth=0.5, color="black")
+plot_scale = _normalize_scale_mode(args.plot_scale)
+plot_fixed_ylim = _resolve_plot_fixed_ylim(list(args.plot_fixed_ylim))
+channel_count = int(signal.shape[1]) if signal.ndim == 2 else 1
+plot_channels = min(channel_count, len(channel_labels))
+spacing_uv = float(args.plot_channel_spacing_uv)
+if (not np.isfinite(spacing_uv)) or spacing_uv <= 0.0:
+    stds = np.nanstd(signal[:, :plot_channels], axis=0)
+    median_std = float(np.nanmedian(stds)) if stds.size else 0.0
+    spacing_uv = float(max(80.0, min(400.0, max(120.0, 6.0 * median_std))))
+plot_offsets = np.arange(channel_count, dtype=float) * spacing_uv
+lines: list[Any] = []
+for _ in range(channel_count):
+    line, = ax.plot([], [], lw=0.6, color="black")
+    lines.append(line)
+_apply_plot_lines(lines, times, signal, plot_offsets, plot_channels)
+overlay_lines = []
+if args.plot_reference_overlay:
+    for off in plot_offsets[:plot_channels]:
+        overlay_lines.append(
+            ax.axhline(float(off), color="#888888", alpha=0.2, linewidth=0.6)
+        )
+try:
+    ax.set_yticks(plot_offsets[:plot_channels].tolist())
+    ax.set_yticklabels([str(v) for v in channel_labels[:plot_channels]])
+except Exception:
+    pass
+if plot_scale == "robust":
+    lows = np.nanpercentile(signal[:, :plot_channels], 5, axis=0)
+    highs = np.nanpercentile(signal[:, :plot_channels], 95, axis=0)
+    low_off = lows + plot_offsets[:plot_channels]
+    high_off = highs + plot_offsets[:plot_channels]
+    ax.set_ylim(float(np.min(low_off)), float(np.max(high_off)))
+else:
+    lo, hi = float(plot_fixed_ylim[0]), float(plot_fixed_ylim[1])
+    ax.set_ylim(float(lo + plot_offsets[0]), float(hi + plot_offsets[plot_channels - 1]))
 cursor_line = ax.axvline(cursor_t, color="red", linestyle="--")
 span_patches: list[Any] = []
 
@@ -522,9 +633,9 @@ if events:
 else:
     redraw_spans()
 
-ax.set_title("EEG Event Review (mean channel)")
+ax.set_title("EEG Event Review")
 ax.set_xlabel("Time (s)")
-ax.set_ylabel("Mean amplitude")
+ax.set_ylabel("Amplitude (uV)")
 if events:
     ax.set_xlim(min(times[0], events_start), max(times[-1], events_end))
 
