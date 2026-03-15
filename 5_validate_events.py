@@ -448,29 +448,58 @@ def print_decision(exit_code, warnings):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--apply", action="store_true", help="Apply fixes in-place")
-    parser.add_argument("--events", type=str, default=None, help="Override events path")
-    parser.add_argument(
-        "--features", type=str, default=None, help="Override features path"
+    parser = argparse.ArgumentParser(
+        description=(
+            "Step 5b: validate a session event file, report label/timing issues, "
+            "and optionally repair them in place."
+        )
     )
-    parser.add_argument(
+    input_group = parser.add_argument_group("input selection")
+    input_group.add_argument(
+        "--events",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Override the event file path.",
+    )
+    input_group.add_argument(
+        "--features",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Override the raw/features path used for timing checks.",
+    )
+    input_group.add_argument(
         "--session-dir",
         type=str,
         default=None,
-        help="Session directory (defaults to events/events.jsonl + raw/eeg_raw_shard_*.npy).",
+        metavar="PATH",
+        help="Canonical session directory. Defaults to events/events.jsonl plus raw/eeg_raw_shard_*.npy.",
     )
-    parser.add_argument(
-    "--subject-id",
-    type=str,
-    default="8-M16",
-    help="(Deprecated) Subject ID lookup is no longer supported without explicit paths.",
-)
-    parser.add_argument(
-        "--strict", action="store_true", help="Exit with code 1 on warnings"
+    input_group.add_argument(
+        "--subject-id",
+        type=str,
+        default="8-M16",
+        metavar="ID",
+        help="Deprecated. Subject lookup is not supported without explicit paths.",
     )
-    parser.add_argument(
-        "--json-report", type=str, default=None, help="Write JSON report to path"
+    action_group = parser.add_argument_group("validation behavior")
+    action_group.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply any safe repairs directly to the event file.",
+    )
+    action_group.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit with code 1 when warnings are found.",
+    )
+    action_group.add_argument(
+        "--json-report",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Write the validation report as JSON to this path.",
     )
     args = parser.parse_args()
     subject_id_provided = "--subject-id" in sys.argv

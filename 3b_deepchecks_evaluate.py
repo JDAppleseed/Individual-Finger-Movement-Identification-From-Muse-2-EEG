@@ -354,73 +354,92 @@ def _dataset_kwargs():
     return {}
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument(
+parser = argparse.ArgumentParser(
+    description=(
+        "Step 3b: run Deepchecks diagnostics on a trained Step 2 run using "
+        "the same dataset and split logic as Step 3."
+    )
+)
+selection_group = parser.add_argument_group("input selection")
+selection_group.add_argument(
     "--run-dir",
     type=str,
     default=None,
-    help="Model run directory override (e.g. .../processed/models/<run_id>).",
+    metavar="PATH",
+    help="Specific Step 2 run directory to inspect (for example: .../processed/models/<run_id>).",
 )
-parser.add_argument(
+selection_group.add_argument(
     "--project",
     type=str,
     required=False,
-    help="Project identifier",
+    metavar="NAME",
+    help="Project identifier used to resolve a session when --run-dir is not provided.",
 )
-parser.add_argument(
+selection_group.add_argument(
     "--subject",
     type=str,
     required=False,
-    help="Subject identifier",
+    metavar="ID",
+    help="Subject identifier used to resolve a session when --run-dir is not provided.",
 )
-parser.add_argument(
+selection_group.add_argument(
     "--session",
     type=str,
     required=False,
-    help="Session identifier (defaults to latest for subject)",
+    metavar="ID",
+    help="Session identifier to inspect. Defaults to the latest session for the subject.",
 )
-parser.add_argument(
+selection_group.add_argument(
     "--session-dir",
     type=str,
     default=None,
-    help="Legacy session directory override from UI",
+    metavar="PATH",
+    help="Legacy session directory override used by the UI.",
 )
-parser.add_argument(
-    "--max-samples", type=int, default=None, help="Limit samples for Deepchecks"
+runtime_group = parser.add_argument_group("runtime and split overrides")
+runtime_group.add_argument(
+    "--max-samples",
+    type=int,
+    default=None,
+    metavar="N",
+    help="Cap the number of windows passed to Deepchecks.",
 )
-parser.add_argument(
-    "--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Inference batch size"
+runtime_group.add_argument(
+    "--batch-size",
+    type=int,
+    default=DEFAULT_BATCH_SIZE,
+    help="Inference batch size.",
 )
-parser.add_argument(
+runtime_group.add_argument(
     "--test-size",
     type=float,
     default=None,
-    help="Test split fraction (defaults to train_config.json when available).",
+    help="Fraction reserved for the test split. Defaults to train_config.json when available.",
 )
-parser.add_argument(
+runtime_group.add_argument(
     "--split-seed",
     type=int,
     default=None,
-    help="Split seed (defaults to train_config.json when available).",
+    help="Random seed used when rebuilding the split. Defaults to train_config.json when available.",
 )
-parser.add_argument(
+runtime_group.add_argument(
     "--split-mode",
     type=str,
     default=None,
     choices=["group_trial", "holdout_session"],
-    help="Split mode for train/test partitions (defaults to train_config.json when available).",
+    help="Split strategy for train/test partitions. Defaults to train_config.json when available.",
 )
-parser.add_argument(
+runtime_group.add_argument(
     "--purge-seconds",
     type=float,
     default=None,
-    help="Purge train windows within this many seconds of any test window (same session).",
+    help="Drop training windows within this many seconds of any test window from the same session.",
 )
-parser.add_argument(
+runtime_group.add_argument(
     "--hop-seconds",
     type=float,
     default=None,
-    help="Optional hop size in seconds (used for purge heuristics if needed)",
+    help="Window hop size, in seconds, used by leakage-purge heuristics when needed.",
 )
 args = parser.parse_args()
 

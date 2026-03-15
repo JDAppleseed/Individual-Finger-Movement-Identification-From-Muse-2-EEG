@@ -47,10 +47,10 @@ BATCH_SIZE = 64
 EPOCHS = 60
 LR = 1e-3
 LOSS_ACTION_WEIGHT = 1.0
-# Default REST class weight. Historically this repo used a smaller value (0.2)
-# for early, REST-imbalanced datasets. Current default increases REST weight to
-# reduce over-triggering on non-REST actions unless confidence gating is used.
-REST_WEIGHT = 0.8
+# Default REST class weight. Historically this repo used smaller values for
+# early, REST-imbalanced datasets. Current default uses parity weighting so the
+# action head does not systematically under-emphasize REST.
+REST_WEIGHT = 1.0
 
 DEFAULT_NPZ = "eeg_windows.npz"
 DEFAULT_MODEL = "finger_action_model.pt"
@@ -485,68 +485,89 @@ def _window_idx_leakage_check(
 
 
 def build_arg_parser():
-    p = argparse.ArgumentParser(description="Train CNN+LSTM EEG multi-head model")
-    p.add_argument("--config", type=str, default=None, help="Path to JSON config")
-    p.add_argument(
+    p = argparse.ArgumentParser(
+        description=(
+            "Step 2: train the CNN+LSTM finger/action model from Step 1b windows "
+            "and write a run directory with model artifacts."
+        )
+    )
+    input_group = p.add_argument_group("input selection")
+    input_group.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Load training settings from a JSON config file.",
+    )
+    input_group.add_argument(
         "--session-dir",
         type=str,
         default=None,
-        help="Canonical session directory (defaults to <session_dir>/processed/eeg_windows.npz and writes outputs under <session_dir>/processed/models/<run_id>/).",
+        metavar="PATH",
+        help="Canonical session directory. Defaults are resolved from this path and outputs are written under processed/models/<run_id>/.",
     )
-    p.add_argument(
+    input_group.add_argument(
         "--run-dir",
         type=str,
         default=None,
-        help="Explicit model run output directory (overrides --session-dir default).",
+        metavar="PATH",
+        help="Explicit model run output directory. Overrides the run path derived from --session-dir.",
     )
-    p.add_argument(
-        "--npz", type=str, default=DEFAULT_NPZ, help="Path to window dataset"
+    input_group.add_argument(
+        "--npz",
+        type=str,
+        default=DEFAULT_NPZ,
+        metavar="PATH",
+        help="Path to the window dataset NPZ.",
     )
-    p.add_argument(
+    input_group.add_argument(
         "--subject-id",
         type=str,
         default="2-M16",
-        help="Filter training data to a single subject_id",
+        metavar="ID",
+        help="Filter the dataset to a single subject_id before splitting.",
     )
-    p.add_argument(
+
+    training_group = p.add_argument_group("training")
+    training_group.add_argument(
         "--epochs", type=int, default=EPOCHS, help="Number of training epochs"
     )
-    p.add_argument(
+    training_group.add_argument(
         "--batch-size", type=int, default=BATCH_SIZE, help="Training batch size"
     )
-    p.add_argument("--lr", type=float, default=LR, help="Learning rate")
-    p.add_argument("--seed", type=int, default=SEED, help="Random seed")
-    p.add_argument(
+    training_group.add_argument("--lr", type=float, default=LR, help="Learning rate.")
+    training_group.add_argument("--seed", type=int, default=SEED, help="Random seed.")
+    training_group.add_argument(
         "--device",
         type=str,
         default="auto",
         choices=["auto", "cpu", "cuda", "mps"],
-        help="Training device (auto picks cuda/mps if available).",
+        help="Training device. 'auto' picks CUDA or MPS when available.",
     )
-    p.add_argument(
+    training_group.add_argument(
         "--num-workers",
         type=int,
         default=0,
         help="DataLoader worker processes (0 = main process).",
     )
-    p.add_argument(
+    training_group.add_argument(
         "--pin-memory",
         action="store_true",
         help="Pin DataLoader memory (useful for CUDA).",
     )
-    p.add_argument(
+    training_group.add_argument(
         "--loss-action-weight",
         type=float,
         default=LOSS_ACTION_WEIGHT,
-        help="Action loss weight",
+        help="Relative weight applied to the action-head loss term.",
     )
-    p.add_argument(
+    training_group.add_argument(
         "--rest-weight",
         type=float,
         default=REST_WEIGHT,
-        help="Class weight for REST action (0=ignore)",
+        help="Class weight for the REST action. Use 0 to ignore REST.",
     )
-    p.add_argument(
+    training_group.add_argument(
         "--finger-weights",
         type=str,
         default=None,
@@ -556,60 +577,82 @@ def build_arg_parser():
             "(e.g. '[1,1,1,1,1,0.5]' or '{\"pinky\":0.5}')."
         ),
     )
-    p.add_argument("--test-size", type=float, default=0.2, help="Test split fraction")
-    p.add_argument(
+    split_group = p.add_argument_group("split and leakage controls")
+    split_group.add_argument(
+        "--test-size",
+        type=float,
+        default=0.2,
+        help="Fraction of windows reserved for the evaluation split.",
+    )
+    split_group.add_argument(
         "--calibration-size",
         type=float,
         default=0.1,
-        help="Fraction of the training split held out for post-hoc temperature scaling (0 disables).",
+        help="Fraction of the training split held out for post-hoc temperature scaling. Use 0 to disable.",
     )
-    p.add_argument(
+    split_group.add_argument(
         "--split-mode",
         type=str,
         default="group_trial",
         choices=["group_trial", "holdout_session"],
-        help="Split mode (group_trial uses trial/event groups; holdout_session uses session_id)",
+        help="How train/test data are separated: by trial/event groups or by session_id.",
     )
-    p.add_argument(
+    split_group.add_argument(
         "--purge-seconds",
         type=float,
         default=0.0,
-        help="Purge train windows within this many seconds of any test window (same session)",
+        help="Drop training windows within this many seconds of any test window from the same session.",
     )
-    p.add_argument(
+    split_group.add_argument(
         "--hop-seconds",
         type=float,
         default=None,
-        help="Optional hop size in seconds (used for purge heuristics if needed)",
+        help="Window hop size, in seconds, used by leakage-purge heuristics when needed.",
     )
-    p.add_argument(
-        "--non-rest-only", action="store_true", help="Train only on non-REST windows"
+    split_group.add_argument(
+        "--non-rest-only",
+        action="store_true",
+        help="Train only on non-REST windows.",
     )
-    p.add_argument(
+    split_group.add_argument(
         "--window-idx-leak-threshold",
         type=float,
         default=0.65,
-        help="Warn if window_idx-only classifier exceeds this accuracy",
+        help="Warn if a window-index-only leakage probe exceeds this accuracy.",
     )
-    p.add_argument(
+    split_group.add_argument(
         "--strict-leakage",
         action="store_true",
-        help="Fail training if leakage checks exceed thresholds",
+        help="Fail training if leakage checks exceed their thresholds.",
     )
-    p.add_argument(
-        "--save-model", type=str, default=DEFAULT_MODEL, help="Model output path"
+    output_group = p.add_argument_group("outputs")
+    output_group.add_argument(
+        "--save-model",
+        type=str,
+        default=DEFAULT_MODEL,
+        metavar="PATH",
+        help="Output path for trained model weights.",
     )
-    p.add_argument(
-        "--save-scaler", type=str, default=DEFAULT_SCALER, help="Scaler output path"
+    output_group.add_argument(
+        "--save-scaler",
+        type=str,
+        default=DEFAULT_SCALER,
+        metavar="PATH",
+        help="Output path for the fitted channel normalizer.",
     )
-    p.add_argument(
-        "--save-preds", type=str, default=DEFAULT_PREDS, help="Predictions output path"
+    output_group.add_argument(
+        "--save-preds",
+        type=str,
+        default=DEFAULT_PREDS,
+        metavar="PATH",
+        help="Output path for cached test predictions.",
     )
-    p.add_argument(
+    output_group.add_argument(
         "--save-temperature",
         type=str,
         default=DEFAULT_TEMPERATURE,
-        help="Temperature scaling output path",
+        metavar="PATH",
+        help="Output path for temperature-scaling metadata.",
     )
     return p
 

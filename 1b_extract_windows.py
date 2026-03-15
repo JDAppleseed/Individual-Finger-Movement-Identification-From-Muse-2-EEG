@@ -968,65 +968,93 @@ def should_drop_gap(
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
-    parser.add_argument(
+    parser = argparse.ArgumentParser(
+        description=(
+            "Step 1b: convert a recorded Step 1 session into resampled EEG windows "
+            "and labels for training and evaluation."
+        )
+    )
+    input_group = parser.add_argument_group("input selection")
+    input_group.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Load extraction settings from a JSON config file.",
+    )
+    input_group.add_argument(
         "--features", type=str, default=None, help="Override features path"
     )
-    parser.add_argument("--events", type=str, default=None, help="Override events path")
-    parser.add_argument(
+    input_group.add_argument(
+        "--events",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Override the event file path.",
+    )
+    input_group.add_argument(
         "--session-dir",
         type=str,
         default=None,
-        help="Session directory containing raw/ and events/ subfolders",
+        metavar="PATH",
+        help="Canonical Step 1 session directory containing raw/ and events/ subfolders.",
     )
-    parser.add_argument(
+
+    behavior_group = parser.add_argument_group("extraction behavior")
+    behavior_group.add_argument(
         "--allow-partial",
         action="store_true",
-        help="Allow partial sessions (skip strict manifest validation)",
+        help="Skip strict session-manifest validation and process a partial session.",
     )
-    parser.add_argument(
+    behavior_group.add_argument(
         "--subject-id",
         type=str,
         default=DEFAULT_SUBJECT_ID,
-        help="Subject ID to select latest session files",
+        metavar="ID",
+        help="Subject identifier used only when inferring a latest session from config/default locations.",
     )
-    parser.add_argument(
+    behavior_group.add_argument(
         "--target-fs",
         type=float,
         default=None,
-        help="Target sampling rate (Hz) for resampling windows",
+        metavar="HZ",
+        help="Resample each extracted window to this sampling rate, in Hz.",
     )
-    parser.add_argument(
+    behavior_group.add_argument(
         "--allow-gaps",
         action="store_true",
-        help="Keep windows with large gaps and mark them",
+        help="Keep windows that contain timing gaps and mark them instead of dropping them.",
     )
-    parser.add_argument(
+    behavior_group.add_argument(
         "--allow-gap-interp",
         action="store_true",
-        help="Allow interpolation across small gaps (requires --allow-gaps)",
+        help="Interpolate across small gaps when --allow-gaps is enabled.",
     )
-    parser.add_argument(
+    behavior_group.add_argument(
         "--gap-interp-max-s",
         type=float,
         default=0.05,
-        help="Maximum gap (s) to allow when interpolating across gaps",
+        metavar="SECONDS",
+        help="Maximum gap duration, in seconds, that may be interpolated.",
     )
-    parser.add_argument(
+    behavior_group.add_argument(
         "--ignore-misalignment",
         action="store_true",
-        help="Warn but continue if events are outside feature range",
+        help="Warn and continue if events extend outside the available signal range.",
     )
-    parser.add_argument(
-        "--seed", type=int, default=None, help="Seed for deterministic REST subsampling"
+    behavior_group.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Seed used for deterministic REST-window subsampling.",
     )
-    parser.add_argument(
+    behavior_group.add_argument(
         "--rest-policy",
         type=str,
         default=None,
         choices=["label_gated", "rest_by_exclusion"],
-        help="REST handling policy (default derived from LABEL_GATED)",
+        help="How REST and unlabeled windows are handled.",
     )
     args = parser.parse_args()
     defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}

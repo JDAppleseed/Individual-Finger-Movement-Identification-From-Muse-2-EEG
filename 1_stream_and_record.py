@@ -3064,85 +3064,250 @@ def _run_recording(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
-    parser.add_argument("--subject-id", type=str, default=None)
-    parser.add_argument("--session-id", type=str, default=None)
-    parser.add_argument("--session-name", dest="session_id", type=str, default=None)
-    parser.add_argument(
+    parser = argparse.ArgumentParser(
+        description=(
+            "Step 1: connect to an EEG LSL stream, optionally show a live plot, "
+            "mark events from the keyboard, and write a canonical recording session."
+        )
+    )
+    session_group = parser.add_argument_group("session and output")
+    session_group.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Load recorder settings from a JSON config file.",
+    )
+    session_group.add_argument(
+        "--subject-id",
+        type=str,
+        default=None,
+        metavar="ID",
+        help="Subject identifier used when creating or resolving the session.",
+    )
+    session_group.add_argument(
+        "--session-id",
+        type=str,
+        default=None,
+        metavar="ID",
+        help="Session identifier to use instead of the default/generated value.",
+    )
+    session_group.add_argument(
+        "--session-name",
+        dest="session_id",
+        type=str,
+        default=None,
+        metavar="ID",
+        help="Alias for --session-id.",
+    )
+    session_group.add_argument(
         "--session-dir",
         type=str,
         default=None,
-        help="Canonical session directory (Projects/<project>/subjects/<subject>/sessions/<session_id>/...)",
+        metavar="PATH",
+        help=(
+            "Canonical session directory "
+            "(Projects/<project>/subjects/<subject>/sessions/<session_id>/...)."
+        ),
     )
-    parser.add_argument("--output-dir", type=str, default=None)
-    parser.add_argument("--out-dir", dest="output_dir", type=str, default=None)
-    parser.add_argument("--stream-name", type=str, default="Muse2-EEG")
-    parser.add_argument("--stream-type", type=str, default="EEG")
+    session_group.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Legacy output directory override for recording artifacts.",
+    )
+    session_group.add_argument(
+        "--out-dir",
+        dest="output_dir",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Alias for --output-dir.",
+    )
 
-    parser.add_argument("--stream-ch", dest="stream_ch", type=int, default=4,
-                        help="Optional: expected channel count for the input LSL stream (used for filtering when auto-selecting).")
-    parser.add_argument("--stream-rate", dest="stream_rate", type=float, default=256.0,
-                        help="Optional: expected nominal sampling rate for the input LSL stream (used for filtering when auto-selecting).")
-    parser.add_argument("--lsl-source-id", type=str, default=None)
+    stream_group = parser.add_argument_group("stream selection")
+    stream_group.add_argument(
+        "--stream-name",
+        type=str,
+        default="Muse2-EEG",
+        metavar="NAME",
+        help="Preferred LSL stream name when resolving the EEG source.",
+    )
+    stream_group.add_argument(
+        "--stream-type",
+        type=str,
+        default="EEG",
+        metavar="TYPE",
+        help="Preferred LSL stream type when resolving the EEG source.",
+    )
+
+    stream_group.add_argument(
+        "--stream-ch",
+        dest="stream_ch",
+        type=int,
+        default=4,
+        metavar="N",
+        help="Expected channel count used only to filter candidate LSL streams during auto-selection.",
+    )
+    stream_group.add_argument(
+        "--stream-rate",
+        dest="stream_rate",
+        type=float,
+        default=256.0,
+        metavar="HZ",
+        help="Expected nominal sampling rate, in Hz, used only to filter candidate LSL streams.",
+    )
+    stream_group.add_argument(
+        "--lsl-source-id",
+        type=str,
+        default=None,
+        metavar="ID",
+        help="Exact LSL source_id to match when selecting a stream.",
+    )
     # CLI default: no plot (protect ingestion latency). UI/config can enable.
-    parser.add_argument(
+    plot_group = parser.add_argument_group("live plot")
+    plot_group.add_argument(
         "--enable-plot",
         dest="enable_plot",
         action="store_const",
         const=True,
         default=None,
+        help="Enable the live EEG plot.",
     )
-    parser.add_argument(
+    plot_group.add_argument(
         "--no-plot",
         dest="enable_plot",
         action="store_const",
         const=False,
+        help="Disable the live EEG plot.",
     )
-    parser.add_argument(
+    plot_group.add_argument(
         "--plot-scale",
         type=str,
         choices=["fixed", "robust", "robust_auto"],
         default="fixed",
+        help="Live-plot scaling mode: fixed limits or robust auto-scaling.",
     )
-    parser.add_argument("--plot-fixed-ylim", type=float, nargs=2, default=None)
-    parser.add_argument("--plot-robust-window-sec", type=float, default=PLOT_ROBUST_WINDOW_SEC)
-    parser.add_argument("--plot-robust-ema", type=float, default=PLOT_ROBUST_EMA)
-    parser.add_argument("--plot-reference-overlay", action="store_true", default=False)
-    parser.add_argument("--plot-window-sec", type=float, default=5.0, help="Seconds of EEG to display in the live plot.")
-    parser.add_argument(
+    plot_group.add_argument(
+        "--plot-fixed-ylim",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("MIN_UV", "MAX_UV"),
+        help="Y-axis limits, in microvolts, when --plot-scale=fixed.",
+    )
+    plot_group.add_argument(
+        "--plot-robust-window-sec",
+        type=float,
+        default=PLOT_ROBUST_WINDOW_SEC,
+        metavar="SECONDS",
+        help="History window, in seconds, used to estimate robust plot limits.",
+    )
+    plot_group.add_argument(
+        "--plot-robust-ema",
+        type=float,
+        default=PLOT_ROBUST_EMA,
+        metavar="ALPHA",
+        help="EMA smoothing factor for robust auto-scaling.",
+    )
+    plot_group.add_argument(
+        "--plot-reference-overlay",
+        action="store_true",
+        default=False,
+        help="Overlay reference guides on the live plot.",
+    )
+    plot_group.add_argument(
+        "--plot-window-sec",
+        type=float,
+        default=5.0,
+        metavar="SECONDS",
+        help="Seconds of EEG history to show in the live plot.",
+    )
+    plot_group.add_argument(
         "--plot-channel-spacing-uv",
         type=float,
         default=PLOT_CHANNEL_SPACING_UV,
-        help="Vertical spacing between channels in microvolts. Set <=0 to auto-scale.",
+        metavar="UV",
+        help="Vertical spacing between channels, in microvolts. Use <= 0 to auto-scale.",
     )
-    parser.add_argument(
+
+    event_group = parser.add_argument_group("event marking")
+    event_group.add_argument(
         "--event-marking-enabled",
         dest="event_marking_enabled",
         action="store_const",
         const=True,
         default=None,
+        help="Enable keyboard event marking during recording.",
     )
-    parser.add_argument(
+    event_group.add_argument(
         "--no-event-marking",
         dest="event_marking_enabled",
         action="store_const",
         const=False,
+        help="Disable keyboard event marking during recording.",
     )
-    parser.add_argument("--event-keymap", type=str, default=DEFAULT_EVENT_KEYMAP)
-    parser.add_argument("--raw-queue-maxsize", type=int, default=RAW_QUEUE_MAXSIZE)
-    parser.add_argument("--raw-shard-samples", type=int, default=RAW_SHARD_SAMPLES)
-    parser.add_argument("--mode", type=str, default="train_record")
-    parser.add_argument("--init-only", action="store_true", default=False)
-    parser.add_argument("--duration-s", type=float, default=None, help="Stop recording after N seconds.")
-    parser.add_argument(
+    event_group.add_argument(
+        "--event-keymap",
+        type=str,
+        default=DEFAULT_EVENT_KEYMAP,
+        metavar="SPEC",
+        help="Keyboard mapping for live event marking (for example: '1:thumb,o:open').",
+    )
+
+    record_group = parser.add_argument_group("recording controls")
+    record_group.add_argument(
+        "--raw-queue-maxsize",
+        type=int,
+        default=RAW_QUEUE_MAXSIZE,
+        metavar="N",
+        help="Maximum raw-sample queue size before backpressure handling begins.",
+    )
+    record_group.add_argument(
+        "--raw-shard-samples",
+        type=int,
+        default=RAW_SHARD_SAMPLES,
+        metavar="N",
+        help="Number of samples to write per raw shard file.",
+    )
+    record_group.add_argument(
+        "--mode",
+        type=str,
+        default="train_record",
+        metavar="NAME",
+        help="Recorder mode label stored in session metadata.",
+    )
+    record_group.add_argument(
+        "--init-only",
+        action="store_true",
+        default=False,
+        help="Initialize the session, verify stream setup, and exit before recording.",
+    )
+    record_group.add_argument(
+        "--duration-s",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Stop recording automatically after N seconds.",
+    )
+    record_group.add_argument(
         "--dry-run",
         action="store_true",
         default=False,
-        help="Resolve LSL stream and exit without writing data.",
+        help="Resolve the LSL stream and exit without writing data.",
     )
-    parser.add_argument("--force-new-session", action="store_true", default=False)
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose output for debugging.")
+    record_group.add_argument(
+        "--force-new-session",
+        action="store_true",
+        default=False,
+        help="Create a new session directory even if the target session already exists.",
+    )
+    record_group.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging for debugging.",
+    )
 
     args = parser.parse_args()
     defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}

@@ -208,30 +208,49 @@ def _events_to_records(events_df: pd.DataFrame) -> list[dict]:
     return records
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument(
+parser = argparse.ArgumentParser(
+    description=(
+        "Step 5: open an interactive event-review UI for a recorded session "
+        "and save edited event annotations."
+    ),
+    epilog=(
+        "Keyboard shortcuts:\n"
+        "  Left/Right  move cursor by 0.1 s\n"
+        "  Up/Down     move cursor by 1.0 s\n"
+        "  n / p       next or previous event\n"
+        "  e / d       edit or delete selected event\n"
+        "  s / q       save or quit"
+    ),
+    formatter_class=argparse.RawDescriptionHelpFormatter,
+)
+input_group = parser.add_argument_group("input selection")
+input_group.add_argument(
     "--session-dir",
     type=str,
     default=None,
-    help="Session directory (defaults to events/events.jsonl + raw/eeg_raw_shard_*.npy).",
+    metavar="PATH",
+    help="Canonical session directory. Defaults to events/events.jsonl plus raw/eeg_raw_shard_*.npy.",
 )
-parser.add_argument(
+input_group.add_argument(
     "--subject-id",
     type=str,
     default="8-M16",
-    help="(Deprecated) Subject ID lookup is no longer supported without explicit paths.",
+    metavar="ID",
+    help="Deprecated. Subject lookup is not supported without explicit paths.",
 )
-parser.add_argument(
+input_group.add_argument(
     "--events",
     type=str,
     default=None,
-    help="Override events path (events.jsonl / legacy events.csv).",
+    metavar="PATH",
+    help="Override the event file path (events.jsonl, events.json, or legacy events.csv).",
 )
-parser.add_argument(
+input_group.add_argument(
     "--features",
     type=str,
     default=None,
-    help="Override legacy features CSV path (optional).",
+    metavar="PATH",
+    help="Optional raw/features path override used for plotting alignment.",
 )
 args = parser.parse_args()
 subject_id_provided = "--subject-id" in sys.argv

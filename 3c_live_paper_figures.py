@@ -161,31 +161,47 @@ SHOW_PLOTS = os.environ.get("SHOW_PLOTS", "0") == "1"
 # ===== LOAD DATA =========
 # =========================
 
-parser = argparse.ArgumentParser()
-parser.add_argument(
+parser = argparse.ArgumentParser(
+    description=(
+        "Step 3c: generate interactive and paper-style evaluation figures from "
+        "a trained Step 2 run and its Step 3 outputs."
+    )
+)
+selection_group = parser.add_argument_group("input selection")
+selection_group.add_argument(
     "--run-dir",
     type=str,
     default=None,
-    help="Model run directory override (e.g. .../processed/models/<run_id>).",
+    metavar="PATH",
+    help="Specific Step 2 run directory to visualize (for example: .../processed/models/<run_id>).",
 )
-parser.add_argument(
+selection_group.add_argument(
     "--project",
     type=str,
     required=False,
-    help="Project identifier",
+    metavar="NAME",
+    help="Project identifier used to resolve a session when --run-dir is not provided.",
 )
-parser.add_argument("--subject", type=str, required=False, help="Subject identifier")
-parser.add_argument(
+selection_group.add_argument(
+    "--subject",
+    type=str,
+    required=False,
+    metavar="ID",
+    help="Subject identifier used to resolve a session when --run-dir is not provided.",
+)
+selection_group.add_argument(
     "--session",
     type=str,
     required=False,
-    help="Session identifier (defaults to latest for subject)",
+    metavar="ID",
+    help="Session identifier to visualize. Defaults to the latest session for the subject.",
 )
-parser.add_argument(
+selection_group.add_argument(
     "--session-dir",
     type=str,
     default=None,
-    help="Legacy session directory override from UI",
+    metavar="PATH",
+    help="Legacy session directory override used by the UI.",
 )
 args = parser.parse_args()
 

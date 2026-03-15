@@ -18,24 +18,40 @@ from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_
 # directory or an explicit experiment hash.
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
+    parser = argparse.ArgumentParser(
+        description=(
+            "Step 4: generate run-level or subject-level reports from Step 2 "
+            "and Step 3 artifacts."
+        )
+    )
+    selection_group = parser.add_argument_group("report selection")
+    selection_group.add_argument(
         "--session-dir",
         type=str,
         default=None,
-        help="Canonical session directory (writes reports under <session_dir>/processed/reports/<run_id>/).",
+        metavar="PATH",
+        help="Canonical session directory. Reports are written under processed/reports/<run_id>/.",
     )
-    parser.add_argument(
+    selection_group.add_argument(
         "--run-dir",
         type=str,
         default=None,
-        help="Model run directory (defaults to latest under <session_dir>/processed/models/).",
+        metavar="PATH",
+        help="Specific model run directory to summarize. Defaults to the latest run under the session.",
     )
-    parser.add_argument(
-        "--subject-id", type=str, default="2-M16", help="Subject ID to report"
+    selection_group.add_argument(
+        "--subject-id",
+        type=str,
+        default="2-M16",
+        metavar="ID",
+        help="Subject identifier used only for legacy --exp-hash report generation.",
     )
-    parser.add_argument(
-        "--exp-hash", type=str, default=None, help="Override experiment hash"
+    selection_group.add_argument(
+        "--exp-hash",
+        type=str,
+        default=None,
+        metavar="HASH",
+        help="Legacy experiment hash override for report generation outside a session directory.",
     )
     args = parser.parse_args()
 

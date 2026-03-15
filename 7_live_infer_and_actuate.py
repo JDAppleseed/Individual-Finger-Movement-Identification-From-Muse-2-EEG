@@ -429,15 +429,15 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "no_file_io": False,
         "subject_id": None,
         "project_name": None,
-        "postprocess": True,
-        "smoothing_enabled": bool(pp_defaults.smoothing_enabled),
+        "postprocess": False,
+        "smoothing_enabled": False,
         "smoothing_method": str(pp_defaults.smoothing_method),
         "smoothing_window": int(pp_defaults.smoothing_window),
-        "hysteresis_enabled": bool(pp_defaults.hysteresis_enabled),
+        "hysteresis_enabled": False,
         "hysteresis_frames": int(pp_defaults.hysteresis_frames),
         "threshold_action": float(pp_defaults.threshold_action),
         "threshold_finger": float(pp_defaults.threshold_finger),
-        "adjacency_enabled": bool(pp_defaults.adjacency_enabled),
+        "adjacency_enabled": False,
         "hysteresis_margin": float(pp_defaults.hysteresis_margin),
         "finger_delta": float(pp_defaults.finger_delta),
         "finger_mode": str(pp_defaults.finger_mode),
@@ -447,74 +447,168 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "uncertainty_weight": float(infer_defaults.uncertainty_weight),
         "pred_log": None,
     }
-    p = argparse.ArgumentParser(description="Live inference + optional robotic hand actuation")
+    p = argparse.ArgumentParser(
+        description=(
+            "Step 7: run live EEG inference from an LSL stream and optionally "
+            "send commands to the robotic hand."
+        )
+    )
     p.set_defaults(**defaults)
 
-    # Existing args (preserved from original file)
-    p.add_argument("--config", required=True, type=str, help="Path to step7 config JSON")
-    p.add_argument("--model-path", type=str, help="Override model file path.")
-    p.add_argument("--scaler-path", type=str, help="Override scaler file path.")
-    p.add_argument("--out-dir", type=str, help="Override output directory.")
-    p.add_argument("--device", type=str, help="torch device override (e.g., cpu, mps, cuda)")
-    p.add_argument(
+    selection_group = p.add_argument_group("session and model")
+    selection_group.add_argument(
+        "--config",
+        required=True,
+        type=str,
+        metavar="PATH",
+        help="Path to the Step 7 JSON config file.",
+    )
+    selection_group.add_argument(
+        "--model-path",
+        type=str,
+        metavar="PATH",
+        help="Override the model weights path.",
+    )
+    selection_group.add_argument(
+        "--scaler-path",
+        type=str,
+        metavar="PATH",
+        help="Override the channel normalizer path.",
+    )
+    selection_group.add_argument(
+        "--out-dir",
+        type=str,
+        metavar="PATH",
+        help="Override the output directory used for live-session artifacts.",
+    )
+    selection_group.add_argument(
+        "--device",
+        type=str,
+        metavar="NAME",
+        help="Torch device override (for example: cpu, mps, cuda).",
+    )
+    selection_group.add_argument(
         "--session-dir",
         type=str,
-        help="Session directory (derives model/scaler + output dir defaults).",
+        metavar="PATH",
+        help="Session directory used to derive default model, scaler, and output paths.",
     )
-    p.add_argument("--subject-id", type=str, help="Subject ID (auto-resolve latest session).")
-    p.add_argument("--project-name", type=str, help="Project name (auto-resolve latest session).")
+    selection_group.add_argument(
+        "--subject-id",
+        type=str,
+        metavar="ID",
+        help="Subject ID used to auto-resolve the latest session when --session-dir is omitted.",
+    )
+    selection_group.add_argument(
+        "--project-name",
+        type=str,
+        metavar="NAME",
+        help="Project name used with --subject-id to auto-resolve the latest session.",
+    )
 
-    p.add_argument("--stream-name", dest="stream_name", type=str, help="LSL stream name override.")
-    p.add_argument("--stream-type", dest="stream_type", type=str, help="LSL stream type override.")
-    p.add_argument("--window_sec", "--window-sec", dest="window_sec", type=float, help="Window length (s).")
-    p.add_argument("--hop_sec", "--hop-sec", dest="hop_sec", type=float, help="Window hop (s).")
-    p.add_argument("--target_fs", "--target-fs", dest="target_fs", type=float, help="Target FS for resampling.")
+    stream_group = p.add_argument_group("stream and timing")
+    stream_group.add_argument(
+        "--stream-name",
+        dest="stream_name",
+        type=str,
+        metavar="NAME",
+        help="Override the LSL stream name used for live inference.",
+    )
+    stream_group.add_argument(
+        "--stream-type",
+        dest="stream_type",
+        type=str,
+        metavar="TYPE",
+        help="Override the LSL stream type used for live inference.",
+    )
+    stream_group.add_argument(
+        "--window-sec",
+        "--window_sec",
+        dest="window_sec",
+        type=float,
+        metavar="SECONDS",
+        help="Window length, in seconds, for each inference step.",
+    )
+    stream_group.add_argument(
+        "--hop-sec",
+        "--hop_sec",
+        dest="hop_sec",
+        type=float,
+        metavar="SECONDS",
+        help="Hop size, in seconds, between successive inference windows.",
+    )
+    stream_group.add_argument(
+        "--target-fs",
+        "--target_fs",
+        dest="target_fs",
+        type=float,
+        metavar="HZ",
+        help="Target sampling rate, in Hz, for resampling incoming windows.",
+    )
 
-    p.add_argument(
-        "--latency_threshold_ms",
+    stream_group.add_argument(
         "--latency-threshold-ms",
+        "--latency_threshold_ms",
         dest="latency_threshold_ms",
         type=float,
-        help="Latency p95 threshold (ms).",
+        metavar="MS",
+        help="Warn/drop/degrade threshold for p95 latency, in milliseconds.",
     )
-    p.add_argument(
-        "--latency_policy",
+    stream_group.add_argument(
         "--latency-policy",
+        "--latency_policy",
         dest="latency_policy",
         type=str,
         choices=["warn", "drop", "degrade"],
-        help="Latency policy (warn/drop/degrade).",
+        help="What to do when latency exceeds the threshold: warn, drop, or degrade.",
     )
-    p.add_argument("--allow_drop", "--allow-drop", dest="allow_drop", action="store_true")
-    p.add_argument("--log_every", "--log-every", dest="log_every", type=float, help="Log interval (s).")
-    p.add_argument(
+    stream_group.add_argument(
+        "--allow-drop",
+        "--allow_drop",
+        dest="allow_drop",
+        action="store_true",
+        help="Allow dropping work instead of blocking when the live loop falls behind.",
+    )
+    stream_group.add_argument(
+        "--log-every",
+        "--log_every",
+        dest="log_every",
+        type=float,
+        metavar="SECONDS",
+        help="Emit progress logs at this interval, in seconds.",
+    )
+    stream_group.add_argument(
+        "--live-viz",
         "--live_viz",
         dest="LIVE_VIZ_ENABLED",
         action="store_true",
-        help="Emit live visualization updates (UI model view).",
+        help="Emit live visualization updates for the UI model view.",
     )
-    p.add_argument(
+    stream_group.add_argument(
+        "--live-viz-fps",
         "--live_viz_fps",
         dest="LIVE_VIZ_FPS",
         type=float,
-        help="Live visualization update rate (Hz).",
+        metavar="HZ",
+        help="Live visualization update rate, in Hz.",
     )
 
     # Postprocess knobs
-    post_group = p.add_mutually_exclusive_group()
+    postprocess_group = p.add_argument_group("postprocessing")
+    post_group = postprocess_group.add_mutually_exclusive_group()
     post_group.add_argument(
         "--postprocess",
         dest="postprocess",
         action="store_true",
-        help="Enable postprocess smoothing/thresholding.",
+        help="Enable postprocessing before predictions are emitted or actuated.",
     )
     post_group.add_argument(
         "--no-postprocess",
         dest="postprocess",
         action="store_false",
-        help="Disable postprocess and use raw argmax predictions.",
+        help="Disable postprocessing and use raw argmax predictions.",
     )
-    smooth_group = p.add_mutually_exclusive_group()
+    smooth_group = postprocess_group.add_mutually_exclusive_group()
     smooth_group.add_argument(
         "--smoothing-enabled",
         dest="smoothing_enabled",
@@ -525,9 +619,9 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "--no-smoothing",
         dest="smoothing_enabled",
         action="store_false",
-        help="Disable postprocess smoothing.",
+        help="Disable the smoothing stage inside postprocessing.",
     )
-    hyst_group = p.add_mutually_exclusive_group()
+    hyst_group = postprocess_group.add_mutually_exclusive_group()
     hyst_group.add_argument(
         "--hysteresis-enabled",
         dest="hysteresis_enabled",
@@ -538,14 +632,14 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "--no-hysteresis",
         dest="hysteresis_enabled",
         action="store_false",
-        help="Disable postprocess hysteresis.",
+        help="Disable the hysteresis stage inside postprocessing.",
     )
-    adj_group = p.add_mutually_exclusive_group()
+    adj_group = postprocess_group.add_mutually_exclusive_group()
     adj_group.add_argument(
         "--adjacency-enabled",
         dest="adjacency_enabled",
         action="store_true",
-        help="Enable adjacency correction for fingers.",
+        help="Enable adjacency correction for finger predictions.",
     )
     adj_group.add_argument(
         "--no-adjacency",
@@ -553,67 +647,67 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         action="store_false",
         help="Disable adjacency correction for fingers.",
     )
-    p.add_argument(
+    postprocess_group.add_argument(
         "--smoothing-method",
         type=str,
         choices=["vote", "ema"],
         help="Postprocess smoothing method.",
     )
-    p.add_argument(
+    postprocess_group.add_argument(
         "--smoothing-window",
         type=int,
-        help="Postprocess smoothing window size.",
+        help="Window size used by the smoothing stage.",
     )
-    p.add_argument(
+    postprocess_group.add_argument(
         "--hysteresis-frames",
         type=int,
-        help="Postprocess hysteresis frames.",
+        help="Number of consecutive frames required by hysteresis.",
     )
-    p.add_argument(
+    postprocess_group.add_argument(
         "--threshold-action",
         type=float,
-        help="Postprocess action confidence threshold.",
+        help="Minimum action confidence required after postprocessing.",
     )
-    p.add_argument(
+    postprocess_group.add_argument(
         "--threshold-finger",
         type=float,
-        help="Postprocess finger confidence threshold.",
+        help="Minimum finger confidence required after postprocessing.",
     )
-    p.add_argument(
+    postprocess_group.add_argument(
         "--hysteresis-margin",
         type=float,
         help="Postprocess hysteresis margin.",
     )
-    p.add_argument(
+    postprocess_group.add_argument(
         "--finger-delta",
         type=float,
-        help="Postprocess finger delta threshold.",
+        help="Minimum finger-score gap used by postprocessing.",
     )
-    p.add_argument(
+    postprocess_group.add_argument(
         "--finger-mode",
         type=str,
         choices=["raw", "smooth"],
-        help="Finger smoothing mode (raw/smooth).",
+        help="Which finger signal to use after postprocessing: raw or smoothed.",
     )
-    p.add_argument(
+    postprocess_group.add_argument(
         "--use-inference-engine",
         dest="use_inference_engine",
         action="store_true",
         help="Use utils.inference.InferenceEngine for MC-dropout mean probabilities and uncertainty.",
     )
-    p.add_argument(
+    postprocess_group.add_argument(
         "--mc-passes",
         dest="mc_passes",
         type=int,
         help="Monte Carlo dropout passes when --use-inference-engine is enabled.",
     )
-    p.add_argument(
+    postprocess_group.add_argument(
         "--uncertainty-base-threshold",
         dest="uncertainty_base_threshold",
         type=float,
         help="Base action threshold used for adaptive uncertainty gating.",
     )
-    p.add_argument(
+    postprocess_group.add_argument(
         "--uncertainty-weight",
         dest="uncertainty_weight",
         type=float,
@@ -621,78 +715,89 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
     )
 
     # New: actuation knobs
-    p.add_argument(
-        "--enable_actuation",
+    actuation_group = p.add_argument_group("actuation")
+    actuation_group.add_argument(
         "--enable-actuation",
+        "--enable_actuation",
         dest="enable_actuation",
         action="store_true",
-        help="Enable sending commands to Arduino hand",
+        help="Enable sending commands to the Arduino-controlled hand.",
     )
-    p.add_argument(
-        "--serial_port",
+    actuation_group.add_argument(
         "--serial-port",
+        "--serial_port",
         dest="serial_port",
         type=str,
-        help="Serial port (auto-detected when omitted and actuation is enabled)",
+        metavar="PORT",
+        help="Serial port to use. Auto-detected when omitted and actuation is enabled.",
     )
-    p.add_argument(
-        "--serial_baud",
+    actuation_group.add_argument(
         "--serial-baud",
+        "--serial_baud",
         dest="serial_baud",
         type=int,
-        help="Baud rate (must match Arduino sketch)",
+        help="Serial baud rate. Must match the Arduino sketch.",
     )
-    p.add_argument(
-        "--actuation_min_prob",
+    actuation_group.add_argument(
         "--actuation-min-prob",
+        "--actuation_min_prob",
         dest="actuation_min_prob",
         type=float,
-        help="Min joint confidence to actuate",
+        help="Minimum joint confidence required before a command is sent.",
     )
-    p.add_argument(
-        "--actuation_stability",
+    actuation_group.add_argument(
         "--actuation-stability",
+        "--actuation_stability",
         dest="actuation_stability",
         type=int,
-        help="Require same decision N windows in a row",
+        help="Require the same decision for N consecutive windows before actuating.",
     )
-    p.add_argument(
-        "--actuation_cooldown_ms",
+    actuation_group.add_argument(
         "--actuation-cooldown-ms",
+        "--actuation_cooldown_ms",
         dest="actuation_cooldown_ms",
         type=int,
-        help="Min time between sends",
+        metavar="MS",
+        help="Minimum time, in milliseconds, between actuation commands.",
     )
-    p.add_argument(
+    actuation_group.add_argument(
         "--modulate-actuation-speed",
         dest="modulate_actuation_speed",
         action="store_true",
         help="Scale actuation speed from prediction confidence.",
     )
-    p.add_argument(
+    actuation_group.add_argument(
         "--actuation-speed-gamma",
         dest="actuation_speed_gamma",
         type=float,
         help="Gamma curve applied to confidence-based actuation speed.",
     )
-    p.add_argument(
+    actuation_group.add_argument(
         "--bluetooth-target",
         dest="bluetooth_target",
         type=str,
-        help="Compatibility option for the UI connector; ignored by the inference script.",
+        metavar="NAME",
+        help="Compatibility option for the UI connector. Ignored by the inference script itself.",
     )
-    p.add_argument("--pred-log", type=str, help="Optional prediction log JSONL path override.")
-    p.add_argument(
+    output_group = p.add_argument_group("outputs")
+    output_group.add_argument(
+        "--pred-log",
+        type=str,
+        metavar="PATH",
+        help="Optional JSONL path override for per-window prediction logs.",
+    )
+    output_group.add_argument(
+        "--allow-outside-base",
         "--allow_outside_base",
         action="store_true",
-        help="Allow output dir outside session/config base directory.",
+        help="Allow the output directory to live outside the session/config base directory.",
     )
-    p.add_argument(
-        "--no_file_io",
+    output_group.add_argument(
         "--no-file-io",
+        "--no_file_io",
         dest="no_file_io",
         action="store_true",
-        help="Disable all file outputs (raw shards + log file) for max performance.",
+        help="Disable all file outputs, including raw shards and the live log file.",
     )
 
     return p, defaults

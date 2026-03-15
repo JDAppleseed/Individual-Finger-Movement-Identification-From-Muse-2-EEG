@@ -650,131 +650,184 @@ def _split_with_checks(
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default=None, help="Path to JSON config")
-    parser.add_argument(
+    parser = argparse.ArgumentParser(
+        description=(
+            "Step 3: evaluate a trained Step 2 run, optionally apply postprocessing, "
+            "and write calibrated metrics, plots, and manifests."
+        )
+    )
+    input_group = parser.add_argument_group("input selection")
+    input_group.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Load evaluation settings from a JSON config file.",
+    )
+    input_group.add_argument(
         "--run-dir",
         type=str,
         default=None,
-        help="Model run directory override (e.g. .../processed/models/<run_id>).",
+        metavar="PATH",
+        help="Specific Step 2 run directory to evaluate (for example: .../processed/models/<run_id>).",
     )
-    parser.add_argument(
+    input_group.add_argument(
         "--project",
         type=str,
         required=False,
-        help="Project identifier",
+        metavar="NAME",
+        help="Project identifier used to resolve a session when --run-dir is not provided.",
     )
-    parser.add_argument(
+    input_group.add_argument(
         "--subject",
         type=str,
         required=False,
-        help="Subject identifier",
+        metavar="ID",
+        help="Subject identifier used to resolve a session when --run-dir is not provided.",
     )
-    parser.add_argument(
+    input_group.add_argument(
         "--session",
         type=str,
         required=False,
-        help="Session identifier (defaults to latest for subject)",
+        metavar="ID",
+        help="Session identifier to evaluate. Defaults to the latest session for the subject.",
     )
-    parser.add_argument(
+    input_group.add_argument(
         "--session-dir",
         type=str,
         default=None,
-        help="Legacy session directory override from UI",
+        metavar="PATH",
+        help="Legacy session directory override used by the UI.",
     )
-    parser.add_argument(
+    input_group.add_argument(
         "--subject-id",
         type=str,
         default="",
-        help="Filter evaluation to a single subject_id",
+        metavar="ID",
+        help="Filter the evaluation dataset to a single subject_id.",
     )
-    parser.add_argument(
+    runtime_group = parser.add_argument_group("runtime and outputs")
+    runtime_group.add_argument(
         "--max-samples",
         type=int,
         default=None,
-        help="Limit samples for eval (memory guard)",
+        metavar="N",
+        help="Cap the number of windows evaluated. Useful as a memory guard.",
     )
-    parser.add_argument(
+    runtime_group.add_argument(
         "--batch-size",
         type=int,
         default=DEFAULT_BATCH_SIZE,
-        help="Inference batch size",
+        help="Inference batch size.",
     )
-    parser.add_argument(
-        "--save-manifest", type=str, default=None, help="Path to write JSON manifest"
+    runtime_group.add_argument(
+        "--save-manifest",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Write an evaluation manifest JSON to this path.",
     )
-    parser.add_argument(
+    runtime_group.add_argument(
         "--no-manifest", action="store_true", help="Disable manifest output"
     )
-    parser.add_argument(
+    runtime_group.add_argument(
         "--deterministic",
         dest="deterministic",
         action="store_true",
         default=True,
-        help="Enable deterministic CPU evaluation",
+        help="Enable deterministic evaluation where possible.",
     )
-    parser.add_argument(
+    runtime_group.add_argument(
         "--no-deterministic",
         dest="deterministic",
         action="store_false",
-        help="Disable deterministic behavior (not recommended)",
+        help="Allow non-deterministic execution for speed or platform compatibility.",
     )
-    parser.add_argument(
-        "--split-seed", type=int, default=SEED, help="Seed used for split attempts"
+    split_group = parser.add_argument_group("split overrides")
+    split_group.add_argument(
+        "--split-seed",
+        type=int,
+        default=SEED,
+        help="Random seed used when rebuilding the evaluation split.",
     )
-    parser.add_argument(
+    split_group.add_argument(
         "--test-size",
         type=float,
         default=None,
-        help="Test split fraction (defaults to train_config.json when available).",
+        help="Fraction reserved for the test split. Defaults to train_config.json when available.",
     )
-    parser.add_argument(
+    split_group.add_argument(
         "--split-mode",
         type=str,
         default=None,
         choices=["group_trial", "holdout_session"],
-        help="Split mode (defaults to train_config.json when available).",
+        help="Split strategy to use when rebuilding the split. Defaults to train_config.json when available.",
     )
-    parser.add_argument(
+    split_group.add_argument(
         "--purge-seconds",
         type=float,
         default=None,
-        help="Purge train windows within this many seconds of any test window (same session).",
+        help="Drop training windows within this many seconds of any test window from the same session.",
     )
-    parser.add_argument(
+    split_group.add_argument(
         "--hop-seconds",
         type=float,
         default=None,
-        help="Optional hop size in seconds (used for purge heuristics if needed).",
+        help="Window hop size, in seconds, used by leakage-purge heuristics when needed.",
     )
-    parser.add_argument(
+    split_group.add_argument(
         "--export-test-pred",
         action="store_true",
-        help="Export cached predictions for test split",
+        help="Export cached predictions for the test split.",
     )
-    parser.add_argument(
+    post_group = parser.add_argument_group("postprocessing")
+    post_group.add_argument(
         "--smooth-action-only",
         action="store_true",
-        help="Smooth action only; finger stays raw (except forced NONE during REST)",
+        help="Smooth only the action head. Finger predictions stay raw except REST forces NONE.",
     )
 
-    parser.add_argument(
+    post_group.add_argument(
         "--smooth", action="store_true", help="Enable postprocess smoothing"
     )
-    parser.add_argument(
-        "--smooth-method", type=str, default="vote", choices=["vote", "ema"]
+    post_group.add_argument(
+        "--smooth-method",
+        type=str,
+        default="vote",
+        choices=["vote", "ema"],
+        help="Smoothing method used when --smooth is enabled.",
     )
-    parser.add_argument("--smooth-window", type=int, default=5)
-    parser.add_argument(
+    post_group.add_argument(
+        "--smooth-window",
+        type=int,
+        default=5,
+        help="Window size used by the smoothing stage.",
+    )
+    post_group.add_argument(
         "--hysteresis", action="store_true", help="Enable action hysteresis"
     )
-    parser.add_argument("--hysteresis-frames", type=int, default=3)
-    parser.add_argument("--threshold-action", type=float, default=0.75)
-    parser.add_argument("--threshold-finger", type=float, default=0.75)
-    parser.add_argument(
+    post_group.add_argument(
+        "--hysteresis-frames",
+        type=int,
+        default=3,
+        help="Number of consecutive frames required by hysteresis.",
+    )
+    post_group.add_argument(
+        "--threshold-action",
+        type=float,
+        default=0.75,
+        help="Minimum action confidence required after postprocessing.",
+    )
+    post_group.add_argument(
+        "--threshold-finger",
+        type=float,
+        default=0.75,
+        help="Minimum finger confidence required after postprocessing.",
+    )
+    post_group.add_argument(
         "--adjacency",
         action="store_true",
-        help="Enable adjacency assist (finger correction)",
+        help="Enable finger adjacency correction during postprocessing.",
     )
     args = parser.parse_args()
     defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
