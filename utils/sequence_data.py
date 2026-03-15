@@ -226,7 +226,13 @@ def apply_channel_normalizer(X: np.ndarray, normalizer: Dict[str, Any]) -> np.nd
 
 def summarize_windows(X: np.ndarray) -> pd.DataFrame:
     """
-    Convert (N,T,C) windows into simple per-channel summary features.
+    Convert (N,T,C) windows into compact per-channel summary features for
+    diagnostic tooling such as Deepchecks.
+
+    These features are intentionally simpler than the raw sequence input used by
+    the CNN+LSTM model. Favor lower-redundancy summaries over multiple nearly
+    equivalent magnitude statistics so the diagnostic report surfaces more
+    meaningful train/test differences.
     """
     X = np.asarray(X)
     if X.ndim != 3:
@@ -234,8 +240,12 @@ def summarize_windows(X: np.ndarray) -> pd.DataFrame:
 
     means = X.mean(axis=1)
     stds = X.std(axis=1)
-    rms = np.sqrt(np.mean(np.square(X), axis=1))
-    ptp = np.ptp(X, axis=1)
+    line_length = np.mean(np.abs(np.diff(X, axis=1)), axis=1)
+    centered = X - means[:, None, :]
+    zero_cross_rate = np.mean(
+        centered[:, :-1, :] * centered[:, 1:, :] < 0.0,
+        axis=1,
+    )
 
     feats = []
     names = []
@@ -245,10 +255,10 @@ def summarize_windows(X: np.ndarray) -> pd.DataFrame:
         names.append(f"ch{idx + 1}_mean")
         feats.append(stds[:, idx])
         names.append(f"ch{idx + 1}_std")
-        feats.append(rms[:, idx])
-        names.append(f"ch{idx + 1}_rms")
-        feats.append(ptp[:, idx])
-        names.append(f"ch{idx + 1}_ptp")
+        feats.append(line_length[:, idx])
+        names.append(f"ch{idx + 1}_line_length")
+        feats.append(zero_cross_rate[:, idx])
+        names.append(f"ch{idx + 1}_zero_cross_rate")
 
     feat_mat = np.stack(feats, axis=1)
     return pd.DataFrame(feat_mat, columns=names)

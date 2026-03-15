@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
+import pandas as pd
 import torch
 
 from deepchecks.tabular import Dataset
@@ -344,14 +345,71 @@ def _split_with_checks(
 
 
 def _dataset_kwargs():
-    try:
-        import inspect
+    return {
+        "index_name": "row_id",
+        "set_index_from_dataframe_index": True,
+    }
 
-        if "index_name" in inspect.signature(Dataset).parameters:
-            return {"index_name": "window_idx"}
-    except Exception:
-        pass
-    return {}
+
+def _prepare_deepchecks_split(df, labels, lookup_ids, seed: int):
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(len(df))
+    df = df.iloc[order].reset_index(drop=True).copy()
+    labels = np.asarray(labels)[order]
+    lookup_ids = np.asarray(lookup_ids, dtype=np.int64)[order]
+    df.index = pd.Index(rng.permutation(len(df)), name="row_id")
+    return df, labels, lookup_ids
+
+
+def _row_lookup_key(values) -> bytes:
+    arr = np.asarray(values, dtype=np.float32)
+    return np.round(arr, decimals=6).tobytes()
+
+
+def _build_feature_row_lookup(df, lookup_ids, feature_names):
+    mapping = {}
+    values = np.asarray(df[feature_names], dtype=np.float32)
+    for row, lookup_id in zip(values, np.asarray(lookup_ids, dtype=np.int64)):
+        mapping.setdefault(_row_lookup_key(row), []).append(int(lookup_id))
+    return mapping
+
+
+def _lookup_window_idx_from_features(
+    X_tabular, feature_names, feature_row_lookup
+) -> np.ndarray:
+    if not hasattr(X_tabular, "__getitem__"):
+        raise KeyError("Deepchecks input is missing required lookup information.")
+    try:
+        values = np.asarray(X_tabular[feature_names], dtype=np.float32)
+    except Exception as exc:
+        raise KeyError("Deepchecks input is missing required lookup information.") from exc
+
+    used_counts = {}
+    resolved = np.zeros((len(values),), dtype=np.int64)
+    for i, row in enumerate(values):
+        key = _row_lookup_key(row)
+        candidates = feature_row_lookup.get(key)
+        if not candidates:
+            raise KeyError("Could not map Deepchecks rows back to window tensors.")
+        pos = used_counts.get(key, 0)
+        if pos >= len(candidates):
+            raise KeyError("Deepchecks lookup exhausted for repeated feature rows.")
+        resolved[i] = candidates[pos]
+        used_counts[key] = pos + 1
+    return resolved
+
+
+def _extract_window_idx(X_tabular) -> np.ndarray:
+    if hasattr(X_tabular, "columns") and "window_idx" in X_tabular:
+        return X_tabular["window_idx"].to_numpy().astype(np.int64)
+    if hasattr(X_tabular, "index") and getattr(X_tabular.index, "name", None) == "window_idx":
+        try:
+            return np.asarray(X_tabular.index, dtype=np.int64)
+        except Exception as exc:
+            raise KeyError(
+                "Deepchecks input is missing required window lookup indices."
+            ) from exc
+    raise KeyError("Deepchecks input is missing required window lookup indices.")
 
 
 parser = argparse.ArgumentParser(
@@ -670,26 +728,44 @@ X_test = apply_channel_normalizer(X_test, normalizer)
 # ===== TABULAR SUMMARY ===
 # =========================
 # Deepchecks needs tabular data; we summarize windows here but
-# run the model on raw window tensors via window_idx in predict().
+# run the model on normalized window tensors via synthetic lookup indices.
+
+X_lookup = np.concatenate([X_train, X_test], axis=0)
+train_lookup_ids = np.arange(len(X_train), dtype=np.int64)
+test_lookup_ids = np.arange(len(X_train), len(X_train) + len(X_test), dtype=np.int64)
 
 train_df = summarize_windows(X_train)
-train_df["window_idx"] = train_idx
 test_df = summarize_windows(X_test)
-test_df["window_idx"] = test_idx
+train_df, y_train, train_lookup_ids = _prepare_deepchecks_split(
+    train_df, y_train, train_lookup_ids, int(split_seed) + 101
+)
+test_df, y_test, test_lookup_ids = _prepare_deepchecks_split(
+    test_df, y_test, test_lookup_ids, int(split_seed) + 202
+)
+train_labels = pd.Series(y_train, index=train_df.index)
+test_labels = pd.Series(y_test, index=test_df.index)
 
-assert "window_idx" in train_df.columns and "window_idx" in test_df.columns
-assert test_idx.max() < len(X) and train_idx.max() < len(X)
+assert len(train_df) == len(y_train) == len(X_train)
+assert len(test_df) == len(y_test) == len(X_test)
 assert y_action.min() >= 0
 assert set(np.unique(y_action)).issubset(set(ACTION_NAMES.keys()))
 assert max(ACTION_NAMES.keys()) >= int(y_action.max())
 
-feature_names = [c for c in train_df.columns if c != "window_idx"]
+feature_names = list(train_df.columns)
 class_names = [ACTION_NAMES[i] for i in sorted(ACTION_NAMES.keys())]
 assert_identifier_not_in_X(meta, feature_names)
+print(f"Deepchecks tabular features: {', '.join(feature_names)}")
+feature_row_lookup = _build_feature_row_lookup(
+    train_df, train_lookup_ids, feature_names
+)
+for key, values in _build_feature_row_lookup(
+    test_df, test_lookup_ids, feature_names
+).items():
+    feature_row_lookup.setdefault(key, []).extend(values)
 
 train_ds = Dataset(
     train_df,
-    label=y_train,
+    label=train_labels,
     features=feature_names,
     label_type="multiclass",
     label_classes=class_names,
@@ -699,7 +775,7 @@ train_ds = Dataset(
 
 test_ds = Dataset(
     test_df,
-    label=y_test,
+    label=test_labels,
     features=feature_names,
     label_type="multiclass",
     label_classes=class_names,
@@ -724,15 +800,24 @@ model.eval()
 class TorchModelWrapper:
     """
     Deepchecks-compatible wrapper.
-    Returns deterministic action probabilities.
+    Exposes sklearn-like predict / predict_proba over deterministic action logits.
     """
 
-    def predict(self, X_tabular):
-        if "window_idx" not in X_tabular:
-            raise KeyError("Deepchecks input is missing required column 'window_idx'.")
-        window_idx = X_tabular["window_idx"].to_numpy().astype(np.int64)
-        if (window_idx < 0).any() or (window_idx >= len(X)).any():
-            raise ValueError("window_idx contains out-of-bounds indices for X.")
+    def __init__(self):
+        self.classes_ = np.asarray(sorted(ACTION_NAMES.keys()), dtype=np.int64)
+
+    def _window_idx(self, X_tabular) -> np.ndarray:
+        try:
+            return _extract_window_idx(X_tabular)
+        except KeyError:
+            return _lookup_window_idx_from_features(
+                X_tabular, feature_names, feature_row_lookup
+            )
+
+    def predict_proba(self, X_tabular):
+        window_idx = self._window_idx(X_tabular)
+        if (window_idx < 0).any() or (window_idx >= len(X_lookup)).any():
+            raise ValueError("window_idx contains out-of-bounds indices for X_lookup.")
 
         batch_size = max(1, int(args.batch_size))
         probs_out = np.zeros((len(window_idx), n_actions), dtype=np.float32)
@@ -742,13 +827,17 @@ class TorchModelWrapper:
             for start in range(0, len(window_idx), batch_size):
                 end = min(start + batch_size, len(window_idx))
                 batch_idx = window_idx[start:end]
-                X_batch = np.asarray(X[batch_idx], dtype=np.float32)
-                X_batch = apply_channel_normalizer(X_batch, normalizer)
+                X_batch = np.asarray(X_lookup[batch_idx], dtype=np.float32)
                 X_tensor = torch.tensor(X_batch, dtype=torch.float32, device=device)
                 _, action_logits = model(X_tensor)
                 probs = torch.softmax(action_logits, dim=1)
                 probs_out[start:end] = probs.detach().cpu().numpy()
         return probs_out
+
+    def predict(self, X_tabular):
+        probs = self.predict_proba(X_tabular)
+        class_pos = np.argmax(probs, axis=1)
+        return self.classes_[class_pos]
 
 
 print("🔍 Running Deepchecks suites...")
@@ -761,5 +850,11 @@ out_dir = Path(paths.eval_dir)
 out_dir.mkdir(parents=True, exist_ok=True)
 out_path = out_dir / "deepchecks_eeg_report.html"
 result.save_as_html(out_path.as_posix(), as_widget=False)
+latest_html = max(
+    out_dir.glob("deepchecks_eeg_report*.html"),
+    key=lambda path: path.stat().st_mtime,
+)
+if latest_html != out_path:
+    out_path.write_text(latest_html.read_text(errors="ignore"))
 print(f"Saving report to: {out_path}")
 print(f"✅ Deepchecks report saved: {out_path}")
