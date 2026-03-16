@@ -1609,8 +1609,9 @@ def main():
 
         window_starts.append(float(window_start))
         window_ends.append(float(window_end))
+        confidence_hint_value = _safe_float(confidence_hint, np.nan)
         confidence_hints.append(
-            float(confidence_hint) if pd.notna(confidence_hint) else np.nan
+            confidence_hint_value if np.isfinite(confidence_hint_value) else np.nan
         )
         artifact_flags.append(int(artifact_flag))
         gap_flags.append(int(gap_flag))
@@ -1645,8 +1646,8 @@ def main():
                 "session_id": str(session_id_value),
                 "window_start": float(window_start),
                 "window_end": float(window_end),
-                "confidence_hint": float(confidence_hint)
-                if pd.notna(confidence_hint)
+                "confidence_hint": confidence_hint_value
+                if np.isfinite(confidence_hint_value)
                 else np.nan,
                 "artifact_flag": int(artifact_flag),
                 "gap_flag": int(gap_flag),
