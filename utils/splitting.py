@@ -262,6 +262,8 @@ def resolve_auxiliary_rest_sessions(
         "reason": "not_requested",
         "core_idx": np.arange(len(y_action), dtype=np.int64),
         "aux_idx": np.array([], dtype=np.int64),
+        "core_non_rest_idx": np.array([], dtype=np.int64),
+        "core_rest_idx": np.array([], dtype=np.int64),
         "core_sessions": [],
         "aux_sessions": [],
         "session_action_counts": {},
@@ -269,7 +271,7 @@ def resolve_auxiliary_rest_sessions(
     policy = str(policy or "none").strip().lower()
     if policy == "none":
         return result
-    if policy != "auto_train_only":
+    if policy not in {"auto_train_only", "train_mixed_rest_test_aux_rest"}:
         raise ValueError(f"Unsupported auxiliary rest session policy: {policy}")
     if ACTION_REST is None:
         result["reason"] = "missing_action_rest"
@@ -315,10 +317,191 @@ def resolve_auxiliary_rest_sessions(
         return result
 
     aux_mask = np.isin(session_id, np.asarray(aux_sessions, dtype="U"))
+    core_mask = ~aux_mask
+    result["core_non_rest_idx"] = np.flatnonzero(core_mask & (y_action != int(ACTION_REST))).astype(
+        np.int64
+    )
+    result["core_rest_idx"] = np.flatnonzero(core_mask & (y_action == int(ACTION_REST))).astype(
+        np.int64
+    )
     result["enabled"] = True
-    result["reason"] = "rest_only_sessions_train_only"
+    if policy == "auto_train_only":
+        result["reason"] = "rest_only_sessions_train_only"
+    else:
+        result["reason"] = "mixed_rest_train_aux_rest_holdout"
     result["core_idx"] = np.flatnonzero(~aux_mask).astype(np.int64)
     result["aux_idx"] = np.flatnonzero(aux_mask).astype(np.int64)
+    return result
+
+
+def _subset_meta(meta: Optional[Dict[str, Any]], idx: np.ndarray, n_expected: int) -> Dict[str, Any]:
+    if not meta:
+        return {}
+    idx = np.asarray(idx, dtype=np.int64)
+    out: Dict[str, Any] = {}
+    for key, val in meta.items():
+        if isinstance(val, dict) or isinstance(val, (str, bytes)):
+            out[key] = val
+            continue
+        try:
+            arr = np.asarray(val)
+        except Exception:
+            out[key] = val
+            continue
+        if arr.ndim == 0:
+            out[key] = val
+            continue
+        try:
+            if len(arr) == n_expected:
+                out[key] = arr[idx]
+            else:
+                out[key] = val
+        except Exception:
+            out[key] = val
+    return out
+
+
+def compose_split_indices(
+    y_action: np.ndarray,
+    y_finger: np.ndarray,
+    meta: Optional[Dict[str, Any]] = None,
+    *,
+    test_size: float = 0.2,
+    random_state: int = 42,
+    split_mode: str = "group_trial",
+    purge_seconds: float = 0.0,
+    hop_seconds: Optional[float] = None,
+    allow_fallback: bool = False,
+    aux_rest_session_policy: str = "none",
+) -> Dict[str, Any]:
+    """
+    Build final train/test indices after applying any auxiliary-rest policy.
+
+    The returned indices are global with respect to the input arrays. Some
+    policies also reserve train-only indices that should not be used for
+    post-hoc calibration.
+    """
+    y_action = _as_1d_int64(y_action, "y_action")
+    y_finger = _as_1d_int64(y_finger, "y_finger")
+    n = len(y_action)
+    policy = str(aux_rest_session_policy or "none").strip().lower()
+
+    plan = resolve_auxiliary_rest_sessions(y_action, meta, policy=policy)
+    result: Dict[str, Any] = {
+        "policy": policy,
+        "aux_plan": plan,
+        "train_idx": np.array([], dtype=np.int64),
+        "test_idx": np.array([], dtype=np.int64),
+        "train_locked_idx": np.array([], dtype=np.int64),
+        "main_split_idx": np.arange(n, dtype=np.int64),
+        "main_train_local": np.array([], dtype=np.int64),
+        "main_test_local": np.array([], dtype=np.int64),
+        "core_train_idx": np.array([], dtype=np.int64),
+        "core_test_idx": np.array([], dtype=np.int64),
+        "aux_train_idx": np.array([], dtype=np.int64),
+        "aux_test_idx": np.array([], dtype=np.int64),
+        "aux_test_split_mode": None,
+    }
+
+    def _run_split(split_idx: np.ndarray, *, split_mode_override: Optional[str] = None):
+        split_idx = np.asarray(split_idx, dtype=np.int64)
+        split_meta = _subset_meta(meta, split_idx, n) if meta else {}
+        train_local, test_local = split_indices(
+            y_action[split_idx],
+            y_finger[split_idx],
+            meta=split_meta if split_meta else None,
+            test_size=test_size,
+            random_state=random_state,
+            split_mode=str(split_mode_override or split_mode),
+            purge_seconds=purge_seconds if split_mode_override is None else 0.0,
+            hop_seconds=hop_seconds,
+            allow_fallback=allow_fallback,
+        )
+        return (
+            split_idx,
+            np.asarray(train_local, dtype=np.int64),
+            np.asarray(test_local, dtype=np.int64),
+        )
+
+    if policy == "none" or not plan.get("enabled", False):
+        if policy == "train_mixed_rest_test_aux_rest" and plan.get("reason") not in {
+            "not_requested",
+            "rest_only_sessions_train_only",
+            "mixed_rest_train_aux_rest_holdout",
+        }:
+            raise ValueError(
+                "aux_rest_session_policy=train_mixed_rest_test_aux_rest requires "
+                f"both mixed and quiet-rest sessions; got reason={plan.get('reason')}"
+            )
+        split_idx, train_local, test_local = _run_split(np.arange(n, dtype=np.int64))
+        result["train_idx"] = split_idx[train_local]
+        result["test_idx"] = split_idx[test_local]
+        result["main_split_idx"] = split_idx
+        result["main_train_local"] = train_local
+        result["main_test_local"] = test_local
+        result["core_train_idx"] = result["train_idx"]
+        result["core_test_idx"] = result["test_idx"]
+        return result
+
+    if policy == "auto_train_only":
+        core_idx, train_local, test_local = _run_split(np.asarray(plan["core_idx"], dtype=np.int64))
+        aux_idx = np.asarray(plan["aux_idx"], dtype=np.int64)
+        train_idx = np.concatenate([core_idx[train_local], aux_idx]).astype(np.int64)
+        result["train_idx"] = np.unique(train_idx)
+        result["test_idx"] = core_idx[test_local]
+        result["train_locked_idx"] = aux_idx
+        result["main_split_idx"] = core_idx
+        result["main_train_local"] = train_local
+        result["main_test_local"] = test_local
+        result["core_train_idx"] = core_idx[train_local]
+        result["core_test_idx"] = core_idx[test_local]
+        result["aux_train_idx"] = aux_idx
+        return result
+
+    if policy != "train_mixed_rest_test_aux_rest":
+        raise ValueError(f"Unsupported auxiliary rest session policy: {policy}")
+
+    core_non_rest_idx = np.asarray(plan["core_non_rest_idx"], dtype=np.int64)
+    core_rest_idx = np.asarray(plan["core_rest_idx"], dtype=np.int64)
+    aux_idx = np.asarray(plan["aux_idx"], dtype=np.int64)
+    if len(core_non_rest_idx) == 0:
+        raise ValueError(
+            "aux_rest_session_policy=train_mixed_rest_test_aux_rest requires non-REST "
+            "windows in mixed sessions."
+        )
+    if len(aux_idx) == 0:
+        raise ValueError(
+            "aux_rest_session_policy=train_mixed_rest_test_aux_rest requires a REST-only "
+            "session to hold out."
+        )
+
+    core_split_idx, core_train_local, core_test_local = _run_split(core_non_rest_idx)
+    aux_split_idx, aux_train_local, aux_test_local = _run_split(
+        aux_idx, split_mode_override="group_trial"
+    )
+
+    train_idx = np.concatenate(
+        [core_split_idx[core_train_local], core_rest_idx, aux_split_idx[aux_train_local]]
+    ).astype(np.int64)
+    test_idx = np.concatenate(
+        [core_split_idx[core_test_local], aux_split_idx[aux_test_local]]
+    ).astype(np.int64)
+
+    result["train_idx"] = np.unique(train_idx)
+    result["test_idx"] = np.unique(test_idx)
+    result["train_locked_idx"] = np.unique(
+        np.concatenate([core_rest_idx, aux_split_idx[aux_train_local]]).astype(np.int64)
+    )
+    result["main_split_idx"] = core_split_idx
+    result["main_train_local"] = core_train_local
+    result["main_test_local"] = core_test_local
+    result["core_train_idx"] = np.unique(
+        np.concatenate([core_split_idx[core_train_local], core_rest_idx]).astype(np.int64)
+    )
+    result["core_test_idx"] = core_split_idx[core_test_local]
+    result["aux_train_idx"] = aux_split_idx[aux_train_local]
+    result["aux_test_idx"] = aux_split_idx[aux_test_local]
+    result["aux_test_split_mode"] = "group_trial"
     return result
 
 

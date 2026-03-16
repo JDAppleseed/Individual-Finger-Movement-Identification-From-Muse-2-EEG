@@ -43,10 +43,9 @@ from utils.eval_utils import (
 )
 from utils.sequence_data import (
     load_sequence_npz,
-    split_indices,
     apply_channel_normalizer,
 )
-from utils.splitting import resolve_auxiliary_rest_sessions
+from utils.splitting import compose_split_indices, resolve_auxiliary_rest_sessions
 from utils.postprocess import (
     PostprocessSettings,
     PostprocessState,
@@ -610,12 +609,13 @@ def _split_with_checks(
     split_mode: str,
     purge_seconds: float,
     hop_seconds: Optional[float],
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], int]:
+    aux_rest_session_policy: str,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], int, Optional[Dict[str, Any]]]:
     overall_action_unique = len(np.unique(y_action))
     overall_finger_unique = _unique_non_rest_fingers(y_action, y_finger)
 
     for attempt in range(MAX_SPLIT_ATTEMPTS):
-        train_idx, test_idx = split_indices(
+        split_plan = compose_split_indices(
             y_action,
             y_finger,
             meta=meta,
@@ -625,7 +625,10 @@ def _split_with_checks(
             purge_seconds=purge_seconds,
             hop_seconds=hop_seconds,
             allow_fallback=False,
+            aux_rest_session_policy=aux_rest_session_policy,
         )
+        train_idx = np.asarray(split_plan["train_idx"], dtype=np.int64)
+        test_idx = np.asarray(split_plan["test_idx"], dtype=np.int64)
 
         if len(test_idx) < MIN_TEST_SAMPLES:
             continue
@@ -647,9 +650,9 @@ def _split_with_checks(
         )
 
         if action_ok and finger_ok:
-            return train_idx, test_idx, attempt + 1
+            return train_idx, test_idx, attempt + 1, split_plan
 
-    return None, None, MAX_SPLIT_ATTEMPTS
+    return None, None, MAX_SPLIT_ATTEMPTS, None
 
 
 def _subset_meta(meta: Dict[str, Any], idx: np.ndarray, n_expected: int) -> Dict[str, Any]:
@@ -1534,12 +1537,20 @@ def main():
         "core_sessions": [str(v) for v in aux_rest_plan.get("core_sessions", [])],
         "aux_count": int(len(aux_idx)),
         "core_count": int(len(split_idx)),
+        "core_rest_count": int(len(aux_rest_plan.get("core_rest_idx", []))),
+        "core_non_rest_count": int(len(aux_rest_plan.get("core_non_rest_idx", []))),
     }
     if aux_rest_plan.get("enabled"):
-        print(
-            "Auxiliary REST-only sessions excluded from main evaluation split: "
-            f"{aux_rest_plan.get('aux_sessions', [])}"
-        )
+        if aux_rest_session_policy == "train_mixed_rest_test_aux_rest":
+            print(
+                "Mixed REST train-only policy enabled: "
+                f"quiet-rest holdout sessions={aux_rest_plan.get('aux_sessions', [])}"
+            )
+        else:
+            print(
+                "Auxiliary REST-only sessions excluded from main evaluation split: "
+                f"{aux_rest_plan.get('aux_sessions', [])}"
+            )
     if len(split_idx) == 0:
         print("⚠️ No core windows remain after applying the auxiliary REST session policy.")
         manifest["abort_reason"] = "no_core_windows_after_aux_rest_filter"
@@ -1615,7 +1626,11 @@ def main():
                             cache_ok = False
                             reject_reasons.append("cache_temperature_scaling_mismatch")
 
-            if cache_ok and aux_rest_plan.get("enabled"):
+            if (
+                cache_ok
+                and aux_rest_plan.get("enabled")
+                and aux_rest_session_policy == "auto_train_only"
+            ):
                 if np.any(np.isin(test_idx, aux_idx)):
                     cache_ok = False
                     reject_reasons.append("cache_includes_aux_rest_test_indices")
@@ -1632,26 +1647,42 @@ def main():
                 print(f"✅ Using cached predictions: {pred_npz_path}")
 
     if cached is None:
-        split_meta = _subset_meta(meta, split_idx, len(y_action)) if meta else {}
-        train_local_idx, test_local_idx, split_attempts = _split_with_checks(
-            y_action[split_idx],
-            y_finger[split_idx],
-            meta=split_meta,
+        train_idx, test_idx, split_attempts, split_plan = _split_with_checks(
+            y_action,
+            y_finger,
+            meta=meta if meta else {},
             seed=split_seed,
             test_size=float(test_size),
             split_mode=str(split_mode),
             purge_seconds=float(purge_seconds),
             hop_seconds=hop_seconds,
+            aux_rest_session_policy=aux_rest_session_policy,
         )
-        if train_local_idx is None or test_local_idx is None:
+        if train_idx is None or test_idx is None:
             print(
                 "⚠️ Unable to create a split with multiple classes. Aborting evaluation."
             )
             manifest["abort_reason"] = "split_failed"
             _maybe_write_manifest()
             return 2
-        train_idx = split_idx[np.asarray(train_local_idx, dtype=np.int64)]
-        test_idx = split_idx[np.asarray(test_local_idx, dtype=np.int64)]
+        train_idx = np.asarray(train_idx, dtype=np.int64)
+        test_idx = np.asarray(test_idx, dtype=np.int64)
+
+        if (
+            split_plan is not None
+            and aux_rest_session_policy == "train_mixed_rest_test_aux_rest"
+        ):
+            manifest["split"]["auxiliary_rest_sessions"]["aux_train_count"] = int(
+                len(split_plan.get("aux_train_idx", []))
+            )
+            manifest["split"]["auxiliary_rest_sessions"]["aux_test_count"] = int(
+                len(split_plan.get("aux_test_idx", []))
+            )
+            print(
+                "Quiet-rest holdout composition: "
+                f"aux_train={len(split_plan.get('aux_train_idx', []))} "
+                f"aux_test={len(split_plan.get('aux_test_idx', []))}"
+            )
 
         y_action_test = y_action[test_idx]
         y_finger_test = y_finger[test_idx]
@@ -2318,7 +2349,6 @@ def main():
         "std": {},
     }
 
-    core_split_meta = _subset_meta(meta, split_idx, len(y_action)) if meta else {}
     if eval_model is None or eval_normalizer is None:
         try:
             eval_model, eval_normalizer, temperature_state = _load_eval_model_and_normalizer(
@@ -2419,22 +2449,23 @@ def main():
                 }
                 test_count = int(len(test_idx))
             else:
-                rep_train_idx, rep_test_idx, _ = _split_with_checks(
-                    y_action[split_idx],
-                    y_finger[split_idx],
-                    meta=core_split_meta,
+                rep_train_idx, rep_test_global, _, _ = _split_with_checks(
+                    y_action,
+                    y_finger,
+                    meta=meta if meta else {},
                     seed=int(repeat_seed),
                     test_size=float(test_size),
                     split_mode=str(split_mode),
                     purge_seconds=float(purge_seconds),
                     hop_seconds=hop_seconds,
+                    aux_rest_session_policy=aux_rest_session_policy,
                 )
-                if rep_test_idx is None:
+                if rep_test_global is None:
                     repeated_split_summary["per_seed"].append(
                         {"seed": int(repeat_seed), "status": "split_failed"}
                     )
                     continue
-                rep_test_global = split_idx[np.asarray(rep_test_idx, dtype=np.int64)]
+                rep_test_global = np.asarray(rep_test_global, dtype=np.int64)
                 rep_action_probs, rep_finger_probs = _run_deterministic_inference(
                     X=X,
                     indices=rep_test_global,

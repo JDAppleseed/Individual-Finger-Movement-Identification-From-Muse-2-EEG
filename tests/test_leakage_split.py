@@ -1,6 +1,7 @@
 import numpy as np
 
 from utils.splitting import (
+    compose_split_indices,
     _split_score,
     split_indices,
     infer_groups,
@@ -178,3 +179,62 @@ def test_resolve_auxiliary_rest_sessions_marks_rest_only_sessions_train_only():
     assert sorted(plan["core_sessions"]) == ["move_a", "move_b"]
     assert np.array_equal(plan["core_idx"], np.array([0, 1, 2, 3, 4], dtype=np.int64))
     assert np.array_equal(plan["aux_idx"], np.array([5, 6, 7], dtype=np.int64))
+
+
+def test_resolve_auxiliary_rest_sessions_tracks_core_rest_for_mixed_rest_policy():
+    y_action = np.array([0, 0, 1, 2, 1, 0, 0, 0], dtype=np.int64)
+    meta = {
+        "session_id": np.array(
+            ["mixed"] * 5 + ["quiet"] * 3,
+            dtype="U",
+        )
+    }
+
+    plan = resolve_auxiliary_rest_sessions(
+        y_action,
+        meta,
+        policy="train_mixed_rest_test_aux_rest",
+    )
+
+    assert plan["enabled"] is True
+    assert plan["reason"] == "mixed_rest_train_aux_rest_holdout"
+    assert np.array_equal(plan["core_rest_idx"], np.array([0, 1], dtype=np.int64))
+    assert np.array_equal(plan["core_non_rest_idx"], np.array([2, 3, 4], dtype=np.int64))
+    assert np.array_equal(plan["aux_idx"], np.array([5, 6, 7], dtype=np.int64))
+
+
+def test_compose_split_indices_trains_on_all_mixed_rest_and_tests_on_quiet_rest():
+    event_ids = np.repeat([10, 11, 20, 21, 30, 31, 32, 33], 4)
+    y_action = np.repeat([0, 0, 1, 2, 0, 0, 0, 0], 4).astype(np.int64)
+    y_finger = np.repeat([0, 0, 1, 2, 0, 0, 0, 0], 4).astype(np.int64)
+    meta = {
+        "event_id": event_ids,
+        "session_id": np.array(["mixed"] * 16 + ["quiet"] * 16, dtype="U"),
+    }
+
+    split = compose_split_indices(
+        y_action,
+        y_finger,
+        meta=meta,
+        test_size=0.25,
+        random_state=42,
+        split_mode="group_trial",
+        aux_rest_session_policy="train_mixed_rest_test_aux_rest",
+    )
+
+    train_idx = np.asarray(split["train_idx"], dtype=np.int64)
+    test_idx = np.asarray(split["test_idx"], dtype=np.int64)
+
+    mixed_rest_mask = (meta["session_id"] == "mixed") & (y_action == 0)
+    quiet_rest_mask = (meta["session_id"] == "quiet") & (y_action == 0)
+
+    assert np.all(np.isin(np.flatnonzero(mixed_rest_mask), train_idx))
+    assert not np.any(np.isin(np.flatnonzero(mixed_rest_mask), test_idx))
+    assert len(split["aux_test_idx"]) > 0
+    assert len(split["aux_train_idx"]) > 0
+    assert np.all(np.isin(split["aux_test_idx"], np.flatnonzero(quiet_rest_mask)))
+    assert np.all(np.isin(split["aux_train_idx"], np.flatnonzero(quiet_rest_mask)))
+    assert np.array_equal(
+        np.sort(np.unique(np.concatenate([train_idx, test_idx]).astype(np.int64))),
+        np.arange(len(y_action), dtype=np.int64),
+    )
