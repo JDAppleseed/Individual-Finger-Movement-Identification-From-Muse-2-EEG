@@ -677,6 +677,74 @@ def _subset_meta(meta: Dict[str, Any], idx: np.ndarray, n_expected: int) -> Dict
     return out
 
 
+def _load_eval_model_and_normalizer(
+    *,
+    model_path: Path,
+    scaler_path: Path,
+    temperature_path: Path,
+    n_channels: int,
+    n_fingers: int,
+    n_actions: int,
+) -> Tuple[CNNLSTMFingerActionNet, Dict[str, Any], Optional[Any]]:
+    if not scaler_path.exists():
+        raise FileNotFoundError(f"Missing scaler/normalizer file: {scaler_path}")
+    normalizer = load_normalizer(scaler_path)
+    if normalizer is None:
+        raise ValueError(f"Failed to load normalizer: {scaler_path}")
+    if not model_path.exists():
+        raise FileNotFoundError(f"Missing model weights: {model_path}")
+
+    model = CNNLSTMFingerActionNet(
+        n_channels=n_channels,
+        n_fingers=n_fingers,
+        n_actions=n_actions,
+    )
+    model.load_state_dict(
+        torch.load(str(model_path), map_location="cpu", weights_only=True)
+    )
+    model.eval()
+    temperature_state = load_temperature_scaling(temperature_path)
+    eval_model = None
+    eval_normalizer = None
+    return model, normalizer, temperature_state
+
+
+def _run_deterministic_inference(
+    *,
+    X: np.ndarray,
+    indices: np.ndarray,
+    model: CNNLSTMFingerActionNet,
+    normalizer: Dict[str, Any],
+    temperature_state: Optional[Any],
+    n_actions: int,
+    n_fingers: int,
+    batch_size: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    idx = np.asarray(indices, dtype=np.int64)
+    action_probs = np.zeros((len(idx), n_actions), dtype=np.float32)
+    finger_probs = np.zeros((len(idx), n_fingers), dtype=np.float32)
+
+    with torch.no_grad():
+        for start in range(0, len(idx), batch_size):
+            end = min(start + batch_size, len(idx))
+            batch_idx = idx[start:end]
+            X_batch = np.asarray(X[batch_idx], dtype=np.float32)
+            X_batch = apply_channel_normalizer(X_batch, normalizer)
+            X_t = torch.tensor(X_batch, dtype=torch.float32)
+            finger_logits, action_logits = model(X_t)
+            if temperature_state is not None:
+                action_logits = apply_temperature_to_logits(
+                    action_logits, temperature_state.action_temperature
+                )
+                finger_logits = apply_temperature_to_logits(
+                    finger_logits, temperature_state.finger_temperature
+                )
+            action_probs[start:end] = torch.softmax(action_logits, dim=1).cpu().numpy()
+            finger_probs[start:end] = torch.softmax(finger_logits, dim=1).cpu().numpy()
+
+    return action_probs, finger_probs
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -1354,53 +1422,30 @@ def main():
         y_action_test = y_action[test_idx]
         y_finger_test = y_finger[test_idx]
 
-        if not scaler_path.exists():
-            print(f"Missing scaler/normalizer file: {scaler_path}")
+        try:
+            eval_model, eval_normalizer, temperature_state = _load_eval_model_and_normalizer(
+                model_path=model_path,
+                scaler_path=scaler_path,
+                temperature_path=temperature_path,
+                n_channels=X.shape[2],
+                n_fingers=n_fingers,
+                n_actions=n_actions,
+            )
+        except Exception as exc:
+            print(str(exc))
             return 2
-        normalizer = load_normalizer(scaler_path)
-        if normalizer is None:
-            print(f"Failed to load normalizer: {scaler_path}")
-            return 2
-
-        if not model_path.exists():
-            print(f"Missing model weights: {model_path}")
-            return 2
-
-        model = CNNLSTMFingerActionNet(
-            n_channels=X.shape[2],
-            n_fingers=n_fingers,
-            n_actions=n_actions,
-        )
-        model.load_state_dict(
-            torch.load(str(model_path), map_location="cpu", weights_only=True)
-        )
-        model.eval()
 
         batch_size = max(1, int(args.batch_size))
-        action_probs = np.zeros((len(test_idx), n_actions), dtype=np.float32)
-        finger_probs = np.zeros((len(test_idx), n_fingers), dtype=np.float32)
-
-        with torch.no_grad():
-            for start in range(0, len(test_idx), batch_size):
-                end = min(start + batch_size, len(test_idx))
-                batch_idx = test_idx[start:end]
-                X_batch = np.asarray(X[batch_idx], dtype=np.float32)
-                X_batch = apply_channel_normalizer(X_batch, normalizer)
-                X_t = torch.tensor(X_batch, dtype=torch.float32)
-                finger_logits, action_logits = model(X_t)
-                if temperature_state is not None:
-                    action_logits = apply_temperature_to_logits(
-                        action_logits, temperature_state.action_temperature
-                    )
-                    finger_logits = apply_temperature_to_logits(
-                        finger_logits, temperature_state.finger_temperature
-                    )
-                action_probs[start:end] = (
-                    torch.softmax(action_logits, dim=1).cpu().numpy()
-                )
-                finger_probs[start:end] = (
-                    torch.softmax(finger_logits, dim=1).cpu().numpy()
-                )
+        action_probs, finger_probs = _run_deterministic_inference(
+            X=X,
+            indices=test_idx,
+            model=eval_model,
+            normalizer=eval_normalizer,
+            temperature_state=temperature_state,
+            n_actions=n_actions,
+            n_fingers=n_fingers,
+            batch_size=batch_size,
+        )
 
         print("✅ Ran deterministic inference (no cached predictions file found).")
 
@@ -1423,6 +1468,88 @@ def main():
     )
     if cache_rejected_reasons is not None:
         manifest["split"]["cache_rejected_reasons"] = cache_rejected_reasons
+
+    aux_rest_benchmark = None
+    if aux_rest_plan.get("enabled") and len(aux_idx) > 0:
+        if eval_model is None or eval_normalizer is None:
+            try:
+                eval_model, eval_normalizer, temperature_state = _load_eval_model_and_normalizer(
+                    model_path=model_path,
+                    scaler_path=scaler_path,
+                    temperature_path=temperature_path,
+                    n_channels=X.shape[2],
+                    n_fingers=n_fingers,
+                    n_actions=n_actions,
+                )
+            except Exception as exc:
+                print(f"⚠️ Auxiliary REST benchmark skipped: {exc}")
+                eval_model = None
+                eval_normalizer = None
+        if eval_model is not None and eval_normalizer is not None:
+            aux_action_probs, aux_finger_probs = _run_deterministic_inference(
+                X=X,
+                indices=aux_idx,
+                model=eval_model,
+                normalizer=eval_normalizer,
+                temperature_state=temperature_state,
+                n_actions=n_actions,
+                n_fingers=n_fingers,
+                batch_size=max(1, int(args.batch_size)),
+            )
+            aux_y_action = y_action[aux_idx]
+            aux_y_finger = y_finger[aux_idx]
+            aux_action_pred = np.argmax(aux_action_probs, axis=1).astype(np.int64)
+            aux_raw_finger_pred = np.argmax(aux_finger_probs, axis=1).astype(np.int64)
+            _, aux_finger_pred = enforce_prediction_pairs(
+                aux_action_pred, aux_raw_finger_pred
+            )
+            aux_rest_mask = aux_y_action == ACTION_REST
+            aux_rest_tpr = (
+                float(np.mean(aux_action_pred[aux_rest_mask] == ACTION_REST))
+                if np.any(aux_rest_mask)
+                else None
+            )
+            aux_rest_precision = (
+                float(np.mean(aux_y_action[aux_action_pred == ACTION_REST] == ACTION_REST))
+                if np.any(aux_action_pred == ACTION_REST)
+                else None
+            )
+            aux_rest_f1 = None
+            if aux_rest_tpr is not None and aux_rest_precision is not None:
+                denom = aux_rest_tpr + aux_rest_precision
+                aux_rest_f1 = (
+                    float(2.0 * aux_rest_tpr * aux_rest_precision / denom) if denom else None
+                )
+            aux_session_ids = (
+                np.asarray(meta["session_id"])[aux_idx].astype("U")
+                if "session_id" in meta
+                else np.array([], dtype="U")
+            )
+            aux_event_ids = (
+                np.asarray(meta["event_id"])[aux_idx].astype(np.int64)
+                if "event_id" in meta
+                else np.array([], dtype=np.int64)
+            )
+            aux_rest_benchmark = {
+                "n_windows": int(len(aux_idx)),
+                "n_rest_events": int(len(np.unique(aux_event_ids))) if aux_event_ids.size else None,
+                "sessions": sorted(set(aux_session_ids.tolist())) if aux_session_ids.size else [],
+                "action_acc": float(np.mean(aux_action_pred == aux_y_action)) if len(aux_y_action) else None,
+                "rest_tpr": aux_rest_tpr,
+                "rest_precision": aux_rest_precision,
+                "rest_f1": aux_rest_f1,
+                "pred_action_counts": _format_label_counts(aux_action_pred, ACTION_NAMES),
+                "pred_finger_counts": _format_label_counts(aux_finger_pred, FINGER_NAMES),
+                "median_rest_prob": float(np.median(aux_action_probs[:, ACTION_REST]))
+                if len(aux_action_probs)
+                else None,
+            }
+            print(
+                "\n🧪 Auxiliary REST benchmark: "
+                f"Action Acc {aux_rest_benchmark['action_acc'] * 100:.2f}% | "
+                f"REST TPR {aux_rest_tpr * 100:.2f}% | "
+                f"REST Precision {aux_rest_precision * 100:.2f}%"
+            )
 
     if len(test_idx) < MIN_TEST_SAMPLES:
         print(f"⚠️ Test set too small ({len(test_idx)} samples). Aborting evaluation.")
@@ -1940,6 +2067,14 @@ def main():
     manifest["metrics"]["smoothed_rest_f1"] = (
         float(rest_f1_s) if rest_f1_s is not None else None
     )
+    manifest["benchmarks"] = {
+        "primary_mixed_holdout": {
+            "test_n": int(len(test_idx)),
+            "test_action_counts": _format_label_counts(y_action_test, ACTION_NAMES),
+            "test_finger_counts": _format_label_counts(y_finger_test, FINGER_NAMES),
+        },
+        "aux_rest_only": aux_rest_benchmark,
+    }
 
     if subject_ids is not None:
         try:

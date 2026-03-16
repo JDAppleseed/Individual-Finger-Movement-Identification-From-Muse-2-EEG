@@ -1,6 +1,6 @@
 """
-STEP 3c — Interactive Evaluation Figures (SDS-aligned)
-Includes confidence & uncertainty visualization
+STEP 3c — Full-Dataset Hero Figures
+Board-facing visual summary over the entire combined dataset using the saved model.
 """
 
 import argparse
@@ -28,10 +28,13 @@ from utils.per_subject_calibration import plot_subject_calibration
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 from utils.sequence_data import (
     load_sequence_npz,
-    split_indices,
     apply_channel_normalizer,
 )
-from utils.runtime_utils import load_normalizer
+from utils.runtime_utils import (
+    apply_temperature_to_logits,
+    load_normalizer,
+    load_temperature_scaling,
+)
 
 # Fixed label ordering for standardized confusion matrices
 ACTION_LABELS = sorted(ACTION_NAMES.keys())
@@ -39,8 +42,9 @@ ACTION_TICK_LABELS = [ACTION_NAMES[label] for label in ACTION_LABELS]
 FINGER_LABELS = sorted(FINGER_NAMES.keys())
 FINGER_TICK_LABELS = [FINGER_NAMES[label] for label in FINGER_LABELS]
 
-# Pipeline handoff: Step 3c reuses Step 2 model/scaler artifacts and produces
-# figure outputs that align with Step 3 evaluation semantics.
+# Pipeline handoff: Step 3c reuses Step 2 model/scaler artifacts but serves a
+# different purpose than Step 3. This script produces a broad, board-ready
+# visual summary across the full dataset instead of the strict canonical split.
 try:
     from projects.session_finder import latest_session_for_subject
     from projects.session_paths import get_session_paths
@@ -154,6 +158,7 @@ def _infer_context_from_session_dir(session_dir: Path) -> Tuple[Optional[str], O
 # =========================
 
 MC_SAMPLES = 30
+BATCH_SIZE = 256
 SEED = 42
 SHOW_PLOTS = os.environ.get("SHOW_PLOTS", "0") == "1"
 
@@ -281,16 +286,17 @@ experiment_hashes = meta.get("experiment_hash")
 exp_hash = str(experiment_hashes[0]) if experiment_hashes is not None else "UNKNOWN"
 
 # =========================
-# ===== SAME SPLIT =========
+# ===== FULL DATASET ======
 # =========================
 
-# Use the same seeded split helper as training/eval to keep figure metrics comparable.
-train_idx, test_idx = split_indices(
-    y_action, y_finger, meta=meta, test_size=0.2, random_state=SEED
+X_eval = X
+y_action_eval = y_action
+y_finger_eval = y_finger
+session_id_eval = (
+    np.asarray(meta.get("session_id")).astype("U")
+    if meta.get("session_id") is not None
+    else np.array(["unknown"] * len(y_action_eval), dtype="U")
 )
-X_test = X[test_idx]
-y_action_test = y_action[test_idx]
-y_finger_test = y_finger[test_idx]
 
 # =========================
 # ===== SCALE (REUSE) =====
@@ -303,7 +309,8 @@ normalizer = load_normalizer(scaler_path)
 if normalizer is None:
     print(f"Failed to load normalizer: {scaler_path}")
     raise SystemExit(2)
-X_test = apply_channel_normalizer(X_test, normalizer)
+X_eval = apply_channel_normalizer(X_eval, normalizer)
+temperature_state = load_temperature_scaling(model_path.parent / "temperature_scaling.json")
 
 # =========================
 # ===== MODEL (MATCH STEP 2)
@@ -324,14 +331,49 @@ model.load_state_dict(torch.load(str(model_path), map_location="cpu", weights_on
 # ===== MC DROPOUT =========
 # =========================
 
-X_t = torch.tensor(X_test, dtype=torch.float32)
-mc = model.mc_forward(X_t, passes=MC_SAMPLES)
+def _mc_predict_dataset(X_arr: np.ndarray):
+    action_mean_parts = []
+    finger_mean_parts = []
+    action_std_parts = []
+    finger_std_parts = []
 
-action_mean = mc["action_mean"].cpu().numpy()
-finger_mean = mc["finger_mean"].cpu().numpy()
+    was_training = model.training
+    model.train()
+    with torch.no_grad():
+        for start in range(0, len(X_arr), BATCH_SIZE):
+            end = min(start + BATCH_SIZE, len(X_arr))
+            xb = torch.tensor(X_arr[start:end], dtype=torch.float32)
+            action_passes = []
+            finger_passes = []
+            for _ in range(MC_SAMPLES):
+                finger_logits, action_logits = model(xb)
+                if temperature_state is not None:
+                    action_logits = apply_temperature_to_logits(
+                        action_logits, temperature_state.action_temperature
+                    )
+                    finger_logits = apply_temperature_to_logits(
+                        finger_logits, temperature_state.finger_temperature
+                    )
+                action_passes.append(torch.softmax(action_logits, dim=1))
+                finger_passes.append(torch.softmax(finger_logits, dim=1))
+            action_stack = torch.stack(action_passes, dim=0)
+            finger_stack = torch.stack(finger_passes, dim=0)
+            action_mean_parts.append(action_stack.mean(dim=0).cpu().numpy())
+            finger_mean_parts.append(finger_stack.mean(dim=0).cpu().numpy())
+            action_std_parts.append(action_stack.std(dim=0).cpu().numpy())
+            finger_std_parts.append(finger_stack.std(dim=0).cpu().numpy())
+    if not was_training:
+        model.eval()
 
-action_std = mc["action_std"].cpu().numpy()
-finger_std = mc["finger_std"].cpu().numpy()
+    return (
+        np.concatenate(action_mean_parts, axis=0),
+        np.concatenate(finger_mean_parts, axis=0),
+        np.concatenate(action_std_parts, axis=0),
+        np.concatenate(finger_std_parts, axis=0),
+    )
+
+
+action_mean, finger_mean, action_std, finger_std = _mc_predict_dataset(X_eval)
 
 action_preds = np.argmax(action_mean, axis=1)
 action_conf = np.max(action_mean, axis=1)
@@ -359,23 +401,50 @@ def reliability_bins(conf, preds, labels, n_bins=10):
     return bin_centers, bin_accs
 
 
-action_acc = accuracy_score(y_action_test, action_preds)
-mask = y_action_test != ACTION_REST
+action_acc = accuracy_score(y_action_eval, action_preds)
+mask = y_action_eval != ACTION_REST
 finger_acc = (
-    accuracy_score(y_finger_test[mask], finger_preds[mask]) if mask.any() else 0.0
+    accuracy_score(y_finger_eval[mask], finger_preds[mask]) if mask.any() else 0.0
 )
 
-print(f"\n🎯 Action Accuracy: {action_acc * 100:.2f}%")
-print(f"🎯 Finger Accuracy (non-REST): {finger_acc * 100:.2f}%")
+rest_only_mask = y_action_eval == ACTION_REST
+rest_recall = float(np.mean(action_preds[rest_only_mask] == ACTION_REST)) if np.any(rest_only_mask) else 0.0
+unique_sessions = sorted(set(session_id_eval.tolist()))
+
+print(f"\n📷 Full-dataset visual summary")
+print(f"🎯 Action Accuracy (all windows): {action_acc * 100:.2f}%")
+print(f"🎯 Finger Accuracy (non-REST, all windows): {finger_acc * 100:.2f}%")
+print(f"🎯 REST Recall (all REST windows): {rest_recall * 100:.2f}%")
 
 # =========================
 # ===== PLOTS =============
 # =========================
 
-fig, axs = plt.subplots(3, 2, figsize=(14, 14))
+fig = plt.figure(figsize=(16, 13))
+gs = fig.add_gridspec(3, 2, height_ratios=[0.18, 1.0, 1.0])
+ax_header = fig.add_subplot(gs[0, :])
+ax_action_cm = fig.add_subplot(gs[1, 0])
+ax_finger_cm = fig.add_subplot(gs[1, 1])
+ax_action_rel = fig.add_subplot(gs[2, 0])
+ax_finger_rel = fig.add_subplot(gs[2, 1])
+
+ax_header.axis("off")
+header_lines = [
+    f"Full-Model Visual Summary | session={args.session} | run={model_path.parent.name}",
+    f"windows={len(y_action_eval)} | sessions={len(unique_sessions)} | MC passes={MC_SAMPLES}",
+]
+ax_header.text(
+    0.01,
+    0.7,
+    "\n".join(header_lines),
+    ha="left",
+    va="center",
+    fontsize=15,
+    fontweight="bold",
+)
 
 # --- Action Confusion Matrix ---
-action_cm = confusion_matrix(y_action_test, action_preds, labels=ACTION_LABELS)
+action_cm = confusion_matrix(y_action_eval, action_preds, labels=ACTION_LABELS)
 action_labels = ACTION_TICK_LABELS
 sns.heatmap(
     action_cm,
@@ -384,16 +453,16 @@ sns.heatmap(
     cmap="Blues",
     xticklabels=action_labels,
     yticklabels=action_labels,
-    ax=axs[0, 0],
+    ax=ax_action_cm,
 )
-axs[0, 0].set_title("Action Confusion Matrix")
-axs[0, 0].set_xlabel("Predicted")
-axs[0, 0].set_ylabel("True")
+ax_action_cm.set_title("Action Confusion Matrix (All Windows)")
+ax_action_cm.set_xlabel("Predicted")
+ax_action_cm.set_ylabel("True")
 
 # --- Finger Confusion Matrix (non-REST) ---
 if mask.any():
     finger_cm = confusion_matrix(
-        y_finger_test[mask], finger_preds[mask], labels=FINGER_LABELS
+        y_finger_eval[mask], finger_preds[mask], labels=FINGER_LABELS
     )
     finger_labels = FINGER_TICK_LABELS
     sns.heatmap(
@@ -403,48 +472,38 @@ if mask.any():
         cmap="Greens",
         xticklabels=finger_labels,
         yticklabels=finger_labels,
-        ax=axs[0, 1],
+        ax=ax_finger_cm,
     )
-    axs[0, 1].set_title("Finger Confusion Matrix (non-REST)")
-    axs[0, 1].set_xlabel("Predicted")
-    axs[0, 1].set_ylabel("True")
+    ax_finger_cm.set_title("Finger Confusion Matrix (Non-REST)")
+    ax_finger_cm.set_xlabel("Predicted")
+    ax_finger_cm.set_ylabel("True")
 else:
-    axs[0, 1].set_axis_off()
+    ax_finger_cm.set_axis_off()
 
-# --- Action Confidence/Uncertainty ---
-axs[1, 0].hist(action_conf, bins=20, alpha=0.8, label="Confidence")
-axs[1, 0].hist(action_uncertainty, bins=20, alpha=0.6, label="Uncertainty")
-axs[1, 0].set_title("Action Confidence vs Uncertainty")
-axs[1, 0].legend()
-
-# --- Finger Confidence/Uncertainty (non-REST) ---
-axs[1, 1].hist(finger_conf[mask], bins=20, alpha=0.8, label="Confidence")
-axs[1, 1].hist(finger_uncertainty[mask], bins=20, alpha=0.6, label="Uncertainty")
-axs[1, 1].set_title("Finger Confidence vs Uncertainty")
-axs[1, 1].legend()
+colors = ["#5B8FF9", "#61DDAA", "#F6BD16"]
 
 # --- Reliability Diagram (Action) ---
 bin_centers, bin_accs = reliability_bins(
-    action_conf, action_preds, y_action_test, n_bins=10
+    action_conf, action_preds, y_action_eval, n_bins=10
 )
-axs[2, 0].plot([0, 1], [0, 1], "--", color="gray")
-axs[2, 0].bar(bin_centers, bin_accs, width=0.08, alpha=0.7)
-axs[2, 0].set_title("Action Reliability Diagram")
-axs[2, 0].set_xlabel("Confidence")
-axs[2, 0].set_ylabel("Accuracy")
+ax_action_rel.plot([0, 1], [0, 1], "--", color="gray")
+ax_action_rel.bar(bin_centers, bin_accs, width=0.08, alpha=0.7)
+ax_action_rel.set_title("Action Reliability")
+ax_action_rel.set_xlabel("Confidence")
+ax_action_rel.set_ylabel("Accuracy")
 
 # --- Reliability Diagram (Finger, non-REST) ---
 if mask.any():
     f_bin_centers, f_bin_accs = reliability_bins(
-        finger_conf[mask], finger_preds[mask], y_finger_test[mask], n_bins=10
+        finger_conf[mask], finger_preds[mask], y_finger_eval[mask], n_bins=10
     )
-    axs[2, 1].plot([0, 1], [0, 1], "--", color="gray")
-    axs[2, 1].bar(f_bin_centers, f_bin_accs, width=0.08, alpha=0.7, color="green")
-    axs[2, 1].set_title("Finger Reliability (non-REST)")
-    axs[2, 1].set_xlabel("Confidence")
-    axs[2, 1].set_ylabel("Accuracy")
+    ax_finger_rel.plot([0, 1], [0, 1], "--", color="gray")
+    ax_finger_rel.bar(f_bin_centers, f_bin_accs, width=0.08, alpha=0.7, color="green")
+    ax_finger_rel.set_title("Finger Reliability (Non-REST)")
+    ax_finger_rel.set_xlabel("Confidence")
+    ax_finger_rel.set_ylabel("Accuracy")
 else:
-    axs[2, 1].set_axis_off()
+    ax_finger_rel.set_axis_off()
 
 plt.tight_layout()
 
@@ -456,15 +515,40 @@ if SHOW_PLOTS:
 else:
     plt.close()
 
-# Optional confidence vs uncertainty scatter
+# Optional supplemental scatter export
 plt.figure(figsize=(6, 5))
 plt.scatter(action_conf, action_uncertainty, alpha=0.5, s=10)
 plt.xlabel("Action Confidence")
 plt.ylabel("Action Uncertainty")
-plt.title("Confidence vs Uncertainty")
+plt.title("Action Confidence vs Uncertainty (All Windows)")
 scatter_path = report_dir / f"mc_scatter_{tag}.png"
 plt.tight_layout()
 plt.savefig(scatter_path)
+plt.close()
+
+# Session action composition export
+session_names = list(unique_sessions)
+counts = np.zeros((len(session_names), len(ACTION_LABELS)), dtype=np.int64)
+for row, sid in enumerate(session_names):
+    sid_mask = session_id_eval == sid
+    counts[row] = np.bincount(y_action_eval[sid_mask], minlength=len(ACTION_LABELS))
+plt.figure(figsize=(8, max(3.5, 1.2 * len(session_names))))
+bottom = np.zeros(len(session_names), dtype=np.int64)
+for idx, label in enumerate(ACTION_LABELS):
+    plt.barh(
+        session_names,
+        counts[:, idx],
+        left=bottom,
+        color=colors[idx],
+        label=ACTION_NAMES[label],
+    )
+    bottom += counts[:, idx]
+plt.title("Session Action Composition")
+plt.xlabel("Window Count")
+plt.legend(loc="lower right", fontsize=8)
+plt.tight_layout()
+session_mix_path = report_dir / f"session_action_mix_{tag}.png"
+plt.savefig(session_mix_path)
 plt.close()
 
 # --- PER-SUBJECT CALIBRATION PLOT ---
