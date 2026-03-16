@@ -328,6 +328,7 @@ def _split_score(
     test_idx: np.ndarray,
     test_size: float,
     session_ids: Optional[np.ndarray] = None,
+    groups: Optional[np.ndarray] = None,
 ) -> float:
     overall = np.bincount(label_ids)
     test_counts = np.bincount(label_ids[test_idx], minlength=len(overall))
@@ -378,6 +379,33 @@ def _split_score(
                     score += 2.0 * float(
                         np.sum(np.abs(test_rest_freq - overall_rest_freq))
                     )
+
+    if groups is not None and ACTION_REST is not None:
+        groups = np.asarray(groups).reshape(-1)
+        rest_mask = np.asarray(y_action).astype(int) == int(ACTION_REST)
+        if np.any(rest_mask):
+            rest_groups_all = np.unique(groups[rest_mask])
+            total_rest_groups = int(len(rest_groups_all))
+            if total_rest_groups > 0:
+                rest_test_idx = test_idx[rest_mask[test_idx]]
+                rest_test_groups = np.unique(groups[rest_test_idx])
+                test_rest_group_count = int(len(rest_test_groups))
+
+                # When multiple rest events exist, require the test split to cover
+                # more than one of them whenever possible. This avoids brittle
+                # evaluations where all REST performance is determined by a single
+                # held-out baseline-rest block.
+                target_rest_groups = min(
+                    total_rest_groups - 1,
+                    max(1, int(np.ceil(total_rest_groups * float(test_size)))),
+                )
+                if total_rest_groups >= 3:
+                    target_rest_groups = max(2, target_rest_groups)
+
+                if test_rest_group_count < target_rest_groups:
+                    score += 10.0 * float(target_rest_groups - test_rest_group_count)
+                else:
+                    score += 0.25 * abs(test_rest_group_count - target_rest_groups)
     return score
 
 
@@ -412,6 +440,7 @@ def _choose_group_split(
             test_idx,
             test_size,
             session_ids=session_ids,
+            groups=groups,
         )
         if best_score is None or score < best_score:
             best_score = score

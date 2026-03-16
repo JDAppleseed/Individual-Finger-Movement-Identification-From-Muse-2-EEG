@@ -108,6 +108,56 @@ def test_split_score_prefers_representative_rest_session_mix():
     assert balanced_score < skewed_score
 
 
+def test_split_score_prefers_multiple_rest_groups_when_available():
+    y_action = np.array([0] * 12 + [1] * 12 + [2] * 12, dtype=np.int64)
+    y_finger = np.array([0] * 12 + [1] * 12 + [2] * 12, dtype=np.int64)
+    label_ids = y_action * 10 + y_finger
+    groups = np.repeat(np.arange(9), 4)
+
+    # Three distinct REST groups occupy indices [0..11].
+    multi_rest_test = np.array([0, 1, 4, 5, 12, 13, 24, 25], dtype=np.int64)
+    single_rest_test = np.array([0, 1, 2, 3, 12, 13, 24, 25], dtype=np.int64)
+
+    multi_score = _split_score(
+        label_ids,
+        y_action,
+        multi_rest_test,
+        test_size=0.25,
+        groups=groups,
+    )
+    single_score = _split_score(
+        label_ids,
+        y_action,
+        single_rest_test,
+        test_size=0.25,
+        groups=groups,
+    )
+
+    assert multi_score < single_score
+
+
+def test_split_indices_spreads_rest_test_across_multiple_events_when_possible():
+    windows_per_event = 4
+    event_ids = np.repeat([0, 1, 2, 10, 11, 12], windows_per_event)
+    y_action = np.repeat([0, 0, 0, 1, 1, 2], windows_per_event).astype(np.int64)
+    y_finger = np.repeat([0, 0, 0, 1, 2, 3], windows_per_event).astype(np.int64)
+    meta = {
+        "event_id": event_ids,
+        "session_id": np.array(["S1"] * len(event_ids), dtype="U"),
+    }
+
+    train_idx, test_idx = split_indices(
+        y_action,
+        y_finger,
+        meta=meta,
+        test_size=0.25,
+        random_state=42,
+    )
+
+    test_rest_events = np.unique(event_ids[test_idx][y_action[test_idx] == 0])
+    assert len(test_rest_events) >= 2
+
+
 def test_resolve_auxiliary_rest_sessions_marks_rest_only_sessions_train_only():
     y_action = np.array([0, 1, 2, 1, 2, 0, 0, 0], dtype=np.int64)
     meta = {
