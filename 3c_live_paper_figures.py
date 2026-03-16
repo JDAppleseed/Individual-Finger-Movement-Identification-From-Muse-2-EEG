@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 from typing import Optional, Tuple
+from scipy.ndimage import gaussian_filter
 
 from sklearn.metrics import confusion_matrix, accuracy_score
 
@@ -515,16 +516,115 @@ if SHOW_PLOTS:
 else:
     plt.close()
 
-# Optional supplemental scatter export
-plt.figure(figsize=(6, 5))
-plt.scatter(action_conf, action_uncertainty, alpha=0.5, s=10)
-plt.xlabel("Action Confidence")
-plt.ylabel("Action Uncertainty")
-plt.title("Action Confidence vs Uncertainty (All Windows)")
+# Optional supplemental density-colored scatter export
+fig, ax = plt.subplots(figsize=(7.6, 6.2))
+fig.patch.set_facecolor("white")
+ax.set_facecolor("#f8fafc")
+x = np.asarray(action_conf, dtype=float)
+y = np.asarray(action_uncertainty, dtype=float)
+
+# Estimate local density with a finer smoothed 2D histogram, then remap the
+# color scale so lower-density regions retain visible structure.
+x_bins = np.linspace(max(0.0, float(np.min(x))), min(1.0, float(np.max(x))), 80)
+y_min = float(np.min(y))
+y_max = float(np.max(y))
+if not np.isfinite(y_min) or not np.isfinite(y_max) or y_min == y_max:
+    y_min, y_max = 0.0, 1.0
+y_bins = np.linspace(y_min, y_max, 80)
+hist, x_edges, y_edges = np.histogram2d(x, y, bins=(x_bins, y_bins))
+hist = gaussian_filter(hist.astype(np.float32), sigma=1.0)
+x_idx = np.clip(np.digitize(x, x_edges) - 1, 0, hist.shape[0] - 1)
+y_idx = np.clip(np.digitize(y, y_edges) - 1, 0, hist.shape[1] - 1)
+density = hist[x_idx, y_idx].astype(float)
+raw_color = np.log10(np.maximum(density, 1.0))
+color_floor = float(np.nanpercentile(raw_color, 1.0))
+color_ceiling = float(np.nanpercentile(raw_color, 99.7))
+if not np.isfinite(color_floor):
+    color_floor = float(np.nanmin(raw_color))
+if not np.isfinite(color_ceiling) or color_ceiling <= color_floor:
+    color_ceiling = color_floor + 1.0
+color_values = np.clip((raw_color - color_floor) / (color_ceiling - color_floor), 0.0, 1.0)
+color_values = np.power(color_values, 0.82) * 3.0
+order = np.argsort(color_values)
+
+sc = plt.scatter(
+    x[order],
+    y[order],
+    c=color_values[order],
+    cmap="jet",
+    alpha=0.58,
+    s=9,
+    linewidths=0,
+)
+fig.subplots_adjust(left=0.11, right=0.885, bottom=0.115, top=0.84)
+cb = fig.colorbar(sc, ax=ax, pad=0.018, fraction=0.048)
+cb.set_label("Relative density", fontsize=11)
+cb.ax.tick_params(labelsize=10)
+
+x_low = float(np.nanpercentile(x, 1))
+x_high = float(np.nanpercentile(x, 99.8))
+y_low = 0.0
+y_high = float(np.nanpercentile(y, 99.5))
+if not np.isfinite(x_low):
+    x_low = 0.35
+if not np.isfinite(x_high):
+    x_high = 1.0
+if not np.isfinite(y_high) or y_high <= 0:
+    y_high = float(np.max(y)) if len(y) else 0.35
+x_low = max(0.35, x_low - 0.01)
+x_high = min(1.0, x_high + 0.005)
+y_high = min(max(y_high + 0.01, 0.08), 0.35)
+
+ax.set_xlim(x_low, x_high)
+ax.set_ylim(y_low, y_high)
+ax.set_xlabel("Action confidence", fontsize=12)
+ax.set_ylabel("Action uncertainty", fontsize=12)
+ax.tick_params(axis="both", labelsize=10)
+ax.grid(True, color="#d7e3f0", linewidth=0.8, alpha=0.5)
+ax.set_axisbelow(True)
+for spine in ("top", "right"):
+    ax.spines[spine].set_visible(False)
+ax.spines["left"].set_color("#94a3b8")
+ax.spines["bottom"].set_color("#94a3b8")
+
+plot_bbox = ax.get_position()
+plot_center_x = (plot_bbox.x0 + plot_bbox.x1) / 2.0
+
+fig.suptitle(
+    "Confidence vs Uncertainty",
+    fontsize=18,
+    fontweight="bold",
+    y=0.96,
+    x=plot_center_x,
+)
+ax.set_title(
+    "Action predictions across all windows",
+    fontsize=12,
+    color="#475569",
+    pad=12,
+    x=0.5,
+)
+
+hi_idx = int(np.argmax(color_values)) if len(color_values) else 0
+if len(color_values):
+    ann_x = float(x[hi_idx])
+    ann_y = float(y[hi_idx])
+    ax.annotate(
+        "Dense region\nHigh confidence, low uncertainty",
+        xy=(ann_x, ann_y),
+        xytext=(0.37, 0.17),
+        textcoords="axes fraction",
+        ha="center",
+        va="center",
+        fontsize=12.5,
+        color="#0f172a",
+        arrowprops=dict(arrowstyle="->", color="#334155", lw=1.2),
+        bbox=dict(boxstyle="round,pad=0.36", fc="white", ec="#cbd5e1", alpha=0.97),
+    )
+
 scatter_path = report_dir / f"mc_scatter_{tag}.png"
-plt.tight_layout()
-plt.savefig(scatter_path)
-plt.close()
+fig.savefig(scatter_path, dpi=180, bbox_inches="tight", pad_inches=0.08)
+plt.close(fig)
 
 # Session action composition export
 session_names = list(unique_sessions)
