@@ -203,7 +203,7 @@ def default_infer_settings() -> Dict[str, Any]:
         "smoothing_window": 5,
         "hysteresis_enabled": False,
         "hysteresis_frames": 3,
-        "threshold_action": 0.75,
+        "threshold_action": 0.20,
         "threshold_finger": 0.75,
         "adjacency_enabled": False,
         "hysteresis_margin": 0.05,
