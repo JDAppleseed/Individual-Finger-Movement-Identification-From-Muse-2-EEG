@@ -2788,7 +2788,7 @@ class MainWindow(QMainWindow):
         threshold_finger.setRange(0.0, 1.0)
         threshold_finger.setDecimals(2)
         threshold_finger.setSingleStep(0.01)
-        threshold_finger.setValue(0.75)
+        threshold_finger.setValue(0.20)
         post_layout.addRow("Threshold finger", threshold_finger)
         fields["threshold_finger"] = threshold_finger
 
