@@ -2780,7 +2780,7 @@ class MainWindow(QMainWindow):
         threshold_action.setRange(0.0, 1.0)
         threshold_action.setDecimals(2)
         threshold_action.setSingleStep(0.01)
-        threshold_action.setValue(0.20)
+        threshold_action.setValue(0.05)
         post_layout.addRow("Threshold action", threshold_action)
         fields["threshold_action"] = threshold_action
 

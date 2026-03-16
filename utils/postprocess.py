@@ -10,16 +10,16 @@ import numpy as np
 @dataclass
 class PostprocessSettings:
     smoothing_enabled: bool = True
-    smoothing_method: str = "vote"  # "vote" or "ema"
+    smoothing_method: str = "ema"  # "vote" or "ema"
     smoothing_window: int = 5
-    hysteresis_enabled: bool = True
+    hysteresis_enabled: bool = False
     hysteresis_frames: int = 3
-    threshold_action: float = 0.75
-    threshold_finger: float = 0.75
-    adjacency_enabled: bool = True
+    threshold_action: float = 0.05
+    threshold_finger: float = 0.20
+    adjacency_enabled: bool = False
     hysteresis_margin: float = 0.05
     finger_delta: float = 0.05
-    finger_mode: str = "raw"  # "raw" (recommended) or "smooth"
+    finger_mode: str = "smooth"  # "raw" or "smooth"
 
 
 @dataclass
