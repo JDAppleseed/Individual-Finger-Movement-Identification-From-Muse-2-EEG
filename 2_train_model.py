@@ -36,7 +36,7 @@ from utils.runtime_utils import (
     save_temperature_scaling,
 )
 from utils.experiment_logger import log_experiment, get_latest_experiment_hash
-from utils.label_schema import ACTION_REST, FINGER_NAMES
+from utils.label_schema import ACTION_NAMES, ACTION_REST, FINGER_NAMES, FINGER_NONE
 from utils.splitting import (
     infer_groups,
     assert_no_group_overlap,
@@ -55,9 +55,10 @@ LOSS_ACTION_WEIGHT = 1.0
 # early, REST-imbalanced datasets. Current default uses parity weighting so the
 # action head does not systematically under-emphasize REST.
 REST_WEIGHT = 1.0
-REST_BALANCE_MODE = "session_equalized"
+REST_BALANCE_MODE = "core_event_equalized"
 WINDOW_PREPROCESS = "center_detrend"
 AUX_REST_SESSION_POLICY = "auto_train_only"
+REST_FINGER_LOSS_WEIGHT = 0.0
 
 DEFAULT_NPZ = "eeg_windows.npz"
 DEFAULT_MODEL = "finger_action_model.pt"
@@ -137,6 +138,57 @@ def _parse_finger_weights(value: Any, n_fingers: int) -> Optional[torch.Tensor]:
         return torch.tensor(weights, dtype=torch.float32)
 
     raise ValueError(f"Unsupported finger_weights type: {type(value)}")
+
+
+def _parse_action_weights(value: Any, n_actions: int) -> Optional[torch.Tensor]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw or raw.lower() in {"none", "null", "default"}:
+            return None
+        if raw[0] in "[{":
+            try:
+                value = json.loads(raw)
+            except Exception as exc:
+                raise ValueError(f"Invalid JSON for action weights: {raw}") from exc
+        else:
+            parts = [p for p in re.split(r"[,\\s]+", raw) if p]
+            try:
+                value = [float(p) for p in parts]
+            except Exception as exc:
+                raise ValueError(f"Invalid action weight list: {raw}") from exc
+
+    if isinstance(value, dict):
+        name_map = {name.lower(): idx for idx, name in ACTION_NAMES.items()}
+        weights = [1.0] * n_actions
+        for key, val in value.items():
+            if isinstance(key, str):
+                k = key.strip().lower()
+                if k.isdigit():
+                    idx = int(k)
+                elif k in name_map:
+                    idx = name_map[k]
+                else:
+                    raise ValueError(f"Unknown action key: {key}")
+            else:
+                idx = int(key)
+            if idx < 0 or idx >= n_actions:
+                raise ValueError(f"Action weight index out of range: {idx}")
+            weights[idx] = float(val)
+        return torch.tensor(weights, dtype=torch.float32)
+
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        weights = [float(v) for v in value]
+        if len(weights) != n_actions:
+            raise ValueError(
+                f"action_weights length {len(weights)} does not match n_actions {n_actions}"
+            )
+        return torch.tensor(weights, dtype=torch.float32)
+
+    raise ValueError(f"Unsupported action_weights type: {type(value)}")
 
 
 def sha256_file(path: Path) -> Optional[str]:
@@ -481,7 +533,7 @@ def _build_train_sample_weights(
         summary["enabled"] = False
         return None, summary
 
-    if str(balance_mode) != "session_equalized":
+    if str(balance_mode) not in {"session_equalized", "core_event_equalized"}:
         raise ValueError(f"Unsupported rest balance mode: {balance_mode}")
 
     session_id = _meta_text_array(meta, "session_id", len(y_action))
@@ -504,27 +556,161 @@ def _build_train_sample_weights(
         summary["reason"] = "unknown_rest_sessions"
         return None, summary
 
+    weights = np.ones(len(y_action), dtype=np.float32)
     unique_sessions, counts = np.unique(rest_sessions, return_counts=True)
-    if len(unique_sessions) < 2:
+
+    if str(balance_mode) == "session_equalized":
+        if len(unique_sessions) < 2:
+            summary["enabled"] = False
+            summary["reason"] = "single_rest_session"
+            return None, summary
+
+        target_per_session = float(np.sum(counts)) / float(len(unique_sessions))
+        rest_counts = {sid: int(count) for sid, count in zip(unique_sessions, counts)}
+        for sid, count in rest_counts.items():
+            sid_mask = rest_mask & (session_id == sid)
+            weights[sid_mask] = target_per_session / float(count)
+
+        summary["enabled"] = True
+        summary["rest_counts"] = rest_counts
+        summary["target_per_session"] = target_per_session
+        summary["expected_rest_mass"] = {
+            sid: float(np.sum(weights[rest_mask & (session_id == sid)])) for sid in rest_counts
+        }
+        summary["weight_range"] = [float(weights.min()), float(weights.max())]
+        return weights, summary
+
+    event_id = None
+    if meta and "event_id" in meta:
+        try:
+            candidate = np.asarray(meta["event_id"])
+            if candidate.ndim != 0 and len(candidate) == len(y_action):
+                event_id = candidate.astype(np.int64)
+        except Exception:
+            event_id = None
+    if event_id is None:
         summary["enabled"] = False
-        summary["reason"] = "single_rest_session"
+        summary["reason"] = "missing_event_id"
         return None, summary
 
-    weights = np.ones(len(y_action), dtype=np.float32)
-    target_per_session = float(np.sum(counts)) / float(len(unique_sessions))
-    rest_counts = {sid: int(count) for sid, count in zip(unique_sessions, counts)}
-    for sid, count in rest_counts.items():
-        sid_mask = rest_mask & (session_id == sid)
-        weights[sid_mask] = target_per_session / float(count)
+    unique_all_sessions = np.unique(session_id[(session_id != "") & (session_id != "UNKNOWN")])
+    aux_sessions: List[str] = []
+    core_sessions: List[str] = []
+    for sid in unique_all_sessions.tolist():
+        sid_mask = session_id == sid
+        sid_actions = np.unique(y_action[sid_mask])
+        if len(sid_actions) == 1 and int(sid_actions[0]) == int(ACTION_REST):
+            aux_sessions.append(str(sid))
+        else:
+            core_sessions.append(str(sid))
+
+    core_rest_mask = rest_mask & np.isin(session_id, np.asarray(core_sessions, dtype="U"))
+    aux_rest_mask = rest_mask & np.isin(session_id, np.asarray(aux_sessions, dtype="U"))
+    if not np.any(core_rest_mask):
+        summary["enabled"] = False
+        summary["reason"] = "no_core_rest_samples"
+        return None, summary
+
+    total_rest = float(np.sum(rest_mask))
+    if np.any(aux_rest_mask):
+        target_core_mass = 0.70 * total_rest
+        target_aux_mass = 0.30 * total_rest
+    else:
+        target_core_mass = total_rest
+        target_aux_mass = 0.0
+
+    core_event_ids = np.unique(event_id[core_rest_mask])
+    if len(core_event_ids) == 0:
+        summary["enabled"] = False
+        summary["reason"] = "no_core_rest_events"
+        return None, summary
+
+    core_event_counts = {
+        int(eid): int(np.sum(core_rest_mask & (event_id == eid)))
+        for eid in core_event_ids.tolist()
+    }
+    target_per_event = float(target_core_mass) / float(len(core_event_ids))
+    for eid, count in core_event_counts.items():
+        eid_mask = core_rest_mask & (event_id == int(eid))
+        weights[eid_mask] = target_per_event / float(count)
+
+    aux_session_counts: Dict[str, int] = {}
+    if np.any(aux_rest_mask):
+        unique_aux_sessions, aux_counts = np.unique(session_id[aux_rest_mask], return_counts=True)
+        target_per_aux_session = float(target_aux_mass) / float(len(unique_aux_sessions))
+        aux_session_counts = {
+            str(sid): int(count)
+            for sid, count in zip(unique_aux_sessions.tolist(), aux_counts.tolist())
+        }
+        for sid, count in aux_session_counts.items():
+            sid_mask = aux_rest_mask & (session_id == sid)
+            weights[sid_mask] = target_per_aux_session / float(count)
 
     summary["enabled"] = True
-    summary["rest_counts"] = rest_counts
-    summary["target_per_session"] = target_per_session
+    summary["core_sessions"] = core_sessions
+    summary["aux_sessions"] = aux_sessions
+    summary["core_rest_event_counts"] = core_event_counts
+    summary["aux_rest_session_counts"] = aux_session_counts
     summary["expected_rest_mass"] = {
-        sid: float(np.sum(weights[rest_mask & (session_id == sid)])) for sid in rest_counts
+        "core_events": {
+            str(eid): float(np.sum(weights[core_rest_mask & (event_id == int(eid))]))
+            for eid in core_event_ids.tolist()
+        },
+        "aux_sessions": {
+            sid: float(np.sum(weights[aux_rest_mask & (session_id == sid)]))
+            for sid in aux_session_counts
+        },
+        "core_total": float(np.sum(weights[core_rest_mask])),
+        "aux_total": float(np.sum(weights[aux_rest_mask])) if np.any(aux_rest_mask) else 0.0,
     }
     summary["weight_range"] = [float(weights.min()), float(weights.max())]
     return weights, summary
+
+
+def _resolve_action_class_weights(
+    *,
+    action_weights: Any,
+    n_actions: int,
+    rest_weight: float,
+) -> Tuple[torch.Tensor, bool]:
+    parsed = _parse_action_weights(action_weights, n_actions)
+    if parsed is not None:
+        return parsed, True
+    weights = torch.ones(n_actions, dtype=torch.float32)
+    if ACTION_REST < n_actions:
+        weights[ACTION_REST] = max(0.0, float(rest_weight))
+    return weights, False
+
+
+def _compute_batch_losses(
+    *,
+    finger_logits: torch.Tensor,
+    action_logits: torch.Tensor,
+    y_finger: torch.Tensor,
+    y_action: torch.Tensor,
+    action_loss_fn: nn.Module,
+    finger_loss_fn: nn.Module,
+    loss_action_weight: float,
+    rest_finger_loss_weight: float,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    loss_action = action_loss_fn(action_logits, y_action)
+    mask_nr = y_action != ACTION_REST
+    if mask_nr.any():
+        loss_finger_non_rest = finger_loss_fn(finger_logits[mask_nr], y_finger[mask_nr])
+    else:
+        loss_finger_non_rest = torch.tensor(0.0, device=action_logits.device)
+
+    mask_rest = y_action == ACTION_REST
+    if rest_finger_loss_weight > 0.0 and mask_rest.any():
+        rest_targets = torch.full_like(y_finger[mask_rest], int(FINGER_NONE))
+        loss_finger_rest = finger_loss_fn(finger_logits[mask_rest], rest_targets)
+    else:
+        loss_finger_rest = torch.tensor(0.0, device=action_logits.device)
+
+    loss = loss_action + float(loss_action_weight) * (
+        loss_finger_non_rest + float(rest_finger_loss_weight) * loss_finger_rest
+    )
+    return loss, loss_action, loss_finger_non_rest, loss_finger_rest
 
 
 def _window_idx_leakage_check(
@@ -669,6 +855,15 @@ def build_arg_parser():
         help="Class weight for the REST action. Use 0 to ignore REST.",
     )
     training_group.add_argument(
+        "--action-weights",
+        type=str,
+        default=None,
+        help=(
+            "Per-action loss weights in REST,OPEN,CLOSE order, or JSON list/dict. "
+            "Overrides --rest-weight when provided."
+        ),
+    )
+    training_group.add_argument(
         "--finger-weights",
         type=str,
         default=None,
@@ -679,13 +874,20 @@ def build_arg_parser():
         ),
     )
     training_group.add_argument(
+        "--rest-finger-loss-weight",
+        type=float,
+        default=REST_FINGER_LOSS_WEIGHT,
+        help="Additional finger-head loss weight applied on REST windows toward NONE.",
+    )
+    training_group.add_argument(
         "--rest-balance-mode",
         type=str,
         default=REST_BALANCE_MODE,
-        choices=["none", "session_equalized"],
+        choices=["none", "session_equalized", "core_event_equalized"],
         help=(
             "Reweight REST windows within each training epoch. "
-            "'session_equalized' keeps total REST mass constant while balancing it across source sessions."
+            "'session_equalized' keeps total REST mass constant while balancing it across source sessions. "
+            "'core_event_equalized' emphasizes core-session REST events while still retaining auxiliary quiet-rest support."
         ),
     )
     training_group.add_argument(
@@ -1495,11 +1697,21 @@ def main():
         else:
             loss_f = nn.CrossEntropyLoss()
 
-        # Action loss (REST downweighted)
-        action_weights = torch.ones(n_actions, dtype=torch.float32)
-        if ACTION_REST < n_actions:
-            action_weights[ACTION_REST] = max(0.0, float(args.rest_weight))
+        # Action loss (explicit action weights override scalar REST weighting)
+        try:
+            action_weights, action_weights_override = _resolve_action_class_weights(
+                action_weights=getattr(args, "action_weights", None),
+                n_actions=n_actions,
+                rest_weight=float(args.rest_weight),
+            )
+        except ValueError as exc:
+            print(f"❌ Invalid --action-weights: {exc}")
+            return 2
         loss_a = nn.CrossEntropyLoss(weight=action_weights.to(device))
+        if action_weights_override:
+            print(f"Using action weights: {action_weights.tolist()}")
+        else:
+            print(f"Using scalar rest_weight via action weights: {action_weights.tolist()}")
 
         # ===== TRAIN =====
         for epoch in range(args.epochs):
@@ -1518,14 +1730,16 @@ def main():
                 opt.zero_grad()
                 f_out, a_out = model(Xb)
 
-                loss_action = loss_a(a_out, yab)
-                mask_nr = yab != ACTION_REST
-                if mask_nr.any():
-                    loss_finger = loss_f(f_out[mask_nr], yfb[mask_nr])
-                else:
-                    loss_finger = torch.tensor(0.0, device=device)
-
-                loss = loss_action + float(args.loss_action_weight) * loss_finger
+                loss, loss_action, loss_finger_non_rest, loss_finger_rest = _compute_batch_losses(
+                    finger_logits=f_out,
+                    action_logits=a_out,
+                    y_finger=yfb,
+                    y_action=yab,
+                    action_loss_fn=loss_a,
+                    finger_loss_fn=loss_f,
+                    loss_action_weight=float(args.loss_action_weight),
+                    rest_finger_loss_weight=float(args.rest_finger_loss_weight),
+                )
                 loss.backward()
                 opt.step()
 
@@ -1535,6 +1749,7 @@ def main():
                 correct_action += (preds_action == yab).sum().item()
                 total_action += yab.numel()
 
+                mask_nr = yab != ACTION_REST
                 if mask_nr.any():
                     preds_finger = torch.argmax(f_out[mask_nr], dim=1)
                     correct_finger += (preds_finger == yfb[mask_nr]).sum().item()
@@ -1562,7 +1777,10 @@ def main():
             "calibration_size": float(args.calibration_size),
             "loss_action_weight": args.loss_action_weight,
             "rest_weight": float(args.rest_weight),
+            "action_weights": action_weights.tolist(),
+            "action_weights_override": bool(action_weights_override),
             "rest_balance_mode": args.rest_balance_mode,
+            "rest_finger_loss_weight": float(args.rest_finger_loss_weight),
             "finger_weights": finger_weights.tolist() if finger_weights is not None else None,
             "window_preprocess": args.window_preprocess,
             "test_size": args.test_size,

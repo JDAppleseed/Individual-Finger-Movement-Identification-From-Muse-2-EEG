@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
@@ -82,8 +83,31 @@ def validate_train(settings: Dict[str, Any]) -> ValidationResult:
     warnings: List[str] = []
     if "rest_balance_mode" in settings:
         value = str(settings.get("rest_balance_mode"))
-        if value not in {"none", "session_equalized"}:
-            errors.append("rest_balance_mode must be 'none' or 'session_equalized'.")
+        if value not in {"none", "session_equalized", "core_event_equalized"}:
+            errors.append(
+                "rest_balance_mode must be 'none', 'session_equalized', or 'core_event_equalized'."
+            )
+    if "rest_finger_loss_weight" in settings:
+        try:
+            if float(settings.get("rest_finger_loss_weight")) < 0.0:
+                errors.append("rest_finger_loss_weight must be >= 0.")
+        except Exception:
+            errors.append("rest_finger_loss_weight must be numeric.")
+    if "action_weights" in settings and settings.get("action_weights") not in {None, "", "none", "null"}:
+        raw = settings.get("action_weights")
+        try:
+            if isinstance(raw, str) and raw.strip().startswith(("[", "{")):
+                parsed = json.loads(raw)
+            elif isinstance(raw, str):
+                parsed = [float(v) for v in raw.replace(" ", ",").split(",") if v]
+            else:
+                parsed = raw
+            if isinstance(parsed, dict):
+                pass
+            elif not isinstance(parsed, (list, tuple)) or len(parsed) != 3:
+                errors.append("action_weights must contain exactly 3 values for REST, OPEN, CLOSE.")
+        except Exception:
+            errors.append("action_weights must be parseable as CSV/JSON with 3 values.")
     if "window_preprocess" in settings:
         value = str(settings.get("window_preprocess"))
         if value not in {"none", "center", "center_detrend"}:

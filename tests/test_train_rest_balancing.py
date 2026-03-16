@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
+import torch
 
 
 def _load_train_module():
@@ -96,3 +97,84 @@ def test_auxiliary_rest_session_policy_noops_when_no_rest_only_session():
     assert summary["reason"] == "no_rest_only_sessions"
     assert np.array_equal(summary["core_idx"], np.arange(len(y_action), dtype=np.int64))
     assert summary["aux_sessions"] == []
+
+
+def test_core_event_equalized_balances_core_events_and_aux_session_mass():
+    mod = _load_train_module()
+    y_action = np.array(
+        [0] * 6 + [0] * 2 + [1] * 4 + [0] * 10,
+        dtype=np.int64,
+    )
+    meta = {
+        "session_id": np.array(
+            ["move"] * 12 + ["rest_only"] * 10,
+            dtype="U",
+        ),
+        "event_id": np.array(
+            [10] * 6 + [11] * 2 + [20] * 4 + [30] * 10,
+            dtype=np.int64,
+        ),
+    }
+
+    weights, summary = mod._build_train_sample_weights(
+        y_action,
+        meta,
+        balance_mode="core_event_equalized",
+    )
+
+    assert weights is not None
+    assert summary["enabled"] is True
+    core_event_10_mass = float(np.sum(weights[(y_action == 0) & (meta["event_id"] == 10)]))
+    core_event_11_mass = float(np.sum(weights[(y_action == 0) & (meta["event_id"] == 11)]))
+    aux_mass = float(np.sum(weights[(y_action == 0) & (meta["session_id"] == "rest_only")]))
+    assert np.isclose(core_event_10_mass, core_event_11_mass)
+    assert np.isclose(core_event_10_mass + core_event_11_mass, 0.70 * 18.0)
+    assert np.isclose(aux_mass, 0.30 * 18.0)
+    assert np.allclose(weights[y_action != 0], 1.0)
+
+
+def test_action_weights_override_rest_weight():
+    mod = _load_train_module()
+    weights, override = mod._resolve_action_class_weights(
+        action_weights="1.25,0.9,1.0",
+        n_actions=3,
+        rest_weight=5.0,
+    )
+
+    assert override is True
+    assert torch.allclose(weights, torch.tensor([1.25, 0.9, 1.0], dtype=torch.float32))
+
+
+def test_rest_finger_loss_only_applies_when_enabled():
+    mod = _load_train_module()
+    finger_logits = torch.tensor([[0.1, 1.2, -0.4]], dtype=torch.float32)
+    action_logits = torch.tensor([[2.0, -1.0, -1.5]], dtype=torch.float32)
+    y_finger = torch.tensor([1], dtype=torch.long)
+    y_action = torch.tensor([0], dtype=torch.long)
+    loss_f = torch.nn.CrossEntropyLoss()
+    loss_a = torch.nn.CrossEntropyLoss()
+
+    loss0, _, _, rest0 = mod._compute_batch_losses(
+        finger_logits=finger_logits,
+        action_logits=action_logits,
+        y_finger=y_finger,
+        y_action=y_action,
+        action_loss_fn=loss_a,
+        finger_loss_fn=loss_f,
+        loss_action_weight=1.0,
+        rest_finger_loss_weight=0.0,
+    )
+    loss1, _, _, rest1 = mod._compute_batch_losses(
+        finger_logits=finger_logits,
+        action_logits=action_logits,
+        y_finger=y_finger,
+        y_action=y_action,
+        action_loss_fn=loss_a,
+        finger_loss_fn=loss_f,
+        loss_action_weight=1.0,
+        rest_finger_loss_weight=0.5,
+    )
+
+    assert float(rest0.item()) == 0.0
+    assert float(rest1.item()) > 0.0
+    assert float(loss1.item()) > float(loss0.item())

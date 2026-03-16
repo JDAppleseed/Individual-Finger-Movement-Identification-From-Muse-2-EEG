@@ -74,3 +74,27 @@ def test_train_new_mode_validation():
     )
     assert any("rest_balance_mode" in err for err in result.errors)
     assert any("window_preprocess" in err for err in result.errors)
+
+
+def test_train_accepts_new_rest_balance_mode_and_action_weights():
+    result = validate_step_settings(
+        "train",
+        {
+            "rest_balance_mode": "core_event_equalized",
+            "action_weights": "1.25,0.9,1.0",
+            "rest_finger_loss_weight": 0.1,
+        },
+    )
+    assert result.ok is True
+
+
+def test_train_rejects_bad_action_weights_and_rest_finger_loss_weight():
+    result = validate_step_settings(
+        "train",
+        {
+            "action_weights": "1.0,0.5",
+            "rest_finger_loss_weight": -0.1,
+        },
+    )
+    assert any("action_weights" in err for err in result.errors)
+    assert any("rest_finger_loss_weight" in err for err in result.errors)

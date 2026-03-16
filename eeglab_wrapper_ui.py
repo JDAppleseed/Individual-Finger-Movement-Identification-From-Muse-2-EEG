@@ -456,7 +456,9 @@ TOOLTIPS: Dict[str, str] = {
     "finger_weights": "Per-finger loss weights (CSV or JSON). Example: 1,1,1,1,1,0.4 or {\"pinky\":0.4}",
     "loss_action_weight": "Weight applied to the finger loss term.",
     "rest_weight": "Class weight for REST actions (0 = ignore).",
+    "action_weights": "Per-action loss weights in REST,OPEN,CLOSE order (CSV or JSON). Overrides rest_weight when set.",
     "rest_balance_mode": "How REST windows are reweighted across source sessions during training.",
+    "rest_finger_loss_weight": "Additional finger-head loss weight applied on REST windows toward NONE.",
     "test_size": "Fraction of windows held out for testing.",
     "split_mode": "Split strategy (group_trial or holdout_session).",
     "calibration_size": "Fraction of the training split reserved for post-hoc temperature scaling (0 disables).",
@@ -1136,10 +1138,22 @@ class MainWindow(QMainWindow):
                 ),
                 ArgSpec("rest_weight", "--rest-weight", "float", "REST class weight."),
                 ArgSpec(
+                    "action_weights",
+                    "--action-weights",
+                    "text",
+                    "Per-action loss weights (REST,OPEN,CLOSE; CSV/JSON).",
+                ),
+                ArgSpec(
                     "rest_balance_mode",
                     "--rest-balance-mode",
                     "text",
-                    "REST reweighting mode (none or session_equalized).",
+                    "REST reweighting mode (none, session_equalized, core_event_equalized).",
+                ),
+                ArgSpec(
+                    "rest_finger_loss_weight",
+                    "--rest-finger-loss-weight",
+                    "float",
+                    "Additional finger loss on REST windows toward NONE.",
                 ),
                 ArgSpec(
                     "finger_weights",
@@ -4387,9 +4401,34 @@ class MainWindow(QMainWindow):
             self._add_text(
                 step_id,
                 form,
+                "action_weights",
+                "Action weights (CSV/JSON)",
+                defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "rest_finger_loss_weight",
+                "REST finger loss weight",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
+            self._add_text(
+                step_id,
+                form,
                 "finger_weights",
                 "Finger weights (CSV/JSON)",
                 defaults,
+            )
+            self._add_choice_dropdown(
+                step_id,
+                form,
+                "rest_balance_mode",
+                "REST balance mode",
+                defaults,
+                ["none", "session_equalized", "core_event_equalized"],
             )
             self._add_spin(
                 step_id,
@@ -4711,7 +4750,10 @@ class MainWindow(QMainWindow):
                 "seed": "Seed",
                 "loss_action_weight": "Finger loss weight",
                 "rest_weight": "REST class weight",
+                "action_weights": "Action weights (CSV/JSON)",
+                "rest_finger_loss_weight": "REST finger loss weight",
                 "finger_weights": "Finger weights (CSV/JSON)",
+                "rest_balance_mode": "REST balance mode",
                 "test_size": "Test split size",
                 "calibration_size": "Calibration holdout",
                 "split_mode": "Split mode",

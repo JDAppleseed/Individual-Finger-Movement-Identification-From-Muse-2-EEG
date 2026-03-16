@@ -10,6 +10,7 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 import platform
@@ -60,6 +61,7 @@ ACTION_LABELS = sorted(ACTION_NAMES.keys())
 ACTION_TICK_LABELS = [ACTION_NAMES[label] for label in ACTION_LABELS]
 FINGER_LABELS = sorted(FINGER_NAMES.keys())
 FINGER_TICK_LABELS = [FINGER_NAMES[label] for label in FINGER_LABELS]
+REPEATED_SPLIT_SEEDS = (7, 21, 42, 84, 168)
 
 # Pipeline handoff: Step 3 reads Step 2 artifacts from one run directory and writes
 # calibrated metrics/plots/manifests back into that same run-scoped report path.
@@ -745,6 +747,235 @@ def _run_deterministic_inference(
     return action_probs, finger_probs
 
 
+def _format_pair_counts(action_ids: np.ndarray, finger_ids: np.ndarray) -> Dict[str, int]:
+    action_ids = np.asarray(action_ids, dtype=np.int64).reshape(-1)
+    finger_ids = np.asarray(finger_ids, dtype=np.int64).reshape(-1)
+    counter = Counter(zip(action_ids.tolist(), finger_ids.tolist()))
+    return {
+        f"{ACTION_NAMES.get(int(a), str(a))}+{FINGER_NAMES.get(int(f), str(f))}": int(count)
+        for (a, f), count in sorted(
+            counter.items(),
+            key=lambda item: (-item[1], int(item[0][0]), int(item[0][1])),
+        )
+    }
+
+
+def _compute_prediction_metrics(
+    *,
+    action_probs: np.ndarray,
+    finger_probs: np.ndarray,
+    y_action_true: np.ndarray,
+    y_finger_true: np.ndarray,
+    n_bins: int = 10,
+) -> Dict[str, Any]:
+    y_action_true = np.asarray(y_action_true, dtype=np.int64).reshape(-1)
+    y_finger_true = np.asarray(y_finger_true, dtype=np.int64).reshape(-1)
+    action_probs = np.asarray(action_probs, dtype=np.float32)
+    finger_probs = np.asarray(finger_probs, dtype=np.float32)
+
+    action_preds = np.argmax(action_probs, axis=1).astype(np.int64)
+    raw_finger_preds = np.argmax(finger_probs, axis=1).astype(np.int64)
+    raw_valid_pair_rate = (
+        float(np.mean((action_preds != ACTION_REST) | (raw_finger_preds == 0)))
+        if len(action_preds)
+        else None
+    )
+    raw_invalid_pair_rate = (
+        float(1.0 - raw_valid_pair_rate) if raw_valid_pair_rate is not None else None
+    )
+    _, finger_preds = enforce_prediction_pairs(action_preds, raw_finger_preds)
+    action_conf = action_probs[np.arange(len(action_probs)), action_preds]
+    finger_conf = finger_probs[np.arange(len(finger_probs)), finger_preds]
+
+    mask_non_rest = y_action_true != ACTION_REST
+    joint_correct = (action_preds == y_action_true) & (finger_preds == y_finger_true)
+    rest_mask = y_action_true == ACTION_REST
+
+    rest_tpr = None
+    rest_precision = None
+    rest_fpr = None
+    rest_f1 = None
+    if np.any(rest_mask):
+        rest_tp = int(np.sum(rest_mask & (action_preds == ACTION_REST)))
+        rest_fn = int(np.sum(rest_mask & (action_preds != ACTION_REST)))
+        rest_fp = int(np.sum(~rest_mask & (action_preds == ACTION_REST)))
+        rest_tn = int(np.sum(~rest_mask & (action_preds != ACTION_REST)))
+        rest_tpr = float(rest_tp / (rest_tp + rest_fn)) if (rest_tp + rest_fn) else None
+        rest_fpr = float(rest_fp / (rest_fp + rest_tn)) if (rest_fp + rest_tn) else None
+        rest_precision = (
+            float(rest_tp / (rest_tp + rest_fp)) if (rest_tp + rest_fp) else None
+        )
+        if rest_tpr is not None and rest_precision is not None:
+            denom = rest_tpr + rest_precision
+            rest_f1 = float(2.0 * rest_tpr * rest_precision / denom) if denom else None
+
+    metrics = {
+        "raw_valid_pair_rate": raw_valid_pair_rate,
+        "raw_invalid_pair_rate": raw_invalid_pair_rate,
+        "action_acc": float(accuracy_score(y_action_true, action_preds)) if len(y_action_true) else None,
+        "action_f1_macro": float(
+            f1_score(y_action_true, action_preds, average="macro", zero_division=0)
+        )
+        if len(y_action_true)
+        else None,
+        "action_f1_weighted": float(
+            f1_score(y_action_true, action_preds, average="weighted", zero_division=0)
+        )
+        if len(y_action_true)
+        else None,
+        "joint_acc": float(np.mean(joint_correct)) if len(joint_correct) else None,
+        "joint_acc_non_rest": float(np.mean(joint_correct[mask_non_rest])) if np.any(mask_non_rest) else None,
+        "finger_acc_non_rest": float(accuracy_score(y_finger_true[mask_non_rest], finger_preds[mask_non_rest]))
+        if np.any(mask_non_rest)
+        else None,
+        "finger_acc_overall": float(accuracy_score(y_finger_true, finger_preds)) if len(y_finger_true) else None,
+        "rest_tpr": rest_tpr,
+        "rest_fpr": rest_fpr,
+        "rest_precision": rest_precision,
+        "rest_f1": rest_f1,
+        "action_ece": float(expected_calibration_error(action_conf, action_preds, y_action_true, n_bins))
+        if len(y_action_true)
+        else None,
+        "finger_ece_non_rest": float(
+            expected_calibration_error(
+                finger_conf[mask_non_rest],
+                finger_preds[mask_non_rest],
+                y_finger_true[mask_non_rest],
+                n_bins,
+            )
+        )
+        if np.any(mask_non_rest)
+        else None,
+    }
+    return {
+        "metrics": metrics,
+        "action_preds": action_preds,
+        "finger_preds": finger_preds,
+        "raw_finger_preds": raw_finger_preds,
+        "action_conf": action_conf,
+        "finger_conf": finger_conf,
+        "pair_counts": _format_pair_counts(action_preds, finger_preds),
+    }
+
+
+def _build_primary_benchmark(
+    *,
+    y_action_test: np.ndarray,
+    y_finger_test: np.ndarray,
+    metrics: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "test_n": int(len(y_action_test)),
+        "test_action_counts": _format_label_counts(y_action_test, ACTION_NAMES),
+        "test_finger_counts": _format_label_counts(y_finger_test, FINGER_NAMES),
+        "metrics": {
+            key: (float(value) if isinstance(value, (np.floating, float)) and value is not None else value)
+            for key, value in metrics.items()
+            if key
+            in {
+                "action_acc",
+                "joint_acc",
+                "joint_acc_non_rest",
+                "finger_acc_non_rest",
+                "rest_tpr",
+                "rest_precision",
+                "action_ece",
+                "raw_invalid_pair_rate",
+            }
+        },
+    }
+
+
+def _build_rest_event_breakdown(
+    *,
+    indices: np.ndarray,
+    y_action_true: np.ndarray,
+    action_probs: np.ndarray,
+    action_preds: np.ndarray,
+    finger_preds: np.ndarray,
+    meta: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if not meta:
+        return [], []
+    if "event_id" not in meta or "session_id" not in meta:
+        return [], []
+
+    event_id = np.asarray(meta["event_id"])[indices].astype(np.int64)
+    session_id = np.asarray(meta["session_id"])[indices].astype("U")
+    window_start = (
+        np.asarray(meta["window_start"])[indices].astype(np.float32)
+        if "window_start" in meta
+        else None
+    )
+    window_end = (
+        np.asarray(meta["window_end"])[indices].astype(np.float32)
+        if "window_end" in meta
+        else None
+    )
+
+    rest_mask = np.asarray(y_action_true, dtype=np.int64) == ACTION_REST
+    rest_event_ids = np.unique(event_id[rest_mask]) if np.any(rest_mask) else np.array([], dtype=np.int64)
+    breakdown: List[Dict[str, Any]] = []
+    flags: List[Dict[str, Any]] = []
+    for eid in rest_event_ids.tolist():
+        event_mask = rest_mask & (event_id == int(eid))
+        if not np.any(event_mask):
+            continue
+        event_action_preds = action_preds[event_mask]
+        event_finger_preds = finger_preds[event_mask]
+        event_probs = action_probs[event_mask]
+        rest_tpr = float(np.mean(event_action_preds == ACTION_REST))
+        pair_counts = _format_pair_counts(event_action_preds, event_finger_preds)
+        non_rest_pair_counts = {
+            key: value
+            for key, value in pair_counts.items()
+            if not key.startswith(f"{ACTION_NAMES.get(ACTION_REST, 'REST')}+")
+        }
+        dominant_pair = None
+        dominant_pair_count = 0
+        if non_rest_pair_counts:
+            dominant_pair, dominant_pair_count = max(
+                non_rest_pair_counts.items(), key=lambda item: item[1]
+            )
+        dominant_pair_share = (
+            float(dominant_pair_count / int(np.sum(event_mask))) if dominant_pair_count else 0.0
+        )
+        entry = {
+            "event_id": int(eid),
+            "session_id": str(session_id[event_mask][0]),
+            "window_count": int(np.sum(event_mask)),
+            "rest_tpr": rest_tpr,
+            "pred_action_counts": _format_label_counts(event_action_preds, ACTION_NAMES),
+            "pred_pair_counts": pair_counts,
+            "median_p_rest": float(np.median(event_probs[:, ACTION_REST])),
+            "median_p_open": float(np.median(event_probs[:, 1])) if event_probs.shape[1] > 1 else None,
+            "median_p_close": float(np.median(event_probs[:, 2])) if event_probs.shape[1] > 2 else None,
+            "window_start": float(np.min(window_start[event_mask])) if window_start is not None else None,
+            "window_end": float(np.max(window_end[event_mask])) if window_end is not None else None,
+        }
+        breakdown.append(entry)
+        if rest_tpr < 0.20 or dominant_pair_share >= 0.80:
+            flags.append(
+                {
+                    "event_id": int(eid),
+                    "session_id": str(session_id[event_mask][0]),
+                    "window_count": int(np.sum(event_mask)),
+                    "rest_tpr": rest_tpr,
+                    "dominant_non_rest_pair": dominant_pair,
+                    "dominant_non_rest_pair_share": dominant_pair_share,
+                    "recommended_action": "relabel" if dominant_pair_share >= 0.80 else "prune",
+                    "reason": (
+                        f"dominant_non_rest_pair={dominant_pair}"
+                        if dominant_pair_share >= 0.80
+                        else "low_rest_tpr"
+                    ),
+                }
+            )
+    breakdown.sort(key=lambda item: item["event_id"])
+    flags.sort(key=lambda item: (item["recommended_action"], item["event_id"]))
+    return breakdown, flags
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -1314,6 +1545,9 @@ def main():
         manifest["abort_reason"] = "no_core_windows_after_aux_rest_filter"
         _maybe_write_manifest()
         return 2
+
+    eval_model = None
+    eval_normalizer = None
 
     # =========================
     # ===== TEST SPLIT =========
@@ -2067,14 +2301,208 @@ def main():
     manifest["metrics"]["smoothed_rest_f1"] = (
         float(rest_f1_s) if rest_f1_s is not None else None
     )
-    manifest["benchmarks"] = {
-        "primary_mixed_holdout": {
-            "test_n": int(len(test_idx)),
-            "test_action_counts": _format_label_counts(y_action_test, ACTION_NAMES),
-            "test_finger_counts": _format_label_counts(y_finger_test, FINGER_NAMES),
-        },
-        "aux_rest_only": aux_rest_benchmark,
+
+    primary_benchmark = _build_primary_benchmark(
+        y_action_test=y_action_test,
+        y_finger_test=y_finger_test,
+        metrics=manifest["metrics"],
+    )
+
+    core_full_session_replay = None
+    rest_event_breakdown: List[Dict[str, Any]] = []
+    candidate_event_flags: List[Dict[str, Any]] = []
+    repeated_split_summary = {
+        "seeds": list(REPEATED_SPLIT_SEEDS),
+        "per_seed": [],
+        "mean": {},
+        "std": {},
     }
+
+    core_split_meta = _subset_meta(meta, split_idx, len(y_action)) if meta else {}
+    if eval_model is None or eval_normalizer is None:
+        try:
+            eval_model, eval_normalizer, temperature_state = _load_eval_model_and_normalizer(
+                model_path=model_path,
+                scaler_path=scaler_path,
+                temperature_path=temperature_path,
+                n_channels=X.shape[2],
+                n_fingers=n_fingers,
+                n_actions=n_actions,
+            )
+        except Exception as exc:
+            print(f"⚠️ Core-session replay skipped: {exc}")
+            eval_model = None
+            eval_normalizer = None
+
+    if eval_model is not None and eval_normalizer is not None:
+        core_action_probs, core_finger_probs = _run_deterministic_inference(
+            X=X,
+            indices=split_idx,
+            model=eval_model,
+            normalizer=eval_normalizer,
+            temperature_state=temperature_state,
+            n_actions=n_actions,
+            n_fingers=n_fingers,
+            batch_size=max(1, int(args.batch_size)),
+        )
+        core_metrics_payload = _compute_prediction_metrics(
+            action_probs=core_action_probs,
+            finger_probs=core_finger_probs,
+            y_action_true=y_action[split_idx],
+            y_finger_true=y_finger[split_idx],
+            n_bins=N_BINS,
+        )
+        core_metrics = core_metrics_payload["metrics"]
+        core_full_session_replay = {
+            "n_windows": int(len(split_idx)),
+            "sessions": sorted(
+                set(np.asarray(meta["session_id"])[split_idx].astype("U").tolist())
+            )
+            if "session_id" in meta
+            else [],
+            "metrics": {
+                key: (
+                    float(value)
+                    if isinstance(value, (float, np.floating)) and value is not None
+                    else value
+                )
+                for key, value in core_metrics.items()
+                if key
+                in {
+                    "action_acc",
+                    "joint_acc",
+                    "joint_acc_non_rest",
+                    "finger_acc_non_rest",
+                    "rest_tpr",
+                    "rest_precision",
+                    "action_ece",
+                    "raw_invalid_pair_rate",
+                }
+            },
+            "pred_action_counts": _format_label_counts(
+                core_metrics_payload["action_preds"], ACTION_NAMES
+            ),
+            "pred_pair_counts": core_metrics_payload["pair_counts"],
+        }
+        rest_event_breakdown, candidate_event_flags = _build_rest_event_breakdown(
+            indices=split_idx,
+            y_action_true=y_action[split_idx],
+            action_probs=core_action_probs,
+            action_preds=core_metrics_payload["action_preds"],
+            finger_preds=core_metrics_payload["finger_preds"],
+            meta=meta,
+        )
+        if candidate_event_flags:
+            print("\n⚠️ Candidate REST events for review:")
+            for flag in candidate_event_flags:
+                print(
+                    f"  event {flag['event_id']} ({flag['session_id']}): "
+                    f"REST TPR {flag['rest_tpr'] * 100:.2f}% | "
+                    f"recommend {flag['recommended_action']} | "
+                    f"reason={flag['reason']}"
+                )
+
+        repeated_metric_keys = [
+            "action_acc",
+            "joint_acc",
+            "finger_acc_non_rest",
+            "rest_tpr",
+            "rest_precision",
+        ]
+        repeated_values: Dict[str, List[float]] = {key: [] for key in repeated_metric_keys}
+        for repeat_seed in REPEATED_SPLIT_SEEDS:
+            if int(repeat_seed) == int(split_seed):
+                metrics_payload = {
+                    "metrics": {
+                        key: manifest["metrics"].get(key) for key in repeated_metric_keys
+                    }
+                }
+                test_count = int(len(test_idx))
+            else:
+                rep_train_idx, rep_test_idx, _ = _split_with_checks(
+                    y_action[split_idx],
+                    y_finger[split_idx],
+                    meta=core_split_meta,
+                    seed=int(repeat_seed),
+                    test_size=float(test_size),
+                    split_mode=str(split_mode),
+                    purge_seconds=float(purge_seconds),
+                    hop_seconds=hop_seconds,
+                )
+                if rep_test_idx is None:
+                    repeated_split_summary["per_seed"].append(
+                        {"seed": int(repeat_seed), "status": "split_failed"}
+                    )
+                    continue
+                rep_test_global = split_idx[np.asarray(rep_test_idx, dtype=np.int64)]
+                rep_action_probs, rep_finger_probs = _run_deterministic_inference(
+                    X=X,
+                    indices=rep_test_global,
+                    model=eval_model,
+                    normalizer=eval_normalizer,
+                    temperature_state=temperature_state,
+                    n_actions=n_actions,
+                    n_fingers=n_fingers,
+                    batch_size=max(1, int(args.batch_size)),
+                )
+                metrics_payload = _compute_prediction_metrics(
+                    action_probs=rep_action_probs,
+                    finger_probs=rep_finger_probs,
+                    y_action_true=y_action[rep_test_global],
+                    y_finger_true=y_finger[rep_test_global],
+                    n_bins=N_BINS,
+                )
+                test_count = int(len(rep_test_global))
+            metric_entry = {
+                key: (
+                    float(metrics_payload["metrics"][key])
+                    if metrics_payload["metrics"].get(key) is not None
+                    else None
+                )
+                for key in repeated_metric_keys
+            }
+            repeated_split_summary["per_seed"].append(
+                {
+                    "seed": int(repeat_seed),
+                    "status": "ok",
+                    "test_n": test_count,
+                    "metrics": metric_entry,
+                }
+            )
+            for key in repeated_metric_keys:
+                value = metric_entry.get(key)
+                if value is not None:
+                    repeated_values[key].append(float(value))
+
+        repeated_split_summary["mean"] = {
+            key: float(np.mean(values)) if values else None
+            for key, values in repeated_values.items()
+        }
+        repeated_split_summary["std"] = {
+            key: float(np.std(values)) if values else None
+            for key, values in repeated_values.items()
+        }
+        rest_tpr_mean = repeated_split_summary["mean"].get("rest_tpr")
+        rest_tpr_std = repeated_split_summary["std"].get("rest_tpr")
+        joint_acc_mean = repeated_split_summary["mean"].get("joint_acc")
+        joint_acc_std = repeated_split_summary["std"].get("joint_acc")
+        if rest_tpr_mean is not None and joint_acc_mean is not None:
+            print(
+                "\n🔁 Repeated split summary: "
+                f"REST TPR mean/std {rest_tpr_mean * 100:.2f}% / "
+                f"{(rest_tpr_std or 0.0) * 100:.2f}% | "
+                f"Joint Acc mean/std {joint_acc_mean * 100:.2f}% / "
+                f"{(joint_acc_std or 0.0) * 100:.2f}%"
+            )
+
+    manifest["benchmarks"] = {
+        "primary_mixed_holdout": primary_benchmark,
+        "aux_rest_only": aux_rest_benchmark,
+        "core_full_session_replay": core_full_session_replay,
+    }
+    manifest["rest_event_breakdown"] = rest_event_breakdown
+    manifest["candidate_event_flags"] = candidate_event_flags
+    manifest["repeated_split_summary"] = repeated_split_summary
 
     if subject_ids is not None:
         try:

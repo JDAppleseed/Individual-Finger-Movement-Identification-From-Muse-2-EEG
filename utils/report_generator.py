@@ -361,6 +361,7 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     metrics_path = run_dir / "metrics.json"
     train_config_path = run_dir / "train_config.json"
     preds_path = run_dir / "test_predictions.npz"
+    eval_manifest_path = out_dir / "eval_manifest.json"
 
     metrics = {}
     if metrics_path.exists():
@@ -368,6 +369,12 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
             metrics = json.loads(metrics_path.read_text())
         except Exception:
             metrics = {}
+    eval_manifest = {}
+    if eval_manifest_path.exists():
+        try:
+            eval_manifest = json.loads(eval_manifest_path.read_text())
+        except Exception:
+            eval_manifest = {}
 
     preds = None
     if preds_path.exists():
@@ -494,6 +501,116 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
         confusion_html += f'<img src="{cm_path.name}" width="400"/>'
 
     metrics_pre = json.dumps(metrics, indent=2) if metrics else "{}"
+    manifest_metrics = eval_manifest.get("metrics", {}) if isinstance(eval_manifest, dict) else {}
+    benchmarks = eval_manifest.get("benchmarks", {}) if isinstance(eval_manifest, dict) else {}
+    primary_benchmark = benchmarks.get("primary_mixed_holdout") or {}
+    aux_rest_benchmark = benchmarks.get("aux_rest_only") or {}
+    core_replay_benchmark = benchmarks.get("core_full_session_replay") or {}
+    repeated_summary = eval_manifest.get("repeated_split_summary") or {}
+    candidate_event_flags = eval_manifest.get("candidate_event_flags") or []
+    rest_event_breakdown = eval_manifest.get("rest_event_breakdown") or []
+
+    if manifest_metrics:
+        action_acc = manifest_metrics.get("action_acc", action_acc)
+        action_f1_macro = manifest_metrics.get("action_f1_macro", action_f1_macro)
+        action_f1_weighted = manifest_metrics.get("action_f1_weighted", action_f1_weighted)
+        raw_valid_pair_rate = manifest_metrics.get("raw_valid_pair_rate", raw_valid_pair_rate)
+        raw_invalid_pair_rate = manifest_metrics.get("raw_invalid_pair_rate", raw_invalid_pair_rate)
+        joint_acc = manifest_metrics.get("joint_acc", joint_acc)
+        joint_acc_non_rest = manifest_metrics.get("joint_acc_non_rest", joint_acc_non_rest)
+        finger_acc_non_rest = manifest_metrics.get("finger_acc_non_rest", finger_acc_non_rest)
+        finger_acc_overall = manifest_metrics.get("finger_acc_overall", finger_acc_overall)
+        rest_tpr = manifest_metrics.get("rest_tpr", rest_tpr)
+        rest_fpr = manifest_metrics.get("rest_fpr", rest_fpr)
+        rest_precision = manifest_metrics.get("rest_precision", rest_precision)
+        rest_f1 = manifest_metrics.get("rest_f1", rest_f1)
+
+    primary_html = ""
+    if primary_benchmark:
+        primary_metrics = primary_benchmark.get("metrics", {})
+        primary_html = f"""
+        <h2>Primary Mixed Holdout</h2>
+        <ul>
+          <li>Test windows: {primary_benchmark.get("test_n", "N/A")}</li>
+          <li>Action counts: {primary_benchmark.get("test_action_counts", "N/A")}</li>
+          <li>Finger counts: {primary_benchmark.get("test_finger_counts", "N/A")}</li>
+          <li>Action accuracy: {_safe_pct(primary_metrics.get("action_acc"))}</li>
+          <li>Joint accuracy: {_safe_pct(primary_metrics.get("joint_acc"))}</li>
+          <li>Finger accuracy (non-REST): {_safe_pct(primary_metrics.get("finger_acc_non_rest"))}</li>
+          <li>REST TPR / Precision: {_safe_pct(primary_metrics.get("rest_tpr"))} / {_safe_pct(primary_metrics.get("rest_precision"))}</li>
+        </ul>
+        """
+
+    aux_html = ""
+    if aux_rest_benchmark:
+        aux_html = f"""
+        <h2>Auxiliary Quiet-REST Benchmark</h2>
+        <ul>
+          <li>Windows: {aux_rest_benchmark.get("n_windows", "N/A")}</li>
+          <li>REST events: {aux_rest_benchmark.get("n_rest_events", "N/A")}</li>
+          <li>Sessions: {", ".join(aux_rest_benchmark.get("sessions", [])) or "N/A"}</li>
+          <li>Action accuracy: {_safe_pct(aux_rest_benchmark.get("action_acc"))}</li>
+          <li>REST TPR / Precision / F1: {_safe_pct(aux_rest_benchmark.get("rest_tpr"))} / {_safe_pct(aux_rest_benchmark.get("rest_precision"))} / {_safe_float(aux_rest_benchmark.get("rest_f1"))}</li>
+        </ul>
+        """
+
+    core_html = ""
+    if core_replay_benchmark:
+        core_metrics = core_replay_benchmark.get("metrics", {})
+        core_html = f"""
+        <h2>Core Full-Session Replay</h2>
+        <ul>
+          <li>Windows: {core_replay_benchmark.get("n_windows", "N/A")}</li>
+          <li>Sessions: {", ".join(core_replay_benchmark.get("sessions", [])) or "N/A"}</li>
+          <li>Action accuracy: {_safe_pct(core_metrics.get("action_acc"))}</li>
+          <li>Joint accuracy: {_safe_pct(core_metrics.get("joint_acc"))}</li>
+          <li>Finger accuracy (non-REST): {_safe_pct(core_metrics.get("finger_acc_non_rest"))}</li>
+          <li>REST TPR / Precision: {_safe_pct(core_metrics.get("rest_tpr"))} / {_safe_pct(core_metrics.get("rest_precision"))}</li>
+        </ul>
+        """
+
+    repeated_html = ""
+    if repeated_summary:
+        repeated_html = f"""
+        <h2>Repeated Split Summary</h2>
+        <ul>
+          <li>Seeds: {", ".join(str(v) for v in repeated_summary.get("seeds", [])) or "N/A"}</li>
+          <li>Action accuracy mean/std: {_safe_pct(repeated_summary.get("mean", {}).get("action_acc"))} / {_safe_pct(repeated_summary.get("std", {}).get("action_acc"))}</li>
+          <li>Joint accuracy mean/std: {_safe_pct(repeated_summary.get("mean", {}).get("joint_acc"))} / {_safe_pct(repeated_summary.get("std", {}).get("joint_acc"))}</li>
+          <li>Finger accuracy non-REST mean/std: {_safe_pct(repeated_summary.get("mean", {}).get("finger_acc_non_rest"))} / {_safe_pct(repeated_summary.get("std", {}).get("finger_acc_non_rest"))}</li>
+          <li>REST TPR mean/std: {_safe_pct(repeated_summary.get("mean", {}).get("rest_tpr"))} / {_safe_pct(repeated_summary.get("std", {}).get("rest_tpr"))}</li>
+          <li>REST precision mean/std: {_safe_pct(repeated_summary.get("mean", {}).get("rest_precision"))} / {_safe_pct(repeated_summary.get("std", {}).get("rest_precision"))}</li>
+        </ul>
+        """
+
+    flags_html = ""
+    if candidate_event_flags:
+        rows = "".join(
+            f"<tr><td>{flag.get('event_id')}</td><td>{flag.get('session_id')}</td><td>{_safe_pct(flag.get('rest_tpr'))}</td><td>{flag.get('dominant_non_rest_pair') or 'N/A'}</td><td>{_safe_pct(flag.get('dominant_non_rest_pair_share'))}</td><td>{flag.get('recommended_action')}</td><td>{flag.get('reason')}</td></tr>"
+            for flag in candidate_event_flags
+        )
+        flags_html = f"""
+        <h2>Flagged REST Events</h2>
+        <table border="1" cellpadding="4" cellspacing="0">
+          <tr><th>Event</th><th>Session</th><th>REST TPR</th><th>Dominant non-REST pair</th><th>Dominant share</th><th>Recommendation</th><th>Reason</th></tr>
+          {rows}
+        </table>
+        """
+
+    rest_breakdown_html = ""
+    if rest_event_breakdown:
+        rows = "".join(
+            f"<tr><td>{row.get('event_id')}</td><td>{row.get('session_id')}</td><td>{row.get('window_count')}</td><td>{_safe_pct(row.get('rest_tpr'))}</td><td>{row.get('pred_action_counts')}</td><td>{json.dumps(row.get('pred_pair_counts', {}))}</td><td>{_safe_float(row.get('median_p_rest'))}</td><td>{_safe_float(row.get('median_p_open'))}</td><td>{_safe_float(row.get('median_p_close'))}</td><td>{_safe_float(row.get('window_start'))}</td><td>{_safe_float(row.get('window_end'))}</td></tr>"
+            for row in rest_event_breakdown
+        )
+        rest_breakdown_html = f"""
+        <h2>REST Event Breakdown</h2>
+        <table border="1" cellpadding="4" cellspacing="0">
+          <tr><th>Event</th><th>Session</th><th>Windows</th><th>REST TPR</th><th>Pred action counts</th><th>Pred pair counts</th><th>Median p(REST)</th><th>Median p(OPEN)</th><th>Median p(CLOSE)</th><th>Start</th><th>End</th></tr>
+          {rows}
+        </table>
+        """
+
     html = f"""
     <html>
     <head><title>BCI Run Report - {run_dir.name}</title></head>
@@ -526,6 +643,13 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
       <li>Finger F1 (overall macro/weighted): {_safe_float(finger_f1_overall_macro)} / {_safe_float(finger_f1_overall_weighted)}</li>
       <li>REST TPR: {_safe_pct(rest_tpr)} | REST FPR: {_safe_pct(rest_fpr)} | REST Precision: {_safe_pct(rest_precision)} | REST F1: {_safe_float(rest_f1)}</li>
     </ul>
+
+    {primary_html}
+    {aux_html}
+    {core_html}
+    {repeated_html}
+    {flags_html}
+    {rest_breakdown_html}
 
     <h2>Confusion Matrices</h2>
     {confusion_html or "<p><i>Predictions unavailable; skipping matrices.</i></p>"}
