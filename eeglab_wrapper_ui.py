@@ -76,6 +76,7 @@ from app.config_model import (
     build_config,
     default_export_settings,
     default_infer_settings,
+    default_live_review_settings,
     default_preprocess_settings,
     default_step1_settings,
     default_step1b_settings,
@@ -472,6 +473,12 @@ TOOLTIPS: Dict[str, str] = {
     "pin_memory": "Pin DataLoader memory (useful for CUDA).",
     "save_preds": "Output path for test predictions.",
     "save_temperature": "Output path for fitted post-hoc temperature scaling parameters.",
+    "pred_log": "Prediction log (JSONL) to analyze. Leave blank to auto-resolve the latest Step 7 log under the selected session.",
+    "out_json": "Output JSON summary path for live prediction review.",
+    "segments_csv": "Output CSV of predicted state segments.",
+    "review_csv": "Output CSV of predicted state segments with blank columns for manual video review.",
+    "video_offset_s": "Video offset applied to exported segment timestamps for manual review.",
+    "short_segment_sec": "Duration threshold used to flag short actuatable bursts in the live review summary.",
     "run_dir": "Explicit output directory for training run.",
 }
 
@@ -944,6 +951,7 @@ class MainWindow(QMainWindow):
             "2) Train Model",
             "3+) Evaluate / Reports",
             "7) Live Infer + Actuate",
+            "7b) Review Live Predictions",
             "Logs & Diagnostics",
             "Projects",
             "Stream Setup",
@@ -961,6 +969,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self._wrap_scroll(self._build_train_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_evaluate_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_infer_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_live_review_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_logs_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_projects_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_stream_page(), "CentralWorkspace"))
@@ -1071,6 +1080,45 @@ class MainWindow(QMainWindow):
                 ArgSpec("no_file_io", "--no_file_io", "bool", "Disable file outputs."),
                 ArgSpec("subject_id", "--subject-id", "text", "Subject ID (auto-resolve latest session)."),
                 ArgSpec("project_name", "--project-name", "text", "Project name (auto-resolve latest session)."),
+            ],
+            "live_review": [
+                ArgSpec(
+                    "session_dir",
+                    "--session-dir",
+                    "text",
+                    "Session directory used to auto-resolve the latest Step 7 prediction log.",
+                ),
+                ArgSpec(
+                    "pred_log",
+                    "--pred-log",
+                    "text",
+                    "Prediction log (predictions.jsonl).",
+                ),
+                ArgSpec("out_json", "--out-json", "text", "Output JSON summary."),
+                ArgSpec(
+                    "segments_csv",
+                    "--segments-csv",
+                    "text",
+                    "Output CSV of predicted segments.",
+                ),
+                ArgSpec(
+                    "review_csv",
+                    "--review-csv",
+                    "text",
+                    "Output CSV with review columns for video alignment.",
+                ),
+                ArgSpec(
+                    "video_offset_s",
+                    "--video-offset-s",
+                    "float",
+                    "Offset applied to exported segment timestamps for video review.",
+                ),
+                ArgSpec(
+                    "short_segment_sec",
+                    "--short-segment-sec",
+                    "float",
+                    "Threshold used to flag short actuatable bursts.",
+                ),
             ],
             "step1b": [
                 ArgSpec(
@@ -1262,7 +1310,7 @@ class MainWindow(QMainWindow):
         menu = self.menuBar()
         file_menu = menu.addMenu("File")
         file_menu.addAction(
-            "Projects", lambda: self.workflow_list.setCurrentRow(9)
+            "Projects", lambda: self.workflow_list.setCurrentRow(10)
         )
         file_menu.addSeparator()
         file_menu.addAction("Quit", self.close)
@@ -1274,13 +1322,14 @@ class MainWindow(QMainWindow):
 
         tools_menu = menu.addMenu("Tools")
         tools_menu.addAction(
-            "Stream Setup", lambda: self.workflow_list.setCurrentRow(10)
+            "Stream Setup", lambda: self.workflow_list.setCurrentRow(11)
         )
         tools_menu.addAction(
             "Validate Session", lambda: self.workflow_list.setCurrentRow(3)
         )
         tools_menu.addAction("Event Review", lambda: self.workflow_list.setCurrentRow(2))
-        tools_menu.addAction("Diagnostics", lambda: self.workflow_list.setCurrentRow(8))
+        tools_menu.addAction("Review Live Predictions", lambda: self.workflow_list.setCurrentRow(8))
+        tools_menu.addAction("Diagnostics", lambda: self.workflow_list.setCurrentRow(9))
         model_views_action = tools_menu.addAction("Model Views", self._open_model_views_window)
         model_views_action.setShortcut("Ctrl+M")
 
@@ -1293,9 +1342,10 @@ class MainWindow(QMainWindow):
         study_menu.addAction("Windowing", lambda: self.workflow_list.setCurrentRow(4))
         study_menu.addAction("Training", lambda: self.workflow_list.setCurrentRow(5))
         study_menu.addAction("Evaluate", lambda: self.workflow_list.setCurrentRow(6))
+        study_menu.addAction("Live Review", lambda: self.workflow_list.setCurrentRow(8))
 
         datasets_menu = menu.addMenu("Datasets")
-        datasets_menu.addAction("Export", lambda: self.workflow_list.setCurrentRow(11))
+        datasets_menu.addAction("Export", lambda: self.workflow_list.setCurrentRow(12))
 
         run_menu = menu.addMenu("Run")
         run_menu.addAction(
@@ -1309,9 +1359,13 @@ class MainWindow(QMainWindow):
         run_menu.addAction(
             "Run Live Infer + Actuate", lambda: self._run_step("infer", "live_infer")
         )
+        run_menu.addAction(
+            "Run Review Live Predictions",
+            lambda: self._run_step("live_review", "live_review"),
+        )
 
         help_menu = menu.addMenu("Help")
-        help_menu.addAction("Logs", lambda: self.workflow_list.setCurrentRow(8))
+        help_menu.addAction("Logs", lambda: self.workflow_list.setCurrentRow(9))
         help_menu.addAction("Open README.md", lambda: self._open_doc("README.md"))
         help_menu.addAction(
             "Open DATA_CONTRACT.md",
@@ -1480,6 +1534,11 @@ class MainWindow(QMainWindow):
         run_infer_btn = QPushButton("Run Live Infer + Actuate")
         run_infer_btn.clicked.connect(lambda: self._run_step("infer", "live_infer"))
         pipeline_layout.addWidget(run_infer_btn)
+        open_live_review_btn = QPushButton("Run Review Live Predictions")
+        open_live_review_btn.clicked.connect(
+            lambda: self._run_step("live_review", "live_review")
+        )
+        pipeline_layout.addWidget(open_live_review_btn)
         self.dry_run_checkbox = QCheckBox("Dry run (print CLI only)")
         pipeline_layout.addWidget(self.dry_run_checkbox)
         stop_btn = QPushButton("Stop Active Run")
@@ -1538,6 +1597,11 @@ class MainWindow(QMainWindow):
         open_infer_btn = QPushButton("Open Live Inference")
         open_infer_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(7))
         model_layout.addWidget(open_infer_btn)
+        open_live_review_page_btn = QPushButton("Open Live Review")
+        open_live_review_page_btn.clicked.connect(
+            lambda: self.workflow_list.setCurrentRow(8)
+        )
+        model_layout.addWidget(open_live_review_page_btn)
         open_model_views_btn = QPushButton("Open Model Views")
         open_model_views_btn.clicked.connect(self._open_model_views_window)
         model_layout.addWidget(open_model_views_btn)
@@ -1571,7 +1635,7 @@ class MainWindow(QMainWindow):
         session_layout.addWidget(self.subject_label_dock)
         session_layout.addWidget(self.session_label_dock)
         projects_btn = QPushButton("Projects")
-        projects_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(9))
+        projects_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(10))
         session_layout.addWidget(projects_btn)
         session_layout.addStretch(1)
         session_dock = QDockWidget("Session", self)
@@ -2493,7 +2557,8 @@ class MainWindow(QMainWindow):
         intro = QLabel(
             "Use the navigation on the left to walk through the lossless pipeline. "
             "Record (lossless) captures raw shards + events only (no inference). "
-            "Window extraction and training are offline, and live inference is a separate script."
+            "Window extraction and training are offline, live inference is a separate script, "
+            "and post-live review turns Step 7 prediction logs into segments for manual validation."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -2506,6 +2571,7 @@ class MainWindow(QMainWindow):
             ("2) Train Model", 5),
             ("3+) Evaluate / Reports", 6),
             ("7) Live Infer + Actuate", 7),
+            ("7b) Review Live Predictions", 8),
         ]:
             box = QGroupBox(label)
             box_layout = QVBoxLayout(box)
@@ -3139,6 +3205,18 @@ class MainWindow(QMainWindow):
             custom_controls=live_controls,
         )
 
+    def _build_live_review_page(self) -> QWidget:
+        review_controls = self._build_live_review_controls()
+        return self._build_step_page(
+            step_id="live_review",
+            title="Step 7b: Review Live Predictions",
+            defaults=default_live_review_settings(),
+            script_key="live_review",
+            include_event_tools=False,
+            include_run_controls=True,
+            custom_controls=review_controls,
+        )
+
     def _build_live_infer_controls(self) -> QWidget:
         box = QGroupBox("Live Inference Notes")
         layout = QVBoxLayout(box)
@@ -3154,6 +3232,21 @@ class MainWindow(QMainWindow):
             "and adaptive actuation gating from utils/inference.py. "
             "Saved run-specific temperature scaling is auto-loaded and applied before softmax. "
             "Actuation speed is confidence-modulated by default unless you disable it."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        return box
+
+    def _build_live_review_controls(self) -> QWidget:
+        box = QGroupBox("Post-Live Review Notes")
+        layout = QVBoxLayout(box)
+        note = QLabel(
+            "Use this step after a Step 7 session to summarize predictions.jsonl, "
+            "export predicted state segments, and generate a review CSV for video alignment. "
+            "If you leave the prediction log blank, the tool auto-resolves the latest "
+            "`processed/live_infer*/predictions.jsonl` under the selected session. "
+            "The review CSV is intended for manual comparison against recorded video "
+            "or robot-hand motion during shadow-mode validation."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -3263,6 +3356,10 @@ class MainWindow(QMainWindow):
                 "Run live inference on an LSL stream or CSV input. Optional actuation is opt-in "
                 "with safety confirmation, latency logging, and auto-loaded run-specific "
                 "temperature scaling."
+            ),
+            "live_review": (
+                "Summarize Step 7 prediction logs, export predicted command segments, and "
+                "generate a reviewer-friendly CSV for video-aligned validation of live sessions."
             ),
         }
         return descriptions.get(step_id, "")
@@ -3735,6 +3832,44 @@ class MainWindow(QMainWindow):
                 defaults,
             )
             self._sync_infer_inference_engine_controls()
+        elif step_id == "live_review":
+            self._add_text(
+                step_id,
+                form,
+                "session_dir",
+                "Session dir",
+                defaults,
+            )
+            self._add_file_picker(
+                step_id,
+                form,
+                "pred_log",
+                "Prediction log (JSONL)",
+                defaults,
+                "JSONL (*.jsonl);;All Files (*)",
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "video_offset_s",
+                "Video offset (s)",
+                defaults,
+                -3600,
+                3600,
+                is_float=True,
+                decimals=3,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "short_segment_sec",
+                "Short segment threshold (s)",
+                defaults,
+                0,
+                60,
+                is_float=True,
+                decimals=3,
+            )
         elif step_id == "step1b":
             self._add_spin(
                 step_id,
@@ -4289,6 +4424,34 @@ class MainWindow(QMainWindow):
                 mode="save",
             )
             self._sync_infer_inference_engine_controls()
+        elif step_id == "live_review":
+            self._add_file_picker(
+                step_id,
+                form,
+                "out_json",
+                "Summary JSON",
+                defaults,
+                "JSON (*.json);;All Files (*)",
+                mode="save",
+            )
+            self._add_file_picker(
+                step_id,
+                form,
+                "segments_csv",
+                "Predicted segments CSV",
+                defaults,
+                "CSV (*.csv);;All Files (*)",
+                mode="save",
+            )
+            self._add_file_picker(
+                step_id,
+                form,
+                "review_csv",
+                "Review CSV",
+                defaults,
+                "CSV (*.csv);;All Files (*)",
+                mode="save",
+            )
         elif step_id == "step1b":
             self._add_spin(
                 step_id,
@@ -4770,6 +4933,17 @@ class MainWindow(QMainWindow):
                 "save_temperature": "Save temperature scaling",
             }
             return labels.get(key, key)
+        if step_id == "live_review":
+            labels = {
+                "session_dir": "Session dir",
+                "pred_log": "Prediction log (JSONL)",
+                "out_json": "Summary JSON",
+                "segments_csv": "Predicted segments CSV",
+                "review_csv": "Review CSV",
+                "video_offset_s": "Video offset (s)",
+                "short_segment_sec": "Short segment threshold (s)",
+            }
+            return labels.get(key, key)
         if step_id == "step1":
             labels = {
                 "MODE": "Mode",
@@ -5201,6 +5375,7 @@ class MainWindow(QMainWindow):
             "preprocess": default_preprocess_settings(),
             "train": default_train_settings(),
             "infer": default_infer_settings(),
+            "live_review": default_live_review_settings(),
             "export": default_export_settings(),
         }
         for name, settings in defaults.items():
@@ -5462,7 +5637,49 @@ class MainWindow(QMainWindow):
                 key="infer.scaler_path",
                 legacy_values={"scaler.npz"},
             )
+        self._autofill_live_review_paths(global_session)
         self._autofill_replay_paths(session_dir_override=global_session)
+
+    def _autofill_live_review_paths(self, session_dir: Optional[Path]) -> None:
+        fields = self.fields.get("live_review", {})
+        if not fields:
+            return
+        session_widget = fields.get("session_dir")
+        if isinstance(session_widget, QLineEdit) and session_dir is not None:
+            self._maybe_autofill_text(
+                session_widget,
+                str(session_dir),
+                key="live_review.session_dir",
+                legacy_values={""},
+            )
+
+        live_dir = self._resolve_latest_live_infer_dir(session_dir)
+        if live_dir is None:
+            return
+
+        pred_log_path = live_dir / "predictions.jsonl"
+        if pred_log_path.exists():
+            pred_log_widget = fields.get("pred_log")
+            self._maybe_autofill_text(
+                pred_log_widget,
+                str(pred_log_path),
+                key="live_review.pred_log",
+                legacy_values={"predictions.jsonl"},
+            )
+
+        outputs = {
+            "out_json": live_dir / "live_prediction_summary.json",
+            "segments_csv": live_dir / "predicted_segments.csv",
+            "review_csv": live_dir / "predicted_segments_review.csv",
+        }
+        for key, path in outputs.items():
+            widget = fields.get(key)
+            self._maybe_autofill_text(
+                widget,
+                str(path),
+                key=f"live_review.{key}",
+                legacy_values={path.name},
+            )
 
     def _autofill_replay_paths(
         self, *, session_dir_override: Optional[Path] = None
@@ -5557,6 +5774,21 @@ class MainWindow(QMainWindow):
         if latest and latest.exists():
             return latest
         return None
+
+    def _resolve_latest_live_infer_dir(self, session_dir: Optional[Path]) -> Optional[Path]:
+        if session_dir is None or not session_dir.exists():
+            return None
+        processed_dir = session_dir / "processed"
+        if not processed_dir.exists():
+            return None
+        candidates = [
+            p
+            for p in processed_dir.iterdir()
+            if p.is_dir() and (p.name == "live_infer" or p.name.startswith("live_infer_v"))
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: p.stat().st_mtime)
 
     def _infer_session_dir_from_run_dir(self, run_dir: str) -> Optional[Path]:
         p = Path(run_dir).expanduser()

@@ -35,6 +35,7 @@ STEP_SCRIPTS = {
     "evaluate_figures": "3c_live_paper_figures.py",
     "evaluate_reports": "4_generate_reports.py",
     "live_infer": "7_live_infer_and_actuate.py",
+    "live_review": "tools/analyze_live_predictions.py",
     "diagnostics": "tools/check_time_alignment.py",
 }
 

@@ -16,7 +16,7 @@ import math
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
 
@@ -48,6 +48,107 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 def _pair_label(action_id: int, finger_id: int) -> str:
     return f"{ACTION_NAMES.get(int(action_id), str(action_id))}+{FINGER_NAMES.get(int(finger_id), str(finger_id))}"
+
+
+def _load_config(path: str | Path | None) -> Tuple[Dict[str, Any], Path | None]:
+    if not path:
+        return {}, None
+    config_path = Path(path).expanduser()
+    if config_path.exists():
+        try:
+            config_path = config_path.resolve()
+        except Exception:
+            pass
+    payload = json.loads(config_path.read_text())
+    settings = payload.get("settings", payload)
+    return dict(settings or {}), config_path.parent
+
+
+def _resolve_input_path(value: str | None, *, base_dir: Path | None) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute() and base_dir is not None:
+        path = base_dir / path
+    if path.exists():
+        try:
+            return path.resolve()
+        except Exception:
+            return path
+    return path
+
+
+def _latest_dir_by_mtime(root: Path) -> Path | None:
+    if not root.exists():
+        return None
+    dirs = [p for p in root.iterdir() if p.is_dir()]
+    if not dirs:
+        return None
+    return max(dirs, key=lambda p: p.stat().st_mtime)
+
+
+def resolve_latest_live_infer_dir(session_dir: str | Path) -> Path | None:
+    session_path = Path(session_dir).expanduser()
+    if session_path.exists():
+        try:
+            session_path = session_path.resolve()
+        except Exception:
+            pass
+    processed_dir = session_path / "processed"
+    if not processed_dir.exists():
+        return None
+    candidates = [
+        p
+        for p in processed_dir.iterdir()
+        if p.is_dir() and (p.name == "live_infer" or p.name.startswith("live_infer_v"))
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def resolve_prediction_log_path(
+    *,
+    pred_log: str | None,
+    session_dir: str | Path | None,
+    config_dir: Path | None,
+) -> Path:
+    direct = _resolve_input_path(pred_log, base_dir=config_dir)
+    if direct is not None:
+        if not direct.exists():
+            raise FileNotFoundError(f"Prediction log not found: {direct}")
+        return direct
+    if session_dir is None:
+        raise FileNotFoundError(
+            "No prediction log provided. Pass --pred-log or provide session_dir in --config."
+        )
+    live_dir = resolve_latest_live_infer_dir(session_dir)
+    if live_dir is None:
+        raise FileNotFoundError(
+            f"No live_infer output directory found under session: {Path(session_dir).expanduser()}"
+        )
+    candidate = live_dir / "predictions.jsonl"
+    if not candidate.exists():
+        raise FileNotFoundError(f"Prediction log not found: {candidate}")
+    return candidate.resolve()
+
+
+def _resolve_output_path(
+    value: str | None,
+    *,
+    default_name: str | None,
+    pred_log_path: Path,
+) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        if not default_name:
+            return None
+        text = str(default_name)
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = pred_log_path.parent / path
+    return path
 
 
 def load_prediction_log(path: str | Path) -> List[Dict[str, Any]]:
@@ -423,7 +524,19 @@ def write_segments_csv(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Summarize Step 7 predictions.jsonl logs.")
-    parser.add_argument("--pred-log", required=True, type=str, help="Path to predictions.jsonl.")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Optional config JSON produced by the UI.",
+    )
+    parser.add_argument(
+        "--session-dir",
+        type=str,
+        default=None,
+        help="Optional session directory used to auto-resolve the latest processed/live_infer*/predictions.jsonl.",
+    )
+    parser.add_argument("--pred-log", type=str, default=None, help="Path to predictions.jsonl.")
     parser.add_argument("--out-json", type=str, default=None, help="Optional JSON summary output.")
     parser.add_argument(
         "--segments-csv",
@@ -451,27 +564,82 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    records = load_prediction_log(args.pred_log)
-    result = summarize_records(records, short_segment_sec=float(args.short_segment_sec))
+    config_settings, config_dir = _load_config(args.config)
 
-    if args.out_json:
-        out_json = Path(args.out_json)
+    session_dir_value = (
+        args.session_dir if args.session_dir is not None else config_settings.get("session_dir")
+    )
+    pred_log_value = (
+        args.pred_log if args.pred_log is not None else config_settings.get("pred_log")
+    )
+    pred_log_path = resolve_prediction_log_path(
+        pred_log=pred_log_value,
+        session_dir=session_dir_value,
+        config_dir=config_dir,
+    )
+
+    out_json_value = (
+        args.out_json if args.out_json is not None else config_settings.get("out_json")
+    )
+    segments_csv_value = (
+        args.segments_csv
+        if args.segments_csv is not None
+        else config_settings.get("segments_csv")
+    )
+    review_csv_value = (
+        args.review_csv if args.review_csv is not None else config_settings.get("review_csv")
+    )
+    video_offset_s = (
+        float(args.video_offset_s)
+        if "--video-offset-s" in sys.argv
+        else float(config_settings.get("video_offset_s", args.video_offset_s))
+    )
+    short_segment_sec = (
+        float(args.short_segment_sec)
+        if "--short-segment-sec" in sys.argv
+        else float(config_settings.get("short_segment_sec", args.short_segment_sec))
+    )
+
+    records = load_prediction_log(pred_log_path)
+    result = summarize_records(records, short_segment_sec=float(short_segment_sec))
+    result["summary"]["pred_log_path"] = str(pred_log_path)
+    if session_dir_value:
+        session_dir_path = _resolve_input_path(str(session_dir_value), base_dir=config_dir)
+        if session_dir_path is not None:
+            result["summary"]["session_dir"] = str(session_dir_path)
+
+    out_json = _resolve_output_path(
+        out_json_value,
+        default_name="live_prediction_summary.json",
+        pred_log_path=pred_log_path,
+    )
+    if out_json is not None:
         out_json.parent.mkdir(parents=True, exist_ok=True)
         out_json.write_text(json.dumps(result["summary"], indent=2, sort_keys=True))
 
-    if args.segments_csv:
+    segments_csv = _resolve_output_path(
+        segments_csv_value,
+        default_name="predicted_segments.csv",
+        pred_log_path=pred_log_path,
+    )
+    if segments_csv is not None:
         write_segments_csv(
-            args.segments_csv,
+            segments_csv,
             result["segments"],
-            video_offset_s=float(args.video_offset_s),
+            video_offset_s=float(video_offset_s),
             include_review_columns=False,
         )
 
-    if args.review_csv:
+    review_csv = _resolve_output_path(
+        review_csv_value,
+        default_name="predicted_segments_review.csv",
+        pred_log_path=pred_log_path,
+    )
+    if review_csv is not None:
         write_segments_csv(
-            args.review_csv,
+            review_csv,
             result["segments"],
-            video_offset_s=float(args.video_offset_s),
+            video_offset_s=float(video_offset_s),
             include_review_columns=True,
         )
 

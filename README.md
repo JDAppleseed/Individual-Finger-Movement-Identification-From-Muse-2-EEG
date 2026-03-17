@@ -79,6 +79,7 @@ Notes:
 - Step 2: Train Model → reads `<session_dir>/processed/eeg_windows.npz`, writes `<session_dir>/processed/models/<run_id>/` including `temperature_scaling.json`.
 - Step 3+: Evaluate / Figures / Reports → read from the same session directory and the latest model run, and report action/finger/joint metrics plus raw invalid-pair rate.
 - Step 7: Live Infer + Actuate → uses the latest model/scaler unless explicitly overridden.
+- Step 7b: Review Live Predictions → reads `processed/live_infer*/predictions.jsonl`, summarizes runtime behavior, and exports segment CSVs for video-aligned validation.
 
 ## CLI Run (Session-Directory Flow)
 
@@ -230,6 +231,8 @@ Notes:
 - When `--enable_actuation` is set and `--serial_port` is omitted, Step 7 auto-detects a likely USB serial Arduino port (for example `/dev/cu.usbmodem*` on macOS).
 - Pass `--serial_port` explicitly if multiple candidate serial devices are attached or auto-detection is ambiguous.
 - Actuation is safety-gated; REST/NONE never actuate.
+- Current live defaults enable postprocessing with EMA smoothing (`smoothing_window=5`), `finger_mode=smooth`, `threshold_action=0.05`, `threshold_finger=0.20`, and no hysteresis.
+- Current actuation defaults use `actuation_min_prob=0.75`, `actuation_stability=3`, and `actuation_cooldown_ms=250`.
 - Step 7 logs prediction latency by default in `predictions.jsonl`; actuation events now also record `actuation_sent`, `actuation_latency_ms`, and `actuation_speed_scalar`.
 - Raw shards and prediction logs are preserved by default. They are only disabled when `no_file_io` is set to `true`.
 - Optional MC-dropout backend: set `use_inference_engine: true` in the infer config to route Step 7 through `utils/inference.py`. Relevant keys are `mc_passes`, `uncertainty_base_threshold`, and `uncertainty_weight`.
@@ -238,6 +241,33 @@ Notes:
 - The deployed decode path now enforces `REST => finger NONE`, so exported/live commands are always valid action-finger pairs.
 - Confidence-modulated actuation speed is enabled by default. Use `modulate_actuation_speed` and `actuation_speed_gamma` to adjust it; the Arduino receiver in `hardware/arduino/blue_hand_receive_upload/blue_hand_receive_upload.ino` now accepts an optional third `speed_u8` field.
 - See `docs/actuation_requirements.md` for design constraints.
+
+## Live Review (Step 7b)
+
+After a Step 7 session, summarize the saved prediction log and export segment CSVs for manual review:
+
+```bash
+python tools/analyze_live_predictions.py \
+  --session-dir <session_dir>
+```
+
+Explicit log path:
+
+```bash
+python tools/analyze_live_predictions.py \
+  --pred-log <session_dir>/processed/live_infer*/predictions.jsonl \
+  --out-json <summary.json> \
+  --segments-csv <predicted_segments.csv> \
+  --review-csv <predicted_segments_review.csv>
+```
+
+Notes:
+
+- If `--pred-log` is omitted, the tool auto-resolves the latest `processed/live_infer*/predictions.jsonl` under `--session-dir`.
+- The summary JSON reports latency, transition rate, actuation counts, uncertainty-gate failures, and short actuatable bursts.
+- `predicted_segments.csv` converts per-window predictions into contiguous predicted command intervals.
+- `predicted_segments_review.csv` adds blank reviewer columns so you can compare predicted intervals against recorded video or robot-hand motion.
+- The UI exposes this as `Step 7b: Review Live Predictions` and auto-fills the latest Step 7 log/output paths for the selected session when available.
 
 ## Muse Streaming CLI (Legacy CSV Pipeline)
 

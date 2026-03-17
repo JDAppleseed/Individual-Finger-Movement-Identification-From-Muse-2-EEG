@@ -217,6 +217,18 @@ def default_infer_settings() -> Dict[str, Any]:
     }
 
 
+def default_live_review_settings() -> Dict[str, Any]:
+    return {
+        "session_dir": None,
+        "pred_log": None,
+        "out_json": "live_prediction_summary.json",
+        "segments_csv": "predicted_segments.csv",
+        "review_csv": "predicted_segments_review.csv",
+        "video_offset_s": 0.0,
+        "short_segment_sec": 0.25,
+    }
+
+
 def default_preprocess_settings() -> Dict[str, Any]:
     return {}
 

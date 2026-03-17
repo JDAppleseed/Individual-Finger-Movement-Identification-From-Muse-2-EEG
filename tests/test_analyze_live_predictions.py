@@ -1,4 +1,11 @@
-from tools.analyze_live_predictions import build_segments, summarize_records
+from pathlib import Path
+
+from tools.analyze_live_predictions import (
+    build_segments,
+    resolve_latest_live_infer_dir,
+    resolve_prediction_log_path,
+    summarize_records,
+)
 
 
 def test_build_segments_and_summary():
@@ -86,3 +93,24 @@ def test_build_segments_and_summary():
     assert summary["actuation_sent_count"] == 1
     assert summary["pair_counts"]["REST+NONE"] == 2
     assert summary["pair_counts"]["OPEN+THUMB"] == 2
+
+
+def test_resolve_prediction_log_from_latest_live_dir(tmp_path: Path):
+    session_dir = tmp_path / "session"
+    processed = session_dir / "processed"
+    older = processed / "live_infer"
+    newer = processed / "live_infer_v2"
+    older.mkdir(parents=True)
+    newer.mkdir(parents=True)
+    (older / "predictions.jsonl").write_text('{"committed_action_id":0}\n')
+    (newer / "predictions.jsonl").write_text('{"committed_action_id":1}\n')
+
+    latest = resolve_latest_live_infer_dir(session_dir)
+    assert latest == newer
+
+    pred_log = resolve_prediction_log_path(
+        pred_log=None,
+        session_dir=session_dir,
+        config_dir=None,
+    )
+    assert pred_log == (newer / "predictions.jsonl").resolve()
