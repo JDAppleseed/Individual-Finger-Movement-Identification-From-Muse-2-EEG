@@ -30,6 +30,7 @@ STEP_SCRIPTS = {
     "event_review": "5_review_events.py",
     "event_validate": "5_validate_events.py",
     "train": "2_train_model.py",
+    "topomaps": "tools/experimental_muse_topomaps.py",
     "evaluate": "3_evaluate_model.py",
     "evaluate_deepchecks": "3b_deepchecks_evaluate.py",
     "evaluate_figures": "3c_live_paper_figures.py",

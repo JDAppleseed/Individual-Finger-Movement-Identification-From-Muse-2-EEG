@@ -1,3 +1,4 @@
+from app.config_model import default_infer_settings
 from app.ui_config_validation import validate_step_settings
 
 
@@ -16,6 +17,12 @@ def test_live_infer_warns_on_drop():
 
 def test_live_infer_allows_actuation():
     result = validate_step_settings("infer", {"enable_actuation": True})
+    assert result.ok is True
+    assert not result.errors
+
+
+def test_live_infer_best_defaults_validate():
+    result = validate_step_settings("infer", default_infer_settings())
     assert result.ok is True
     assert not result.errors
 
@@ -59,6 +66,43 @@ def test_inference_engine_validation():
     assert any("actuation_speed_gamma must be numeric." in err for err in result.errors)
 
 
+def test_live_infer_rejects_bad_actuation_and_postprocess_values():
+    result = validate_step_settings(
+        "infer",
+        {
+            "serial_baud": "fast",
+            "actuation_min_prob": 1.2,
+            "actuation_stability": 0,
+            "actuation_cooldown_ms": -1,
+            "actuation_repeat_ms": -1,
+            "actuation_min_speed": 1.1,
+            "threshold_action": "high",
+            "threshold_finger": -0.1,
+            "smoothing_method": "median",
+            "finger_mode": "vote",
+        },
+    )
+    assert any("serial_baud must be an integer." in err for err in result.errors)
+    assert any("actuation_min_prob must be in [0.0, 1.0]." in err for err in result.errors)
+    assert any("actuation_stability must be >= 1." in err for err in result.errors)
+    assert any("actuation_cooldown_ms must be >= 0." in err for err in result.errors)
+    assert any("actuation_repeat_ms must be >= 0." in err for err in result.errors)
+    assert any("actuation_min_speed must be in [0.0, 1.0]." in err for err in result.errors)
+    assert any("threshold_action must be numeric." in err for err in result.errors)
+    assert any("threshold_finger must be in [0.0, 1.0]." in err for err in result.errors)
+    assert any("smoothing_method must be 'vote' or 'ema'." in err for err in result.errors)
+    assert any("finger_mode must be 'raw' or 'smooth'." in err for err in result.errors)
+
+
+def test_live_infer_warns_when_actuation_serial_port_is_implicit():
+    settings = default_infer_settings()
+    settings["enable_actuation"] = True
+    settings["serial_port"] = None
+    result = validate_step_settings("infer", settings)
+    assert result.ok is True
+    assert any("serial_port is blank" in warning for warning in result.warnings)
+
+
 def test_train_calibration_size_validation():
     result = validate_step_settings("train", {"calibration_size": 1.0})
     assert any("calibration_size must be in [0.0, 1.0)." in err for err in result.errors)
@@ -98,3 +142,26 @@ def test_train_rejects_bad_action_weights_and_rest_finger_loss_weight():
     )
     assert any("action_weights" in err for err in result.errors)
     assert any("rest_finger_loss_weight" in err for err in result.errors)
+
+
+def test_topomap_band_validation():
+    result = validate_step_settings(
+        "topomaps",
+        {
+            "band_low": 12.0,
+            "band_high": 8.0,
+        },
+    )
+    assert any("band_low must be strictly less than band_high." in err for err in result.errors)
+
+
+def test_topomap_quantile_and_blur_validation():
+    result = validate_step_settings(
+        "topomaps",
+        {
+            "blur_sigma": -0.1,
+            "robust_quantile": 0.5,
+        },
+    )
+    assert any("blur_sigma must be >= 0." in err for err in result.errors)
+    assert any("robust_quantile must be in [0.0, 0.5)." in err for err in result.errors)

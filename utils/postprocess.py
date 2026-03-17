@@ -19,7 +19,7 @@ class PostprocessSettings:
     adjacency_enabled: bool = False
     hysteresis_margin: float = 0.05
     finger_delta: float = 0.05
-    finger_mode: str = "smooth"  # "raw" or "smooth"
+    finger_mode: str = "raw"  # "raw" or "smooth"
 
 
 @dataclass

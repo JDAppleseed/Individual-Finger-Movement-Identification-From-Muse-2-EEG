@@ -172,6 +172,26 @@ def default_train_settings() -> Dict[str, Any]:
     }
 
 
+def default_topomap_settings() -> Dict[str, Any]:
+    return {
+        "session_dir": None,
+        "npz": None,
+        "out_dir": None,
+        "suite": True,
+        "group_by": "action",
+        "metric": "log_absolute",
+        "split_halves": False,
+        "include_none": False,
+        "band_low": 8.0,
+        "band_high": 12.0,
+        "blur_sigma": 0.0,
+        "robust_quantile": 0.05,
+        "out": None,
+        "summary_out": None,
+        "summary_json_out": None,
+    }
+
+
 def default_infer_settings() -> Dict[str, Any]:
     return {
         "model_path": "models/finger_action_model.pt",
@@ -188,13 +208,15 @@ def default_infer_settings() -> Dict[str, Any]:
         "latency_policy": "warn",
         "log_every": 5.0,
         "enable_actuation": False,
+        "serial_port": None,
+        "serial_baud": 9600,
         "bluetooth_target": "",
         "no_file_io": False,
-        "actuation_min_prob": 0.75,
+        "actuation_min_prob": 0.2,
         "actuation_stability": 3,
         "actuation_cooldown_ms": 250,
         "actuation_repeat_ms": 500,
-        "actuation_min_speed": 0.45,
+        "actuation_min_speed": 0.5,
         "modulate_actuation_speed": True,
         "actuation_speed_gamma": 1.0,
         "postprocess": True,
@@ -208,7 +230,7 @@ def default_infer_settings() -> Dict[str, Any]:
         "adjacency_enabled": False,
         "hysteresis_margin": 0.05,
         "finger_delta": 0.05,
-        "finger_mode": "smooth",
+        "finger_mode": "raw",
         "use_inference_engine": False,
         "mc_passes": 10,
         "uncertainty_base_threshold": 0.75,

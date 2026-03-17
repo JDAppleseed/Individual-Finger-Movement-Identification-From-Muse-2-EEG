@@ -80,6 +80,7 @@ from app.config_model import (
     default_preprocess_settings,
     default_step1_settings,
     default_step1b_settings,
+    default_topomap_settings,
     default_train_settings,
     write_json,
 )
@@ -140,6 +141,42 @@ class ArgSpec:
     description: str
 
 
+WORKFLOW_ROWS: Dict[str, int] = {
+    "pipeline": 0,
+    "step1": 1,
+    "event_tools": 2,
+    "validate_session": 3,
+    "step1b": 4,
+    "topomaps": 5,
+    "train": 6,
+    "evaluate": 7,
+    "infer": 8,
+    "live_review": 9,
+    "logs": 10,
+    "projects": 11,
+    "stream_setup": 12,
+    "export": 13,
+}
+
+
+WORKFLOW_ITEMS: list[str] = [
+    "Pipeline Overview",
+    "1) Record (Lossless)",
+    "Events: Mark/Edit (Optional)",
+    "Validate Session (Tool)",
+    "1b) Extract Windows",
+    "1c) Dataset Topomaps",
+    "2) Train Model",
+    "3+) Evaluate / Reports",
+    "7) Live Infer + Actuate",
+    "7b) Review Live Predictions",
+    "Logs & Diagnostics",
+    "Projects",
+    "Stream Setup",
+    "Export",
+]
+
+
 def _latest_dir_by_mtime(root: Path) -> Optional[Path]:
     if not root.exists():
         return None
@@ -147,6 +184,12 @@ def _latest_dir_by_mtime(root: Path) -> Optional[Path]:
     if not dirs:
         return None
     return max(dirs, key=lambda p: p.stat().st_mtime)
+
+
+def _topomap_band_slug(low: float, high: float) -> str:
+    if abs(low - 8.0) < 1e-6 and abs(high - 12.0) < 1e-6:
+        return "alpha"
+    return f"{str(low).replace('.', 'p')}_{str(high).replace('.', 'p')}hz"
 
 
 class MuseConnectorController(QObject):
@@ -431,7 +474,10 @@ TOOLTIPS: Dict[str, str] = {
     "LABEL_CHECK_ACKNOWLEDGED": "Operator acknowledged label mismatch.",
     "model_path": "Model path for live inference.",
     "scaler_path": "Scaler path for live inference.",
-    "out_dir": "Output directory override for live inference.",
+    "session_dir": "Session directory under subjects/<id>/sessions/<session_id>.",
+    "npz": "Window dataset NPZ. Leave blank to auto-resolve from the selected session when supported.",
+    "out_dir": "Output directory override for the current step.",
+    "out": "Single-figure output path.",
     "stream_name": "LSL stream name for live inference.",
     "stream_type": "LSL stream type for live inference.",
     "hop_sec": "Window hop length in seconds.",
@@ -441,10 +487,29 @@ TOOLTIPS: Dict[str, str] = {
     "latency_policy": "Latency policy when threshold is exceeded.",
     "log_every": "Live inference log interval (s).",
     "enable_actuation": "Enable robot hand actuation (explicit opt-in, requires confirmation).",
+    "serial_port": "Serial port for actuation. Leave blank to auto-detect, but set it explicitly for live hardware when possible.",
+    "serial_baud": "Serial baud rate for the hand controller. Must match the Arduino sketch.",
+    "actuation_min_prob": "Minimum joint confidence required before a command is sent.",
+    "actuation_stability": "Consecutive stable windows required before actuation.",
+    "actuation_cooldown_ms": "Minimum time between actuation commands in milliseconds.",
+    "actuation_repeat_ms": "Minimum delay before repeating the same command in milliseconds.",
+    "actuation_min_speed": "Minimum non-zero speed scalar allowed for actuated commands.",
     "bluetooth_target": "Bluetooth device name/address for actuation.",
     "no_file_io": "Disable file outputs during live inference (max performance).",
     "modulate_actuation_speed": "Modulate actuation speed from prediction confidence.",
     "actuation_speed_gamma": "Gamma curve for confidence-based actuation speed modulation.",
+    "postprocess": "Enable live postprocessing before action and finger decisions are committed.",
+    "smoothing_enabled": "Apply temporal smoothing to live predictions.",
+    "smoothing_method": "Temporal smoothing method used for live predictions.",
+    "smoothing_window": "Number of windows used by the live smoothing stage.",
+    "hysteresis_enabled": "Require extra evidence before switching committed classes.",
+    "hysteresis_frames": "Committed frames retained before hysteresis will allow a class switch.",
+    "threshold_action": "Minimum postprocessed action confidence kept as OPEN/CLOSE before falling back to REST.",
+    "threshold_finger": "Minimum postprocessed finger confidence kept as a finger movement before falling back to NONE.",
+    "adjacency_enabled": "Allow adjacency-based finger correction when using smoothed finger decisions.",
+    "hysteresis_margin": "Additional margin required to switch classes when hysteresis is enabled.",
+    "finger_delta": "Minimum winning-finger margin used by postprocessing helpers.",
+    "finger_mode": "Use raw or smoothed finger confidence for committed live decisions.",
     "use_inference_engine": "Use utils.inference.InferenceEngine for MC-dropout mean probabilities and uncertainty-aware actuation gating.",
     "mc_passes": "Monte Carlo dropout passes for live inference when the inference engine backend is enabled.",
     "uncertainty_base_threshold": "Base action confidence threshold before uncertainty adjustment.",
@@ -452,6 +517,17 @@ TOOLTIPS: Dict[str, str] = {
     "infer_subject_override": "Subject override for Step 7 (defaults to current subject).",
     "project_name": "Project name for auto-resolving latest session.",
     "subject_id": "Subject ID for auto-resolving latest session.",
+    "suite": "Generate the full experimental topomap suite instead of a single figure.",
+    "group_by": "How windows are grouped into panels for a single topomap figure.",
+    "metric": "Power metric used for the rendered topomaps.",
+    "band_low": "Lower frequency edge in Hz for bandpower estimation.",
+    "band_high": "Upper frequency edge in Hz for bandpower estimation.",
+    "split_halves": "Split each action into early and late halves to inspect session drift.",
+    "include_none": "Include the NONE finger class when grouping by finger.",
+    "blur_sigma": "Post-interpolation blur sigma. Keep at 0 for four-channel Muse maps unless you have a specific reason.",
+    "robust_quantile": "Quantile clipping used to choose figure color limits.",
+    "summary_out": "Optional markdown summary output path for topomap suite mode.",
+    "summary_json_out": "Optional JSON summary output path for topomap suite mode.",
     "raw_dir": "Session root for raw recording.",
     "session_id": "Session ID for raw recording.",
     "finger_weights": "Per-finger loss weights (CSV or JSON). Example: 1,1,1,1,1,0.4 or {\"pinky\":0.4}",
@@ -942,21 +1018,7 @@ class MainWindow(QMainWindow):
             "QListWidget { background: rgb(80, 100, 130); color: white; font-weight: 700; } "
             "QListWidget::item:selected { background: rgb(110,130,170); }"
         )
-        for item in [
-            "Pipeline Overview",
-            "1) Record (Lossless)",
-            "Events: Mark/Edit (Optional)",
-            "Validate Session (Tool)",
-            "1b) Extract Windows",
-            "2) Train Model",
-            "3+) Evaluate / Reports",
-            "7) Live Infer + Actuate",
-            "7b) Review Live Predictions",
-            "Logs & Diagnostics",
-            "Projects",
-            "Stream Setup",
-            "Export",
-        ]:
+        for item in WORKFLOW_ITEMS:
             QListWidgetItem(item, self.workflow_list)
         self.workflow_list.currentRowChanged.connect(self._switch_page)
 
@@ -966,6 +1028,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self._wrap_scroll(self._build_event_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_session_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_step1b_page(), "CentralWorkspace"))
+        self.stack.addWidget(self._wrap_scroll(self._build_topomap_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_train_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_evaluate_page(), "CentralWorkspace"))
         self.stack.addWidget(self._wrap_scroll(self._build_infer_page(), "CentralWorkspace"))
@@ -992,7 +1055,7 @@ class MainWindow(QMainWindow):
         self.health_timer.start(1000)
         self._set_live_buttons_state()
         self._set_connector_stream(self.live_stream_name)
-        self.workflow_list.setCurrentRow(0)
+        self.workflow_list.setCurrentRow(WORKFLOW_ROWS["pipeline"])
 
     def _build_step_arg_specs(self) -> Dict[str, list[ArgSpec]]:
         return {
@@ -1060,6 +1123,48 @@ class MainWindow(QMainWindow):
                     "Enable robot hand actuation.",
                 ),
                 ArgSpec(
+                    "serial_port",
+                    "--serial-port",
+                    "text",
+                    "Serial port override for actuation.",
+                ),
+                ArgSpec(
+                    "serial_baud",
+                    "--serial-baud",
+                    "int",
+                    "Serial baud rate for actuation.",
+                ),
+                ArgSpec(
+                    "actuation_min_prob",
+                    "--actuation-min-prob",
+                    "float",
+                    "Minimum confidence required before sending a command.",
+                ),
+                ArgSpec(
+                    "actuation_stability",
+                    "--actuation-stability",
+                    "int",
+                    "Stable windows required before actuation.",
+                ),
+                ArgSpec(
+                    "actuation_cooldown_ms",
+                    "--actuation-cooldown-ms",
+                    "int",
+                    "Minimum delay between commands.",
+                ),
+                ArgSpec(
+                    "actuation_repeat_ms",
+                    "--actuation-repeat-ms",
+                    "int",
+                    "Minimum delay before repeating the same command.",
+                ),
+                ArgSpec(
+                    "actuation_min_speed",
+                    "--actuation-min-speed",
+                    "float",
+                    "Minimum non-zero actuation speed scalar.",
+                ),
+                ArgSpec(
                     "modulate_actuation_speed",
                     "--modulate-actuation-speed",
                     "bool",
@@ -1077,6 +1182,68 @@ class MainWindow(QMainWindow):
                     "text",
                     "Bluetooth target name/address.",
                 ),
+                ArgSpec("postprocess", "--postprocess", "bool", "Enable live postprocessing."),
+                ArgSpec(
+                    "smoothing_enabled",
+                    "--smoothing-enabled",
+                    "bool",
+                    "Enable temporal smoothing for live predictions.",
+                ),
+                ArgSpec(
+                    "smoothing_method",
+                    "--smoothing-method",
+                    "text",
+                    "Temporal smoothing method.",
+                ),
+                ArgSpec(
+                    "smoothing_window",
+                    "--smoothing-window",
+                    "int",
+                    "Temporal smoothing window size.",
+                ),
+                ArgSpec(
+                    "hysteresis_enabled",
+                    "--hysteresis-enabled",
+                    "bool",
+                    "Enable hysteresis before switching committed classes.",
+                ),
+                ArgSpec(
+                    "hysteresis_frames",
+                    "--hysteresis-frames",
+                    "int",
+                    "Committed frames retained by hysteresis.",
+                ),
+                ArgSpec(
+                    "threshold_action",
+                    "--threshold-action",
+                    "float",
+                    "Committed action threshold.",
+                ),
+                ArgSpec(
+                    "threshold_finger",
+                    "--threshold-finger",
+                    "float",
+                    "Committed finger threshold.",
+                ),
+                ArgSpec(
+                    "adjacency_enabled",
+                    "--adjacency-enabled",
+                    "bool",
+                    "Enable adjacency-based finger correction.",
+                ),
+                ArgSpec(
+                    "hysteresis_margin",
+                    "--hysteresis-margin",
+                    "float",
+                    "Additional hysteresis switch margin.",
+                ),
+                ArgSpec(
+                    "finger_delta",
+                    "--finger-delta",
+                    "float",
+                    "Minimum winning-finger margin.",
+                ),
+                ArgSpec("finger_mode", "--finger-mode", "text", "Finger confidence mode."),
                 ArgSpec("no_file_io", "--no_file_io", "bool", "Disable file outputs."),
                 ArgSpec("subject_id", "--subject-id", "text", "Subject ID (auto-resolve latest session)."),
                 ArgSpec("project_name", "--project-name", "text", "Project name (auto-resolve latest session)."),
@@ -1155,6 +1322,28 @@ class MainWindow(QMainWindow):
                     "Continue if events are out of range.",
                 ),
                 ArgSpec("seed", "--seed", "int", "Seed for REST subsampling."),
+            ],
+            "topomaps": [
+                ArgSpec(
+                    "session_dir",
+                    "--session-dir",
+                    "text",
+                    "Session directory used to auto-resolve processed/eeg_windows.npz and reports/.",
+                ),
+                ArgSpec("npz", "--npz", "text", "Window dataset NPZ override."),
+                ArgSpec("out_dir", "--out-dir", "text", "Output directory for suite mode."),
+                ArgSpec("suite", "--suite", "bool", "Generate the full topomap suite."),
+                ArgSpec("group_by", "--group-by", "text", "Panel grouping for single-figure mode."),
+                ArgSpec("metric", "--metric", "text", "Metric for single-figure mode."),
+                ArgSpec("split_halves", "--split-halves", "bool", "Split action panels into early and late halves."),
+                ArgSpec("include_none", "--include-none", "bool", "Include the NONE finger class."),
+                ArgSpec("band_low", "--band-low", "float", "Lower band edge in Hz."),
+                ArgSpec("band_high", "--band-high", "float", "Upper band edge in Hz."),
+                ArgSpec("blur_sigma", "--blur-sigma", "float", "Post-interpolation blur sigma."),
+                ArgSpec("robust_quantile", "--robust-quantile", "float", "Quantile clipping used for figure color limits."),
+                ArgSpec("out", "--out", "text", "Single-figure output path."),
+                ArgSpec("summary_out", "--summary-out", "text", "Markdown summary output path."),
+                ArgSpec("summary_json_out", "--summary-json-out", "text", "JSON summary output path."),
             ],
             "train": [
                 ArgSpec(
@@ -1310,42 +1499,43 @@ class MainWindow(QMainWindow):
         menu = self.menuBar()
         file_menu = menu.addMenu("File")
         file_menu.addAction(
-            "Projects", lambda: self.workflow_list.setCurrentRow(10)
+            "Projects", lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["projects"])
         )
         file_menu.addSeparator()
         file_menu.addAction("Quit", self.close)
 
         edit_menu = menu.addMenu("Edit")
         edit_menu.addAction(
-            "Validate Session", lambda: self.workflow_list.setCurrentRow(3)
+            "Validate Session", lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["validate_session"])
         )
 
         tools_menu = menu.addMenu("Tools")
         tools_menu.addAction(
-            "Stream Setup", lambda: self.workflow_list.setCurrentRow(11)
+            "Stream Setup", lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["stream_setup"])
         )
         tools_menu.addAction(
-            "Validate Session", lambda: self.workflow_list.setCurrentRow(3)
+            "Validate Session", lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["validate_session"])
         )
-        tools_menu.addAction("Event Review", lambda: self.workflow_list.setCurrentRow(2))
-        tools_menu.addAction("Review Live Predictions", lambda: self.workflow_list.setCurrentRow(8))
-        tools_menu.addAction("Diagnostics", lambda: self.workflow_list.setCurrentRow(9))
+        tools_menu.addAction("Event Review", lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["event_tools"]))
+        tools_menu.addAction("Review Live Predictions", lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["live_review"]))
+        tools_menu.addAction("Diagnostics", lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["logs"]))
         model_views_action = tools_menu.addAction("Model Views", self._open_model_views_window)
         model_views_action.setShortcut("Ctrl+M")
 
         plot_menu = menu.addMenu("Plot")
         plot_menu.addAction(
-            "Record (Lossless)", lambda: self.workflow_list.setCurrentRow(1)
+            "Record (Lossless)", lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["step1"])
         )
 
         study_menu = menu.addMenu("Study")
-        study_menu.addAction("Windowing", lambda: self.workflow_list.setCurrentRow(4))
-        study_menu.addAction("Training", lambda: self.workflow_list.setCurrentRow(5))
-        study_menu.addAction("Evaluate", lambda: self.workflow_list.setCurrentRow(6))
-        study_menu.addAction("Live Review", lambda: self.workflow_list.setCurrentRow(8))
+        study_menu.addAction("Windowing", lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["step1b"]))
+        study_menu.addAction("Dataset Topomaps", lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["topomaps"]))
+        study_menu.addAction("Training", lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["train"]))
+        study_menu.addAction("Evaluate", lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["evaluate"]))
+        study_menu.addAction("Live Review", lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["live_review"]))
 
         datasets_menu = menu.addMenu("Datasets")
-        datasets_menu.addAction("Export", lambda: self.workflow_list.setCurrentRow(12))
+        datasets_menu.addAction("Export", lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["export"]))
 
         run_menu = menu.addMenu("Run")
         run_menu.addAction(
@@ -1354,6 +1544,7 @@ class MainWindow(QMainWindow):
         run_menu.addAction(
             "Run Extract Windows", lambda: self._run_step("step1b", "step1b")
         )
+        run_menu.addAction("Run Dataset Topomaps", lambda: self._run_step("topomaps", "topomaps"))
         run_menu.addAction("Run Train Model", lambda: self._run_step("train", "train"))
         run_menu.addAction("Run Evaluate", self._run_evaluate_all)
         run_menu.addAction(
@@ -1365,7 +1556,7 @@ class MainWindow(QMainWindow):
         )
 
         help_menu = menu.addMenu("Help")
-        help_menu.addAction("Logs", lambda: self.workflow_list.setCurrentRow(9))
+        help_menu.addAction("Logs", lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["logs"]))
         help_menu.addAction("Open README.md", lambda: self._open_doc("README.md"))
         help_menu.addAction(
             "Open DATA_CONTRACT.md",
@@ -1517,7 +1708,7 @@ class MainWindow(QMainWindow):
         run_step1_btn.clicked.connect(lambda: self._run_step("step1", "step1"))
         pipeline_layout.addWidget(run_step1_btn)
         open_events_btn = QPushButton("Open Events: Mark/Edit (Optional)")
-        open_events_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(2))
+        open_events_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["event_tools"]))
         pipeline_layout.addWidget(open_events_btn)
         validate_btn = QPushButton("Validate Session")
         validate_btn.clicked.connect(self._run_validate_session)
@@ -1525,6 +1716,9 @@ class MainWindow(QMainWindow):
         run_step1b_btn = QPushButton("Run Extract Windows")
         run_step1b_btn.clicked.connect(lambda: self._run_step("step1b", "step1b"))
         pipeline_layout.addWidget(run_step1b_btn)
+        run_topomaps_btn = QPushButton("Run Dataset Topomaps")
+        run_topomaps_btn.clicked.connect(lambda: self._run_step("topomaps", "topomaps"))
+        pipeline_layout.addWidget(run_topomaps_btn)
         run_train_btn = QPushButton("Run Train Model")
         run_train_btn.clicked.connect(lambda: self._run_step("train", "train"))
         pipeline_layout.addWidget(run_train_btn)
@@ -1570,7 +1764,7 @@ class MainWindow(QMainWindow):
         event_validate_btn.clicked.connect(self._run_event_validate)
         event_layout.addWidget(event_validate_btn)
         open_event_btn = QPushButton("Open Event Tools")
-        open_event_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(2))
+        open_event_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["event_tools"]))
         event_layout.addWidget(open_event_btn)
         event_layout.addStretch(1)
         event_dock = QDockWidget("Events", self)
@@ -1595,11 +1789,11 @@ class MainWindow(QMainWindow):
         self._bind_checkbox(self.plot_toggle_dock, "step1", "ENABLE_PLOT")
         model_layout.addWidget(self.plot_toggle_dock)
         open_infer_btn = QPushButton("Open Live Inference")
-        open_infer_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(7))
+        open_infer_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["infer"]))
         model_layout.addWidget(open_infer_btn)
         open_live_review_page_btn = QPushButton("Open Live Review")
         open_live_review_page_btn.clicked.connect(
-            lambda: self.workflow_list.setCurrentRow(8)
+            lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["live_review"])
         )
         model_layout.addWidget(open_live_review_page_btn)
         open_model_views_btn = QPushButton("Open Model Views")
@@ -1635,7 +1829,7 @@ class MainWindow(QMainWindow):
         session_layout.addWidget(self.subject_label_dock)
         session_layout.addWidget(self.session_label_dock)
         projects_btn = QPushButton("Projects")
-        projects_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(10))
+        projects_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["projects"]))
         session_layout.addWidget(projects_btn)
         session_layout.addStretch(1)
         session_dock = QDockWidget("Session", self)
@@ -2184,6 +2378,33 @@ class MainWindow(QMainWindow):
             if isinstance(widget, QWidget):
                 widget.setEnabled(enabled)
 
+    def _sync_infer_actuation_controls(self) -> None:
+        infer_fields = self.fields.get("infer", {})
+        actuation_enabled = False
+        enable_widget = infer_fields.get("enable_actuation")
+        if isinstance(enable_widget, QCheckBox):
+            actuation_enabled = enable_widget.isChecked()
+        speed_mod_enabled = actuation_enabled
+        mod_widget = infer_fields.get("modulate_actuation_speed")
+        if isinstance(mod_widget, QCheckBox):
+            speed_mod_enabled = actuation_enabled and mod_widget.isChecked()
+        for key in (
+            "serial_port",
+            "serial_baud",
+            "actuation_min_prob",
+            "actuation_stability",
+            "actuation_cooldown_ms",
+            "actuation_repeat_ms",
+            "actuation_min_speed",
+            "bluetooth_target",
+        ):
+            widget = infer_fields.get(key)
+            if isinstance(widget, QWidget):
+                widget.setEnabled(actuation_enabled)
+        gamma_widget = infer_fields.get("actuation_speed_gamma")
+        if isinstance(gamma_widget, QWidget):
+            gamma_widget.setEnabled(speed_mod_enabled)
+
     def _switch_page(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
 
@@ -2557,21 +2778,22 @@ class MainWindow(QMainWindow):
         intro = QLabel(
             "Use the navigation on the left to walk through the lossless pipeline. "
             "Record (lossless) captures raw shards + events only (no inference). "
-            "Window extraction and training are offline, live inference is a separate script, "
+            "Window extraction, dataset topomaps, and training are offline, live inference is a separate script, "
             "and post-live review turns Step 7 prediction logs into segments for manual validation."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
         for label, row in [
-            ("1) Record (Lossless)", 1),
-            ("Events: Mark/Edit (Optional)", 2),
-            ("Validate Session (Tool)", 3),
-            ("1b) Extract Windows", 4),
-            ("2) Train Model", 5),
-            ("3+) Evaluate / Reports", 6),
-            ("7) Live Infer + Actuate", 7),
-            ("7b) Review Live Predictions", 8),
+            ("1) Record (Lossless)", WORKFLOW_ROWS["step1"]),
+            ("Events: Mark/Edit (Optional)", WORKFLOW_ROWS["event_tools"]),
+            ("Validate Session (Tool)", WORKFLOW_ROWS["validate_session"]),
+            ("1b) Extract Windows", WORKFLOW_ROWS["step1b"]),
+            ("1c) Dataset Topomaps", WORKFLOW_ROWS["topomaps"]),
+            ("2) Train Model", WORKFLOW_ROWS["train"]),
+            ("3+) Evaluate / Reports", WORKFLOW_ROWS["evaluate"]),
+            ("7) Live Infer + Actuate", WORKFLOW_ROWS["infer"]),
+            ("7b) Review Live Predictions", WORKFLOW_ROWS["live_review"]),
         ]:
             box = QGroupBox(label)
             box_layout = QVBoxLayout(box)
@@ -3166,6 +3388,22 @@ class MainWindow(QMainWindow):
             custom_controls=note,
         )
 
+    def _build_topomap_page(self) -> QWidget:
+        note = QLabel(
+            "Step 1c renders experimental Muse topomaps from extracted windows to inspect dataset trends, "
+            "channel asymmetry, and session drift. This is intentionally separate from Step 3 model evaluation. "
+            "The default mode generates the full suite into the selected session's reports folder."
+        )
+        note.setWordWrap(True)
+        return self._build_step_page(
+            step_id="topomaps",
+            title="Step 1c: Dataset Topomaps (Experimental)",
+            defaults=default_topomap_settings(),
+            script_key="topomaps",
+            include_event_tools=False,
+            custom_controls=note,
+        )
+
     def _build_preprocess_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -3346,6 +3584,10 @@ class MainWindow(QMainWindow):
                 "Extract fixed windows from a session directory and generate `eeg_windows.npz`. "
                 "Performs manifest continuity validation by default and rejects OPEN/CLOSE "
                 "labels that use finger NONE."
+            ),
+            "topomaps": (
+                "Generate experimental Muse topomaps from extracted windows to inspect dataset "
+                "trends, channel asymmetry, and drift. This step is dataset QC, not model evaluation."
             ),
             "train": (
                 "Train the CNN+LSTM model from `eeg_windows.npz` and write model/scaler artifacts "
@@ -3817,6 +4059,11 @@ class MainWindow(QMainWindow):
                 "Enable Robot Hand Actuation (DANGEROUS)",
                 defaults,
             )
+            enable_actuation_widget = self.fields[step_id].get("enable_actuation")
+            if isinstance(enable_actuation_widget, QCheckBox):
+                enable_actuation_widget.toggled.connect(
+                    lambda _checked: self._sync_infer_actuation_controls()
+                )
             self._add_checkbox(
                 step_id,
                 form,
@@ -3824,6 +4071,11 @@ class MainWindow(QMainWindow):
                 "Modulate actuation speed from confidence",
                 defaults,
             )
+            modulate_speed_widget = self.fields[step_id].get("modulate_actuation_speed")
+            if isinstance(modulate_speed_widget, QCheckBox):
+                modulate_speed_widget.toggled.connect(
+                    lambda _checked: self._sync_infer_actuation_controls()
+                )
             self._add_checkbox(
                 step_id,
                 form,
@@ -3832,6 +4084,7 @@ class MainWindow(QMainWindow):
                 defaults,
             )
             self._sync_infer_inference_engine_controls()
+            self._sync_infer_actuation_controls()
         elif step_id == "live_review":
             self._add_text(
                 step_id,
@@ -3921,6 +4174,43 @@ class MainWindow(QMainWindow):
             )
             self._add_checkbox(
                 step_id, form, "ignore_misalignment", "Ignore misalignment", defaults
+            )
+        elif step_id == "topomaps":
+            self._add_dir_picker(step_id, form, "session_dir", "Session dir", defaults)
+            session_widget = self.fields[step_id].get("session_dir")
+            if isinstance(session_widget, QLineEdit):
+                session_widget.textChanged.connect(
+                    lambda _text: self._update_checklist("topomaps")
+                )
+            self._add_file_picker(
+                step_id,
+                form,
+                "npz",
+                "Window NPZ override",
+                defaults,
+                "NPZ (*.npz);;All Files (*)",
+            )
+            self._add_dir_picker(step_id, form, "out_dir", "Output dir", defaults)
+            self._add_checkbox(step_id, form, "suite", "Generate full suite", defaults)
+            self._add_spin(
+                step_id,
+                form,
+                "band_low",
+                "Band low (Hz)",
+                defaults,
+                0,
+                256,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "band_high",
+                "Band high (Hz)",
+                defaults,
+                0,
+                256,
+                is_float=True,
             )
         elif step_id == "train":
             self.train_session_dir_input = OutlineLineEdit()
@@ -4304,6 +4594,63 @@ class MainWindow(QMainWindow):
             self._add_text(
                 step_id, form, "bluetooth_target", "Bluetooth target", defaults
             )
+            self._add_text(step_id, form, "serial_port", "Serial port", defaults)
+            self._add_spin(
+                step_id,
+                form,
+                "serial_baud",
+                "Serial baud",
+                defaults,
+                1,
+                1000000,
+            )
+            self._add_slider(
+                step_id,
+                form,
+                "actuation_min_prob",
+                "Actuation min prob",
+                defaults,
+                0,
+                1,
+                decimals=2,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "actuation_stability",
+                "Actuation stability",
+                defaults,
+                1,
+                20,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "actuation_cooldown_ms",
+                "Actuation cooldown (ms)",
+                defaults,
+                0,
+                10000,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "actuation_repeat_ms",
+                "Actuation repeat (ms)",
+                defaults,
+                0,
+                10000,
+            )
+            self._add_slider(
+                step_id,
+                form,
+                "actuation_min_speed",
+                "Actuation min speed",
+                defaults,
+                0,
+                1,
+                decimals=2,
+            )
             self._add_spin(
                 step_id,
                 form,
@@ -4424,6 +4771,7 @@ class MainWindow(QMainWindow):
                 mode="save",
             )
             self._sync_infer_inference_engine_controls()
+            self._sync_infer_actuation_controls()
         elif step_id == "live_review":
             self._add_file_picker(
                 step_id,
@@ -4539,6 +4887,85 @@ class MainWindow(QMainWindow):
             )
             self._add_text(step_id, form, "OUT_FILE", "Output CSV", defaults)
             self._add_text(step_id, form, "OUT_NPZ", "Output NPZ", defaults)
+        elif step_id == "topomaps":
+            self._add_choice_dropdown(
+                step_id,
+                form,
+                "group_by",
+                "Single-figure group by",
+                defaults,
+                ["action", "finger", "joint"],
+            )
+            self._add_choice_dropdown(
+                step_id,
+                form,
+                "metric",
+                "Single-figure metric",
+                defaults,
+                ["absolute", "log_absolute", "rest_delta", "rest_zscore"],
+            )
+            self._add_checkbox(
+                step_id,
+                form,
+                "split_halves",
+                "Split action panels into early and late halves",
+                defaults,
+            )
+            self._add_checkbox(
+                step_id,
+                form,
+                "include_none",
+                "Include NONE finger class",
+                defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "blur_sigma",
+                "Blur sigma",
+                defaults,
+                0,
+                25,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "robust_quantile",
+                "Robust quantile",
+                defaults,
+                0,
+                0.49,
+                is_float=True,
+                decimals=3,
+            )
+            self._add_file_picker(
+                step_id,
+                form,
+                "out",
+                "Single-figure output",
+                defaults,
+                "PNG (*.png);;All Files (*)",
+                mode="save",
+            )
+            self._add_file_picker(
+                step_id,
+                form,
+                "summary_out",
+                "Summary markdown",
+                defaults,
+                "Markdown (*.md);;All Files (*)",
+                mode="save",
+            )
+            self._add_file_picker(
+                step_id,
+                form,
+                "summary_json_out",
+                "Summary JSON",
+                defaults,
+                "JSON (*.json);;All Files (*)",
+                mode="save",
+            )
         elif step_id == "train":
             self._add_spin(step_id, form, "seed", "Seed", defaults, 0, 1_000_000)
             self._add_spin(
@@ -4879,6 +5306,13 @@ class MainWindow(QMainWindow):
                 "latency_policy": "Latency policy",
                 "log_every": "Log every (s)",
                 "enable_actuation": "Enable robot hand actuation",
+                "serial_port": "Serial port",
+                "serial_baud": "Serial baud",
+                "actuation_min_prob": "Actuation min prob",
+                "actuation_stability": "Actuation stability",
+                "actuation_cooldown_ms": "Actuation cooldown (ms)",
+                "actuation_repeat_ms": "Actuation repeat (ms)",
+                "actuation_min_speed": "Actuation min speed",
                 "modulate_actuation_speed": "Modulate actuation speed from confidence",
                 "actuation_speed_gamma": "Actuation speed gamma",
                 "bluetooth_target": "Bluetooth target",
@@ -5018,6 +5452,25 @@ class MainWindow(QMainWindow):
                 "OUT_NPZ": "Output NPZ",
             }
             return labels.get(key, key)
+        if step_id == "topomaps":
+            labels = {
+                "session_dir": "Session dir",
+                "npz": "Window NPZ override",
+                "out_dir": "Output dir",
+                "suite": "Generate full suite",
+                "group_by": "Single-figure group by",
+                "metric": "Single-figure metric",
+                "split_halves": "Split action panels into early and late halves",
+                "include_none": "Include NONE finger class",
+                "band_low": "Band low (Hz)",
+                "band_high": "Band high (Hz)",
+                "blur_sigma": "Blur sigma",
+                "robust_quantile": "Robust quantile",
+                "out": "Single-figure output",
+                "summary_out": "Summary markdown",
+                "summary_json_out": "Summary JSON",
+            }
+            return labels.get(key, key)
         return key
 
     def _add_checkbox(
@@ -5080,6 +5533,29 @@ class MainWindow(QMainWindow):
         line.setReadOnly(read_only)
         self._apply_tooltip(line, key)
         form.addRow(label, line)
+        self.fields[step_id][key] = line
+
+    def _add_dir_picker(
+        self,
+        step_id: str,
+        form: QFormLayout,
+        key: str,
+        label: str,
+        defaults: Dict[str, Any],
+    ) -> None:
+        line = OutlineLineEdit()
+        val = defaults.get(key, "")
+        line.setText("" if val is None else str(val))
+        btn = QPushButton("Browse")
+        btn.clicked.connect(lambda: self._browse_dir(line, label))
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(line)
+        row.addWidget(btn)
+        container = QWidget()
+        container.setLayout(row)
+        self._apply_tooltip(line, key)
+        form.addRow(label, container)
         self.fields[step_id][key] = line
 
     def _add_file_picker(
@@ -5372,6 +5848,7 @@ class MainWindow(QMainWindow):
         defaults = {
             "step1": default_step1_settings(),
             "step1b": default_step1b_settings(),
+            "topomaps": default_topomap_settings(),
             "preprocess": default_preprocess_settings(),
             "train": default_train_settings(),
             "infer": default_infer_settings(),
@@ -5613,6 +6090,7 @@ class MainWindow(QMainWindow):
                 key="train.npz",
                 legacy_values={"eeg_windows.npz"},
             )
+            self._autofill_topomap_paths(train_source)
 
         if not global_session or not global_session.exists():
             self._autofill_replay_paths()
@@ -5639,6 +6117,43 @@ class MainWindow(QMainWindow):
             )
         self._autofill_live_review_paths(global_session)
         self._autofill_replay_paths(session_dir_override=global_session)
+
+    def _autofill_topomap_paths(self, session_dir: Path) -> None:
+        fields = self.fields.get("topomaps", {})
+        if not fields:
+            return
+        if session_dir is None:
+            return
+        session_widget = fields.get("session_dir")
+        self._maybe_autofill_text(
+            session_widget,
+            str(session_dir),
+            key="topomaps.session_dir",
+            legacy_values={""},
+        )
+
+        layout = SessionLayout(session_dir)
+        npz_path = layout.windows_npz
+        if not npz_path.exists():
+            legacy_npz = session_dir / "windows" / "eeg_windows.npz"
+            if legacy_npz.exists():
+                npz_path = legacy_npz
+        if npz_path.exists():
+            npz_widget = fields.get("npz")
+            self._maybe_autofill_text(
+                npz_widget,
+                str(npz_path),
+                key="topomaps.npz",
+                legacy_values={"eeg_windows.npz"},
+            )
+
+        out_dir_widget = fields.get("out_dir")
+        self._maybe_autofill_text(
+            out_dir_widget,
+            str(session_dir / "reports"),
+            key="topomaps.out_dir",
+            legacy_values={"reports", ""},
+        )
 
     def _autofill_live_review_paths(self, session_dir: Optional[Path]) -> None:
         fields = self.fields.get("live_review", {})
@@ -6332,6 +6847,28 @@ class MainWindow(QMainWindow):
                         )
                     if latest_events:
                         settings["events"] = str(latest_events)
+        if step_id == "topomaps":
+            session_dir_path = self._resolve_effective_session_dir(step_id=None)
+            session_dir_value = str(session_dir_path) if session_dir_path else ""
+            if session_dir_value and not settings.get("session_dir"):
+                settings["session_dir"] = session_dir_value
+            if session_dir_path and not settings.get("out_dir"):
+                settings["out_dir"] = str(session_dir_path / "reports")
+            if not settings.get("npz") and session_dir_path:
+                layout = SessionLayout(session_dir_path)
+                candidate_npz = layout.windows_npz
+                legacy_candidate_npz = session_dir_path / "windows" / "eeg_windows.npz"
+                if candidate_npz.exists():
+                    settings["npz"] = str(candidate_npz)
+                elif legacy_candidate_npz.exists():
+                    settings["npz"] = str(legacy_candidate_npz)
+            if not settings.get("session_dir") and not settings.get("npz"):
+                QMessageBox.warning(
+                    self,
+                    "Dataset Required",
+                    "Select a session with extracted windows or provide an explicit eeg_windows.npz path before running dataset topomaps.",
+                )
+                return
         if step_id == "train":
             settings["subject_id"] = settings.get("subject_id") or self.current_subject
             session_dir_path = self._resolve_effective_session_dir(step_id="train")
@@ -6448,6 +6985,8 @@ class MainWindow(QMainWindow):
             session_dir_value = str(session_dir_path) if session_dir_path else ""
             if session_dir_value:
                 args.extend(["--session-dir", session_dir_value])
+        if step_id == "topomaps" and settings.get("session_dir"):
+            args.extend(["--session-dir", str(settings["session_dir"])])
         # Enforce correct handoff between Step 1b → Step 2:
         # - always train on the selected subject (avoids argparse default filtering to an unrelated subject)
         # - prefer the windows NPZ produced for the current session to avoid stale ./eeg_windows.npz
@@ -7885,6 +8424,8 @@ class MainWindow(QMainWindow):
             items = self._expected_step1_outputs()
         elif step_id == "step1b":
             items = self._expected_step1b_outputs()
+        elif step_id == "topomaps":
+            items = self._expected_topomap_outputs()
         elif step_id == "train":
             items = self._expected_train_outputs()
         elif step_id == "event_tools":
@@ -7940,6 +8481,85 @@ class MainWindow(QMainWindow):
                 "Extraction report",
                 str(session_dir / "processed" / "extraction_report.json"),
             )
+        )
+        return outputs
+
+    def _expected_topomap_outputs(self) -> list[tuple[str, str]]:
+        outputs: list[tuple[str, str]] = []
+        fields = self.fields.get("topomaps", {})
+        if not fields:
+            return outputs
+
+        session_dir_value = ""
+        session_widget = fields.get("session_dir")
+        if isinstance(session_widget, QLineEdit):
+            session_dir_value = session_widget.text().strip()
+        if not session_dir_value:
+            current_session = self._resolve_effective_session_dir(step_id=None)
+            if current_session is not None:
+                session_dir_value = str(current_session)
+
+        out_dir_value = ""
+        out_dir_widget = fields.get("out_dir")
+        if isinstance(out_dir_widget, QLineEdit):
+            out_dir_value = out_dir_widget.text().strip()
+
+        if not out_dir_value and session_dir_value:
+            out_dir_value = str(Path(session_dir_value) / "reports")
+        if not out_dir_value:
+            return outputs
+
+        out_dir = Path(out_dir_value)
+        outputs.append(("Reports dir", str(out_dir)))
+
+        band_low = 8.0
+        band_high = 12.0
+        band_low_widget = fields.get("band_low")
+        band_high_widget = fields.get("band_high")
+        if isinstance(band_low_widget, QDoubleSpinBox):
+            band_low = float(band_low_widget.value())
+        if isinstance(band_high_widget, QDoubleSpinBox):
+            band_high = float(band_high_widget.value())
+        band_slug = _topomap_band_slug(band_low, band_high)
+
+        suite_enabled = False
+        suite_widget = fields.get("suite")
+        if isinstance(suite_widget, QCheckBox):
+            suite_enabled = suite_widget.isChecked()
+
+        if not suite_enabled:
+            out_widget = fields.get("out")
+            if isinstance(out_widget, QLineEdit) and out_widget.text().strip():
+                outputs.append(("Topomap figure", out_widget.text().strip()))
+            return outputs
+
+        outputs.extend(
+            [
+                (
+                    "Action rest-delta",
+                    str(out_dir / f"experimental_muse_action_{band_slug}_rest_delta_topomaps.png"),
+                ),
+                (
+                    "Finger rest-delta",
+                    str(out_dir / f"experimental_muse_finger_{band_slug}_rest_delta_topomaps.png"),
+                ),
+                (
+                    "Action split-halves",
+                    str(out_dir / f"experimental_muse_action_{band_slug}_split_halves_log_absolute_topomaps.png"),
+                ),
+                (
+                    "Joint rest-delta",
+                    str(out_dir / f"experimental_muse_joint_{band_slug}_rest_delta_topomaps.png"),
+                ),
+                (
+                    "Summary markdown",
+                    str(out_dir / f"experimental_muse_{band_slug}_summary.md"),
+                ),
+                (
+                    "Summary JSON",
+                    str(out_dir / f"experimental_muse_{band_slug}_summary.json"),
+                ),
+            ]
         )
         return outputs
 

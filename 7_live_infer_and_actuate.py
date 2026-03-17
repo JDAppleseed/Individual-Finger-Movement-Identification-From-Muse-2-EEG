@@ -461,11 +461,11 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "enable_actuation": False,
         "serial_port": None,
         "serial_baud": 9600,
-        "actuation_min_prob": 0.75,
+        "actuation_min_prob": 0.2,
         "actuation_stability": 3,
         "actuation_cooldown_ms": 250,
         "actuation_repeat_ms": 500,
-        "actuation_min_speed": 0.45,
+        "actuation_min_speed": 0.5,
         "modulate_actuation_speed": True,
         "actuation_speed_gamma": 1.0,
         "allow_outside_base": False,
@@ -979,6 +979,8 @@ def _serial_port_score(port: Any) -> int:
     score = 0
     if "bluetooth" in text or "bluetooth" in device_l:
         score -= 200
+    if "debug-console" in device_l or "incoming-port" in device_l:
+        score -= 250
     if "arduino" in text:
         score += 200
     if "usbmodem" in device_l:

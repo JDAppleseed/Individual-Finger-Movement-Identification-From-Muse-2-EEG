@@ -5,7 +5,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, Dict, NamedTuple, Optional
 
 import matplotlib
 
@@ -13,6 +13,7 @@ matplotlib.use("Agg", force=True)
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+ROOT_DIR = REPO_ROOT
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -61,6 +62,35 @@ class FigureSpec(NamedTuple):
     metric: str
     include_none: bool = False
     split_halves: bool = False
+
+
+def _load_config(path: Optional[str]) -> Dict[str, Any]:
+    if not path:
+        return {}
+    try:
+        payload = json.loads(Path(path).read_text())
+    except Exception:
+        return {}
+    return payload.get("settings", payload)
+
+
+def _apply_config_to_args(args_obj, settings: Dict[str, Any], defaults: Dict[str, Any]) -> None:
+    for key, default in defaults.items():
+        if key in settings and getattr(args_obj, key) == default:
+            setattr(args_obj, key, settings[key])
+
+
+def _resolve_path(path_str: Optional[str], *, base_dir: Optional[Path] = None) -> Optional[Path]:
+    if not path_str:
+        return None
+    p = Path(path_str).expanduser()
+    if p.is_absolute():
+        return p
+    if base_dir is not None:
+        return base_dir / p
+    if p.exists():
+        return p
+    return ROOT_DIR / p
 
 
 def _scalar_float(value, default: float) -> float:
@@ -206,6 +236,24 @@ def _band_slug(band: tuple[float, float]) -> str:
 
 def _metric_title(metric: str) -> str:
     return str(METRIC_CONFIG[metric]["title_suffix"])
+
+
+def _default_out_filename(
+    *,
+    group_by: str,
+    metric: str,
+    band: tuple[float, float],
+    split_halves: bool,
+    include_none: bool,
+) -> str:
+    band_slug = _band_slug(band)
+    suffix_parts = [f"experimental_muse_{group_by}_{band_slug}"]
+    if include_none and group_by == "finger":
+        suffix_parts.append("with_none")
+    if split_halves:
+        suffix_parts.append("split_halves")
+    suffix_parts.append(metric)
+    return "_".join(suffix_parts) + "_topomaps.png"
 
 
 def make_figure_title(
@@ -571,7 +619,13 @@ def parse_args():
             "This remains separate from the main figure pipeline."
         )
     )
-    parser.add_argument("--npz", required=True, help="Path to eeg_windows.npz")
+    parser.add_argument("--config", default=None, help="Path to a JSON config file.")
+    parser.add_argument(
+        "--session-dir",
+        default=None,
+        help="Session directory used to auto-resolve processed/eeg_windows.npz and reports/.",
+    )
+    parser.add_argument("--npz", default=None, help="Path to eeg_windows.npz")
     parser.add_argument("--out", default=None, help="Output image path for single-figure mode.")
     parser.add_argument("--out-dir", default=None, help="Output directory for --suite mode.")
     parser.add_argument(
@@ -625,12 +679,36 @@ def parse_args():
         default=None,
         help="Optional JSON summary path. When --suite is used and omitted, a default summary is written.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
+    settings = _load_config(args.config)
+    _apply_config_to_args(args, settings, defaults)
+    return args
 
 
 def main():
     args = parse_args()
-    npz_path = Path(args.npz).expanduser().resolve()
+    config_dir = (
+        Path(args.config).expanduser().resolve().parent
+        if getattr(args, "config", None)
+        else None
+    )
+    session_dir = _resolve_path(getattr(args, "session_dir", None), base_dir=config_dir)
+    if session_dir is not None:
+        session_dir = session_dir.resolve()
+
+    npz_path = _resolve_path(getattr(args, "npz", None), base_dir=config_dir)
+    if npz_path is None and session_dir is not None:
+        candidate = session_dir / "processed" / "eeg_windows.npz"
+        legacy_candidate = session_dir / "windows" / "eeg_windows.npz"
+        if candidate.exists():
+            npz_path = candidate
+        elif legacy_candidate.exists():
+            npz_path = legacy_candidate
+    if npz_path is None:
+        raise SystemExit("Unable to resolve eeg_windows.npz. Provide --npz or --session-dir.")
+    npz_path = npz_path.resolve()
+
     X, y_action, y_finger, meta = load_sequence_npz(npz_path)
     channel_names = _channel_names_from_meta(meta)
     fs = _scalar_float(meta.get("target_fs", meta.get("fs")), 256.0)
@@ -642,10 +720,17 @@ def main():
         channel_count=channel_names.size,
     )
 
+    inferred_session_dir = session_dir
+    if inferred_session_dir is None and npz_path.parent.name == "processed":
+        inferred_session_dir = npz_path.parent.parent
+
     if args.suite:
-        if not args.out_dir:
-            raise SystemExit("--suite requires --out-dir")
-        out_dir = Path(args.out_dir).expanduser().resolve()
+        out_dir = _resolve_path(getattr(args, "out_dir", None), base_dir=config_dir)
+        if out_dir is None and inferred_session_dir is not None:
+            out_dir = inferred_session_dir / "reports"
+        if out_dir is None:
+            raise SystemExit("--suite requires --out-dir or a resolvable --session-dir")
+        out_dir = out_dir.resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
         generated_files = []
         for spec in default_suite_specs(band):
@@ -666,12 +751,12 @@ def main():
 
         band_slug = _band_slug(band)
         summary_md = (
-            Path(args.summary_out).expanduser().resolve()
+            _resolve_path(args.summary_out, base_dir=config_dir).resolve()
             if args.summary_out
             else out_dir / f"experimental_muse_{band_slug}_summary.md"
         )
         summary_json = (
-            Path(args.summary_json_out).expanduser().resolve()
+            _resolve_path(args.summary_json_out, base_dir=config_dir).resolve()
             if args.summary_json_out
             else out_dir / f"experimental_muse_{band_slug}_summary.json"
         )
@@ -689,10 +774,21 @@ def main():
         print(f"Wrote {summary_json}")
         return 0
 
-    if not args.out:
-        raise SystemExit("single-figure mode requires --out")
-
-    out_path = Path(args.out).expanduser().resolve()
+    out_path = _resolve_path(getattr(args, "out", None), base_dir=config_dir)
+    out_dir = _resolve_path(getattr(args, "out_dir", None), base_dir=config_dir)
+    if out_path is None:
+        if out_dir is None and inferred_session_dir is not None:
+            out_dir = inferred_session_dir / "reports"
+        if out_dir is None:
+            raise SystemExit("single-figure mode requires --out or a resolvable --out-dir/session-dir")
+        out_path = out_dir / _default_out_filename(
+            group_by=str(args.group_by),
+            metric=str(args.metric),
+            band=band,
+            split_halves=bool(args.split_halves),
+            include_none=bool(args.include_none),
+        )
+    out_path = out_path.resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     spec = FigureSpec(
         filename=out_path.name,

@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 
+from app.config_model import default_infer_settings
 from utils.inference import InferenceConfig, InferenceEngine
 from utils.postprocess import PostprocessSettings, PostprocessState
 from utils.runtime_utils import TemperatureScalingState
@@ -75,6 +76,60 @@ def test_postprocess_decision_raw_argmax_gates_rest_to_none():
     assert out["committed_finger_id"] == 0
     assert np.isclose(out["finger_conf"], 0.01)
     assert out["decision_reason"] == "raw_argmax_gated"
+
+
+def test_live_infer_defaults_match_best_live_profile():
+    mod = _load_live_module()
+    _, defaults = mod._build_arg_parser()
+    config_defaults = default_infer_settings()
+
+    assert PostprocessSettings().finger_mode == "raw"
+    assert PostprocessSettings().threshold_action == pytest.approx(0.05)
+    assert PostprocessSettings().threshold_finger == pytest.approx(0.20)
+    assert defaults["finger_mode"] == "raw"
+    assert defaults["window_sec"] == pytest.approx(0.25)
+    assert defaults["hop_sec"] == pytest.approx(0.05)
+    assert defaults["latency_threshold_ms"] == pytest.approx(750.0)
+    assert defaults["smoothing_method"] == "ema"
+    assert defaults["smoothing_window"] == 5
+    assert defaults["hysteresis_enabled"] is False
+    assert defaults["hysteresis_frames"] == 3
+    assert defaults["threshold_action"] == pytest.approx(0.05)
+    assert defaults["threshold_finger"] == pytest.approx(0.20)
+    assert defaults["adjacency_enabled"] is False
+    assert defaults["hysteresis_margin"] == pytest.approx(0.05)
+    assert defaults["finger_delta"] == pytest.approx(0.05)
+    assert defaults["serial_port"] is None
+    assert defaults["serial_baud"] == 9600
+    assert defaults["actuation_min_prob"] == pytest.approx(0.2)
+    assert defaults["actuation_stability"] == 3
+    assert defaults["actuation_cooldown_ms"] == 250
+    assert defaults["actuation_repeat_ms"] == 500
+    assert defaults["actuation_min_speed"] == pytest.approx(0.5)
+    assert defaults["modulate_actuation_speed"] is True
+    assert defaults["actuation_speed_gamma"] == pytest.approx(1.0)
+    assert config_defaults["finger_mode"] == "raw"
+    assert config_defaults["window_sec"] == pytest.approx(0.25)
+    assert config_defaults["hop_sec"] == pytest.approx(0.05)
+    assert config_defaults["latency_threshold_ms"] == pytest.approx(750.0)
+    assert config_defaults["smoothing_method"] == "ema"
+    assert config_defaults["smoothing_window"] == 5
+    assert config_defaults["hysteresis_enabled"] is False
+    assert config_defaults["hysteresis_frames"] == 3
+    assert config_defaults["threshold_action"] == pytest.approx(0.05)
+    assert config_defaults["threshold_finger"] == pytest.approx(0.20)
+    assert config_defaults["adjacency_enabled"] is False
+    assert config_defaults["hysteresis_margin"] == pytest.approx(0.05)
+    assert config_defaults["finger_delta"] == pytest.approx(0.05)
+    assert config_defaults["serial_port"] is None
+    assert config_defaults["serial_baud"] == 9600
+    assert config_defaults["actuation_min_prob"] == pytest.approx(0.2)
+    assert config_defaults["actuation_stability"] == 3
+    assert config_defaults["actuation_cooldown_ms"] == 250
+    assert config_defaults["actuation_repeat_ms"] == 500
+    assert config_defaults["actuation_min_speed"] == pytest.approx(0.5)
+    assert config_defaults["modulate_actuation_speed"] is True
+    assert config_defaults["actuation_speed_gamma"] == pytest.approx(1.0)
 
 
 class _DummyMCModel(torch.nn.Module):
@@ -352,24 +407,62 @@ def test_choose_auto_serial_port_prefers_usb_modem():
     mod = _load_live_module()
 
     class _Port:
-        def __init__(self, device: str, description: str = "", manufacturer: str = ""):
+        def __init__(
+            self,
+            device: str,
+            description: str = "",
+            manufacturer: str = "",
+            *,
+            vid=None,
+            pid=None,
+        ):
             self.device = device
             self.description = description
             self.manufacturer = manufacturer
             self.product = ""
             self.interface = ""
             self.name = Path(device).name
-            self.vid = 0x2341
-            self.pid = 0x0043
+            self.vid = vid
+            self.pid = pid
 
     chosen = mod._choose_auto_serial_port(
         [
             _Port("/dev/tty.Bluetooth-Incoming-Port", description="Bluetooth"),
-            _Port("/dev/cu.usbmodem1101", description="Arduino Uno", manufacturer="Arduino"),
+            _Port(
+                "/dev/cu.usbmodem1101",
+                description="Arduino Uno",
+                manufacturer="Arduino",
+                vid=0x2341,
+                pid=0x0043,
+            ),
         ]
     )
 
     assert chosen == "/dev/cu.usbmodem1101"
+
+
+def test_choose_auto_serial_port_rejects_system_console_ports():
+    mod = _load_live_module()
+
+    class _Port:
+        def __init__(self, device: str, description: str = ""):
+            self.device = device
+            self.description = description
+            self.manufacturer = ""
+            self.product = ""
+            self.interface = ""
+            self.name = Path(device).name
+            self.vid = None
+            self.pid = None
+
+    chosen = mod._choose_auto_serial_port(
+        [
+            _Port("/dev/cu.debug-console"),
+            _Port("/dev/tty.Bluetooth-Incoming-Port", description="Bluetooth"),
+        ]
+    )
+
+    assert chosen is None
 
 
 def test_main_uses_config_model_override_with_session_dir(tmp_path, monkeypatch):

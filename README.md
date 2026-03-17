@@ -231,8 +231,8 @@ Notes:
 - When `--enable_actuation` is set and `--serial_port` is omitted, Step 7 auto-detects a likely USB serial Arduino port (for example `/dev/cu.usbmodem*` on macOS).
 - Pass `--serial_port` explicitly if multiple candidate serial devices are attached or auto-detection is ambiguous.
 - Actuation is safety-gated; REST/NONE never actuate.
-- Current live defaults enable postprocessing with EMA smoothing (`smoothing_window=5`), `finger_mode=smooth`, `threshold_action=0.05`, `threshold_finger=0.20`, and no hysteresis.
-- Current actuation defaults use `actuation_min_prob=0.75`, `actuation_stability=3`, and `actuation_cooldown_ms=250`.
+- Current live defaults enable postprocessing with EMA smoothing (`smoothing_window=5`), `finger_mode=raw`, `threshold_action=0.05`, `threshold_finger=0.20`, and no hysteresis.
+- Current actuation defaults use `actuation_min_prob=0.20`, `actuation_stability=3`, and `actuation_cooldown_ms=250`.
 - Step 7 logs prediction latency by default in `predictions.jsonl`; actuation events now also record `actuation_sent`, `actuation_latency_ms`, and `actuation_speed_scalar`.
 - Raw shards and prediction logs are preserved by default. They are only disabled when `no_file_io` is set to `true`.
 - Optional MC-dropout backend: set `use_inference_engine: true` in the infer config to route Step 7 through `utils/inference.py`. Relevant keys are `mc_passes`, `uncertainty_base_threshold`, and `uncertainty_weight`.
