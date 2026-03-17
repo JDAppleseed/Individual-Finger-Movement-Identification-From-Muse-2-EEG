@@ -162,6 +162,7 @@ MC_SAMPLES = 30
 BATCH_SIZE = 256
 SEED = 42
 SHOW_PLOTS = os.environ.get("SHOW_PLOTS", "0") == "1"
+FIGURE_EXPORT_PAD_INCHES = 0.16
 
 # =========================
 # ===== LOAD DATA =========
@@ -402,6 +403,39 @@ def reliability_bins(conf, preds, labels, n_bins=10):
     return bin_centers, bin_accs
 
 
+def plot_reliability_bars(ax, bin_centers, bin_accs, *, title: str, color: str):
+    ax.plot([0, 1], [0, 1], "--", color="gray")
+    ax.bar(bin_centers, bin_accs, width=0.08, alpha=0.7, color=color)
+    ax.set_title(title)
+    ax.set_xlabel("Confidence")
+    ax.set_ylabel("Accuracy")
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+
+
+def save_action_reliability_figure(
+    bin_centers,
+    bin_accs,
+    output_path: Path,
+    *,
+    title: str = "Action Confidence vs Accuracy",
+):
+    fig, ax = plt.subplots(figsize=(7.4, 5.8), constrained_layout=True)
+    fig.patch.set_facecolor("white")
+    plot_reliability_bars(
+        ax,
+        bin_centers,
+        bin_accs,
+        title=title,
+        color="#5B8FF9",
+    )
+    fig.savefig(output_path, dpi=200, bbox_inches="tight", pad_inches=FIGURE_EXPORT_PAD_INCHES)
+    if SHOW_PLOTS:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
 action_acc = accuracy_score(y_action_eval, action_preds)
 mask = y_action_eval != ACTION_REST
 finger_acc = (
@@ -469,32 +503,39 @@ colors = ["#5B8FF9", "#61DDAA", "#F6BD16"]
 bin_centers, bin_accs = reliability_bins(
     action_conf, action_preds, y_action_eval, n_bins=10
 )
-ax_action_rel.plot([0, 1], [0, 1], "--", color="gray")
-ax_action_rel.bar(bin_centers, bin_accs, width=0.08, alpha=0.7)
-ax_action_rel.set_title("Action Reliability")
-ax_action_rel.set_xlabel("Confidence")
-ax_action_rel.set_ylabel("Accuracy")
+plot_reliability_bars(
+    ax_action_rel,
+    bin_centers,
+    bin_accs,
+    title="Action Reliability",
+    color="#5B8FF9",
+)
 
 # --- Reliability Diagram (Finger, non-REST) ---
 if mask.any():
     f_bin_centers, f_bin_accs = reliability_bins(
         finger_conf[mask], finger_preds[mask], y_finger_eval[mask], n_bins=10
     )
-    ax_finger_rel.plot([0, 1], [0, 1], "--", color="gray")
-    ax_finger_rel.bar(f_bin_centers, f_bin_accs, width=0.08, alpha=0.7, color="green")
-    ax_finger_rel.set_title("Finger Reliability (Non-REST)")
-    ax_finger_rel.set_xlabel("Confidence")
-    ax_finger_rel.set_ylabel("Accuracy")
+    plot_reliability_bars(
+        ax_finger_rel,
+        f_bin_centers,
+        f_bin_accs,
+        title="Finger Reliability (Non-REST)",
+        color="green",
+    )
 else:
     ax_finger_rel.set_axis_off()
 
 tag = run_tag or exp_hash
 fig_path = report_dir / f"mc_eval_{tag}.png"
-plt.savefig(fig_path, dpi=200)
+plt.savefig(fig_path, dpi=200, bbox_inches="tight", pad_inches=FIGURE_EXPORT_PAD_INCHES)
 if SHOW_PLOTS:
     plt.show()
 else:
     plt.close()
+
+action_reliability_path = report_dir / f"action_calibration_{tag}.png"
+save_action_reliability_figure(bin_centers, bin_accs, action_reliability_path)
 
 # Optional supplemental density-colored scatter export
 fig, ax = plt.subplots(figsize=(7.6, 6.2))
@@ -603,7 +644,7 @@ if len(color_values):
     )
 
 scatter_path = report_dir / f"mc_scatter_{tag}.png"
-fig.savefig(scatter_path, dpi=180, bbox_inches="tight", pad_inches=0.08)
+fig.savefig(scatter_path, dpi=180, bbox_inches="tight", pad_inches=FIGURE_EXPORT_PAD_INCHES)
 plt.close(fig)
 
 # Session action composition export
@@ -628,7 +669,7 @@ plt.xlabel("Window Count")
 plt.legend(loc="lower right", fontsize=8)
 plt.tight_layout()
 session_mix_path = report_dir / f"session_action_mix_{tag}.png"
-plt.savefig(session_mix_path)
+plt.savefig(session_mix_path, bbox_inches="tight", pad_inches=FIGURE_EXPORT_PAD_INCHES)
 plt.close()
 
 # --- PER-SUBJECT CALIBRATION PLOT ---
