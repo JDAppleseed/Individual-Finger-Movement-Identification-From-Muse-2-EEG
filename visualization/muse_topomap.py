@@ -101,7 +101,11 @@ def mean_bandpower_map(
     if mask is None:
         selected = arr
     else:
-        selected = arr[np.asarray(mask, dtype=bool)]
+        mask_arr = np.asarray(mask)
+        if mask_arr.dtype == bool:
+            selected = arr[mask_arr]
+        else:
+            selected = arr[mask_arr.astype(np.int64)]
     if selected.size == 0:
         raise ValueError("Selection produced no windows for topomap")
     return selected.mean(axis=0).astype(np.float32)
@@ -152,10 +156,12 @@ def plot_muse_topomap(
     vmin: float | None = None,
     vmax: float | None = None,
     colorbar: bool = False,
+    blur_sigma: float = 1.2,
 ):
     grid_x, grid_y, zi, positions, kept_values = interpolate_muse_topomap(
         values,
         channel_names,
+        smoothing_sigma=float(blur_sigma),
     )
     if ax is None:
         _, ax = plt.subplots(figsize=(4.2, 4.4))
@@ -209,6 +215,10 @@ def plot_muse_topomap_grid(
     figsize: tuple[float, float] | None = None,
     cmap: str = "turbo",
     suptitle: str | None = None,
+    blur_sigma: float = 1.2,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    colorbar_label: str = "Band Power",
 ):
     if not maps:
         raise ValueError("maps must contain at least one panel")
@@ -220,10 +230,18 @@ def plot_muse_topomap_grid(
         figsize = (4.2 * ncols, 4.2 * nrows)
 
     stack = np.stack([np.asarray(values, dtype=np.float32) for _, values in maps], axis=0)
-    vmin = float(np.nanmin(stack))
-    vmax = float(np.nanmax(stack))
+    if vmin is None:
+        vmin = float(np.nanmin(stack))
+    if vmax is None:
+        vmax = float(np.nanmax(stack))
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=figsize,
+        squeeze=False,
+        constrained_layout=True,
+    )
     flat_axes = axes.reshape(-1)
     last_contour = None
     for idx, (title, values) in enumerate(maps):
@@ -236,6 +254,7 @@ def plot_muse_topomap_grid(
             vmin=vmin,
             vmax=vmax,
             colorbar=False,
+            blur_sigma=blur_sigma,
         )
     for idx in range(n_panels, flat_axes.size):
         flat_axes[idx].axis("off")
@@ -247,11 +266,33 @@ def plot_muse_topomap_grid(
             pad=0.02,
             shrink=0.92,
         )
-        colorbar.ax.set_ylabel("Band Power", rotation=90)
+        if colorbar_label:
+            colorbar.ax.set_ylabel(colorbar_label, rotation=90)
     if suptitle:
         fig.suptitle(suptitle, fontsize=13)
-    fig.tight_layout()
     return fig
+
+
+def compute_map_limits(
+    maps: Sequence[tuple[str, np.ndarray]],
+    *,
+    robust_quantile: float = 0.02,
+    center_zero: bool = False,
+) -> tuple[float, float]:
+    if not maps:
+        raise ValueError("maps must contain at least one panel")
+    stack = np.stack([np.asarray(values, dtype=np.float32) for _, values in maps], axis=0)
+    flat = stack.reshape(-1)
+    if robust_quantile > 0.0:
+        low = float(np.nanquantile(flat, robust_quantile))
+        high = float(np.nanquantile(flat, 1.0 - robust_quantile))
+    else:
+        low = float(np.nanmin(flat))
+        high = float(np.nanmax(flat))
+    if center_zero:
+        limit = max(abs(low), abs(high))
+        return -limit, limit
+    return low, high
 
 
 def split_indices_in_halves(indices: Iterable[int]) -> tuple[np.ndarray, np.ndarray]:
