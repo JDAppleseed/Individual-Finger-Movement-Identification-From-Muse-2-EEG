@@ -421,28 +421,10 @@ print(f"🎯 REST Recall (all REST windows): {rest_recall * 100:.2f}%")
 # ===== PLOTS =============
 # =========================
 
-fig = plt.figure(figsize=(16, 13))
-gs = fig.add_gridspec(3, 2, height_ratios=[0.18, 1.0, 1.0])
-ax_header = fig.add_subplot(gs[0, :])
-ax_action_cm = fig.add_subplot(gs[1, 0])
-ax_finger_cm = fig.add_subplot(gs[1, 1])
-ax_action_rel = fig.add_subplot(gs[2, 0])
-ax_finger_rel = fig.add_subplot(gs[2, 1])
-
-ax_header.axis("off")
-header_lines = [
-    f"Full-Model Visual Summary | session={args.session} | run={model_path.parent.name}",
-    f"windows={len(y_action_eval)} | sessions={len(unique_sessions)} | MC passes={MC_SAMPLES}",
-]
-ax_header.text(
-    0.01,
-    0.7,
-    "\n".join(header_lines),
-    ha="left",
-    va="center",
-    fontsize=15,
-    fontweight="bold",
-)
+fig, axes = plt.subplots(2, 2, figsize=(15.5, 11.5), constrained_layout=True)
+fig.patch.set_facecolor("white")
+ax_action_cm, ax_finger_cm = axes[0]
+ax_action_rel, ax_finger_rel = axes[1]
 
 # --- Action Confusion Matrix ---
 action_cm = confusion_matrix(y_action_eval, action_preds, labels=ACTION_LABELS)
@@ -506,11 +488,9 @@ if mask.any():
 else:
     ax_finger_rel.set_axis_off()
 
-plt.tight_layout()
-
 tag = run_tag or exp_hash
 fig_path = report_dir / f"mc_eval_{tag}.png"
-plt.savefig(fig_path)
+plt.savefig(fig_path, dpi=200)
 if SHOW_PLOTS:
     plt.show()
 else:
