@@ -71,6 +71,7 @@ class CommandShaper:
         finger_id: int,
         action_conf: float,
         timestamp_stream_ms: int,
+        speed_scalar_override: Optional[float] = None,
         stability_ok: bool = True,
         timebase_ms: Optional[int] = None,
         thermal_c: Optional[float] = None,
@@ -91,7 +92,10 @@ class CommandShaper:
             target_finger = 0
             speed = 0.0
         else:
-            speed = self._confidence_to_speed(conf)
+            if speed_scalar_override is None:
+                speed = self._confidence_to_speed(conf)
+            else:
+                speed = max(0.0, min(1.0, float(speed_scalar_override)))
             if target_action == 0:
                 target_finger = 0
                 speed = 0.0

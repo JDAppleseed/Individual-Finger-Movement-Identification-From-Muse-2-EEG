@@ -58,6 +58,31 @@ def test_hold_on_change():
     assert second.flags & FLAG_HOLD
 
 
+def test_speed_override_is_used_and_preserved_across_hold():
+    shaper = CommandShaper(CommandShaperConfig(hold_ms=200, base_conf_thresh=0.2))
+    first = shaper.shape(
+        action_id=1,
+        finger_id=2,
+        action_conf=0.9,
+        speed_scalar_override=0.6,
+        timestamp_stream_ms=1000,
+        timebase_ms=1000,
+    )
+    second = shaper.shape(
+        action_id=2,
+        finger_id=3,
+        action_conf=0.95,
+        speed_scalar_override=0.2,
+        timestamp_stream_ms=1100,
+        timebase_ms=1100,
+    )
+    assert first.speed_scalar == 0.6
+    assert second.flags & FLAG_HOLD
+    assert second.action_id == first.action_id
+    assert second.finger_id == first.finger_id
+    assert second.speed_scalar == first.speed_scalar
+
+
 def test_watchdog_trigger():
     shaper = CommandShaper(CommandShaperConfig(watchdog_ms=500))
     shaper.note_valid(timebase_ms=1000)

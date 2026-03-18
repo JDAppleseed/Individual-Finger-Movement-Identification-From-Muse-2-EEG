@@ -41,6 +41,10 @@ class SessionLayout:
     def reports_root(self) -> Path:
         return self.processed_dir / "reports"
 
+    @property
+    def pseudo_live_root(self) -> Path:
+        return self.processed_dir / "pseudo_live"
+
 
 def _latest_dir_by_mtime(root: Path) -> Optional[Path]:
     if not root.exists():

@@ -65,6 +65,17 @@ from utils.label_schema import (
     decode_prediction_pair,
     finger_confidence_for_id,
 )
+from utils.live_infer_common import (
+    build_actuation_command_shaper as _shared_build_actuation_command_shaper,
+    build_actuation_speed_mapper as _shared_build_actuation_speed_mapper,
+    compute_actuation_speed_scalar as _shared_compute_actuation_speed_scalar,
+    debounced_should_send as _shared_debounced_should_send,
+    is_noop_decision as _shared_is_noop_decision,
+    latency_gate_passed as _shared_latency_gate_passed,
+    resolve_actuation_candidate as _shared_resolve_actuation_candidate,
+    resolve_temperature_path as _shared_resolve_temperature_path,
+    uncertainty_gate_passed as _shared_uncertainty_gate_passed,
+)
 from utils.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
 from utils.runtime_utils import (
     TemperatureScalingState,
@@ -190,11 +201,7 @@ def _load_train_config(run_dir: Path) -> dict:
 
 
 def _resolve_temperature_path(run_dir: Path) -> Path:
-    train_cfg = _load_train_config(run_dir)
-    candidate = train_cfg.get("save_temperature_path")
-    if candidate:
-        return Path(str(candidate)).expanduser()
-    return run_dir / "temperature_scaling.json"
+    return _shared_resolve_temperature_path(run_dir)
 
 
 def setup_logger(log_path: str, level: int = logging.INFO) -> None:
@@ -435,13 +442,7 @@ def _ensure_unique_output_dir(path: Path) -> Path:
 
 
 def _is_noop_decision(finger_id: int, action_id: int) -> bool:
-    """
-    Returns True if the decision represents a guaranteed no-op.
-    Semantics:
-      finger_id == 0 -> NONE
-      action_id == 0 -> REST (suppressed for safety during inference)
-    """
-    return int(finger_id) == 0 or int(action_id) == 0
+    return _shared_is_noop_decision(finger_id, action_id)
 
 
 def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
@@ -1439,42 +1440,33 @@ def _debounced_should_send(
     cooldown_ms: int,
     repeat_same_ms: int = 0,
 ) -> bool:
-    if decision.prob <= 0.0:
-        return False
-    # Invariant: finger_id=0 is NONE and must never actuate hardware.
-    if int(decision.finger_id) == 0:
-        return False
-    # Invariant: action_id=0 (REST) must never actuate hardware.
-    if int(decision.action_id) == 0:
-        return False
-    if stable_count < required_stability:
-        return False
-    elapsed_ms = (time.monotonic() - last_send_ts) * 1000.0
-    if last_sent is not None and (decision.finger_id, decision.action_id) == last_sent:
-        return elapsed_ms >= float(max(0, int(repeat_same_ms)))
-    if elapsed_ms < float(cooldown_ms):
-        return False
-    return True
+    last_send_time_ms = (
+        None if float(last_send_ts) <= 0.0 else float(last_send_ts) * 1000.0
+    )
+    current_time_ms = float(time.monotonic()) * 1000.0
+    return _shared_debounced_should_send(
+        decision,
+        last_sent=last_sent,
+        stable_count=stable_count,
+        required_stability=required_stability,
+        last_send_time_ms=last_send_time_ms,
+        current_time_ms=current_time_ms,
+        cooldown_ms=cooldown_ms,
+        repeat_same_ms=repeat_same_ms,
+    )
 
 
 def _uncertainty_gate_passed(
     decision_info: dict[str, Any],
     inference_result: dict[str, Any],
 ) -> bool:
-    adaptive_threshold = inference_result.get("adaptive_threshold")
-    if adaptive_threshold is None:
-        return True
-    return float(decision_info.get("action_conf", 0.0)) >= float(adaptive_threshold)
+    return _shared_uncertainty_gate_passed(decision_info, inference_result)
 
 
 def _build_actuation_speed_mapper(args: argparse.Namespace) -> Optional[CommandShaper]:
-    if not bool(getattr(args, "modulate_actuation_speed", True)):
-        return None
-    return CommandShaper(
-        CommandShaperConfig(
-            base_conf_thresh=0.0,
-            speed_gamma=float(args.actuation_speed_gamma),
-        )
+    return _shared_build_actuation_speed_mapper(
+        modulate_actuation_speed=bool(getattr(args, "modulate_actuation_speed", True)),
+        actuation_speed_gamma=float(args.actuation_speed_gamma),
     )
 
 
@@ -1484,29 +1476,21 @@ def _compute_actuation_speed_scalar(
     speed_mapper: Optional[CommandShaper],
     min_speed: float = 0.0,
 ) -> float:
-    confidence = float(max(0.0, min(1.0, decision_prob)))
-    confidence *= max(0.0, 1.0 - float(action_uncertainty))
-    if speed_mapper is None:
-        return 1.0
-    speed = float(speed_mapper.confidence_to_speed(confidence))
-    min_speed = float(max(0.0, min(1.0, min_speed)))
-    if speed > 0.0 and min_speed > 0.0:
-        speed = max(min_speed, speed)
-    return speed
+    return _shared_compute_actuation_speed_scalar(
+        decision_prob,
+        action_uncertainty,
+        speed_mapper,
+        min_speed=min_speed,
+    )
 
 
 def _build_actuation_command_shaper(args: argparse.Namespace) -> CommandShaper:
-    min_hold_ms = max(
-        int(args.actuation_cooldown_ms),
-        int(round(float(args.hop_sec) * 1000.0 * max(1, int(args.actuation_stability)))),
-    )
-    return CommandShaper(
-        CommandShaperConfig(
-            base_conf_thresh=float(args.actuation_min_prob),
-            speed_gamma=float(args.actuation_speed_gamma),
-            hold_ms=max(150, min_hold_ms),
-            hold_conf_margin=0.05,
-        )
+    return _shared_build_actuation_command_shaper(
+        actuation_min_prob=float(args.actuation_min_prob),
+        actuation_speed_gamma=float(args.actuation_speed_gamma),
+        hop_sec=float(args.hop_sec),
+        actuation_stability=int(args.actuation_stability),
+        actuation_cooldown_ms=int(args.actuation_cooldown_ms),
     )
 
 
@@ -1530,9 +1514,7 @@ def _estimate_window_center_mono(
 
 
 def _latency_gate_passed(latency_ms: float, threshold_ms: float) -> bool:
-    latency_ms = float(latency_ms)
-    threshold_ms = float(threshold_ms)
-    return -50.0 <= latency_ms <= threshold_ms
+    return _shared_latency_gate_passed(latency_ms, threshold_ms)
 
 
 def _resolve_actuation_candidate(
@@ -1540,65 +1522,10 @@ def _resolve_actuation_candidate(
     *,
     required_finger_stability: int,
 ) -> dict[str, Any]:
-    required = max(1, int(required_finger_stability))
-    if len(history) < required:
-        return {
-            "decision": ActuationDecision(finger_id=0, action_id=0, prob=0.0),
-            "reason": "finger_stability",
-            "finger_votes": {},
-            "action_votes": {},
-            "resolved_finger_id": 0,
-        }
-
-    tail = list(history)[-required:]
-    finger_ids = [int(d.finger_id) for d in tail]
-    nonzero_fingers = [fid for fid in finger_ids if fid != 0]
-    if len(nonzero_fingers) != required:
-        return {
-            "decision": ActuationDecision(finger_id=0, action_id=0, prob=0.0),
-            "reason": "finger_stability",
-            "finger_votes": dict(collections.Counter(finger_ids)),
-            "action_votes": {},
-            "resolved_finger_id": 0,
-        }
-    if len(set(nonzero_fingers)) != 1:
-        return {
-            "decision": ActuationDecision(finger_id=0, action_id=0, prob=0.0),
-            "reason": "finger_stability",
-            "finger_votes": dict(collections.Counter(finger_ids)),
-            "action_votes": {},
-            "resolved_finger_id": 0,
-        }
-
-    resolved_finger_id = int(nonzero_fingers[0])
-    action_counts = collections.Counter(int(d.action_id) for d in tail)
-    action_prob_sums: dict[int, float] = {}
-    for d in tail:
-        action_id = int(d.action_id)
-        action_prob_sums[action_id] = action_prob_sums.get(action_id, 0.0) + float(
-            d.prob
-        )
-    chosen_action_id = max(
-        action_counts,
-        key=lambda action_id: (
-            int(action_counts[action_id]),
-            float(action_prob_sums.get(action_id, 0.0)),
-            int(action_id),
-        ),
+    return _shared_resolve_actuation_candidate(
+        history,
+        required_finger_stability=required_finger_stability,
     )
-    chosen_probs = [float(d.prob) for d in tail if int(d.action_id) == chosen_action_id]
-    chosen_prob = float(np.mean(chosen_probs)) if chosen_probs else 0.0
-    return {
-        "decision": ActuationDecision(
-            finger_id=resolved_finger_id,
-            action_id=int(chosen_action_id),
-            prob=chosen_prob,
-        ),
-        "reason": "finger_majority_action_vote",
-        "finger_votes": dict(collections.Counter(finger_ids)),
-        "action_votes": dict(action_counts),
-        "resolved_finger_id": resolved_finger_id,
-    }
 
 
 # -------------------- Main --------------------
@@ -2210,6 +2137,7 @@ def main() -> int:
                             action_id=int(voted_decision.action_id),
                             finger_id=int(voted_decision.finger_id),
                             action_conf=float(voted_decision.prob),
+                            speed_scalar_override=float(actuation_speed_scalar),
                             timestamp_stream_ms=int(round(window_center_stream_s * 1000.0)),
                             stability_ok=True,
                             timebase_ms=int(round(window_center_stream_s * 1000.0)),
@@ -2217,11 +2145,6 @@ def main() -> int:
                         actuation_target_finger_id = int(shaped_command.finger_id)
                         actuation_target_action_id = int(shaped_command.action_id)
                         actuation_speed_scalar = float(shaped_command.speed_scalar)
-                        if actuation_speed_scalar > 0.0:
-                            actuation_speed_scalar = max(
-                                float(args.actuation_min_speed),
-                                actuation_speed_scalar,
-                            )
                         actuation_decision = ActuationDecision(
                             finger_id=actuation_target_finger_id,
                             action_id=actuation_target_action_id,
