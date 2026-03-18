@@ -150,6 +150,7 @@ def default_train_settings() -> Dict[str, Any]:
         "rest_weight": 1.0,
         "action_weights": None,
         "rest_balance_mode": "core_event_equalized",
+        "active_finger_head": True,
         "rest_finger_loss_weight": 0.0,
         "finger_weights": None,
         "window_preprocess": "center_detrend",

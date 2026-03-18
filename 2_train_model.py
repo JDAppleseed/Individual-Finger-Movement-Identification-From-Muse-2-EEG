@@ -36,7 +36,15 @@ from utils.runtime_utils import (
     save_temperature_scaling,
 )
 from utils.experiment_logger import log_experiment, get_latest_experiment_hash
-from utils.label_schema import ACTION_NAMES, ACTION_REST, FINGER_NAMES, FINGER_NONE
+from utils.label_schema import (
+    ACTION_NAMES,
+    ACTION_REST,
+    FINGER_NAMES,
+    FINGER_NONE,
+    decode_finger_predictions,
+    finger_id_to_model_index,
+    uses_active_finger_head,
+)
 from utils.splitting import (
     compose_split_indices,
     infer_groups,
@@ -60,6 +68,7 @@ REST_BALANCE_MODE = "core_event_equalized"
 WINDOW_PREPROCESS = "center_detrend"
 AUX_REST_SESSION_POLICY = "auto_train_only"
 REST_FINGER_LOSS_WEIGHT = 0.0
+ACTIVE_FINGER_HEAD = True
 
 DEFAULT_NPZ = "eeg_windows.npz"
 DEFAULT_MODEL = "finger_action_model.pt"
@@ -116,13 +125,18 @@ def _parse_finger_weights(value: Any, n_fingers: int) -> Optional[torch.Tensor]:
             if isinstance(key, str):
                 k = key.strip().lower()
                 if k.isdigit():
-                    idx = int(k)
+                    raw_idx = int(k)
                 elif k in name_map:
-                    idx = name_map[k]
+                    raw_idx = name_map[k]
                 else:
                     raise ValueError(f"Unknown finger key: {key}")
             else:
-                idx = int(key)
+                raw_idx = int(key)
+            idx = (
+                finger_id_to_model_index(raw_idx, n_fingers)
+                if uses_active_finger_head(n_fingers)
+                else raw_idx
+            )
             if idx < 0 or idx >= n_fingers:
                 raise ValueError(f"Finger weight index out of range: {idx}")
             weights[idx] = float(val)
@@ -693,16 +707,28 @@ def _compute_batch_losses(
     finger_loss_fn: nn.Module,
     loss_action_weight: float,
     rest_finger_loss_weight: float,
+    n_finger_classes: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     loss_action = action_loss_fn(action_logits, y_action)
     mask_nr = y_action != ACTION_REST
     if mask_nr.any():
-        loss_finger_non_rest = finger_loss_fn(finger_logits[mask_nr], y_finger[mask_nr])
+        nr_targets = y_finger[mask_nr]
+        if uses_active_finger_head(n_finger_classes):
+            if torch.any(nr_targets <= int(FINGER_NONE)):
+                raise ValueError(
+                    "Non-REST windows include FINGER_NONE targets, which are invalid for an active finger head."
+                )
+            nr_targets = nr_targets - 1
+        loss_finger_non_rest = finger_loss_fn(finger_logits[mask_nr], nr_targets)
     else:
         loss_finger_non_rest = torch.tensor(0.0, device=action_logits.device)
 
     mask_rest = y_action == ACTION_REST
-    if rest_finger_loss_weight > 0.0 and mask_rest.any():
+    if (
+        not uses_active_finger_head(n_finger_classes)
+        and rest_finger_loss_weight > 0.0
+        and mask_rest.any()
+    ):
         rest_targets = torch.full_like(y_finger[mask_rest], int(FINGER_NONE))
         loss_finger_rest = finger_loss_fn(finger_logits[mask_rest], rest_targets)
     else:
@@ -873,6 +899,22 @@ def build_arg_parser():
             "0..N-1 (e.g. '1,1,1,1,1,0.5' to downweight pinky), or JSON list/dict "
             "(e.g. '[1,1,1,1,1,0.5]' or '{\"pinky\":0.5}')."
         ),
+    )
+    training_group.add_argument(
+        "--active-finger-head",
+        dest="active_finger_head",
+        action="store_true",
+        default=ACTIVE_FINGER_HEAD,
+        help=(
+            "Train the finger head on active fingers only (THUMB..PINKY). "
+            "REST is then handled solely by the action head."
+        ),
+    )
+    training_group.add_argument(
+        "--no-active-finger-head",
+        dest="active_finger_head",
+        action="store_false",
+        help="Keep the legacy 6-class finger head with NONE as an explicit class.",
     )
     training_group.add_argument(
         "--rest-finger-loss-weight",
@@ -1611,7 +1653,7 @@ def main():
         y_finger_calib = y_finger[calib_idx] if len(calib_idx) else None
         train_meta = _subset_meta(meta, train_fit_idx, len(y_action)) if meta else {}
 
-        n_fingers = int(np.max(y_finger)) + 1
+        n_fingers = 5 if bool(args.active_finger_head) else int(np.max(y_finger)) + 1
         n_actions = int(np.max(y_action)) + 1
 
         # ===== NORMALIZE =====
@@ -1709,6 +1751,10 @@ def main():
             print(f"Using finger weights: {finger_weights.tolist()}")
         else:
             loss_f = nn.CrossEntropyLoss()
+        if uses_active_finger_head(n_fingers) and float(args.rest_finger_loss_weight) > 0.0:
+            print(
+                "⚠️ rest_finger_loss_weight is ignored when active_finger_head is enabled."
+            )
 
         # Action loss (explicit action weights override scalar REST weighting)
         try:
@@ -1752,6 +1798,7 @@ def main():
                     finger_loss_fn=loss_f,
                     loss_action_weight=float(args.loss_action_weight),
                     rest_finger_loss_weight=float(args.rest_finger_loss_weight),
+                    n_finger_classes=n_fingers,
                 )
                 loss.backward()
                 opt.step()
@@ -1765,6 +1812,8 @@ def main():
                 mask_nr = yab != ACTION_REST
                 if mask_nr.any():
                     preds_finger = torch.argmax(f_out[mask_nr], dim=1)
+                    if uses_active_finger_head(n_fingers):
+                        preds_finger = preds_finger + 1
                     correct_finger += (preds_finger == yfb[mask_nr]).sum().item()
                     total_finger += yfb[mask_nr].numel()
 
@@ -1793,6 +1842,7 @@ def main():
             "action_weights": action_weights.tolist(),
             "action_weights_override": bool(action_weights_override),
             "rest_balance_mode": args.rest_balance_mode,
+            "active_finger_head": bool(args.active_finger_head),
             "rest_finger_loss_weight": float(args.rest_finger_loss_weight),
             "finger_weights": finger_weights.tolist() if finger_weights is not None else None,
             "window_preprocess": args.window_preprocess,
@@ -1883,9 +1933,12 @@ def main():
                 device=device,
             )
             if np.any(finger_mask_calib):
+                finger_targets_calib = y_finger_calib_np[finger_mask_calib]
+                if uses_active_finger_head(n_fingers):
+                    finger_targets_calib = finger_targets_calib - 1
                 finger_temp, finger_metrics = _fit_temperature(
                     finger_logits_calib[finger_mask_calib],
-                    y_finger_calib_np[finger_mask_calib],
+                    finger_targets_calib,
                     device=device,
                 )
             else:
@@ -1932,7 +1985,7 @@ def main():
         test_finger_acc = None
         test_non_rest = (y_action_test.astype(np.int64) != int(ACTION_REST))
         if bool(np.any(test_non_rest)):
-            test_finger_pred = np.argmax(finger_probs[test_non_rest], axis=1).astype(np.int64)
+            test_finger_pred = decode_finger_predictions(finger_probs[test_non_rest])
             test_finger_acc = float(np.mean(test_finger_pred == y_finger_test[test_non_rest].astype(np.int64)))
 
         metrics = {

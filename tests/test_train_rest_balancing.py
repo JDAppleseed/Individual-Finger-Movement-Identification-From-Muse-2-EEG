@@ -163,6 +163,7 @@ def test_rest_finger_loss_only_applies_when_enabled():
         finger_loss_fn=loss_f,
         loss_action_weight=1.0,
         rest_finger_loss_weight=0.0,
+        n_finger_classes=3,
     )
     loss1, _, _, rest1 = mod._compute_batch_losses(
         finger_logits=finger_logits,
@@ -173,8 +174,35 @@ def test_rest_finger_loss_only_applies_when_enabled():
         finger_loss_fn=loss_f,
         loss_action_weight=1.0,
         rest_finger_loss_weight=0.5,
+        n_finger_classes=3,
     )
 
     assert float(rest0.item()) == 0.0
     assert float(rest1.item()) > 0.0
     assert float(loss1.item()) > float(loss0.item())
+
+
+def test_active_finger_head_ignores_rest_finger_loss_and_reindexes_targets():
+    mod = _load_train_module()
+    finger_logits = torch.tensor([[0.1, 1.2, -0.4, -0.5, -0.6]], dtype=torch.float32)
+    action_logits = torch.tensor([[0.2, 1.8, -1.0]], dtype=torch.float32)
+    y_finger = torch.tensor([2], dtype=torch.long)
+    y_action = torch.tensor([1], dtype=torch.long)
+    loss_f = torch.nn.CrossEntropyLoss()
+    loss_a = torch.nn.CrossEntropyLoss()
+
+    loss, _, finger_non_rest, finger_rest = mod._compute_batch_losses(
+        finger_logits=finger_logits,
+        action_logits=action_logits,
+        y_finger=y_finger,
+        y_action=y_action,
+        action_loss_fn=loss_a,
+        finger_loss_fn=loss_f,
+        loss_action_weight=1.0,
+        rest_finger_loss_weight=0.5,
+        n_finger_classes=5,
+    )
+
+    assert float(finger_non_rest.item()) > 0.0
+    assert float(finger_rest.item()) == 0.0
+    assert float(loss.item()) > 0.0

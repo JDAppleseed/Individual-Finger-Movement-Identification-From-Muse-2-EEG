@@ -6,6 +6,8 @@ from utils.label_schema import (
     ACTION_REST,
     FINGER_INDEX,
     FINGER_NONE,
+    FINGER_THUMB,
+    decode_finger_prediction,
     decode_prediction_pair,
     enforce_prediction_pair,
     enforce_prediction_pairs,
@@ -32,6 +34,22 @@ def test_decode_prediction_pair_gates_rest_but_keeps_non_rest_none():
     )
     assert open_action == ACTION_OPEN
     assert open_finger == FINGER_NONE
+
+
+def test_decode_prediction_pair_maps_active_only_finger_head_to_true_label_ids():
+    open_action, open_finger = decode_prediction_pair(
+        np.array([0.05, 0.90, 0.05], dtype=float),
+        np.array([0.85, 0.05, 0.03, 0.02, 0.05], dtype=float),
+    )
+    assert open_action == ACTION_OPEN
+    assert open_finger == FINGER_THUMB
+
+
+def test_decode_finger_prediction_maps_active_only_output():
+    finger_id = decode_finger_prediction(
+        np.array([0.01, 0.80, 0.05, 0.04, 0.10], dtype=float)
+    )
+    assert finger_id == FINGER_INDEX
 
 
 def test_enforce_prediction_pairs_vectorized():

@@ -7,7 +7,7 @@ from typing import Any, Deque, Dict, Optional, Tuple
 import numpy as np
 import torch
 
-from utils.label_schema import decode_prediction_pair
+from utils.label_schema import decode_prediction_pair, finger_confidence_for_id
 from utils.runtime_utils import (
     LogitBiasState,
     TemperatureScalingState,
@@ -263,7 +263,11 @@ class InferenceEngine:
         action_id, finger_id = decode_prediction_pair(action_mean, finger_mean)
 
         action_confidence = float(action_mean[action_id])
-        finger_confidence = float(finger_mean[finger_id]) if finger_mean.size else 0.0
+        finger_confidence = (
+            finger_confidence_for_id(finger_mean, finger_id)
+            if finger_mean.size
+            else 0.0
+        )
 
         adaptive = min(
             0.99,

@@ -35,7 +35,10 @@ from utils.label_schema import (
     ACTION_REST,
     ACTION_NAMES,
     FINGER_NAMES,
+    decode_finger_predictions,
     enforce_prediction_pairs,
+    finger_confidences_for_ids,
+    uses_active_finger_head,
 )
 from utils.eval_utils import (
     resolve_cached_test_indices,
@@ -699,14 +702,15 @@ def _load_eval_model_and_normalizer(
     if not model_path.exists():
         raise FileNotFoundError(f"Missing model weights: {model_path}")
 
+    state_dict = torch.load(str(model_path), map_location="cpu", weights_only=True)
+    model_n_fingers = int(state_dict["finger_head.weight"].shape[0])
+    model_n_actions = int(state_dict["action_head.weight"].shape[0])
     model = CNNLSTMFingerActionNet(
         n_channels=n_channels,
-        n_fingers=n_fingers,
-        n_actions=n_actions,
+        n_fingers=model_n_fingers,
+        n_actions=model_n_actions,
     )
-    model.load_state_dict(
-        torch.load(str(model_path), map_location="cpu", weights_only=True)
-    )
+    model.load_state_dict(state_dict)
     model.eval()
     temperature_state = load_temperature_scaling(temperature_path)
     eval_model = None
@@ -727,7 +731,7 @@ def _run_deterministic_inference(
 ) -> Tuple[np.ndarray, np.ndarray]:
     idx = np.asarray(indices, dtype=np.int64)
     action_probs = np.zeros((len(idx), n_actions), dtype=np.float32)
-    finger_probs = np.zeros((len(idx), n_fingers), dtype=np.float32)
+    finger_probs = np.zeros((len(idx), int(model.finger_head.out_features)), dtype=np.float32)
 
     with torch.no_grad():
         for start in range(0, len(idx), batch_size):
@@ -748,6 +752,24 @@ def _run_deterministic_inference(
             finger_probs[start:end] = torch.softmax(finger_logits, dim=1).cpu().numpy()
 
     return action_probs, finger_probs
+
+
+def _infer_model_output_dims(
+    model_path: Path,
+    *,
+    fallback_n_fingers: int,
+    fallback_n_actions: int,
+) -> Tuple[int, int]:
+    if not model_path.exists():
+        return int(fallback_n_fingers), int(fallback_n_actions)
+    try:
+        state_dict = torch.load(str(model_path), map_location="cpu", weights_only=True)
+        return (
+            int(state_dict["finger_head.weight"].shape[0]),
+            int(state_dict["action_head.weight"].shape[0]),
+        )
+    except Exception:
+        return int(fallback_n_fingers), int(fallback_n_actions)
 
 
 def _format_pair_counts(action_ids: np.ndarray, finger_ids: np.ndarray) -> Dict[str, int]:
@@ -777,18 +799,18 @@ def _compute_prediction_metrics(
     finger_probs = np.asarray(finger_probs, dtype=np.float32)
 
     action_preds = np.argmax(action_probs, axis=1).astype(np.int64)
-    raw_finger_preds = np.argmax(finger_probs, axis=1).astype(np.int64)
-    raw_valid_pair_rate = (
-        float(np.mean((action_preds != ACTION_REST) | (raw_finger_preds == 0)))
-        if len(action_preds)
-        else None
-    )
+    raw_finger_preds = decode_finger_predictions(finger_probs)
+    raw_valid_pair_rate = None
+    if len(action_preds) and not uses_active_finger_head(int(finger_probs.shape[1])):
+        raw_valid_pair_rate = float(
+            np.mean((action_preds != ACTION_REST) | (raw_finger_preds == 0))
+        )
     raw_invalid_pair_rate = (
         float(1.0 - raw_valid_pair_rate) if raw_valid_pair_rate is not None else None
     )
     _, finger_preds = enforce_prediction_pairs(action_preds, raw_finger_preds)
     action_conf = action_probs[np.arange(len(action_probs)), action_preds]
-    finger_conf = finger_probs[np.arange(len(finger_probs)), finger_preds]
+    finger_conf = finger_confidences_for_ids(finger_probs, finger_preds)
 
     mask_non_rest = y_action_true != ACTION_REST
     joint_correct = (action_preds == y_action_true) & (finger_preds == y_finger_true)
@@ -1505,10 +1527,10 @@ def main():
         max_samples=args.max_samples,
     )
 
-    n_fingers = int(np.max(y_finger)) + 1
+    dataset_n_fingers = int(np.max(y_finger)) + 1
     n_actions = int(np.max(y_action)) + 1
     manifest["dataset"]["n_actions"] = n_actions
-    manifest["dataset"]["n_fingers"] = n_fingers
+    manifest["dataset"]["n_fingers"] = dataset_n_fingers
     manifest["dataset"]["exp_hash"] = exp_hash
     manifest["dataset"]["label_counts"]["action"] = _format_label_counts(
         y_action, ACTION_NAMES
@@ -1559,6 +1581,13 @@ def main():
 
     eval_model = None
     eval_normalizer = None
+    model_n_fingers, model_n_actions = _infer_model_output_dims(
+        model_path,
+        fallback_n_fingers=dataset_n_fingers,
+        fallback_n_actions=n_actions,
+    )
+    manifest["dataset"]["model_output_n_fingers"] = int(model_n_fingers)
+    manifest["dataset"]["model_output_n_actions"] = int(model_n_actions)
 
     # =========================
     # ===== TEST SPLIT =========
@@ -1594,8 +1623,8 @@ def main():
                 y_action_test=y_action_test,
                 y_finger_test=y_finger_test,
                 test_idx=test_idx,
-                n_actions=n_actions,
-                n_fingers=n_fingers,
+                n_actions=model_n_actions,
+                n_fingers=model_n_fingers,
                 n_samples_current=len(y_action),
                 dataset_info_cache=dataset_info_cache,
                 dataset_info_current=dataset_info_current,
@@ -1693,8 +1722,8 @@ def main():
                 scaler_path=scaler_path,
                 temperature_path=temperature_path,
                 n_channels=X.shape[2],
-                n_fingers=n_fingers,
-                n_actions=n_actions,
+                n_fingers=model_n_fingers,
+                n_actions=model_n_actions,
             )
         except Exception as exc:
             print(str(exc))
@@ -1707,8 +1736,8 @@ def main():
             model=eval_model,
             normalizer=eval_normalizer,
             temperature_state=temperature_state,
-            n_actions=n_actions,
-            n_fingers=n_fingers,
+            n_actions=model_n_actions,
+            n_fingers=model_n_fingers,
             batch_size=batch_size,
         )
 
@@ -1743,8 +1772,8 @@ def main():
                     scaler_path=scaler_path,
                     temperature_path=temperature_path,
                     n_channels=X.shape[2],
-                    n_fingers=n_fingers,
-                    n_actions=n_actions,
+                    n_fingers=model_n_fingers,
+                    n_actions=model_n_actions,
                 )
             except Exception as exc:
                 print(f"⚠️ Auxiliary REST benchmark skipped: {exc}")
@@ -1757,14 +1786,14 @@ def main():
                 model=eval_model,
                 normalizer=eval_normalizer,
                 temperature_state=temperature_state,
-                n_actions=n_actions,
-                n_fingers=n_fingers,
+                n_actions=model_n_actions,
+                n_fingers=model_n_fingers,
                 batch_size=max(1, int(args.batch_size)),
             )
             aux_y_action = y_action[aux_idx]
             aux_y_finger = y_finger[aux_idx]
             aux_action_pred = np.argmax(aux_action_probs, axis=1).astype(np.int64)
-            aux_raw_finger_pred = np.argmax(aux_finger_probs, axis=1).astype(np.int64)
+            aux_raw_finger_pred = decode_finger_predictions(aux_finger_probs)
             _, aux_finger_pred = enforce_prediction_pairs(
                 aux_action_pred, aux_raw_finger_pred
             )
@@ -1908,15 +1937,17 @@ def main():
     action_preds = np.argmax(action_probs, axis=1)
     action_conf = np.max(action_probs, axis=1)
 
-    raw_finger_preds = np.argmax(finger_probs, axis=1)
-    raw_valid_pair_rate = float(
-        np.mean((action_preds != ACTION_REST) | (raw_finger_preds == 0))
-    ) if len(action_preds) else None
+    raw_finger_preds = decode_finger_predictions(finger_probs)
+    raw_valid_pair_rate = None
+    if len(action_preds) and not uses_active_finger_head(int(finger_probs.shape[1])):
+        raw_valid_pair_rate = float(
+            np.mean((action_preds != ACTION_REST) | (raw_finger_preds == 0))
+        )
     raw_invalid_pair_rate = (
         float(1.0 - raw_valid_pair_rate) if raw_valid_pair_rate is not None else None
     )
     _, finger_preds = enforce_prediction_pairs(action_preds, raw_finger_preds)
-    finger_conf = finger_probs[np.arange(len(finger_probs)), finger_preds]
+    finger_conf = finger_confidences_for_ids(finger_probs, finger_preds)
 
     # =========================
     # ===== METRICS ===========
@@ -2356,8 +2387,8 @@ def main():
                 scaler_path=scaler_path,
                 temperature_path=temperature_path,
                 n_channels=X.shape[2],
-                n_fingers=n_fingers,
-                n_actions=n_actions,
+                n_fingers=model_n_fingers,
+                n_actions=model_n_actions,
             )
         except Exception as exc:
             print(f"⚠️ Core-session replay skipped: {exc}")
@@ -2371,8 +2402,8 @@ def main():
             model=eval_model,
             normalizer=eval_normalizer,
             temperature_state=temperature_state,
-            n_actions=n_actions,
-            n_fingers=n_fingers,
+            n_actions=model_n_actions,
+            n_fingers=model_n_fingers,
             batch_size=max(1, int(args.batch_size)),
         )
         core_metrics_payload = _compute_prediction_metrics(
@@ -2472,8 +2503,8 @@ def main():
                     model=eval_model,
                     normalizer=eval_normalizer,
                     temperature_state=temperature_state,
-                    n_actions=n_actions,
-                    n_fingers=n_fingers,
+                    n_actions=model_n_actions,
+                    n_fingers=model_n_fingers,
                     batch_size=max(1, int(args.batch_size)),
                 )
                 metrics_payload = _compute_prediction_metrics(

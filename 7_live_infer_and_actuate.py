@@ -60,7 +60,11 @@ from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from muse_streaming.resample import resample_window, verify_alignment
 from utils.command_shaper import CommandShaper, CommandShaperConfig
 from utils.inference import InferenceConfig, InferenceEngine
-from utils.label_schema import decode_prediction_pair
+from utils.label_schema import (
+    decode_finger_prediction,
+    decode_prediction_pair,
+    finger_confidence_for_id,
+)
 from utils.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
 from utils.runtime_utils import (
     TemperatureScalingState,
@@ -1154,15 +1158,14 @@ def _choose_actuation(
     finger_probs: torch.Tensor,
     action_probs: torch.Tensor,
 ) -> ActuationDecision:
-    pred_action, pred_finger = decode_prediction_pair(
-        action_probs.detach().cpu().numpy(),
-        finger_probs.detach().cpu().numpy(),
-    )
+    action_probs_np = action_probs.detach().cpu().numpy()
+    finger_probs_np = finger_probs.detach().cpu().numpy()
+    pred_action, pred_finger = decode_prediction_pair(action_probs_np, finger_probs_np)
     # Joint confidence heuristic: min of the two max probs
     conf = float(
         min(
-            float(finger_probs[pred_finger].item()),
-            float(action_probs[pred_action].item()),
+            float(finger_confidence_for_id(finger_probs_np, pred_finger)),
+            float(action_probs_np[pred_action]),
         )
     )
     return ActuationDecision(finger_id=pred_finger, action_id=pred_action, prob=conf)
@@ -1178,13 +1181,15 @@ def _postprocess_decision(
 ) -> dict:
     if not enabled:
         raw_action = int(np.argmax(action_probs)) if action_probs.size else 0
-        raw_finger = int(np.argmax(finger_probs)) if finger_probs.size else 0
+        raw_finger = decode_finger_prediction(finger_probs)
         committed_action, committed_finger = decode_prediction_pair(
             action_probs, finger_probs
         )
         action_conf = float(np.max(action_probs)) if action_probs.size else 0.0
         finger_conf = (
-            float(finger_probs[committed_finger]) if finger_probs.size else 0.0
+            finger_confidence_for_id(finger_probs, committed_finger)
+            if finger_probs.size
+            else 0.0
         )
         return {
             "committed_action_id": committed_action,

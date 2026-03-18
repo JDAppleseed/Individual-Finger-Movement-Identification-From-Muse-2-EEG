@@ -36,7 +36,7 @@ def validate_cached_predictions(
             return False
     if len(y_finger_test) > 0:
         try:
-            if y_finger_test.min() < 0 or y_finger_test.max() >= n_fingers:
+            if y_finger_test.min() < 0:
                 return False
         except Exception:
             return False

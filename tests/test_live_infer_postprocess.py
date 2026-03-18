@@ -49,6 +49,32 @@ def test_postprocess_decision_deterministic():
     assert out["committed_finger_id"] == 2
 
 
+def test_postprocess_decision_maps_active_only_finger_head():
+    mod = _load_live_module()
+    settings = PostprocessSettings(
+        smoothing_enabled=False,
+        hysteresis_enabled=False,
+        threshold_action=0.5,
+        threshold_finger=0.5,
+        adjacency_enabled=False,
+    )
+    state = PostprocessState()
+    action_probs = np.array([0.1, 0.8, 0.1], dtype=float)
+    finger_probs = np.array([0.05, 0.85, 0.02, 0.02, 0.06], dtype=float)
+
+    out = mod._postprocess_decision(
+        action_probs,
+        finger_probs,
+        enabled=True,
+        settings=settings,
+        state=state,
+    )
+
+    assert out["committed_action_id"] == 1
+    assert out["committed_finger_id"] == 2
+    assert out["raw_top_finger_id"] == 2
+
+
 def test_postprocess_decision_raw_argmax_gates_rest_to_none():
     mod = _load_live_module()
     settings = PostprocessSettings(
@@ -174,6 +200,25 @@ class _DummyRestMCModel(torch.nn.Module):
         }
 
 
+class _DummyRestMCModelActiveHead(torch.nn.Module):
+    def forward(self, x):
+        finger_logits = torch.tensor([[0.0, 2.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+        action_logits = torch.tensor([[2.0, 0.0, 0.0]], dtype=torch.float32)
+        return finger_logits, action_logits
+
+    def mc_forward(self, x, passes=20):
+        return {
+            "finger_mean": torch.tensor(
+                [[0.05, 0.80, 0.04, 0.03, 0.08]], dtype=torch.float32
+            ),
+            "action_mean": torch.tensor([[0.75, 0.10, 0.15]], dtype=torch.float32),
+            "finger_std": torch.tensor(
+                [[0.01, 0.05, 0.01, 0.01, 0.01]], dtype=torch.float32
+            ),
+            "action_std": torch.tensor([[0.10, 0.02, 0.03]], dtype=torch.float32),
+        }
+
+
 def test_predict_window_uses_inference_engine_backend():
     mod = _load_live_module()
     model = _DummyMCModel()
@@ -273,6 +318,33 @@ def test_inference_engine_predict_gates_rest_to_none():
     assert prediction["action_id"] == 0
     assert prediction["finger_id"] == 0
     assert np.isclose(prediction["finger_confidence"], 0.05)
+    assert safety["allow_actuation"] is True
+    assert diagnostics["health_score"] >= 0.0
+
+
+def test_inference_engine_predict_gates_rest_to_none_with_active_finger_head():
+    model = _DummyRestMCModelActiveHead()
+    engine = InferenceEngine(
+        model=model,
+        normalizer=None,
+        device=torch.device("cpu"),
+        action_names={0: "REST"},
+        finger_names={0: "NONE", 2: "INDEX"},
+        config=InferenceConfig(
+            base_threshold=0.7,
+            uncertainty_weight=0.5,
+            stability_frames=1,
+            mc_passes=5,
+        ),
+    )
+
+    prediction, safety, diagnostics = engine.predict(
+        np.zeros((64, 4), dtype=np.float32)
+    )
+
+    assert prediction["action_id"] == 0
+    assert prediction["finger_id"] == 0
+    assert np.isclose(prediction["finger_confidence"], 0.0)
     assert safety["allow_actuation"] is True
     assert diagnostics["health_score"] >= 0.0
 

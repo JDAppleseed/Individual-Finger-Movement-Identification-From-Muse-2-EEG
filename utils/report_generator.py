@@ -19,7 +19,9 @@ from utils.label_schema import (
     ACTION_REST,
     ACTION_NAMES,
     FINGER_NAMES,
+    decode_finger_predictions,
     enforce_prediction_pairs,
+    uses_active_finger_head,
 )
 from utils.per_subject_calibration import expected_calibration_error
 from utils.sequence_data import load_sequence_npz
@@ -147,7 +149,7 @@ def generate_subject_report(subject_id, experiment_hash):
         finger_probs = preds["finger_probs"]
         action_preds = np.argmax(action_probs, axis=1)
         _, finger_preds = enforce_prediction_pairs(
-            action_preds, np.argmax(finger_probs, axis=1)
+            action_preds, decode_finger_predictions(finger_probs)
         )
 
         subj_ids = meta.get("subject_id")
@@ -410,12 +412,12 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     if preds is not None:
         action_probs, finger_probs, y_action, y_finger = preds
         action_pred = np.argmax(action_probs, axis=1).astype(int)
-        raw_finger_pred = np.argmax(finger_probs, axis=1).astype(int)
-        raw_valid_pair_rate = (
-            float(np.mean((action_pred != ACTION_REST) | (raw_finger_pred == 0)))
-            if y_action.size
-            else None
-        )
+        raw_finger_pred = decode_finger_predictions(finger_probs).astype(int)
+        raw_valid_pair_rate = None
+        if y_action.size and not uses_active_finger_head(int(finger_probs.shape[1])):
+            raw_valid_pair_rate = float(
+                np.mean((action_pred != ACTION_REST) | (raw_finger_pred == 0))
+            )
         raw_invalid_pair_rate = (
             float(1.0 - raw_valid_pair_rate)
             if raw_valid_pair_rate is not None

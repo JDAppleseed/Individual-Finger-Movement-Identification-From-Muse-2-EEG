@@ -149,6 +149,7 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
 def validate_train(settings: Dict[str, Any]) -> ValidationResult:
     errors: List[str] = []
     warnings: List[str] = []
+    _validate_bool(settings, "active_finger_head", errors)
     if "rest_balance_mode" in settings:
         value = str(settings.get("rest_balance_mode"))
         if value not in {"none", "session_equalized", "core_event_equalized"}:
