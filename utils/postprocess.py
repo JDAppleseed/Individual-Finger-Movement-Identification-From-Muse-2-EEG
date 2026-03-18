@@ -9,8 +9,10 @@ import numpy as np
 from utils.label_schema import (
     ACTION_REST,
     FINGER_NONE,
+    decode_finger_prediction_for_action,
     decode_finger_prediction,
     finger_confidence_for_id,
+    is_valid_action_finger,
     model_index_to_finger_id,
 )
 
@@ -102,7 +104,9 @@ def postprocess_predictions(
     smoothed_action_id = raw_action_id
 
     smoothed_finger_probs = finger_probs
-    smoothed_finger_id = raw_finger_id
+    smoothed_finger_id = decode_finger_prediction_for_action(
+        smoothed_action_id, smoothed_finger_probs
+    )
 
     # =========================
     # ===== ACTION SMOOTHING ===
@@ -132,7 +136,9 @@ def postprocess_predictions(
                         alpha * finger_probs + (1 - alpha) * state.ema_finger
                     )
                 smoothed_finger_probs = state.ema_finger
-                smoothed_finger_id = decode_finger_prediction(smoothed_finger_probs)
+                smoothed_finger_id = decode_finger_prediction_for_action(
+                    smoothed_action_id, smoothed_finger_probs
+                )
 
         else:
             # ===== vote mode for ACTION =====
@@ -154,14 +160,20 @@ def postprocess_predictions(
                     state.finger_probs.popleft()
                 smoothed_finger_probs = _mean_probs(state.finger_probs)
                 smoothed_finger_id = (
-                    decode_finger_prediction(smoothed_finger_probs)
+                    decode_finger_prediction_for_action(
+                        smoothed_action_id, smoothed_finger_probs
+                    )
                     if smoothed_finger_probs.size
-                    else raw_finger_id
+                    else decode_finger_prediction_for_action(
+                        smoothed_action_id, finger_probs
+                    )
                 )
             else:
                 # finger raw: do not maintain finger histories
                 smoothed_finger_probs = finger_probs
-                smoothed_finger_id = raw_finger_id
+                smoothed_finger_id = decode_finger_prediction_for_action(
+                    smoothed_action_id, smoothed_finger_probs
+                )
 
     # =========================
     # ===== CONFIDENCE =========
@@ -179,11 +191,13 @@ def postprocess_predictions(
     # Finger confidence: if finger_mode="raw", use current frame confidence (recommended)
     if getattr(settings, "finger_mode", "raw") == "raw":
         finger_conf = (
-            finger_confidence_for_id(finger_probs, raw_finger_id)
+            finger_confidence_for_id(finger_probs, smoothed_finger_id)
             if finger_probs.size
             else 0.0
         )
-        smoothed_finger_id = raw_finger_id
+        smoothed_finger_id = decode_finger_prediction_for_action(
+            smoothed_action_id, finger_probs
+        )
         smoothed_finger_probs = finger_probs
     else:
         # finger_mode="smooth"
@@ -201,6 +215,12 @@ def postprocess_predictions(
             )
 
     decision_reason = "commit"
+    finger_gate_ok = True
+    committed_finger_conf = (
+        finger_confidence_for_id(finger_probs, smoothed_finger_id)
+        if finger_probs.size and getattr(settings, "finger_mode", "raw") == "raw"
+        else finger_conf
+    )
 
     # ===== Thresholding =====
     if action_conf < float(settings.threshold_action):
@@ -301,9 +321,19 @@ def postprocess_predictions(
                 committed_finger_conf = 0.0
 
             if committed_finger_conf < float(settings.threshold_finger):
-                committed_finger = int(FINGER_NONE)
-                if decision_reason not in {"below_threshold", "hysteresis_hold"}:
-                    decision_reason = "finger_below_threshold"
+                finger_gate_ok = False
+
+    if int(committed_action) == int(ACTION_REST):
+        committed_finger_conf = (
+            finger_confidence_for_id(finger_probs, committed_finger)
+            if finger_probs.size and getattr(settings, "finger_mode", "raw") == "raw"
+            else (
+                finger_confidence_for_id(smoothed_finger_probs, committed_finger)
+                if smoothed_finger_probs.size
+                else 0.0
+            )
+        )
+        finger_gate_ok = True
 
     # ===== Update state =====
     if int(committed_action) == int(state.last_action):
@@ -320,7 +350,11 @@ def postprocess_predictions(
         "raw_top_action_id": int(raw_action_id),
         "raw_top_finger_id": int(raw_finger_id),
         "action_conf": float(action_conf),
-        "finger_conf": float(finger_conf),
+        "finger_conf": float(committed_finger_conf),
+        "finger_gate_ok": bool(finger_gate_ok),
+        "committed_pair_valid": bool(
+            is_valid_action_finger(int(committed_action), int(committed_finger))
+        ),
         "smoothed_action_id": int(smoothed_action_id),
         "smoothed_finger_id": int(smoothed_finger_id),
         "decision_reason": str(decision_reason),

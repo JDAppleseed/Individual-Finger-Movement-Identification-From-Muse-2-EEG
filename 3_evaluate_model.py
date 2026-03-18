@@ -36,9 +36,9 @@ from utils.label_schema import (
     ACTION_NAMES,
     FINGER_NAMES,
     decode_finger_predictions,
-    enforce_prediction_pairs,
+    decode_finger_predictions_for_actions,
     finger_confidences_for_ids,
-    uses_active_finger_head,
+    prediction_pair_diagnostics,
 )
 from utils.eval_utils import (
     resolve_cached_test_indices,
@@ -800,15 +800,24 @@ def _compute_prediction_metrics(
 
     action_preds = np.argmax(action_probs, axis=1).astype(np.int64)
     raw_finger_preds = decode_finger_predictions(finger_probs)
-    raw_valid_pair_rate = None
-    if len(action_preds) and not uses_active_finger_head(int(finger_probs.shape[1])):
-        raw_valid_pair_rate = float(
-            np.mean((action_preds != ACTION_REST) | (raw_finger_preds == 0))
-        )
-    raw_invalid_pair_rate = (
-        float(1.0 - raw_valid_pair_rate) if raw_valid_pair_rate is not None else None
+    finger_preds = decode_finger_predictions_for_actions(action_preds, finger_probs)
+    pair_diag = prediction_pair_diagnostics(
+        action_preds,
+        raw_finger_preds,
+        committed_finger_ids=finger_preds,
     )
-    _, finger_preds = enforce_prediction_pairs(action_preds, raw_finger_preds)
+    raw_invalid_pair_count = (
+        int(pair_diag["raw_non_rest_none_count"])
+        + int(pair_diag["raw_rest_non_none_count"])
+    )
+    raw_invalid_pair_rate = (
+        float(raw_invalid_pair_count / len(action_preds)) if len(action_preds) else None
+    )
+    raw_valid_pair_rate = (
+        float(1.0 - raw_invalid_pair_rate)
+        if raw_invalid_pair_rate is not None
+        else None
+    )
     action_conf = action_probs[np.arange(len(action_probs)), action_preds]
     finger_conf = finger_confidences_for_ids(finger_probs, finger_preds)
 
@@ -835,6 +844,15 @@ def _compute_prediction_metrics(
             rest_f1 = float(2.0 * rest_tpr * rest_precision / denom) if denom else None
 
     metrics = {
+        "raw_non_rest_none_count": int(pair_diag["raw_non_rest_none_count"]),
+        "raw_non_rest_none_rate": pair_diag["raw_non_rest_none_rate"],
+        "raw_rest_non_none_count": int(pair_diag["raw_rest_non_none_count"]),
+        "raw_rest_non_none_rate": pair_diag["raw_rest_non_none_rate"],
+        "committed_non_rest_none_count": int(pair_diag["committed_non_rest_none_count"]),
+        "committed_non_rest_none_rate": pair_diag["committed_non_rest_none_rate"],
+        "deployment_pair_invariant_ok": bool(
+            pair_diag["deployment_pair_invariant_ok"]
+        ),
         "raw_valid_pair_rate": raw_valid_pair_rate,
         "raw_invalid_pair_rate": raw_invalid_pair_rate,
         "action_acc": float(accuracy_score(y_action_true, action_preds)) if len(y_action_true) else None,
@@ -905,7 +923,10 @@ def _build_primary_benchmark(
                 "rest_tpr",
                 "rest_precision",
                 "action_ece",
-                "raw_invalid_pair_rate",
+                "raw_non_rest_none_rate",
+                "raw_rest_non_none_rate",
+                "committed_non_rest_none_rate",
+                "deployment_pair_invariant_ok",
             }
         },
     }
@@ -1399,6 +1420,13 @@ def main():
             "smooth_action_only": bool(args.smooth_action_only),
         },
         "metrics": {
+            "raw_non_rest_none_count": None,
+            "raw_non_rest_none_rate": None,
+            "raw_rest_non_none_count": None,
+            "raw_rest_non_none_rate": None,
+            "committed_non_rest_none_count": None,
+            "committed_non_rest_none_rate": None,
+            "deployment_pair_invariant_ok": None,
             "raw_valid_pair_rate": None,
             "raw_invalid_pair_rate": None,
             "action_acc": None,
@@ -1793,9 +1821,8 @@ def main():
             aux_y_action = y_action[aux_idx]
             aux_y_finger = y_finger[aux_idx]
             aux_action_pred = np.argmax(aux_action_probs, axis=1).astype(np.int64)
-            aux_raw_finger_pred = decode_finger_predictions(aux_finger_probs)
-            _, aux_finger_pred = enforce_prediction_pairs(
-                aux_action_pred, aux_raw_finger_pred
+            aux_finger_pred = decode_finger_predictions_for_actions(
+                aux_action_pred, aux_finger_probs
             )
             aux_rest_mask = aux_y_action == ACTION_REST
             aux_rest_tpr = (
@@ -1938,15 +1965,24 @@ def main():
     action_conf = np.max(action_probs, axis=1)
 
     raw_finger_preds = decode_finger_predictions(finger_probs)
-    raw_valid_pair_rate = None
-    if len(action_preds) and not uses_active_finger_head(int(finger_probs.shape[1])):
-        raw_valid_pair_rate = float(
-            np.mean((action_preds != ACTION_REST) | (raw_finger_preds == 0))
-        )
-    raw_invalid_pair_rate = (
-        float(1.0 - raw_valid_pair_rate) if raw_valid_pair_rate is not None else None
+    finger_preds = decode_finger_predictions_for_actions(action_preds, finger_probs)
+    pair_diag = prediction_pair_diagnostics(
+        action_preds,
+        raw_finger_preds,
+        committed_finger_ids=finger_preds,
     )
-    _, finger_preds = enforce_prediction_pairs(action_preds, raw_finger_preds)
+    raw_invalid_pair_count = (
+        int(pair_diag["raw_non_rest_none_count"])
+        + int(pair_diag["raw_rest_non_none_count"])
+    )
+    raw_invalid_pair_rate = (
+        float(raw_invalid_pair_count / len(action_preds)) if len(action_preds) else None
+    )
+    raw_valid_pair_rate = (
+        float(1.0 - raw_invalid_pair_rate)
+        if raw_invalid_pair_rate is not None
+        else None
+    )
     finger_conf = finger_confidences_for_ids(finger_probs, finger_preds)
 
     # =========================
@@ -2027,10 +2063,16 @@ def main():
     print(
         f"🎯 Action F1 (macro/weighted): {action_f1_macro:.3f} / {action_f1_weighted:.3f}"
     )
-    if raw_invalid_pair_rate is not None:
-        print(
-            f"🎯 Raw invalid pair rate: {raw_invalid_pair_rate * 100:.2f}%"
-        )
+    print(
+        "🎯 Pair diagnostics: "
+        f"raw non-REST+NONE {pair_diag['raw_non_rest_none_count']}"
+        f" ({(pair_diag['raw_non_rest_none_rate'] or 0.0) * 100:.2f}%), "
+        f"raw REST+active {pair_diag['raw_rest_non_none_count']}"
+        f" ({(pair_diag['raw_rest_non_none_rate'] or 0.0) * 100:.2f}%), "
+        f"committed non-REST+NONE {pair_diag['committed_non_rest_none_count']}"
+        f" ({(pair_diag['committed_non_rest_none_rate'] or 0.0) * 100:.2f}%), "
+        f"deployable={'yes' if pair_diag['deployment_pair_invariant_ok'] else 'no'}"
+    )
     if joint_acc is not None:
         joint_non_rest_str = (
             f"{joint_acc_non_rest * 100:.2f}%"
@@ -2114,8 +2156,9 @@ def main():
 
         # If you want "smooth action only", override finger smoothing here
         if args.smooth_action_only:
-            smoothed_finger = finger_preds[order].copy()
-            smoothed_finger[smoothed_action == ACTION_REST] = 0  # NONE=0
+            smoothed_finger = decode_finger_predictions_for_actions(
+                smoothed_action, finger_probs[order]
+            )
 
         action_acc_s = accuracy_score(y_action_test[order], smoothed_action)
         action_f1_macro_s = f1_score(
@@ -2261,6 +2304,23 @@ def main():
         )
         print(f"📏 Finger ECE (non-REST): {finger_ece:.4f}")
 
+    manifest["metrics"]["raw_non_rest_none_count"] = int(
+        pair_diag["raw_non_rest_none_count"]
+    )
+    manifest["metrics"]["raw_non_rest_none_rate"] = pair_diag["raw_non_rest_none_rate"]
+    manifest["metrics"]["raw_rest_non_none_count"] = int(
+        pair_diag["raw_rest_non_none_count"]
+    )
+    manifest["metrics"]["raw_rest_non_none_rate"] = pair_diag["raw_rest_non_none_rate"]
+    manifest["metrics"]["committed_non_rest_none_count"] = int(
+        pair_diag["committed_non_rest_none_count"]
+    )
+    manifest["metrics"]["committed_non_rest_none_rate"] = pair_diag[
+        "committed_non_rest_none_rate"
+    ]
+    manifest["metrics"]["deployment_pair_invariant_ok"] = bool(
+        pair_diag["deployment_pair_invariant_ok"]
+    )
     manifest["metrics"]["raw_valid_pair_rate"] = (
         float(raw_valid_pair_rate) if raw_valid_pair_rate is not None else None
     )
@@ -2437,7 +2497,10 @@ def main():
                     "rest_tpr",
                     "rest_precision",
                     "action_ece",
-                    "raw_invalid_pair_rate",
+                    "raw_non_rest_none_rate",
+                    "raw_rest_non_none_rate",
+                    "committed_non_rest_none_rate",
+                    "deployment_pair_invariant_ok",
                 }
             },
             "pred_action_counts": _format_label_counts(
@@ -2469,6 +2532,8 @@ def main():
             "finger_acc_non_rest",
             "rest_tpr",
             "rest_precision",
+            "raw_non_rest_none_rate",
+            "committed_non_rest_none_rate",
         ]
         repeated_values: Dict[str, List[float]] = {key: [] for key in repeated_metric_keys}
         for repeat_seed in REPEATED_SPLIT_SEEDS:

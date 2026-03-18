@@ -364,6 +364,24 @@ def summarize_records(
     ]
 
     actuation_sent_count = int(sum(bool(row.get("actuation_sent", False)) for row in rows))
+    committed_non_rest_none_count = int(
+        sum(
+            _safe_int(row.get("committed_action_id")) != 0
+            and _safe_int(row.get("committed_finger_id")) == 0
+            for row in rows
+        )
+    )
+    sent_non_rest_none_count = int(
+        sum(
+            bool(row.get("actuation_sent", False))
+            and _safe_int(row.get("actuation_target_action_id")) != 0
+            and _safe_int(row.get("actuation_target_finger_id")) == 0
+            for row in rows
+        )
+    )
+    committed_pair_valid_all = all(
+        bool(row.get("committed_pair_valid", True)) for row in valid_rows
+    )
     uncertainty_gate_fail_count = int(
         sum(not bool(row.get("uncertainty_gate_ok", True)) for row in valid_rows)
     )
@@ -398,7 +416,20 @@ def summarize_records(
         "pair_counts": dict(sorted(pair_counts.items(), key=lambda item: (-item[1], item[0]))),
         "decision_reason_counts": dict(decision_reason_counts),
         "actuation_suppressed_reason_counts": dict(suppress_counts),
+        "committed_non_rest_none_count": committed_non_rest_none_count,
+        "committed_non_rest_none_rate": (
+            float(committed_non_rest_none_count / len(rows)) if rows else None
+        ),
         "actuation_sent_count": actuation_sent_count,
+        "sent_non_rest_none_count": sent_non_rest_none_count,
+        "sent_non_rest_none_rate": (
+            float(sent_non_rest_none_count / len(rows)) if rows else None
+        ),
+        "deployment_pair_invariant_ok": bool(
+            committed_non_rest_none_count == 0
+            and sent_non_rest_none_count == 0
+            and committed_pair_valid_all
+        ),
         "actuation_sent_per_min": (
             float(actuation_sent_count / (duration_s / 60.0))
             if duration_s and duration_s > 0

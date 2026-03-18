@@ -25,6 +25,7 @@ from utils.live_infer_common import (
     compute_replay_metrics,
     load_model_artifacts,
     replay_ordered_windows,
+    require_deployable_run,
     write_predictions_jsonl,
 )
 from utils.postprocess import PostprocessSettings
@@ -312,6 +313,37 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def _assert_deployment_replay_ok(
+    *,
+    target_session_dir: Path,
+    summary: dict[str, Any],
+    replay_metrics: dict[str, Any],
+) -> None:
+    summary_committed = int(summary.get("committed_non_rest_none_count", 0) or 0)
+    summary_sent = int(summary.get("sent_non_rest_none_count", 0) or 0)
+    replay_committed = int(replay_metrics.get("committed_non_rest_none_count", 0) or 0)
+    replay_sent = int(replay_metrics.get("sent_non_rest_none_count", 0) or 0)
+    summary_ok = bool(summary.get("deployment_pair_invariant_ok", False))
+    replay_ok = bool(replay_metrics.get("deployment_pair_invariant_ok", False))
+    if (
+        summary_committed != 0
+        or summary_sent != 0
+        or replay_committed != 0
+        or replay_sent != 0
+        or not summary_ok
+        or not replay_ok
+    ):
+        raise SystemExit(
+            "Deployment replay invariant failed for "
+            f"{target_session_dir}: "
+            f"summary committed_non_rest_none={summary_committed}, "
+            f"summary sent_non_rest_none={summary_sent}, "
+            f"replay committed_non_rest_none={replay_committed}, "
+            f"replay sent_non_rest_none={replay_sent}, "
+            f"summary_ok={summary_ok}, replay_ok={replay_ok}"
+        )
+
+
 def _run_single_replay(
     *,
     run_dir: Path,
@@ -443,6 +475,11 @@ def _run_single_replay(
         "replay_metrics": replay_metrics,
     }
     _write_json(manifest_path, manifest)
+    _assert_deployment_replay_ok(
+        target_session_dir=target_session_dir,
+        summary=summary,
+        replay_metrics=replay_metrics,
+    )
     return manifest
 
 
@@ -515,6 +552,10 @@ def main() -> int:
         settings=settings,
         base_dir=config_dir,
     )
+    try:
+        require_deployable_run(run_dir)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
     infer_config_path = _resolve_path(
         args.infer_config or settings.get("infer_config"),
         base_dir=config_dir,

@@ -105,5 +105,41 @@ def test_compute_prediction_metrics_reports_rest_and_pair_validity():
 
     assert payload["metrics"]["action_acc"] == 1.0
     assert payload["metrics"]["rest_tpr"] == 1.0
+    assert payload["metrics"]["raw_non_rest_none_count"] == 0
+    assert payload["metrics"]["raw_rest_non_none_count"] == 0
+    assert payload["metrics"]["committed_non_rest_none_count"] == 0
+    assert payload["metrics"]["deployment_pair_invariant_ok"] is True
     assert payload["metrics"]["raw_invalid_pair_rate"] == 0.0
     assert payload["pair_counts"]["REST+NONE"] == 1
+
+
+def test_compute_prediction_metrics_separates_raw_none_from_committed_decode():
+    mod = _load_eval_module()
+    action_probs = np.array(
+        [
+            [0.05, 0.90, 0.05],
+            [0.05, 0.05, 0.90],
+        ],
+        dtype=np.float32,
+    )
+    finger_probs = np.array(
+        [
+            [0.85, 0.10, 0.03, 0.01, 0.01, 0.00],
+            [0.80, 0.05, 0.05, 0.05, 0.03, 0.02],
+        ],
+        dtype=np.float32,
+    )
+    payload = mod._compute_prediction_metrics(
+        action_probs=action_probs,
+        finger_probs=finger_probs,
+        y_action_true=np.array([1, 2], dtype=np.int64),
+        y_finger_true=np.array([1, 1], dtype=np.int64),
+    )
+
+    assert payload["metrics"]["raw_non_rest_none_count"] == 2
+    assert payload["metrics"]["raw_non_rest_none_rate"] == 1.0
+    assert payload["metrics"]["committed_non_rest_none_count"] == 0
+    assert payload["metrics"]["committed_non_rest_none_rate"] == 0.0
+    assert payload["metrics"]["deployment_pair_invariant_ok"] is True
+    assert payload["pair_counts"]["OPEN+THUMB"] == 1
+    assert payload["pair_counts"]["CLOSE+THUMB"] == 1

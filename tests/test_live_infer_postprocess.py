@@ -47,6 +47,8 @@ def test_postprocess_decision_deterministic():
 
     assert out["committed_action_id"] == 1
     assert out["committed_finger_id"] == 2
+    assert out["finger_gate_ok"] is True
+    assert out["committed_pair_valid"] is True
 
 
 def test_postprocess_decision_maps_active_only_finger_head():
@@ -73,6 +75,7 @@ def test_postprocess_decision_maps_active_only_finger_head():
     assert out["committed_action_id"] == 1
     assert out["committed_finger_id"] == 2
     assert out["raw_top_finger_id"] == 2
+    assert out["committed_pair_valid"] is True
 
 
 def test_postprocess_decision_raw_argmax_gates_rest_to_none():
@@ -101,7 +104,38 @@ def test_postprocess_decision_raw_argmax_gates_rest_to_none():
     assert out["committed_action_id"] == 0
     assert out["committed_finger_id"] == 0
     assert np.isclose(out["finger_conf"], 0.01)
+    assert out["finger_gate_ok"] is True
+    assert out["committed_pair_valid"] is True
     assert out["decision_reason"] == "raw_argmax_gated"
+
+
+def test_postprocess_decision_low_finger_conf_blocks_actuation_without_rewriting_label():
+    mod = _load_live_module()
+    settings = PostprocessSettings(
+        smoothing_enabled=False,
+        hysteresis_enabled=False,
+        threshold_action=0.0,
+        threshold_finger=0.60,
+        adjacency_enabled=False,
+    )
+    state = PostprocessState()
+    action_probs = np.array([0.05, 0.90, 0.05], dtype=float)
+    finger_probs = np.array([0.40, 0.30, 0.20, 0.05, 0.03, 0.02], dtype=float)
+
+    out = mod._postprocess_decision(
+        action_probs,
+        finger_probs,
+        enabled=True,
+        settings=settings,
+        state=state,
+    )
+
+    assert out["committed_action_id"] == 1
+    assert out["committed_finger_id"] == 1
+    assert np.isclose(out["finger_conf"], 0.30)
+    assert out["finger_gate_ok"] is False
+    assert out["committed_pair_valid"] is True
+    assert out["decision_reason"] == "commit"
 
 
 def test_live_infer_defaults_match_best_live_profile():
@@ -409,6 +443,25 @@ def test_parser_accepts_ui_hyphenated_flags():
     assert np.isclose(args.window_sec, 0.5)
     assert args.allow_drop is True
     assert np.isclose(args.latency_threshold_ms, 333.0)
+
+
+def test_require_deployable_run_rejects_legacy_finger_head(tmp_path: Path):
+    mod = _load_live_module()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "train_config.json").write_text(
+        json.dumps({"active_finger_head": False})
+    )
+    torch.save(
+        {
+            "finger_head.weight": torch.zeros((6, 4), dtype=torch.float32),
+            "action_head.weight": torch.zeros((3, 4), dtype=torch.float32),
+        },
+        run_dir / "finger_action_model.pt",
+    )
+
+    with pytest.raises(RuntimeError, match="Deployment model requirement failed"):
+        mod._require_deployable_run(run_dir)
 
 
 def test_resolve_lsl_inlet_retries_and_prefers_source_id(monkeypatch):

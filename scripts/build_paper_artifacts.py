@@ -687,8 +687,11 @@ def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo
         import torch  # noqa: F401
 
         from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+        from utils.label_schema import ACTIVE_FINGER_IDS
 
-        m = CNNLSTMFingerActionNet(n_channels=4, n_fingers=6, n_actions=3)
+        m = CNNLSTMFingerActionNet(
+            n_channels=4, n_fingers=len(ACTIVE_FINGER_IDS), n_actions=3
+        )
         param_count = int(sum(p.numel() for p in m.parameters()))
     except Exception:
         param_count = None

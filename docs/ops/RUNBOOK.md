@@ -38,6 +38,32 @@ Expected:
 - `events/events.jsonl` may be empty if no labels were sent (this is OK)
 - log lines with `[alive] recv=... wrote=...`
 
+## Deployment Model Gate
+
+Deployment candidates must satisfy all of the following:
+
+- `train_config.json` has `active_finger_head: true`
+- the saved model finger head has exactly `5` outputs
+- Step 7 actuation is only started with that model class
+- pseudo-live replay reports:
+  - `committed_non_rest_none_count == 0`
+  - `sent_non_rest_none_count == 0`
+  - `deployment_pair_invariant_ok == true`
+
+Required deployment validation flow:
+
+```bash
+python tools/smoke_inference.py --npz eeg_windows.npz --model <run_dir>/finger_action_model.pt --scaler <run_dir>/scaler.npz
+python tools/pseudo_live_replay.py --run-dir <run_dir> --session-dir <session_dir> --target-session-dir <target_session_dir> --infer-config <infer_json>
+python 7_live_infer_and_actuate.py --config <infer_json> --enable-actuation
+```
+
+Notes:
+
+- `OPEN/CLOSE + NONE` is a deployment failure, even if actuation would have been blocked later.
+- Low finger confidence is allowed only as an actuation gate (`finger_gate_ok=false`), not as a committed label rewrite.
+- Legacy 6-class finger-head runs remain readable for historical analysis, but they are not deployable.
+
 ## Environment setup (clean clone)
 
 ```bash

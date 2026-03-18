@@ -4,6 +4,7 @@ Smoke inference: load a trained model, one window, run preprocessing + forward +
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -25,7 +26,12 @@ def main():
         postprocess_predictions,
     )
     from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
-    from utils.label_schema import ACTION_NAMES, FINGER_NAMES, decode_prediction_pair
+    from utils.label_schema import (
+        ACTION_NAMES,
+        ACTIVE_FINGER_IDS,
+        FINGER_NAMES,
+        decode_prediction_pair,
+    )
     from utils.sequence_data import load_sequence_npz
 
     parser = argparse.ArgumentParser(description="Smoke inference on a single window")
@@ -38,10 +44,10 @@ def main():
     parser.add_argument("--scaler", type=str, default="scaler.npz", help="Scaler path")
     parser.add_argument("--index", type=int, default=0, help="Window index to use")
     parser.add_argument(
-        "--n-fingers", type=int, default=6, help="Number of finger classes"
+        "--n-fingers", type=int, default=None, help="Optional finger head size override"
     )
     parser.add_argument(
-        "--n-actions", type=int, default=3, help="Number of action classes"
+        "--n-actions", type=int, default=None, help="Optional action head size override"
     )
     parser.add_argument("--device", type=str, default="cpu", help="Device to run on")
     args = parser.parse_args()
@@ -56,6 +62,45 @@ def main():
     if not model_path.exists():
         print(f"ERROR: Model not found: {model_path}")
         sys.exit(1)
+
+    state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
+    inferred_n_fingers = int(state_dict["finger_head.weight"].shape[0])
+    inferred_n_actions = int(state_dict["action_head.weight"].shape[0])
+    n_fingers = (
+        int(args.n_fingers) if args.n_fingers is not None else int(inferred_n_fingers)
+    )
+    n_actions = (
+        int(args.n_actions) if args.n_actions is not None else int(inferred_n_actions)
+    )
+    if args.n_fingers is not None and n_fingers != inferred_n_fingers:
+        print(
+            "ERROR: --n-fingers does not match model weights "
+            f"({n_fingers} != {inferred_n_fingers})"
+        )
+        sys.exit(2)
+    if args.n_actions is not None and n_actions != inferred_n_actions:
+        print(
+            "ERROR: --n-actions does not match model weights "
+            f"({n_actions} != {inferred_n_actions})"
+        )
+        sys.exit(2)
+
+    train_config_path = model_path.parent / "train_config.json"
+    active_finger_head = None
+    if train_config_path.exists():
+        try:
+            train_config = json.loads(train_config_path.read_text())
+            if isinstance(train_config, dict):
+                active_finger_head = train_config.get("active_finger_head")
+        except Exception:
+            active_finger_head = None
+    if n_fingers != len(ACTIVE_FINGER_IDS) or active_finger_head is not True:
+        print(
+            "ERROR: deployment smoke inference requires an active finger head "
+            f"with {len(ACTIVE_FINGER_IDS)} outputs; got n_fingers={n_fingers}, "
+            f"active_finger_head={active_finger_head}"
+        )
+        sys.exit(2)
 
     X, _, _, _ = load_sequence_npz(str(npz_path))
     if len(X) == 0:
@@ -74,10 +119,10 @@ def main():
     device = torch.device(args.device)
     model = CNNLSTMFingerActionNet(
         n_channels=window.shape[1],
-        n_fingers=args.n_fingers,
-        n_actions=args.n_actions,
+        n_fingers=n_fingers,
+        n_actions=n_actions,
     ).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+    model.load_state_dict(state_dict)
     model.eval()
 
     with torch.no_grad():

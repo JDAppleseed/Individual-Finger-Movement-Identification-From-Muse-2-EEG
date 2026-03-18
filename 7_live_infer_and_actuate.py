@@ -64,14 +64,17 @@ from utils.label_schema import (
     decode_finger_prediction,
     decode_prediction_pair,
     finger_confidence_for_id,
+    is_valid_action_finger,
 )
 from utils.live_infer_common import (
     build_actuation_command_shaper as _shared_build_actuation_command_shaper,
     build_actuation_speed_mapper as _shared_build_actuation_speed_mapper,
     compute_actuation_speed_scalar as _shared_compute_actuation_speed_scalar,
     debounced_should_send as _shared_debounced_should_send,
+    finger_gate_passed as _shared_finger_gate_passed,
     is_noop_decision as _shared_is_noop_decision,
     latency_gate_passed as _shared_latency_gate_passed,
+    require_deployable_run as _shared_require_deployable_run,
     resolve_actuation_candidate as _shared_resolve_actuation_candidate,
     resolve_temperature_path as _shared_resolve_temperature_path,
     uncertainty_gate_passed as _shared_uncertainty_gate_passed,
@@ -1192,6 +1195,9 @@ def _postprocess_decision(
             if finger_probs.size
             else 0.0
         )
+        finger_gate_ok = bool(
+            committed_action == 0 or finger_conf >= float(settings.threshold_finger)
+        )
         return {
             "committed_action_id": committed_action,
             "committed_finger_id": committed_finger,
@@ -1199,6 +1205,10 @@ def _postprocess_decision(
             "raw_top_finger_id": raw_finger,
             "action_conf": action_conf,
             "finger_conf": finger_conf,
+            "finger_gate_ok": finger_gate_ok,
+            "committed_pair_valid": bool(
+                is_valid_action_finger(committed_action, committed_finger)
+            ),
             "smoothed_action_id": committed_action,
             "smoothed_finger_id": committed_finger,
             "decision_reason": "raw_argmax_gated",
@@ -1463,6 +1473,10 @@ def _uncertainty_gate_passed(
     return _shared_uncertainty_gate_passed(decision_info, inference_result)
 
 
+def _finger_gate_passed(decision_info: dict[str, Any]) -> bool:
+    return _shared_finger_gate_passed(decision_info)
+
+
 def _build_actuation_speed_mapper(args: argparse.Namespace) -> Optional[CommandShaper]:
     return _shared_build_actuation_speed_mapper(
         modulate_actuation_speed=bool(getattr(args, "modulate_actuation_speed", True)),
@@ -1515,6 +1529,10 @@ def _estimate_window_center_mono(
 
 def _latency_gate_passed(latency_ms: float, threshold_ms: float) -> bool:
     return _shared_latency_gate_passed(latency_ms, threshold_ms)
+
+
+def _require_deployable_run(run_dir: Path) -> dict[str, Any]:
+    return _shared_require_deployable_run(run_dir)
 
 
 def _resolve_actuation_candidate(
@@ -1800,6 +1818,17 @@ def main() -> int:
         bool(args.modulate_actuation_speed),
         float(args.actuation_speed_gamma),
     )
+    deploy_info = None
+    if args.enable_actuation:
+        deployment_run_dir = Path(model_path).expanduser().resolve().parent
+        deploy_info = _require_deployable_run(deployment_run_dir)
+        logger.info(
+            "Deployment model validated run_dir=%s active_finger_head=%s n_fingers=%s n_actions=%s",
+            deployment_run_dir,
+            deploy_info.get("active_finger_head"),
+            deploy_info.get("n_fingers"),
+            deploy_info.get("n_actions"),
+        )
 
     live_viz_enabled = bool(getattr(args, "LIVE_VIZ_ENABLED", False))
     live_viz_fps = float(getattr(args, "LIVE_VIZ_FPS", 0.0) or 0.0)
@@ -1957,6 +1986,8 @@ def main() -> int:
                             "decision_reason": "alignment_fail",
                             "committed_action_id": 0,
                             "committed_finger_id": 0,
+                            "finger_gate_ok": True,
+                            "committed_pair_valid": True,
                         }
                         pred_log.write(json.dumps(payload) + "\n")
                         pred_log_count += 1
@@ -2015,6 +2046,7 @@ def main() -> int:
                     action_id=int(decision_info["committed_action_id"]),
                     prob=float(min(decision_info["action_conf"], decision_info["finger_conf"])),
                 )
+                finger_gate_ok = _finger_gate_passed(decision_info)
                 uncertainty_gate_ok = _uncertainty_gate_passed(
                     decision_info=decision_info,
                     inference_result=inference_result,
@@ -2112,6 +2144,14 @@ def main() -> int:
                             "Actuation suppressed by latency gate latency_ms=%.1f threshold_ms=%.1f",
                             latency_ms,
                             float(args.latency_threshold_ms),
+                        )
+                    elif not finger_gate_ok:
+                        actuation_suppressed_reason = "finger_gate"
+                        logger.info(
+                            "Actuation suppressed by finger gate finger=%s finger_conf=%.3f threshold=%.3f",
+                            decision.finger_id,
+                            float(decision_info.get("finger_conf", 0.0)),
+                            float(args.threshold_finger),
                         )
                     elif _is_noop_decision(
                         voted_decision.finger_id, voted_decision.action_id
@@ -2215,6 +2255,10 @@ def main() -> int:
                         "committed_finger_id": int(decision_info.get("committed_finger_id", 0)),
                         "action_conf": float(decision_info.get("action_conf", 0.0)),
                         "finger_conf": float(decision_info.get("finger_conf", 0.0)),
+                        "finger_gate_ok": bool(decision_info.get("finger_gate_ok", True)),
+                        "committed_pair_valid": bool(
+                            decision_info.get("committed_pair_valid", True)
+                        ),
                         "joint_conf": float(decision.prob),
                         "action_uncertainty": action_uncertainty,
                         "finger_uncertainty": finger_uncertainty,

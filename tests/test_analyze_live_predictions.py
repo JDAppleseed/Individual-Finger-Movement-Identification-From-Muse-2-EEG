@@ -91,8 +91,33 @@ def test_build_segments_and_summary():
     assert summary["actuatable_segment_count"] == 1
     assert summary["short_actuatable_segment_count"] == 1
     assert summary["actuation_sent_count"] == 1
+    assert summary["committed_non_rest_none_count"] == 0
+    assert summary["sent_non_rest_none_count"] == 0
+    assert summary["deployment_pair_invariant_ok"] is True
     assert summary["pair_counts"]["REST+NONE"] == 2
     assert summary["pair_counts"]["OPEN+THUMB"] == 2
+
+
+def test_summarize_records_flags_invalid_pairs():
+    records = [
+        {
+            "window_start_s": 0.00,
+            "window_end_s": 0.25,
+            "ts_utc": 1000.0,
+            "alignment_ok": True,
+            "committed_action_id": 1,
+            "committed_finger_id": 0,
+            "committed_pair_valid": False,
+            "actuation_sent": True,
+            "actuation_target_action_id": 1,
+            "actuation_target_finger_id": 0,
+        }
+    ]
+
+    summary = summarize_records(records)["summary"]
+    assert summary["committed_non_rest_none_count"] == 1
+    assert summary["sent_non_rest_none_count"] == 1
+    assert summary["deployment_pair_invariant_ok"] is False
 
 
 def test_resolve_prediction_log_from_latest_live_dir(tmp_path: Path):

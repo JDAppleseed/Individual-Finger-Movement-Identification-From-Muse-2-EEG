@@ -20,8 +20,8 @@ from utils.label_schema import (
     ACTION_NAMES,
     FINGER_NAMES,
     decode_finger_predictions,
-    enforce_prediction_pairs,
-    uses_active_finger_head,
+    decode_finger_predictions_for_actions,
+    prediction_pair_diagnostics,
 )
 from utils.per_subject_calibration import expected_calibration_error
 from utils.sequence_data import load_sequence_npz
@@ -148,8 +148,8 @@ def generate_subject_report(subject_id, experiment_hash):
         action_probs = preds["action_probs"]
         finger_probs = preds["finger_probs"]
         action_preds = np.argmax(action_probs, axis=1)
-        _, finger_preds = enforce_prediction_pairs(
-            action_preds, decode_finger_predictions(finger_probs)
+        finger_preds = decode_finger_predictions_for_actions(
+            action_preds, finger_probs
         )
 
         subj_ids = meta.get("subject_id")
@@ -393,6 +393,13 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     action_acc = None
     action_f1_macro = None
     action_f1_weighted = None
+    raw_non_rest_none_count = None
+    raw_non_rest_none_rate = None
+    raw_rest_non_none_count = None
+    raw_rest_non_none_rate = None
+    committed_non_rest_none_count = None
+    committed_non_rest_none_rate = None
+    deployment_pair_invariant_ok = None
     raw_valid_pair_rate = None
     raw_invalid_pair_rate = None
     joint_acc = None
@@ -413,18 +420,29 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
         action_probs, finger_probs, y_action, y_finger = preds
         action_pred = np.argmax(action_probs, axis=1).astype(int)
         raw_finger_pred = decode_finger_predictions(finger_probs).astype(int)
-        raw_valid_pair_rate = None
-        if y_action.size and not uses_active_finger_head(int(finger_probs.shape[1])):
-            raw_valid_pair_rate = float(
-                np.mean((action_pred != ACTION_REST) | (raw_finger_pred == 0))
-            )
-        raw_invalid_pair_rate = (
-            float(1.0 - raw_valid_pair_rate)
-            if raw_valid_pair_rate is not None
-            else None
+        finger_pred = decode_finger_predictions_for_actions(
+            action_pred, finger_probs
         )
-        _, finger_pred = enforce_prediction_pairs(
-            action_pred, raw_finger_pred
+        pair_diag = prediction_pair_diagnostics(
+            action_pred,
+            raw_finger_pred,
+            committed_finger_ids=finger_pred,
+        )
+        raw_non_rest_none_count = int(pair_diag["raw_non_rest_none_count"])
+        raw_non_rest_none_rate = pair_diag["raw_non_rest_none_rate"]
+        raw_rest_non_none_count = int(pair_diag["raw_rest_non_none_count"])
+        raw_rest_non_none_rate = pair_diag["raw_rest_non_none_rate"]
+        committed_non_rest_none_count = int(pair_diag["committed_non_rest_none_count"])
+        committed_non_rest_none_rate = pair_diag["committed_non_rest_none_rate"]
+        deployment_pair_invariant_ok = bool(pair_diag["deployment_pair_invariant_ok"])
+        raw_invalid_pair_count = raw_non_rest_none_count + raw_rest_non_none_count
+        raw_invalid_pair_rate = (
+            float(raw_invalid_pair_count / len(action_pred)) if len(action_pred) else None
+        )
+        raw_valid_pair_rate = (
+            float(1.0 - raw_invalid_pair_rate)
+            if raw_invalid_pair_rate is not None
+            else None
         )
         if y_action.size:
             action_acc = float(accuracy_score(y_action, action_pred))
@@ -516,6 +534,27 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
         action_acc = manifest_metrics.get("action_acc", action_acc)
         action_f1_macro = manifest_metrics.get("action_f1_macro", action_f1_macro)
         action_f1_weighted = manifest_metrics.get("action_f1_weighted", action_f1_weighted)
+        raw_non_rest_none_count = manifest_metrics.get(
+            "raw_non_rest_none_count", raw_non_rest_none_count
+        )
+        raw_non_rest_none_rate = manifest_metrics.get(
+            "raw_non_rest_none_rate", raw_non_rest_none_rate
+        )
+        raw_rest_non_none_count = manifest_metrics.get(
+            "raw_rest_non_none_count", raw_rest_non_none_count
+        )
+        raw_rest_non_none_rate = manifest_metrics.get(
+            "raw_rest_non_none_rate", raw_rest_non_none_rate
+        )
+        committed_non_rest_none_count = manifest_metrics.get(
+            "committed_non_rest_none_count", committed_non_rest_none_count
+        )
+        committed_non_rest_none_rate = manifest_metrics.get(
+            "committed_non_rest_none_rate", committed_non_rest_none_rate
+        )
+        deployment_pair_invariant_ok = manifest_metrics.get(
+            "deployment_pair_invariant_ok", deployment_pair_invariant_ok
+        )
         raw_valid_pair_rate = manifest_metrics.get("raw_valid_pair_rate", raw_valid_pair_rate)
         raw_invalid_pair_rate = manifest_metrics.get("raw_invalid_pair_rate", raw_invalid_pair_rate)
         joint_acc = manifest_metrics.get("joint_acc", joint_acc)
@@ -540,6 +579,10 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
           <li>Joint accuracy: {_safe_pct(primary_metrics.get("joint_acc"))}</li>
           <li>Finger accuracy (non-REST): {_safe_pct(primary_metrics.get("finger_acc_non_rest"))}</li>
           <li>REST TPR / Precision: {_safe_pct(primary_metrics.get("rest_tpr"))} / {_safe_pct(primary_metrics.get("rest_precision"))}</li>
+          <li>Raw non-REST+NONE rate: {_safe_pct(primary_metrics.get("raw_non_rest_none_rate"))}</li>
+          <li>Raw REST+active rate: {_safe_pct(primary_metrics.get("raw_rest_non_none_rate"))}</li>
+          <li>Committed non-REST+NONE rate: {_safe_pct(primary_metrics.get("committed_non_rest_none_rate"))}</li>
+          <li>Deployment pair invariant OK: {primary_metrics.get("deployment_pair_invariant_ok", "N/A")}</li>
         </ul>
         """
 
@@ -568,6 +611,10 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
           <li>Joint accuracy: {_safe_pct(core_metrics.get("joint_acc"))}</li>
           <li>Finger accuracy (non-REST): {_safe_pct(core_metrics.get("finger_acc_non_rest"))}</li>
           <li>REST TPR / Precision: {_safe_pct(core_metrics.get("rest_tpr"))} / {_safe_pct(core_metrics.get("rest_precision"))}</li>
+          <li>Raw non-REST+NONE rate: {_safe_pct(core_metrics.get("raw_non_rest_none_rate"))}</li>
+          <li>Raw REST+active rate: {_safe_pct(core_metrics.get("raw_rest_non_none_rate"))}</li>
+          <li>Committed non-REST+NONE rate: {_safe_pct(core_metrics.get("committed_non_rest_none_rate"))}</li>
+          <li>Deployment pair invariant OK: {core_metrics.get("deployment_pair_invariant_ok", "N/A")}</li>
         </ul>
         """
 
@@ -637,13 +684,17 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     <ul>
       <li>Action accuracy: {_safe_pct(action_acc)}</li>
       <li>Action F1 (macro/weighted): {_safe_float(action_f1_macro)} / {_safe_float(action_f1_weighted)}</li>
-      <li>Raw valid/invalid pair rate: {_safe_pct(raw_valid_pair_rate)} / {_safe_pct(raw_invalid_pair_rate)}</li>
+      <li>Raw non-REST+NONE count/rate: {raw_non_rest_none_count if raw_non_rest_none_count is not None else "N/A"} / {_safe_pct(raw_non_rest_none_rate)}</li>
+      <li>Raw REST+active count/rate: {raw_rest_non_none_count if raw_rest_non_none_count is not None else "N/A"} / {_safe_pct(raw_rest_non_none_rate)}</li>
+      <li>Committed non-REST+NONE count/rate: {committed_non_rest_none_count if committed_non_rest_none_count is not None else "N/A"} / {_safe_pct(committed_non_rest_none_rate)}</li>
+      <li>Deployment pair invariant OK: {deployment_pair_invariant_ok if deployment_pair_invariant_ok is not None else "N/A"}</li>
       <li>Joint accuracy (overall/non-REST): {_safe_pct(joint_acc)} / {_safe_pct(joint_acc_non_rest)}</li>
       <li>Finger accuracy (non-REST): {_safe_pct(finger_acc_non_rest)}</li>
       <li>Finger F1 (non-REST macro/weighted): {_safe_float(finger_f1_non_rest_macro)} / {_safe_float(finger_f1_non_rest_weighted)}</li>
       <li>Finger accuracy (overall): {_safe_pct(finger_acc_overall)}</li>
       <li>Finger F1 (overall macro/weighted): {_safe_float(finger_f1_overall_macro)} / {_safe_float(finger_f1_overall_weighted)}</li>
       <li>REST TPR: {_safe_pct(rest_tpr)} | REST FPR: {_safe_pct(rest_fpr)} | REST Precision: {_safe_pct(rest_precision)} | REST F1: {_safe_float(rest_f1)}</li>
+      <li>Deprecated raw valid/invalid pair rate: {_safe_pct(raw_valid_pair_rate)} / {_safe_pct(raw_invalid_pair_rate)}</li>
     </ul>
 
     {primary_html}
