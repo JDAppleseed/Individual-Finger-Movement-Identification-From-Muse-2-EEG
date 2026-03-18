@@ -22,7 +22,9 @@ from utils.label_schema import (
     ACTION_REST,
     ACTION_NAMES,
     FINGER_NAMES,
+    decode_finger_predictions,
     enforce_prediction_pairs,
+    finger_confidences_for_ids,
 )
 from utils.experiment_logger import get_latest_experiment_hash, LOG_DIR
 from utils.per_subject_calibration import plot_subject_calibration
@@ -318,8 +320,20 @@ temperature_state = load_temperature_scaling(model_path.parent / "temperature_sc
 # ===== MODEL (MATCH STEP 2)
 # =========================
 
-n_fingers = int(y_finger.max()) + 1
-n_actions = int(y_action.max()) + 1
+state_dict = torch.load(str(model_path), map_location="cpu", weights_only=True)
+finger_head_weight = state_dict.get("finger_head.weight")
+action_head_weight = state_dict.get("action_head.weight")
+
+n_fingers = (
+    int(finger_head_weight.shape[0])
+    if finger_head_weight is not None and hasattr(finger_head_weight, "shape")
+    else int(y_finger.max()) + 1
+)
+n_actions = (
+    int(action_head_weight.shape[0])
+    if action_head_weight is not None and hasattr(action_head_weight, "shape")
+    else int(y_action.max()) + 1
+)
 
 model = CNNLSTMFingerActionNet(
     n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions
@@ -327,7 +341,7 @@ model = CNNLSTMFingerActionNet(
 if not model_path.exists():
     print(f"Model file not found: {model_path}")
     raise SystemExit(2)
-model.load_state_dict(torch.load(str(model_path), map_location="cpu", weights_only=True))
+model.load_state_dict(state_dict)
 
 # =========================
 # ===== MC DROPOUT =========
@@ -381,8 +395,9 @@ action_preds = np.argmax(action_mean, axis=1)
 action_conf = np.max(action_mean, axis=1)
 action_uncertainty = np.mean(action_std, axis=1)
 
-_, finger_preds = enforce_prediction_pairs(action_preds, np.argmax(finger_mean, axis=1))
-finger_conf = finger_mean[np.arange(len(finger_mean)), finger_preds]
+raw_finger_preds = decode_finger_predictions(finger_mean)
+_, finger_preds = enforce_prediction_pairs(action_preds, raw_finger_preds)
+finger_conf = finger_confidences_for_ids(finger_mean, finger_preds)
 finger_uncertainty = np.mean(finger_std, axis=1)
 
 # =========================

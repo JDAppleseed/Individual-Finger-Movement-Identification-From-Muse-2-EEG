@@ -806,13 +806,25 @@ test_ds = Dataset(
 # ===== MODEL (MATCH STEP 2)
 # =========================
 
-n_fingers = int(y_finger.max()) + 1
-n_actions = int(y_action.max()) + 1
+state_dict = torch.load(str(model_path), map_location="cpu", weights_only=True)
+finger_head_weight = state_dict.get("finger_head.weight")
+action_head_weight = state_dict.get("action_head.weight")
+
+n_fingers = (
+    int(finger_head_weight.shape[0])
+    if finger_head_weight is not None and hasattr(finger_head_weight, "shape")
+    else int(y_finger.max()) + 1
+)
+n_actions = (
+    int(action_head_weight.shape[0])
+    if action_head_weight is not None and hasattr(action_head_weight, "shape")
+    else int(y_action.max()) + 1
+)
 
 model = CNNLSTMFingerActionNet(
     n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions
 )
-model.load_state_dict(torch.load(str(model_path), map_location="cpu", weights_only=True))
+model.load_state_dict(state_dict)
 model.eval()
 
 
