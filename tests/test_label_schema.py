@@ -93,13 +93,19 @@ def test_prediction_pair_diagnostics_reports_raw_and_committed_counts():
     diagnostics = prediction_pair_diagnostics(
         np.array([ACTION_REST, ACTION_OPEN, ACTION_OPEN], dtype=int),
         np.array([FINGER_INDEX, FINGER_NONE, FINGER_INDEX], dtype=int),
+        committed_action_ids=np.array([ACTION_REST, ACTION_OPEN, ACTION_REST], dtype=int),
         committed_finger_ids=np.array([FINGER_NONE, FINGER_THUMB, FINGER_INDEX], dtype=int),
+        sent_action_ids=np.array([ACTION_REST, ACTION_OPEN, ACTION_REST], dtype=int),
+        sent_finger_ids=np.array([FINGER_NONE, FINGER_THUMB, FINGER_INDEX], dtype=int),
     )
 
     assert diagnostics["raw_rest_non_none_count"] == 1
     assert diagnostics["raw_non_rest_none_count"] == 1
     assert diagnostics["committed_non_rest_none_count"] == 0
-    assert diagnostics["deployment_pair_invariant_ok"] is True
+    assert diagnostics["committed_rest_non_none_count"] == 1
+    assert diagnostics["sent_non_rest_none_count"] == 0
+    assert diagnostics["sent_rest_non_none_count"] == 1
+    assert diagnostics["deployment_pair_invariant_ok"] is False
 
 
 def test_enforce_prediction_pairs_vectorized():

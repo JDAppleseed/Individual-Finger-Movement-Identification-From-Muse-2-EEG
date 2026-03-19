@@ -23,6 +23,8 @@ def test_build_segments_and_summary():
             "decision_reason": "commit",
             "actuation_sent": False,
             "uncertainty_gate_ok": True,
+            "applicability_gate_ok": False,
+            "finger_applicable_prob": 0.10,
             "latency_ms": 80.0,
         },
         {
@@ -38,6 +40,8 @@ def test_build_segments_and_summary():
             "decision_reason": "commit",
             "actuation_sent": False,
             "uncertainty_gate_ok": True,
+            "applicability_gate_ok": False,
+            "finger_applicable_prob": 0.15,
             "latency_ms": 82.0,
         },
         {
@@ -53,6 +57,8 @@ def test_build_segments_and_summary():
             "decision_reason": "commit",
             "actuation_sent": True,
             "uncertainty_gate_ok": True,
+            "applicability_gate_ok": True,
+            "finger_applicable_prob": 0.88,
             "latency_ms": 84.0,
         },
         {
@@ -68,6 +74,8 @@ def test_build_segments_and_summary():
             "decision_reason": "commit",
             "actuation_sent": False,
             "uncertainty_gate_ok": True,
+            "applicability_gate_ok": True,
+            "finger_applicable_prob": 0.92,
             "latency_ms": 86.0,
         },
     ]
@@ -81,6 +89,7 @@ def test_build_segments_and_summary():
     assert segments[1]["actuation_sent_count"] == 1
     assert abs(segments[1]["mean_joint_conf"] - 0.735) < 1e-9
     assert abs(segments[1]["max_joint_conf"] - 0.75) < 1e-9
+    assert abs(segments[1]["mean_applicability_prob"] - 0.90) < 1e-9
 
     result = summarize_records(records, short_segment_sec=0.35)
     summary = result["summary"]
@@ -92,7 +101,10 @@ def test_build_segments_and_summary():
     assert summary["short_actuatable_segment_count"] == 1
     assert summary["actuation_sent_count"] == 1
     assert summary["committed_non_rest_none_count"] == 0
+    assert summary["committed_rest_non_none_count"] == 0
     assert summary["sent_non_rest_none_count"] == 0
+    assert summary["sent_rest_non_none_count"] == 0
+    assert summary["applicability_gate_fail_count"] == 2
     assert summary["deployment_pair_invariant_ok"] is True
     assert summary["pair_counts"]["REST+NONE"] == 2
     assert summary["pair_counts"]["OPEN+THUMB"] == 2
@@ -111,12 +123,26 @@ def test_summarize_records_flags_invalid_pairs():
             "actuation_sent": True,
             "actuation_target_action_id": 1,
             "actuation_target_finger_id": 0,
+        },
+        {
+            "window_start_s": 0.25,
+            "window_end_s": 0.50,
+            "ts_utc": 1000.25,
+            "alignment_ok": True,
+            "committed_action_id": 0,
+            "committed_finger_id": 2,
+            "committed_pair_valid": False,
+            "actuation_sent": True,
+            "actuation_target_action_id": 0,
+            "actuation_target_finger_id": 2,
         }
     ]
 
     summary = summarize_records(records)["summary"]
     assert summary["committed_non_rest_none_count"] == 1
+    assert summary["committed_rest_non_none_count"] == 1
     assert summary["sent_non_rest_none_count"] == 1
+    assert summary["sent_rest_non_none_count"] == 1
     assert summary["deployment_pair_invariant_ok"] is False
 
 

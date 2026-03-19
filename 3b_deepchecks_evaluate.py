@@ -23,6 +23,7 @@ from deepchecks.tabular.suites import (
 )
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+from utils.model_outputs import infer_output_dims_from_state_dict, unpack_model_outputs
 from utils.label_schema import ACTION_NAMES, ACTION_REST, FINGER_NAMES
 from utils.sequence_data import (
     load_sequence_npz,
@@ -807,22 +808,15 @@ test_ds = Dataset(
 # =========================
 
 state_dict = torch.load(str(model_path), map_location="cpu", weights_only=True)
-finger_head_weight = state_dict.get("finger_head.weight")
-action_head_weight = state_dict.get("action_head.weight")
-
-n_fingers = (
-    int(finger_head_weight.shape[0])
-    if finger_head_weight is not None and hasattr(finger_head_weight, "shape")
-    else int(y_finger.max()) + 1
-)
-n_actions = (
-    int(action_head_weight.shape[0])
-    if action_head_weight is not None and hasattr(action_head_weight, "shape")
-    else int(y_action.max()) + 1
+n_fingers, n_actions, has_applicability_head = infer_output_dims_from_state_dict(
+    state_dict
 )
 
 model = CNNLSTMFingerActionNet(
-    n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions
+    n_channels=X.shape[2],
+    n_fingers=n_fingers,
+    n_actions=n_actions,
+    finger_applicability_head=bool(has_applicability_head),
 )
 model.load_state_dict(state_dict)
 model.eval()
@@ -860,7 +854,7 @@ class TorchModelWrapper:
                 batch_idx = window_idx[start:end]
                 X_batch = np.asarray(X_lookup[batch_idx], dtype=np.float32)
                 X_tensor = torch.tensor(X_batch, dtype=torch.float32, device=device)
-                _, action_logits = model(X_tensor)
+                _, action_logits, _ = unpack_model_outputs(model(X_tensor))
                 probs = torch.softmax(action_logits, dim=1)
                 probs_out[start:end] = probs.detach().cpu().numpy()
         return probs_out

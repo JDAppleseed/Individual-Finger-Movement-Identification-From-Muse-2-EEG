@@ -8,6 +8,8 @@ import pytest
 import torch
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+from utils.live_infer_common import require_deployable_run
+from utils.runtime_utils import TemperatureScalingState, save_temperature_scaling
 
 
 def _load_module(relative_path: str, name: str):
@@ -28,15 +30,61 @@ def test_pseudo_live_replay_asserts_deployment_invariant():
             target_session_dir=Path("/tmp/session"),
             summary={
                 "committed_non_rest_none_count": 1,
+                "committed_rest_non_none_count": 0,
                 "sent_non_rest_none_count": 0,
+                "sent_rest_non_none_count": 0,
                 "deployment_pair_invariant_ok": False,
             },
             replay_metrics={
                 "committed_non_rest_none_count": 0,
+                "committed_rest_non_none_count": 1,
                 "sent_non_rest_none_count": 0,
+                "sent_rest_non_none_count": 0,
                 "deployment_pair_invariant_ok": True,
             },
         )
+
+
+def test_cnn_lstm_model_emits_applicability_head_when_enabled():
+    model = CNNLSTMFingerActionNet(
+        n_channels=4,
+        n_fingers=5,
+        n_actions=3,
+        finger_applicability_head=True,
+    )
+    xb = torch.zeros((2, 64, 4), dtype=torch.float32)
+
+    finger_logits, action_logits, applicability_logits = model(xb)
+
+    assert tuple(finger_logits.shape) == (2, 5)
+    assert tuple(action_logits.shape) == (2, 3)
+    assert tuple(applicability_logits.shape) == (2,)
+    assert "finger_applicability_head.weight" in model.state_dict()
+
+
+def test_require_deployable_run_rejects_missing_applicability_temperature(tmp_path: Path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "train_config.json").write_text(
+        json.dumps(
+            {
+                "active_finger_head": True,
+                "finger_applicability_head": True,
+            }
+        )
+    )
+    torch.save(
+        CNNLSTMFingerActionNet(
+            n_channels=4,
+            n_fingers=5,
+            n_actions=3,
+            finger_applicability_head=True,
+        ).state_dict(),
+        run_dir / "finger_action_model.pt",
+    )
+
+    with pytest.raises(RuntimeError, match="applicability_temperature"):
+        require_deployable_run(run_dir)
 
 
 def test_smoke_inference_infers_active_finger_head_from_weights(
@@ -57,11 +105,31 @@ def test_smoke_inference_infers_active_finger_head_from_weights(
         channels=np.array(4, dtype=np.int64),
     )
     torch.save(
-        CNNLSTMFingerActionNet(n_channels=4, n_fingers=5, n_actions=3).state_dict(),
+        CNNLSTMFingerActionNet(
+            n_channels=4,
+            n_fingers=5,
+            n_actions=3,
+            finger_applicability_head=True,
+        ).state_dict(),
         tmp_path / "finger_action_model.pt",
     )
     (tmp_path / "train_config.json").write_text(
-        json.dumps({"active_finger_head": True})
+        json.dumps(
+            {
+                "active_finger_head": True,
+                "finger_applicability_head": True,
+            }
+        )
+    )
+    save_temperature_scaling(
+        tmp_path / "temperature_scaling.json",
+        TemperatureScalingState(
+            action_temperature=1.0,
+            finger_temperature=1.0,
+            applicability_temperature=1.0,
+            has_applicability_temperature=True,
+            source="test",
+        ),
     )
 
     monkeypatch.setattr(
@@ -83,3 +151,5 @@ def test_smoke_inference_infers_active_finger_head_from_weights(
     mod.main()
     stdout = capsys.readouterr().out
     assert "Smoke inference OK" in stdout
+    assert "applicability_prob=" in stdout
+    assert "applicability_gate_ok=" in stdout

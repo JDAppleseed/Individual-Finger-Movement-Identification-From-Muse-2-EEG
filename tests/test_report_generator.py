@@ -19,12 +19,17 @@ def test_generate_run_report_surfaces_directional_pair_metrics(tmp_path: Path):
                     "action_acc": 0.9,
                     "joint_acc": 0.8,
                     "finger_acc_non_rest": 0.85,
+                    "applicability_fp_rate_on_true_rest": 0.1,
+                    "applicability_fn_rate_on_true_non_rest": 0.05,
+                    "action_applicability_disagreement_rate": 0.0667,
                     "raw_non_rest_none_count": 3,
                     "raw_non_rest_none_rate": 0.1,
                     "raw_rest_non_none_count": 1,
                     "raw_rest_non_none_rate": 0.0333,
                     "committed_non_rest_none_count": 0,
                     "committed_non_rest_none_rate": 0.0,
+                    "committed_rest_non_none_count": 0,
+                    "committed_rest_non_none_rate": 0.0,
                     "deployment_pair_invariant_ok": True,
                     "raw_valid_pair_rate": 0.8667,
                     "raw_invalid_pair_rate": 0.1333,
@@ -38,8 +43,12 @@ def test_generate_run_report_surfaces_directional_pair_metrics(tmp_path: Path):
                             "action_acc": 0.9,
                             "joint_acc": 0.8,
                             "finger_acc_non_rest": 0.85,
+                            "applicability_fp_rate_on_true_rest": 0.1,
+                            "applicability_fn_rate_on_true_non_rest": 0.05,
+                            "action_applicability_disagreement_rate": 0.0667,
                             "raw_non_rest_none_rate": 0.1,
                             "raw_rest_non_none_rate": 0.0333,
+                            "committed_rest_non_none_rate": 0.0,
                             "committed_non_rest_none_rate": 0.0,
                             "deployment_pair_invariant_ok": True,
                         },
@@ -53,6 +62,9 @@ def test_generate_run_report_surfaces_directional_pair_metrics(tmp_path: Path):
     html = report_path.read_text()
 
     assert "Raw non-REST+NONE count/rate" in html
+    assert "Committed REST+active count/rate" in html
     assert "Committed non-REST+NONE count/rate" in html
+    assert "Applicability FP(rest) / FN(non-REST)" in html
+    assert "Action/applicability disagreement" in html
     assert "Deployment pair invariant OK" in html
     assert "Deprecated raw valid/invalid pair rate" in html

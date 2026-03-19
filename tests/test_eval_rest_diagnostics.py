@@ -51,6 +51,7 @@ def test_rest_event_breakdown_flags_relabel_and_prune_cases():
     payload = mod._compute_prediction_metrics(
         action_probs=action_probs,
         finger_probs=finger_probs,
+        applicability_probs=None,
         y_action_true=y_action_true,
         y_finger_true=y_finger_true,
     )
@@ -99,6 +100,7 @@ def test_compute_prediction_metrics_reports_rest_and_pair_validity():
     payload = mod._compute_prediction_metrics(
         action_probs=action_probs,
         finger_probs=finger_probs,
+        applicability_probs=np.array([0.2, 0.9, 0.8], dtype=np.float32),
         y_action_true=np.array([0, 1, 2], dtype=np.int64),
         y_finger_true=np.array([0, 1, 2], dtype=np.int64),
     )
@@ -108,9 +110,42 @@ def test_compute_prediction_metrics_reports_rest_and_pair_validity():
     assert payload["metrics"]["raw_non_rest_none_count"] == 0
     assert payload["metrics"]["raw_rest_non_none_count"] == 0
     assert payload["metrics"]["committed_non_rest_none_count"] == 0
+    assert payload["metrics"]["committed_rest_non_none_count"] == 0
+    assert payload["metrics"]["sent_non_rest_none_count"] is None
+    assert payload["metrics"]["sent_rest_non_none_count"] is None
+    assert payload["metrics"]["applicability_fp_rate_on_true_rest"] == 0.0
+    assert payload["metrics"]["applicability_fn_rate_on_true_non_rest"] == 0.0
+    assert payload["metrics"]["action_applicability_disagreement_rate"] == 0.0
     assert payload["metrics"]["deployment_pair_invariant_ok"] is True
     assert payload["metrics"]["raw_invalid_pair_rate"] == 0.0
     assert payload["pair_counts"]["REST+NONE"] == 1
+
+
+def test_compute_prediction_metrics_respects_applicability_threshold() -> None:
+    mod = _load_eval_module()
+    payload = mod._compute_prediction_metrics(
+        action_probs=np.array(
+            [
+                [0.9, 0.05, 0.05],
+                [0.05, 0.9, 0.05],
+            ],
+            dtype=np.float32,
+        ),
+        finger_probs=np.array(
+            [
+                [0.9, 0.05, 0.05, 0.0, 0.0, 0.0],
+                [0.01, 0.98, 0.01, 0.0, 0.0, 0.0],
+            ],
+            dtype=np.float32,
+        ),
+        applicability_probs=np.array([0.45, 0.55], dtype=np.float32),
+        y_action_true=np.array([0, 1], dtype=np.int64),
+        y_finger_true=np.array([0, 1], dtype=np.int64),
+        threshold_applicability=0.4,
+    )
+
+    assert payload["metrics"]["applicability_fp_rate_on_true_rest"] == 1.0
+    assert payload["metrics"]["applicability_fn_rate_on_true_non_rest"] == 0.0
 
 
 def test_compute_prediction_metrics_separates_raw_none_from_committed_decode():
@@ -132,6 +167,7 @@ def test_compute_prediction_metrics_separates_raw_none_from_committed_decode():
     payload = mod._compute_prediction_metrics(
         action_probs=action_probs,
         finger_probs=finger_probs,
+        applicability_probs=None,
         y_action_true=np.array([1, 2], dtype=np.int64),
         y_finger_true=np.array([1, 1], dtype=np.int64),
     )
@@ -140,6 +176,38 @@ def test_compute_prediction_metrics_separates_raw_none_from_committed_decode():
     assert payload["metrics"]["raw_non_rest_none_rate"] == 1.0
     assert payload["metrics"]["committed_non_rest_none_count"] == 0
     assert payload["metrics"]["committed_non_rest_none_rate"] == 0.0
+    assert payload["metrics"]["committed_rest_non_none_count"] == 0
     assert payload["metrics"]["deployment_pair_invariant_ok"] is True
     assert payload["pair_counts"]["OPEN+THUMB"] == 1
     assert payload["pair_counts"]["CLOSE+THUMB"] == 1
+
+
+def test_primary_benchmark_surfaces_applicability_and_committed_rest_metrics():
+    mod = _load_eval_module()
+    benchmark = mod._build_primary_benchmark(
+        y_action_test=np.array([0, 1, 2], dtype=np.int64),
+        y_finger_test=np.array([0, 1, 2], dtype=np.int64),
+        metrics={
+            "action_acc": 0.9,
+            "joint_acc": 0.8,
+            "joint_acc_non_rest": 0.75,
+            "finger_acc_non_rest": 0.85,
+            "rest_tpr": 0.7,
+            "rest_precision": 0.6,
+            "action_ece": 0.1,
+            "applicability_fp_rate_on_true_rest": 0.2,
+            "applicability_fn_rate_on_true_non_rest": 0.1,
+            "action_applicability_disagreement_rate": 0.05,
+            "raw_non_rest_none_rate": 0.0,
+            "raw_rest_non_none_rate": 0.3,
+            "committed_rest_non_none_rate": 0.0,
+            "committed_non_rest_none_rate": 0.0,
+            "deployment_pair_invariant_ok": True,
+        },
+    )
+
+    metrics = benchmark["metrics"]
+    assert metrics["applicability_fp_rate_on_true_rest"] == 0.2
+    assert metrics["applicability_fn_rate_on_true_non_rest"] == 0.1
+    assert metrics["action_applicability_disagreement_rate"] == 0.05
+    assert metrics["committed_rest_non_none_rate"] == 0.0

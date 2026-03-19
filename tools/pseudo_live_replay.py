@@ -320,16 +320,24 @@ def _assert_deployment_replay_ok(
     replay_metrics: dict[str, Any],
 ) -> None:
     summary_committed = int(summary.get("committed_non_rest_none_count", 0) or 0)
+    summary_rest = int(summary.get("committed_rest_non_none_count", 0) or 0)
     summary_sent = int(summary.get("sent_non_rest_none_count", 0) or 0)
+    summary_sent_rest = int(summary.get("sent_rest_non_none_count", 0) or 0)
     replay_committed = int(replay_metrics.get("committed_non_rest_none_count", 0) or 0)
+    replay_rest = int(replay_metrics.get("committed_rest_non_none_count", 0) or 0)
     replay_sent = int(replay_metrics.get("sent_non_rest_none_count", 0) or 0)
+    replay_sent_rest = int(replay_metrics.get("sent_rest_non_none_count", 0) or 0)
     summary_ok = bool(summary.get("deployment_pair_invariant_ok", False))
     replay_ok = bool(replay_metrics.get("deployment_pair_invariant_ok", False))
     if (
         summary_committed != 0
+        or summary_rest != 0
         or summary_sent != 0
+        or summary_sent_rest != 0
         or replay_committed != 0
+        or replay_rest != 0
         or replay_sent != 0
+        or replay_sent_rest != 0
         or not summary_ok
         or not replay_ok
     ):
@@ -337,9 +345,13 @@ def _assert_deployment_replay_ok(
             "Deployment replay invariant failed for "
             f"{target_session_dir}: "
             f"summary committed_non_rest_none={summary_committed}, "
+            f"summary committed_rest_non_none={summary_rest}, "
             f"summary sent_non_rest_none={summary_sent}, "
+            f"summary sent_rest_non_none={summary_sent_rest}, "
             f"replay committed_non_rest_none={replay_committed}, "
+            f"replay committed_rest_non_none={replay_rest}, "
             f"replay sent_non_rest_none={replay_sent}, "
+            f"replay sent_rest_non_none={replay_sent_rest}, "
             f"summary_ok={summary_ok}, replay_ok={replay_ok}"
         )
 
@@ -451,6 +463,7 @@ def _run_single_replay(
         session_ids=session_ids,
         event_ids=event_ids,
         event_onset_s=event_onset_s,
+        applicability_threshold=float(postprocess_settings.threshold_applicability),
     )
 
     manifest = {

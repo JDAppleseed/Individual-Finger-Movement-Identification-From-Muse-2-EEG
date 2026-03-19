@@ -77,7 +77,7 @@ Notes:
 - Step 1: Stream & Record → creates a new session directory.
 - Step 1b: Extract Windows → reads `<session_dir>/raw/` + `<session_dir>/events/`, writes `<session_dir>/processed/`.
 - Step 2: Train Model → reads `<session_dir>/processed/eeg_windows.npz`, writes `<session_dir>/processed/models/<run_id>/` including `temperature_scaling.json`.
-- Step 3+: Evaluate / Figures / Reports → read from the same session directory and the latest model run, and report action/finger/joint metrics plus raw invalid-pair rate.
+- Step 3+: Evaluate / Figures / Reports → read from the same session directory and the latest model run, and report action/finger/joint metrics, applicability diagnostics, and committed deployment-pair invariants.
 - Step 7: Live Infer + Actuate → uses the latest model/scaler unless explicitly overridden.
 - Step 7b: Review Live Predictions → reads `processed/live_infer*/predictions.jsonl`, summarizes runtime behavior, and exports segment CSVs for video-aligned validation.
 
@@ -123,8 +123,9 @@ python 4_generate_reports.py --session-dir <session_dir>
 Training/evaluation notes:
 
 - Step 2 now reserves a calibration holdout from the training split by default (`--calibration-size 0.1`) and fits post-hoc temperature scaling.
-- Each run saves `finger_action_model.pt`, `scaler.npz`, `test_predictions.npz`, and `temperature_scaling.json`.
-- Step 3 applies the saved temperature scaling when recomputing predictions and reports raw invalid-pair rate, joint accuracy, and smoothed joint accuracy in addition to the existing action/finger metrics.
+- Step 2 trains the default deployable architecture with a 5-way active-finger head plus a binary finger-applicability head, and saves `finger_action_model.pt`, `scaler.npz`, `test_predictions.npz`, and `temperature_scaling.json`.
+- `temperature_scaling.json` now stores calibrated temperatures for action, finger, and applicability. `test_predictions.npz` stores `applicability_probs` for runs that include the applicability head.
+- Step 3 applies the saved temperature scaling when recomputing predictions and treats applicability FP/FN, action-applicability disagreement, and committed deployment-pair invariants as the primary deployment health signals. Raw `REST + active finger` remains available as a deprecated structural metric for active-finger heads.
 
 Paper/manuscript note:
 
@@ -231,14 +232,16 @@ Notes:
 - When `--enable_actuation` is set and `--serial_port` is omitted, Step 7 auto-detects a likely USB serial Arduino port (for example `/dev/cu.usbmodem*` on macOS).
 - Pass `--serial_port` explicitly if multiple candidate serial devices are attached or auto-detection is ambiguous.
 - Actuation is safety-gated; REST/NONE never actuate.
-- Current live defaults enable postprocessing with EMA smoothing (`smoothing_window=5`), `finger_mode=raw`, `threshold_action=0.05`, `threshold_finger=0.20`, and no hysteresis.
+- Current live defaults enable postprocessing with EMA smoothing (`smoothing_window=5`), `finger_mode=raw`, `threshold_action=0.05`, `threshold_finger=0.20`, `threshold_applicability=0.40`, and no hysteresis.
 - Current actuation defaults use `actuation_min_prob=0.20`, `actuation_stability=3`, and `actuation_cooldown_ms=250`.
-- Step 7 logs prediction latency by default in `predictions.jsonl`; actuation events now also record `actuation_sent`, `actuation_latency_ms`, and `actuation_speed_scalar`.
+- Step 7 logs prediction latency by default in `predictions.jsonl`; actuation events now also record `actuation_sent`, `actuation_latency_ms`, `actuation_speed_scalar`, `finger_applicable_prob`, and `applicability_gate_ok`.
 - Raw shards and prediction logs are preserved by default. They are only disabled when `no_file_io` is set to `true`.
 - Optional MC-dropout backend: set `use_inference_engine: true` in the infer config to route Step 7 through `utils/inference.py`. Relevant keys are `mc_passes`, `uncertainty_base_threshold`, and `uncertainty_weight`.
 - When enabled, live inference uses mean probabilities across MC passes, logs `action_uncertainty` / `finger_uncertainty`, and adds an adaptive uncertainty gate before hardware actuation.
 - Step 7 automatically loads `temperature_scaling.json` from the selected run when present and applies it before softmax in both direct and MC-dropout inference modes.
-- The deployed decode path now enforces `REST => finger NONE`, so exported/live commands are always valid action-finger pairs.
+- The deployed decode path now enforces `REST => finger NONE` and `OPEN/CLOSE => active finger`, so committed/exported/live commands are always valid action-finger pairs.
+- Low finger confidence and low applicability are actuation gates only. They do not rewrite a committed non-REST label back to `NONE`.
+- Step 7 actuation only starts for deployable runs: `active_finger_head=true`, `finger_applicability_head=true`, a 5-output finger head, and `temperature_scaling.json` with `applicability_temperature`.
 - Confidence-modulated actuation speed is enabled by default. Use `modulate_actuation_speed` and `actuation_speed_gamma` to adjust it; the Arduino receiver in `hardware/arduino/blue_hand_receive_upload/blue_hand_receive_upload.ino` now accepts an optional third `speed_u8` field.
 - See `docs/actuation_requirements.md` for design constraints.
 
@@ -264,7 +267,7 @@ python tools/analyze_live_predictions.py \
 Notes:
 
 - If `--pred-log` is omitted, the tool auto-resolves the latest `processed/live_infer*/predictions.jsonl` under `--session-dir`.
-- The summary JSON reports latency, transition rate, actuation counts, uncertainty-gate failures, and short actuatable bursts.
+- The summary JSON reports latency, transition rate, actuation counts, uncertainty-gate failures, applicability-gate failures, and committed/sent deployment-pair invariants.
 - `predicted_segments.csv` converts per-window predictions into contiguous predicted command intervals.
 - `predicted_segments_review.csv` adds blank reviewer columns so you can compare predicted intervals against recorded video or robot-hand motion.
 - The UI exposes this as `Step 7b: Review Live Predictions` and auto-fills the latest Step 7 log/output paths for the selected session when available.
@@ -316,7 +319,7 @@ Action head:
 - `1` = OPEN
 - `2` = CLOSE
 
-Finger head (only valid when action != REST):
+Committed finger labels:
 
 - `0` = NONE
 - `1` = THUMB
@@ -325,6 +328,12 @@ Finger head (only valid when action != REST):
 - `4` = RING
 - `5` = PINKY
 
+Default deployable model heads:
+
+- Finger head: active fingers only (`THUMB..PINKY`, 5 outputs)
+- Action head: `REST/OPEN/CLOSE` (3 outputs)
+- Applicability head: binary `finger meaningful on this window?`
+
 Validity rules:
 
 - REST + NONE is valid
@@ -332,7 +341,7 @@ Validity rules:
 - OPEN/CLOSE + NONE is invalid for extracted/trainable datasets and Step 1b now fails fast on it
 - OPEN/CLOSE + finger 1–5 is valid
 
-During training, finger loss is masked when action == REST.
+During training, active-finger loss is masked when action == REST, and the applicability head is trained on all windows with target `1[action != REST]`.
 
 ## Data Artifacts (Session Directory)
 

@@ -43,11 +43,16 @@ Expected:
 Deployment candidates must satisfy all of the following:
 
 - `train_config.json` has `active_finger_head: true`
+- `train_config.json` has `finger_applicability_head: true`
 - the saved model finger head has exactly `5` outputs
+- the saved model includes `finger_applicability_head.weight` / `.bias`
+- `temperature_scaling.json` includes `applicability_temperature`
 - Step 7 actuation is only started with that model class
 - pseudo-live replay reports:
   - `committed_non_rest_none_count == 0`
+  - `committed_rest_non_none_count == 0`
   - `sent_non_rest_none_count == 0`
+  - `sent_rest_non_none_count == 0`
   - `deployment_pair_invariant_ok == true`
 
 Required deployment validation flow:
@@ -61,7 +66,10 @@ python 7_live_infer_and_actuate.py --config <infer_json> --enable-actuation
 Notes:
 
 - `OPEN/CLOSE + NONE` is a deployment failure, even if actuation would have been blocked later.
+- `REST + active finger` is also a deployment failure for committed or sent outputs, even though raw active-finger logits remain structural on REST windows.
 - Low finger confidence is allowed only as an actuation gate (`finger_gate_ok=false`), not as a committed label rewrite.
+- Low applicability is allowed only as an actuation gate (`applicability_gate_ok=false`), not as a committed label rewrite.
+- For active-finger deployment runs, use applicability FP/FN and action-applicability disagreement as the primary REST-side health metrics. Raw `REST + active finger` is retained only as a deprecated diagnostic.
 - Legacy 6-class finger-head runs remain readable for historical analysis, but they are not deployable.
 
 ## Environment setup (clean clone)

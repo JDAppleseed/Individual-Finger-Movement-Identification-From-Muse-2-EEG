@@ -34,12 +34,14 @@ from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from utils.label_schema import (
     ACTION_REST,
     ACTION_NAMES,
+    FINGER_NONE,
     FINGER_NAMES,
     decode_finger_predictions,
     decode_finger_predictions_for_actions,
     finger_confidences_for_ids,
     prediction_pair_diagnostics,
 )
+from utils.model_outputs import infer_output_dims_from_state_dict, unpack_model_outputs
 from utils.eval_utils import (
     resolve_cached_test_indices,
     validate_cached_predictions_with_dataset_info,
@@ -703,12 +705,14 @@ def _load_eval_model_and_normalizer(
         raise FileNotFoundError(f"Missing model weights: {model_path}")
 
     state_dict = torch.load(str(model_path), map_location="cpu", weights_only=True)
-    model_n_fingers = int(state_dict["finger_head.weight"].shape[0])
-    model_n_actions = int(state_dict["action_head.weight"].shape[0])
+    model_n_fingers, model_n_actions, has_applicability_head = (
+        infer_output_dims_from_state_dict(state_dict)
+    )
     model = CNNLSTMFingerActionNet(
         n_channels=n_channels,
         n_fingers=model_n_fingers,
         n_actions=model_n_actions,
+        finger_applicability_head=bool(has_applicability_head),
     )
     model.load_state_dict(state_dict)
     model.eval()
@@ -728,10 +732,15 @@ def _run_deterministic_inference(
     n_actions: int,
     n_fingers: int,
     batch_size: int,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     idx = np.asarray(indices, dtype=np.int64)
     action_probs = np.zeros((len(idx), n_actions), dtype=np.float32)
     finger_probs = np.zeros((len(idx), int(model.finger_head.out_features)), dtype=np.float32)
+    applicability_probs = (
+        np.zeros((len(idx),), dtype=np.float32)
+        if getattr(model, "finger_applicability_head", None) is not None
+        else None
+    )
 
     with torch.no_grad():
         for start in range(0, len(idx), batch_size):
@@ -740,7 +749,9 @@ def _run_deterministic_inference(
             X_batch = np.asarray(X[batch_idx], dtype=np.float32)
             X_batch = apply_channel_normalizer(X_batch, normalizer)
             X_t = torch.tensor(X_batch, dtype=torch.float32)
-            finger_logits, action_logits = model(X_t)
+            finger_logits, action_logits, applicability_logits = unpack_model_outputs(
+                model(X_t)
+            )
             if temperature_state is not None:
                 action_logits = apply_temperature_to_logits(
                     action_logits, temperature_state.action_temperature
@@ -748,10 +759,19 @@ def _run_deterministic_inference(
                 finger_logits = apply_temperature_to_logits(
                     finger_logits, temperature_state.finger_temperature
                 )
+                if applicability_logits is not None:
+                    applicability_logits = apply_temperature_to_logits(
+                        applicability_logits,
+                        temperature_state.applicability_temperature,
+                    )
             action_probs[start:end] = torch.softmax(action_logits, dim=1).cpu().numpy()
             finger_probs[start:end] = torch.softmax(finger_logits, dim=1).cpu().numpy()
+            if applicability_probs is not None and applicability_logits is not None:
+                applicability_probs[start:end] = (
+                    torch.sigmoid(applicability_logits).cpu().numpy().reshape(-1)
+                )
 
-    return action_probs, finger_probs
+    return action_probs, finger_probs, applicability_probs
 
 
 def _infer_model_output_dims(
@@ -759,17 +779,14 @@ def _infer_model_output_dims(
     *,
     fallback_n_fingers: int,
     fallback_n_actions: int,
-) -> Tuple[int, int]:
+) -> Tuple[int, int, bool]:
     if not model_path.exists():
-        return int(fallback_n_fingers), int(fallback_n_actions)
+        return int(fallback_n_fingers), int(fallback_n_actions), False
     try:
         state_dict = torch.load(str(model_path), map_location="cpu", weights_only=True)
-        return (
-            int(state_dict["finger_head.weight"].shape[0]),
-            int(state_dict["action_head.weight"].shape[0]),
-        )
+        return infer_output_dims_from_state_dict(state_dict)
     except Exception:
-        return int(fallback_n_fingers), int(fallback_n_actions)
+        return int(fallback_n_fingers), int(fallback_n_actions), False
 
 
 def _format_pair_counts(action_ids: np.ndarray, finger_ids: np.ndarray) -> Dict[str, int]:
@@ -789,14 +806,21 @@ def _compute_prediction_metrics(
     *,
     action_probs: np.ndarray,
     finger_probs: np.ndarray,
+    applicability_probs: Optional[np.ndarray],
     y_action_true: np.ndarray,
     y_finger_true: np.ndarray,
+    threshold_applicability: float = 0.5,
     n_bins: int = 10,
 ) -> Dict[str, Any]:
     y_action_true = np.asarray(y_action_true, dtype=np.int64).reshape(-1)
     y_finger_true = np.asarray(y_finger_true, dtype=np.int64).reshape(-1)
     action_probs = np.asarray(action_probs, dtype=np.float32)
     finger_probs = np.asarray(finger_probs, dtype=np.float32)
+    applicability_probs = (
+        np.asarray(applicability_probs, dtype=np.float32).reshape(-1)
+        if applicability_probs is not None
+        else None
+    )
 
     action_preds = np.argmax(action_probs, axis=1).astype(np.int64)
     raw_finger_preds = decode_finger_predictions(finger_probs)
@@ -804,6 +828,7 @@ def _compute_prediction_metrics(
     pair_diag = prediction_pair_diagnostics(
         action_preds,
         raw_finger_preds,
+        committed_action_ids=action_preds,
         committed_finger_ids=finger_preds,
     )
     raw_invalid_pair_count = (
@@ -820,6 +845,22 @@ def _compute_prediction_metrics(
     )
     action_conf = action_probs[np.arange(len(action_probs)), action_preds]
     finger_conf = finger_confidences_for_ids(finger_probs, finger_preds)
+    applicability_fp_rate_on_true_rest = None
+    applicability_fn_rate_on_true_non_rest = None
+    action_applicability_disagreement_rate = None
+    if applicability_probs is not None:
+        applicability_pred = applicability_probs >= float(threshold_applicability)
+        if np.any(rest_mask := (y_action_true == ACTION_REST)):
+            applicability_fp_rate_on_true_rest = float(
+                np.mean(applicability_pred[rest_mask])
+            )
+        if np.any(mask_non_rest := (y_action_true != ACTION_REST)):
+            applicability_fn_rate_on_true_non_rest = float(
+                np.mean(~applicability_pred[mask_non_rest])
+            )
+        action_applicability_disagreement_rate = float(
+            np.mean(applicability_pred != (action_preds != ACTION_REST))
+        )
 
     mask_non_rest = y_action_true != ACTION_REST
     joint_correct = (action_preds == y_action_true) & (finger_preds == y_finger_true)
@@ -850,6 +891,15 @@ def _compute_prediction_metrics(
         "raw_rest_non_none_rate": pair_diag["raw_rest_non_none_rate"],
         "committed_non_rest_none_count": int(pair_diag["committed_non_rest_none_count"]),
         "committed_non_rest_none_rate": pair_diag["committed_non_rest_none_rate"],
+        "committed_rest_non_none_count": int(pair_diag["committed_rest_non_none_count"]),
+        "committed_rest_non_none_rate": pair_diag["committed_rest_non_none_rate"],
+        "sent_non_rest_none_count": None,
+        "sent_non_rest_none_rate": None,
+        "sent_rest_non_none_count": None,
+        "sent_rest_non_none_rate": None,
+        "applicability_fp_rate_on_true_rest": applicability_fp_rate_on_true_rest,
+        "applicability_fn_rate_on_true_non_rest": applicability_fn_rate_on_true_non_rest,
+        "action_applicability_disagreement_rate": action_applicability_disagreement_rate,
         "deployment_pair_invariant_ok": bool(
             pair_diag["deployment_pair_invariant_ok"]
         ),
@@ -898,6 +948,7 @@ def _compute_prediction_metrics(
         "action_conf": action_conf,
         "finger_conf": finger_conf,
         "pair_counts": _format_pair_counts(action_preds, finger_preds),
+        "applicability_probs": applicability_probs,
     }
 
 
@@ -923,8 +974,12 @@ def _build_primary_benchmark(
                 "rest_tpr",
                 "rest_precision",
                 "action_ece",
+                "applicability_fp_rate_on_true_rest",
+                "applicability_fn_rate_on_true_non_rest",
+                "action_applicability_disagreement_rate",
                 "raw_non_rest_none_rate",
                 "raw_rest_non_none_rate",
+                "committed_rest_non_none_rate",
                 "committed_non_rest_none_rate",
                 "deployment_pair_invariant_ok",
             }
@@ -1198,6 +1253,12 @@ def main():
         help="Minimum finger confidence required after postprocessing.",
     )
     post_group.add_argument(
+        "--threshold-applicability",
+        type=float,
+        default=0.5,
+        help="Minimum applicability probability required after postprocessing.",
+    )
+    post_group.add_argument(
         "--adjacency",
         action="store_true",
         help="Enable finger adjacency correction during postprocessing.",
@@ -1416,6 +1477,7 @@ def main():
             "hysteresis_frames": int(args.hysteresis_frames),
             "threshold_action": float(args.threshold_action),
             "threshold_finger": float(args.threshold_finger),
+            "threshold_applicability": float(args.threshold_applicability),
             "adjacency": bool(args.adjacency),
             "smooth_action_only": bool(args.smooth_action_only),
         },
@@ -1426,6 +1488,15 @@ def main():
             "raw_rest_non_none_rate": None,
             "committed_non_rest_none_count": None,
             "committed_non_rest_none_rate": None,
+            "committed_rest_non_none_count": None,
+            "committed_rest_non_none_rate": None,
+            "sent_non_rest_none_count": None,
+            "sent_non_rest_none_rate": None,
+            "sent_rest_non_none_count": None,
+            "sent_rest_non_none_rate": None,
+            "applicability_fp_rate_on_true_rest": None,
+            "applicability_fn_rate_on_true_non_rest": None,
+            "action_applicability_disagreement_rate": None,
             "deployment_pair_invariant_ok": None,
             "raw_valid_pair_rate": None,
             "raw_invalid_pair_rate": None,
@@ -1609,13 +1680,16 @@ def main():
 
     eval_model = None
     eval_normalizer = None
-    model_n_fingers, model_n_actions = _infer_model_output_dims(
+    model_n_fingers, model_n_actions, model_has_applicability_head = _infer_model_output_dims(
         model_path,
         fallback_n_fingers=dataset_n_fingers,
         fallback_n_actions=n_actions,
     )
     manifest["dataset"]["model_output_n_fingers"] = int(model_n_fingers)
     manifest["dataset"]["model_output_n_actions"] = int(model_n_actions)
+    manifest["dataset"]["model_has_finger_applicability_head"] = bool(
+        model_has_applicability_head
+    )
 
     # =========================
     # ===== TEST SPLIT =========
@@ -1623,12 +1697,18 @@ def main():
     cached = _load_predictions_if_present(pred_npz_path)
     cache_rejected_reasons: Optional[List[str]] = None
     temperature_state = load_temperature_scaling(temperature_path)
+    applicability_probs = None
 
     cached_used = False
     split_attempts = 0
     if cached is not None:
         action_probs = np.asarray(cached["action_probs"])
         finger_probs = np.asarray(cached["finger_probs"])
+        applicability_probs = (
+            np.asarray(cached["applicability_probs"])
+            if "applicability_probs" in cached
+            else None
+        )
         y_action_test = np.asarray(cached["y_action"])
         y_finger_test = np.asarray(cached["y_finger"])
         test_idx = resolve_cached_test_indices(cached)
@@ -1665,6 +1745,7 @@ def main():
             if cache_ok and temperature_state is not None:
                 cached_action_temp = cached.get("action_temperature")
                 cached_finger_temp = cached.get("finger_temperature")
+                cached_applicability_temp = cached.get("applicability_temperature")
                 if cached_action_temp is None or cached_finger_temp is None:
                     cache_ok = False
                     reject_reasons.append("cache_missing_temperature_scaling")
@@ -1682,6 +1763,40 @@ def main():
                         ):
                             cache_ok = False
                             reject_reasons.append("cache_temperature_scaling_mismatch")
+                        elif model_has_applicability_head:
+                            if cached_applicability_temp is None:
+                                cache_ok = False
+                                reject_reasons.append(
+                                    "cache_missing_applicability_temperature_scaling"
+                                )
+                            elif applicability_probs is None:
+                                cache_ok = False
+                                reject_reasons.append("cache_missing_applicability_probs")
+                            else:
+                                try:
+                                    applicability_temp_val = float(
+                                        np.asarray(cached_applicability_temp)
+                                        .reshape(-1)[0]
+                                    )
+                                except Exception:
+                                    cache_ok = False
+                                    reject_reasons.append(
+                                        "cache_applicability_temperature_invalid"
+                                    )
+                                else:
+                                    if (
+                                        abs(
+                                            applicability_temp_val
+                                            - float(
+                                                temperature_state.applicability_temperature
+                                            )
+                                        )
+                                        > 1e-6
+                                    ):
+                                        cache_ok = False
+                                        reject_reasons.append(
+                                            "cache_applicability_temperature_mismatch"
+                                        )
 
             if (
                 cache_ok
@@ -1758,7 +1873,7 @@ def main():
             return 2
 
         batch_size = max(1, int(args.batch_size))
-        action_probs, finger_probs = _run_deterministic_inference(
+        action_probs, finger_probs, applicability_probs = _run_deterministic_inference(
             X=X,
             indices=test_idx,
             model=eval_model,
@@ -1808,7 +1923,11 @@ def main():
                 eval_model = None
                 eval_normalizer = None
         if eval_model is not None and eval_normalizer is not None:
-            aux_action_probs, aux_finger_probs = _run_deterministic_inference(
+            (
+                aux_action_probs,
+                aux_finger_probs,
+                aux_applicability_probs,
+            ) = _run_deterministic_inference(
                 X=X,
                 indices=aux_idx,
                 model=eval_model,
@@ -1864,6 +1983,16 @@ def main():
                 "median_rest_prob": float(np.median(aux_action_probs[:, ACTION_REST]))
                 if len(aux_action_probs)
                 else None,
+                "applicability_fp_rate_on_true_rest": (
+                    float(
+                        np.mean(
+                            np.asarray(aux_applicability_probs)
+                            >= float(args.threshold_applicability)
+                        )
+                    )
+                    if aux_applicability_probs is not None and len(aux_applicability_probs)
+                    else None
+                ),
             }
             print(
                 "\n🧪 Auxiliary REST benchmark: "
@@ -1903,7 +2032,17 @@ def main():
                 ],
                 dtype=np.float32,
             ),
+            "applicability_temperature": np.array(
+                [
+                    float(temperature_state.applicability_temperature)
+                    if temperature_state is not None
+                    else 1.0
+                ],
+                dtype=np.float32,
+            ),
         }
+        if applicability_probs is not None:
+            export_payload["applicability_probs"] = applicability_probs
         optional_keys = [
             "window_start",
             "window_end",
@@ -1969,6 +2108,7 @@ def main():
     pair_diag = prediction_pair_diagnostics(
         action_preds,
         raw_finger_preds,
+        committed_action_ids=action_preds,
         committed_finger_ids=finger_preds,
     )
     raw_invalid_pair_count = (
@@ -1984,6 +2124,27 @@ def main():
         else None
     )
     finger_conf = finger_confidences_for_ids(finger_probs, finger_preds)
+    applicability_fp_rate_on_true_rest = None
+    applicability_fn_rate_on_true_non_rest = None
+    action_applicability_disagreement_rate = None
+    if applicability_probs is not None:
+        applicability_pred = (
+            np.asarray(applicability_probs, dtype=np.float32)
+            >= float(args.threshold_applicability)
+        )
+        rest_mask_app = y_action_test == ACTION_REST
+        non_rest_mask_app = y_action_test != ACTION_REST
+        if np.any(rest_mask_app):
+            applicability_fp_rate_on_true_rest = float(
+                np.mean(applicability_pred[rest_mask_app])
+            )
+        if np.any(non_rest_mask_app):
+            applicability_fn_rate_on_true_non_rest = float(
+                np.mean(~applicability_pred[non_rest_mask_app])
+            )
+        action_applicability_disagreement_rate = float(
+            np.mean(applicability_pred != (action_preds != ACTION_REST))
+        )
 
     # =========================
     # ===== METRICS ===========
@@ -2067,12 +2228,25 @@ def main():
         "🎯 Pair diagnostics: "
         f"raw non-REST+NONE {pair_diag['raw_non_rest_none_count']}"
         f" ({(pair_diag['raw_non_rest_none_rate'] or 0.0) * 100:.2f}%), "
-        f"raw REST+active {pair_diag['raw_rest_non_none_count']}"
-        f" ({(pair_diag['raw_rest_non_none_rate'] or 0.0) * 100:.2f}%), "
         f"committed non-REST+NONE {pair_diag['committed_non_rest_none_count']}"
         f" ({(pair_diag['committed_non_rest_none_rate'] or 0.0) * 100:.2f}%), "
+        f"committed REST+active {pair_diag['committed_rest_non_none_count']}"
+        f" ({(pair_diag['committed_rest_non_none_rate'] or 0.0) * 100:.2f}%), "
         f"deployable={'yes' if pair_diag['deployment_pair_invariant_ok'] else 'no'}"
     )
+    if applicability_probs is not None:
+        print(
+            "🎯 Applicability diagnostics: "
+            f"REST false-positive {((applicability_fp_rate_on_true_rest or 0.0) * 100):.2f}% | "
+            f"non-REST false-negative {((applicability_fn_rate_on_true_non_rest or 0.0) * 100):.2f}% | "
+            f"action disagreement {((action_applicability_disagreement_rate or 0.0) * 100):.2f}%"
+        )
+    else:
+        print(
+            "🎯 Legacy raw REST+active rate: "
+            f"{(pair_diag['raw_rest_non_none_rate'] or 0.0) * 100:.2f}% "
+            f"(structural without applicability head)"
+        )
     if joint_acc is not None:
         joint_non_rest_str = (
             f"{joint_acc_non_rest * 100:.2f}%"
@@ -2128,6 +2302,7 @@ def main():
             hysteresis_frames=int(args.hysteresis_frames),
             threshold_action=float(args.threshold_action),
             threshold_finger=float(args.threshold_finger),
+            threshold_applicability=float(args.threshold_applicability),
             adjacency_enabled=bool(args.adjacency),
             finger_mode="raw" if args.smooth_action_only else "smooth",
         )
@@ -2318,6 +2493,31 @@ def main():
     manifest["metrics"]["committed_non_rest_none_rate"] = pair_diag[
         "committed_non_rest_none_rate"
     ]
+    manifest["metrics"]["committed_rest_non_none_count"] = int(
+        pair_diag["committed_rest_non_none_count"]
+    )
+    manifest["metrics"]["committed_rest_non_none_rate"] = pair_diag[
+        "committed_rest_non_none_rate"
+    ]
+    manifest["metrics"]["sent_non_rest_none_count"] = None
+    manifest["metrics"]["sent_non_rest_none_rate"] = None
+    manifest["metrics"]["sent_rest_non_none_count"] = None
+    manifest["metrics"]["sent_rest_non_none_rate"] = None
+    manifest["metrics"]["applicability_fp_rate_on_true_rest"] = (
+        float(applicability_fp_rate_on_true_rest)
+        if applicability_fp_rate_on_true_rest is not None
+        else None
+    )
+    manifest["metrics"]["applicability_fn_rate_on_true_non_rest"] = (
+        float(applicability_fn_rate_on_true_non_rest)
+        if applicability_fn_rate_on_true_non_rest is not None
+        else None
+    )
+    manifest["metrics"]["action_applicability_disagreement_rate"] = (
+        float(action_applicability_disagreement_rate)
+        if action_applicability_disagreement_rate is not None
+        else None
+    )
     manifest["metrics"]["deployment_pair_invariant_ok"] = bool(
         pair_diag["deployment_pair_invariant_ok"]
     )
@@ -2456,7 +2656,11 @@ def main():
             eval_normalizer = None
 
     if eval_model is not None and eval_normalizer is not None:
-        core_action_probs, core_finger_probs = _run_deterministic_inference(
+        (
+            core_action_probs,
+            core_finger_probs,
+            core_applicability_probs,
+        ) = _run_deterministic_inference(
             X=X,
             indices=split_idx,
             model=eval_model,
@@ -2469,8 +2673,10 @@ def main():
         core_metrics_payload = _compute_prediction_metrics(
             action_probs=core_action_probs,
             finger_probs=core_finger_probs,
+            applicability_probs=core_applicability_probs,
             y_action_true=y_action[split_idx],
             y_finger_true=y_finger[split_idx],
+            threshold_applicability=float(args.threshold_applicability),
             n_bins=N_BINS,
         )
         core_metrics = core_metrics_payload["metrics"]
@@ -2497,9 +2703,12 @@ def main():
                     "rest_tpr",
                     "rest_precision",
                     "action_ece",
+                    "applicability_fp_rate_on_true_rest",
+                    "applicability_fn_rate_on_true_non_rest",
+                    "action_applicability_disagreement_rate",
                     "raw_non_rest_none_rate",
-                    "raw_rest_non_none_rate",
                     "committed_non_rest_none_rate",
+                    "committed_rest_non_none_rate",
                     "deployment_pair_invariant_ok",
                 }
             },
@@ -2532,15 +2741,19 @@ def main():
             "finger_acc_non_rest",
             "rest_tpr",
             "rest_precision",
-            "raw_non_rest_none_rate",
+            "applicability_fp_rate_on_true_rest",
+            "applicability_fn_rate_on_true_non_rest",
             "committed_non_rest_none_rate",
         ]
-        repeated_values: Dict[str, List[float]] = {key: [] for key in repeated_metric_keys}
+        repeated_values: Dict[str, List[float]] = {
+            key: [] for key in repeated_metric_keys
+        }
         for repeat_seed in REPEATED_SPLIT_SEEDS:
             if int(repeat_seed) == int(split_seed):
                 metrics_payload = {
                     "metrics": {
-                        key: manifest["metrics"].get(key) for key in repeated_metric_keys
+                        key: manifest["metrics"].get(key)
+                        for key in repeated_metric_keys
                     }
                 }
                 test_count = int(len(test_idx))
@@ -2562,7 +2775,11 @@ def main():
                     )
                     continue
                 rep_test_global = np.asarray(rep_test_global, dtype=np.int64)
-                rep_action_probs, rep_finger_probs = _run_deterministic_inference(
+                (
+                    rep_action_probs,
+                    rep_finger_probs,
+                    rep_applicability_probs,
+                ) = _run_deterministic_inference(
                     X=X,
                     indices=rep_test_global,
                     model=eval_model,
@@ -2575,8 +2792,10 @@ def main():
                 metrics_payload = _compute_prediction_metrics(
                     action_probs=rep_action_probs,
                     finger_probs=rep_finger_probs,
+                    applicability_probs=rep_applicability_probs,
                     y_action_true=y_action[rep_test_global],
                     y_finger_true=y_finger[rep_test_global],
+                    threshold_applicability=float(args.threshold_applicability),
                     n_bins=N_BINS,
                 )
                 test_count = int(len(rep_test_global))

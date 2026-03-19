@@ -19,6 +19,7 @@ from utils.label_schema import (
     ACTIVE_FINGER_IDS,
     ACTION_NAMES,
     ACTION_REST,
+    FINGER_NONE,
     FINGER_NAMES,
     decode_finger_prediction,
     decode_prediction_pair,
@@ -26,6 +27,7 @@ from utils.label_schema import (
     is_valid_action_finger,
     prediction_pair_diagnostics,
 )
+from utils.model_outputs import infer_output_dims_from_state_dict, unpack_model_outputs
 from utils.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
 from utils.runtime_utils import (
     TemperatureScalingState,
@@ -88,28 +90,53 @@ def get_deployment_model_info(run_dir: Path) -> dict[str, Any]:
     run_dir = Path(run_dir).expanduser().resolve()
     train_cfg = load_train_config(run_dir)
     model_path = run_dir / "finger_action_model.pt"
+    temperature_path = resolve_temperature_path(run_dir)
     n_fingers = None
     n_actions = None
+    has_applicability_head = None
     if model_path.exists():
         try:
             state_dict = torch.load(str(model_path), map_location="cpu", weights_only=True)
-            n_fingers = int(state_dict["finger_head.weight"].shape[0])
-            n_actions = int(state_dict["action_head.weight"].shape[0])
+            n_fingers, n_actions, has_applicability_head = infer_output_dims_from_state_dict(
+                state_dict
+            )
         except Exception:
             n_fingers = None
             n_actions = None
+            has_applicability_head = None
     active_finger_head = train_cfg.get("active_finger_head")
-    deployable = bool(active_finger_head is True and n_fingers == len(ACTIVE_FINGER_IDS))
+    finger_applicability_head = train_cfg.get("finger_applicability_head")
+    temperature_state = load_temperature_scaling(temperature_path)
+    has_applicability_temperature = bool(
+        temperature_state is not None
+        and temperature_state.has_applicability_temperature
+    )
+    deployable = bool(
+        active_finger_head is True
+        and finger_applicability_head is True
+        and n_fingers == len(ACTIVE_FINGER_IDS)
+        and has_applicability_head is True
+        and has_applicability_temperature is True
+    )
     reasons: list[str] = []
     if active_finger_head is not True:
         reasons.append("train_config.active_finger_head must be true")
+    if finger_applicability_head is not True:
+        reasons.append("train_config.finger_applicability_head must be true")
     if n_fingers != len(ACTIVE_FINGER_IDS):
         reasons.append(f"model finger head must have {len(ACTIVE_FINGER_IDS)} outputs")
+    if has_applicability_head is not True:
+        reasons.append("model must include finger_applicability_head")
+    if has_applicability_temperature is not True:
+        reasons.append("temperature_scaling.json must include applicability_temperature")
     return {
         "run_dir": str(run_dir),
         "active_finger_head": active_finger_head,
+        "finger_applicability_head": finger_applicability_head,
         "n_fingers": n_fingers,
         "n_actions": n_actions,
+        "has_applicability_head": has_applicability_head,
+        "has_applicability_temperature": has_applicability_temperature,
         "deployable": deployable,
         "reasons": reasons,
     }
@@ -144,10 +171,14 @@ def load_model_artifacts(
         raise RuntimeError(f"Failed to load normalizer: {scaler_path}")
 
     state_dict = torch.load(str(model_path), map_location="cpu", weights_only=True)
+    n_fingers, n_actions, has_applicability_head = infer_output_dims_from_state_dict(
+        state_dict
+    )
     model = CNNLSTMFingerActionNet(
         n_channels=int(n_channels),
-        n_fingers=int(state_dict["finger_head.weight"].shape[0]),
-        n_actions=int(state_dict["action_head.weight"].shape[0]),
+        n_fingers=n_fingers,
+        n_actions=n_actions,
+        finger_applicability_head=bool(has_applicability_head),
     )
     model.load_state_dict(state_dict)
     model.to(device)
@@ -168,6 +199,7 @@ def postprocess_decision(
     enabled: bool,
     settings: PostprocessSettings,
     state: PostprocessState,
+    finger_applicable_prob: Optional[float] = None,
 ) -> dict:
     if not enabled:
         raw_action = int(np.argmax(action_probs)) if action_probs.size else 0
@@ -185,6 +217,11 @@ def postprocess_decision(
             committed_action == int(ACTION_REST)
             or finger_conf >= float(settings.threshold_finger)
         )
+        applicability_gate_ok = bool(
+            committed_action == int(ACTION_REST)
+            or finger_applicable_prob is None
+            or float(finger_applicable_prob) >= float(settings.threshold_applicability)
+        )
         return {
             "committed_action_id": committed_action,
             "committed_finger_id": committed_finger,
@@ -193,6 +230,12 @@ def postprocess_decision(
             "action_conf": action_conf,
             "finger_conf": finger_conf,
             "finger_gate_ok": finger_gate_ok,
+            "finger_applicable_prob": (
+                float(finger_applicable_prob)
+                if finger_applicable_prob is not None
+                else None
+            ),
+            "applicability_gate_ok": applicability_gate_ok,
             "committed_pair_valid": bool(
                 is_valid_action_finger(committed_action, committed_finger)
             ),
@@ -201,7 +244,13 @@ def postprocess_decision(
             "decision_reason": "raw_argmax_gated",
             "frames_in_state": 1,
         }
-    return postprocess_predictions(action_probs, finger_probs, settings, state)
+    return postprocess_predictions(
+        action_probs,
+        finger_probs,
+        settings,
+        state,
+        finger_applicable_prob=finger_applicable_prob,
+    )
 
 
 def predict_window(
@@ -219,7 +268,9 @@ def predict_window(
         window_input = apply_channel_normalizer(window_f32, scaler)
         x = torch.tensor(window_input, dtype=torch.float32).unsqueeze(0).to(device)
         with torch.inference_mode():
-            finger_logits, action_logits = model(x)
+            finger_logits, action_logits, applicability_logits = unpack_model_outputs(
+                model(x)
+            )
             finger_logits = apply_temperature_to_logits(
                 finger_logits,
                 temperature_state.finger_temperature
@@ -232,14 +283,32 @@ def predict_window(
                 if temperature_state is not None
                 else 1.0,
             )
+            if applicability_logits is not None:
+                applicability_logits = apply_temperature_to_logits(
+                    applicability_logits,
+                    temperature_state.applicability_temperature
+                    if temperature_state is not None
+                    else 1.0,
+                )
             action_probs_t = torch.softmax(action_logits, dim=1).squeeze(0)
             finger_probs_t = torch.softmax(finger_logits, dim=1).squeeze(0)
+            applicability_prob = (
+                torch.sigmoid(applicability_logits).squeeze(0)
+                if applicability_logits is not None
+                else None
+            )
         return {
             "backend": "direct",
             "action_probs": action_probs_t.detach().cpu().numpy(),
             "finger_probs": finger_probs_t.detach().cpu().numpy(),
+            "finger_applicable_prob": (
+                float(applicability_prob.detach().cpu().item())
+                if applicability_prob is not None
+                else None
+            ),
             "action_uncertainty": 0.0,
             "finger_uncertainty": 0.0,
+            "applicability_uncertainty": None,
             "adaptive_threshold": None,
             "health_score": None,
         }
@@ -268,8 +337,10 @@ def predict_window(
         "backend": "inference_engine",
         "action_probs": action_probs,
         "finger_probs": finger_probs,
+        "finger_applicable_prob": diagnostics.get("finger_applicable_prob"),
         "action_uncertainty": float(action_uncertainty),
         "finger_uncertainty": float(finger_uncertainty),
+        "applicability_uncertainty": diagnostics.get("applicability_uncertainty"),
         "adaptive_threshold": float(adaptive_threshold),
         "health_score": (
             diagnostics.get("health_score") if isinstance(diagnostics, dict) else None
@@ -317,6 +388,10 @@ def uncertainty_gate_passed(
 
 def finger_gate_passed(decision_info: dict[str, Any]) -> bool:
     return bool(decision_info.get("finger_gate_ok", True))
+
+
+def applicability_gate_passed(decision_info: dict[str, Any]) -> bool:
+    return bool(decision_info.get("applicability_gate_ok", True))
 
 
 def build_actuation_speed_mapper(
@@ -564,8 +639,10 @@ def replay_ordered_windows(
         )
         action_probs = np.asarray(inference_result["action_probs"], dtype=float)
         finger_probs = np.asarray(inference_result["finger_probs"], dtype=float)
+        finger_applicable_prob = inference_result.get("finger_applicable_prob")
         action_uncertainty = float(inference_result.get("action_uncertainty", 0.0) or 0.0)
         finger_uncertainty = float(inference_result.get("finger_uncertainty", 0.0) or 0.0)
+        applicability_uncertainty = inference_result.get("applicability_uncertainty")
 
         decision_info = postprocess_decision(
             action_probs,
@@ -573,6 +650,11 @@ def replay_ordered_windows(
             enabled=bool(postprocess_enabled),
             settings=postprocess_settings,
             state=post_state,
+            finger_applicable_prob=(
+                float(finger_applicable_prob)
+                if finger_applicable_prob is not None
+                else None
+            ),
         )
         decision = ActuationDecision(
             finger_id=int(decision_info["committed_finger_id"]),
@@ -585,6 +667,7 @@ def replay_ordered_windows(
             ),
         )
         finger_gate_ok = finger_gate_passed(decision_info)
+        applicability_gate_ok = applicability_gate_passed(decision_info)
         uncertainty_gate_ok = uncertainty_gate_passed(decision_info, inference_result)
         actuation_speed_scalar = compute_actuation_speed_scalar(
             decision.prob,
@@ -628,6 +711,8 @@ def replay_ordered_windows(
 
         if not actuation_latency_gate_ok:
             actuation_suppressed_reason = "latency_gate"
+        elif not applicability_gate_ok:
+            actuation_suppressed_reason = "applicability_gate"
         elif not finger_gate_ok:
             actuation_suppressed_reason = "finger_gate"
         elif is_noop_decision(voted_decision.finger_id, voted_decision.action_id):
@@ -696,12 +781,17 @@ def replay_ordered_windows(
             "action_conf": float(decision_info.get("action_conf", 0.0)),
             "finger_conf": float(decision_info.get("finger_conf", 0.0)),
             "finger_gate_ok": bool(decision_info.get("finger_gate_ok", True)),
+            "finger_applicable_prob": decision_info.get("finger_applicable_prob"),
+            "applicability_gate_ok": bool(
+                decision_info.get("applicability_gate_ok", True)
+            ),
             "committed_pair_valid": bool(
                 decision_info.get("committed_pair_valid", True)
             ),
             "joint_conf": float(decision.prob),
             "action_uncertainty": action_uncertainty,
             "finger_uncertainty": finger_uncertainty,
+            "applicability_uncertainty": applicability_uncertainty,
             "adaptive_threshold": inference_result.get("adaptive_threshold"),
             "uncertainty_gate_ok": bool(uncertainty_gate_ok),
             "health_score": inference_result.get("health_score"),
@@ -958,6 +1048,7 @@ def compute_replay_metrics(
     session_ids: Optional[np.ndarray],
     event_ids: Optional[np.ndarray],
     event_onset_s: Optional[np.ndarray],
+    applicability_threshold: float = 0.5,
 ) -> Dict[str, Any]:
     committed_action = np.asarray(
         [int(row.get("committed_action_id", 0)) for row in records], dtype=np.int64
@@ -976,6 +1067,24 @@ def compute_replay_metrics(
     )
     committed_pair_valid = np.asarray(
         [bool(row.get("committed_pair_valid", True)) for row in records], dtype=bool
+    )
+    applicability_gate_ok = np.asarray(
+        [bool(row.get("applicability_gate_ok", True)) for row in records], dtype=bool
+    )
+    finger_applicable_prob_values = [
+        row.get("finger_applicable_prob") for row in records
+    ]
+    has_applicability_prob = any(value is not None for value in finger_applicable_prob_values)
+    finger_applicable_prob = (
+        np.asarray(
+            [
+                float(value) if value is not None else np.nan
+                for value in finger_applicable_prob_values
+            ],
+            dtype=float,
+        )
+        if has_applicability_prob
+        else None
     )
     offline_compute_ms = np.asarray(
         [float(row.get("offline_compute_ms", 0.0) or 0.0) for row in records],
@@ -996,19 +1105,55 @@ def compute_replay_metrics(
     positive_send_mask = actuation_sent & (
         (actuation_action != int(ACTION_REST)) & (actuation_finger != 0)
     )
+    sent_action_effective = np.where(
+        actuation_sent, actuation_action, int(ACTION_REST)
+    ).astype(np.int64)
+    sent_finger_effective = np.where(
+        actuation_sent, actuation_finger, int(FINGER_NONE)
+    ).astype(np.int64)
     pair_diag = prediction_pair_diagnostics(
         committed_action,
         committed_finger,
+        committed_action_ids=committed_action,
         committed_finger_ids=committed_finger,
-    )
-    sent_non_rest_none_mask = actuation_sent & (
-        (actuation_action != int(ACTION_REST)) & (actuation_finger == 0)
+        sent_action_ids=sent_action_effective,
+        sent_finger_ids=sent_finger_effective,
     )
 
     committed_detection_time_s = np.asarray(window_end_s, dtype=float)
     would_send_time_s = np.asarray(window_end_s, dtype=float) + (
         offline_compute_ms / 1000.0
     )
+    applicability_fp_rate_on_true_rest = None
+    applicability_fn_rate_on_true_non_rest = None
+    action_applicability_disagreement_rate = None
+    if finger_applicable_prob is not None:
+        valid_applicability_mask = np.isfinite(finger_applicable_prob)
+        predicted_applicable = np.asarray(
+            np.nan_to_num(finger_applicable_prob, nan=0.0)
+            >= float(applicability_threshold),
+            dtype=bool,
+        )
+        rest_mask_valid = rest_mask & valid_applicability_mask
+        non_rest_mask_valid = non_rest_mask & valid_applicability_mask
+        if np.any(rest_mask_valid):
+            applicability_fp_rate_on_true_rest = float(
+                np.mean(predicted_applicable[rest_mask_valid])
+            )
+        if np.any(non_rest_mask_valid):
+            applicability_fn_rate_on_true_non_rest = float(
+                np.mean(~predicted_applicable[non_rest_mask_valid])
+            )
+        if np.any(valid_applicability_mask):
+            action_applicability_disagreement_rate = float(
+                np.mean(
+                    predicted_applicable[valid_applicability_mask]
+                    != (
+                        committed_action[valid_applicability_mask]
+                        != int(ACTION_REST)
+                    )
+                )
+            )
 
     return {
         "committed_action_acc": float(accuracy_score(y_action_true, committed_action))
@@ -1040,16 +1185,21 @@ def compute_replay_metrics(
         "non_rest_none_count": int(pair_diag["committed_non_rest_none_count"]),
         "committed_non_rest_none_count": int(pair_diag["committed_non_rest_none_count"]),
         "committed_non_rest_none_rate": pair_diag["committed_non_rest_none_rate"],
-        "sent_non_rest_none_count": int(np.sum(sent_non_rest_none_mask)),
-        "sent_non_rest_none_rate": (
-            float(np.mean(sent_non_rest_none_mask))
-            if sent_non_rest_none_mask.size
-            else None
-        ),
+        "committed_rest_non_none_count": int(pair_diag["committed_rest_non_none_count"]),
+        "committed_rest_non_none_rate": pair_diag["committed_rest_non_none_rate"],
+        "sent_non_rest_none_count": int(pair_diag["sent_non_rest_none_count"]),
+        "sent_non_rest_none_rate": pair_diag["sent_non_rest_none_rate"],
+        "sent_rest_non_none_count": int(pair_diag["sent_rest_non_none_count"]),
+        "sent_rest_non_none_rate": pair_diag["sent_rest_non_none_rate"],
+        "applicability_fp_rate_on_true_rest": applicability_fp_rate_on_true_rest,
+        "applicability_fn_rate_on_true_non_rest": applicability_fn_rate_on_true_non_rest,
+        "action_applicability_disagreement_rate": action_applicability_disagreement_rate,
         "deployment_pair_invariant_ok": bool(
             pair_diag["committed_non_rest_none_count"] == 0
+            and pair_diag["committed_rest_non_none_count"] == 0
             and bool(np.all(committed_pair_valid))
-            and int(np.sum(sent_non_rest_none_mask)) == 0
+            and pair_diag["sent_non_rest_none_count"] == 0
+            and pair_diag["sent_rest_non_none_count"] == 0
         ),
         "committed_first_onset_latency_s": _first_match_latency_summary(
             match_mask=committed_joint_correct,

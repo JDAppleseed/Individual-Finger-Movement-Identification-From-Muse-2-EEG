@@ -99,15 +99,64 @@ Diagnostic summary:
 ## 6) Model Artifacts
 
 - `finger_action_model.pt` — PyTorch state dict for `CNNLSTMFingerActionNet`
+  - deployable runs require:
+    - `finger_head.weight` shape `[5, ...]` (active fingers only)
+    - `action_head.weight` shape `[3, ...]`
+    - `finger_applicability_head.weight` / `.bias` present
 - `test_predictions.npz` — held-out predictions for reproducibility
-  - `action_probs`, `finger_probs`, `y_action`, `y_finger`, `test_indices`
+  - required arrays:
+    - `action_probs`
+    - `finger_probs`
+    - `y_action`
+    - `y_finger`
+    - `test_indices_local`
+    - `test_indices_global`
+    - `action_temperature`
+    - `finger_temperature`
+    - `applicability_temperature`
+  - optional / run-dependent arrays:
+    - `applicability_probs` — required for deployable runs with the applicability head
+    - `window_start`
+    - `window_end`
+    - `dataset_info` — JSON payload stored as a string array for cache validation / provenance
 
 ## 7) Calibration + Logs
 
+- `temperature_scaling.json` — post-hoc calibration metadata
+  - `action_temperature` (float)
+  - `finger_temperature` (float)
+  - `applicability_temperature` (float)
+  - `has_applicability_temperature` (bool)
+  - `fit_sample_count` (int)
+  - `fit_non_rest_count` (int)
+  - `source` (string)
+  - `metrics` (object)
 - `logs/experiments/<experiment_hash>.json` — step-wise experiment log
 - `logs/calibration/<subject_id>_<experiment_hash>.json` — per-subject calibration stream
 - `logs/calibration/calibration_state_<subject>_<experiment>.json` — online threshold state
 - `logs/session_state_<subject_id>.json` — append/resume state (session_id, block_id, segment_id, total_elapsed_s, last_time_s, features_path, events_path, raw_path, created_utc, updated_utc)
+- `processed/live_infer*/predictions.jsonl` — Step 7 per-window live predictions
+  - core fields:
+    - `window_start_s`, `window_end_s`, `ts_utc`
+    - `committed_action_id`, `committed_finger_id`
+    - `raw_top_action_id`, `raw_top_finger_id`
+    - `action_conf`, `finger_conf`, `joint_conf`
+    - `committed_pair_valid`
+  - gate / uncertainty fields:
+    - `finger_gate_ok`
+    - `finger_applicable_prob`
+    - `applicability_gate_ok`
+    - `uncertainty_gate_ok`
+    - `action_uncertainty`
+    - `finger_uncertainty`
+    - `applicability_uncertainty` (if MC inference produced it)
+  - actuation fields:
+    - `actuation_sent`
+    - `actuation_target_action_id`
+    - `actuation_target_finger_id`
+    - `actuation_suppressed_reason`
+    - `actuation_latency_ms`
+    - `actuation_speed_scalar`
 
 ## 8) Reports
 

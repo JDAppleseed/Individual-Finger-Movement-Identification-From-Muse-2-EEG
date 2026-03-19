@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 
 import numpy as np
+from utils.model_outputs import unpack_model_outputs
 
 if TYPE_CHECKING:
     import torch
@@ -115,7 +116,7 @@ class ReplayVisualizer:
         torch = self._torch
         x = self._tensor_from_window(idx)
         x.requires_grad = True
-        finger_logits, action_logits = self.model(x)
+        _, action_logits, _ = unpack_model_outputs(self.model(x))
         target_idx = int(torch.argmax(action_logits, dim=1).item())
         loss = action_logits[0, target_idx]
         loss.backward()

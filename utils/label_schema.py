@@ -160,7 +160,10 @@ def prediction_pair_diagnostics(
     action_ids,
     raw_finger_ids,
     *,
+    committed_action_ids=None,
     committed_finger_ids=None,
+    sent_action_ids=None,
+    sent_finger_ids=None,
 ):
     action_arr = np.asarray(action_ids, dtype=np.int64).reshape(-1)
     raw_finger_arr = np.asarray(raw_finger_ids, dtype=np.int64).reshape(-1)
@@ -184,13 +187,22 @@ def prediction_pair_diagnostics(
     }
 
     if committed_finger_ids is not None:
+        committed_action_arr = (
+            np.asarray(committed_action_ids, dtype=np.int64).reshape(-1)
+            if committed_action_ids is not None
+            else action_arr
+        )
         committed_finger_arr = np.asarray(committed_finger_ids, dtype=np.int64).reshape(-1)
-        if action_arr.shape != committed_finger_arr.shape:
+        if committed_action_arr.shape != committed_finger_arr.shape:
             raise ValueError(
-                f"action_ids and committed_finger_ids shape mismatch: {action_arr.shape} vs {committed_finger_arr.shape}"
+                "committed_action_ids and committed_finger_ids shape mismatch: "
+                f"{committed_action_arr.shape} vs {committed_finger_arr.shape}"
             )
-        committed_non_rest_none = (action_arr != ACTION_REST) & (
+        committed_non_rest_none = (committed_action_arr != ACTION_REST) & (
             committed_finger_arr == int(FINGER_NONE)
+        )
+        committed_rest_non_none = (committed_action_arr == ACTION_REST) & (
+            committed_finger_arr != int(FINGER_NONE)
         )
         result["committed_non_rest_none_count"] = int(np.sum(committed_non_rest_none))
         result["committed_non_rest_none_rate"] = (
@@ -198,8 +210,46 @@ def prediction_pair_diagnostics(
             if committed_non_rest_none.size
             else None
         )
+        result["committed_rest_non_none_count"] = int(np.sum(committed_rest_non_none))
+        result["committed_rest_non_none_rate"] = (
+            float(np.mean(committed_rest_non_none))
+            if committed_rest_non_none.size
+            else None
+        )
         result["deployment_pair_invariant_ok"] = bool(
             result["committed_non_rest_none_count"] == 0
+            and result["committed_rest_non_none_count"] == 0
+        )
+
+    if sent_finger_ids is not None:
+        sent_action_arr = (
+            np.asarray(sent_action_ids, dtype=np.int64).reshape(-1)
+            if sent_action_ids is not None
+            else action_arr
+        )
+        sent_finger_arr = np.asarray(sent_finger_ids, dtype=np.int64).reshape(-1)
+        if sent_action_arr.shape != sent_finger_arr.shape:
+            raise ValueError(
+                f"sent_action_ids and sent_finger_ids shape mismatch: {sent_action_arr.shape} vs {sent_finger_arr.shape}"
+            )
+        sent_non_rest_none = (sent_action_arr != ACTION_REST) & (
+            sent_finger_arr == int(FINGER_NONE)
+        )
+        sent_rest_non_none = (sent_action_arr == ACTION_REST) & (
+            sent_finger_arr != int(FINGER_NONE)
+        )
+        result["sent_non_rest_none_count"] = int(np.sum(sent_non_rest_none))
+        result["sent_non_rest_none_rate"] = (
+            float(np.mean(sent_non_rest_none)) if sent_non_rest_none.size else None
+        )
+        result["sent_rest_non_none_count"] = int(np.sum(sent_rest_non_none))
+        result["sent_rest_non_none_rate"] = (
+            float(np.mean(sent_rest_non_none)) if sent_rest_non_none.size else None
+        )
+        result["deployment_pair_invariant_ok"] = bool(
+            result.get("deployment_pair_invariant_ok", True)
+            and result["sent_non_rest_none_count"] == 0
+            and result["sent_rest_non_none_count"] == 0
         )
 
     return result

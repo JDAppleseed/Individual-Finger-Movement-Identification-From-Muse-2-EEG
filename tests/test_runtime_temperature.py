@@ -17,8 +17,10 @@ def test_save_and_load_temperature_scaling(tmp_path):
     state = TemperatureScalingState(
         action_temperature=1.5,
         finger_temperature=2.0,
+        applicability_temperature=0.8,
         fit_sample_count=123,
         fit_non_rest_count=100,
+        has_applicability_temperature=True,
         source="fit_on_holdout",
         metrics={"action": {"nll_before": 1.0, "nll_after": 0.9}},
     )
@@ -29,8 +31,10 @@ def test_save_and_load_temperature_scaling(tmp_path):
     assert loaded is not None
     assert loaded.action_temperature == 1.5
     assert loaded.finger_temperature == 2.0
+    assert loaded.applicability_temperature == 0.8
     assert loaded.fit_sample_count == 123
     assert loaded.fit_non_rest_count == 100
+    assert loaded.has_applicability_temperature is True
     assert loaded.source == "fit_on_holdout"
     assert loaded.metrics["action"]["nll_after"] == 0.9
 

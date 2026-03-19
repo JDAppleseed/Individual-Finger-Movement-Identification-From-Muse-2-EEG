@@ -92,6 +92,9 @@ def test_compute_replay_metrics_reports_active_finger_behavior() -> None:
         {
             "committed_action_id": 1,
             "committed_finger_id": 2,
+            "committed_pair_valid": True,
+            "applicability_gate_ok": True,
+            "finger_applicable_prob": 0.95,
             "actuation_sent": True,
             "actuation_target_action_id": 1,
             "actuation_target_finger_id": 2,
@@ -100,6 +103,9 @@ def test_compute_replay_metrics_reports_active_finger_behavior() -> None:
         {
             "committed_action_id": 1,
             "committed_finger_id": 2,
+            "committed_pair_valid": True,
+            "applicability_gate_ok": True,
+            "finger_applicable_prob": 0.90,
             "actuation_sent": True,
             "actuation_target_action_id": 1,
             "actuation_target_finger_id": 2,
@@ -108,6 +114,9 @@ def test_compute_replay_metrics_reports_active_finger_behavior() -> None:
         {
             "committed_action_id": 0,
             "committed_finger_id": 0,
+            "committed_pair_valid": True,
+            "applicability_gate_ok": False,
+            "finger_applicable_prob": 0.10,
             "actuation_sent": False,
             "actuation_target_action_id": 0,
             "actuation_target_finger_id": 0,
@@ -143,7 +152,12 @@ def test_compute_replay_metrics_reports_active_finger_behavior() -> None:
     assert metrics["false_actuation_rate_rest"] == 0.0
     assert metrics["non_rest_none_count"] == 0
     assert metrics["committed_non_rest_none_count"] == 0
+    assert metrics["committed_rest_non_none_count"] == 0
     assert metrics["sent_non_rest_none_count"] == 0
+    assert metrics["sent_rest_non_none_count"] == 0
+    assert metrics["applicability_fp_rate_on_true_rest"] == 0.0
+    assert metrics["applicability_fn_rate_on_true_non_rest"] == 0.0
+    assert metrics["action_applicability_disagreement_rate"] == 0.0
     assert metrics["deployment_pair_invariant_ok"] is True
     assert metrics["committed_segment_overlap"]["truth_segment_count"] == 1
 
@@ -153,25 +167,85 @@ def test_compute_replay_metrics_flags_invalid_committed_or_sent_pairs() -> None:
         {
             "committed_action_id": 1,
             "committed_finger_id": 0,
+            "committed_pair_valid": False,
+            "applicability_gate_ok": True,
+            "finger_applicable_prob": 0.9,
             "actuation_sent": True,
             "actuation_target_action_id": 1,
             "actuation_target_finger_id": 0,
+            "offline_compute_ms": 5.0,
+        },
+        {
+            "committed_action_id": 0,
+            "committed_finger_id": 2,
+            "committed_pair_valid": False,
+            "applicability_gate_ok": True,
+            "finger_applicable_prob": 0.8,
+            "actuation_sent": True,
+            "actuation_target_action_id": 0,
+            "actuation_target_finger_id": 2,
             "offline_compute_ms": 5.0,
         }
     ]
 
     metrics = compute_replay_metrics(
         records=records,
-        y_action_true=np.asarray([1], dtype=np.int64),
-        y_finger_true=np.asarray([1], dtype=np.int64),
-        window_start_s=np.asarray([0.0], dtype=np.float32),
-        window_end_s=np.asarray([0.25], dtype=np.float32),
-        trial_ids=np.asarray([1], dtype=np.int64),
-        session_ids=np.asarray(["S1"], dtype="U"),
-        event_ids=np.asarray([7], dtype=np.int64),
-        event_onset_s=np.asarray([0.0], dtype=np.float32),
+        y_action_true=np.asarray([1, 0], dtype=np.int64),
+        y_finger_true=np.asarray([1, 0], dtype=np.int64),
+        window_start_s=np.asarray([0.0, 0.25], dtype=np.float32),
+        window_end_s=np.asarray([0.25, 0.50], dtype=np.float32),
+        trial_ids=np.asarray([1, 1], dtype=np.int64),
+        session_ids=np.asarray(["S1", "S1"], dtype="U"),
+        event_ids=np.asarray([7, 8], dtype=np.int64),
+        event_onset_s=np.asarray([0.0, 0.25], dtype=np.float32),
     )
 
     assert metrics["committed_non_rest_none_count"] == 1
+    assert metrics["committed_rest_non_none_count"] == 1
     assert metrics["sent_non_rest_none_count"] == 1
+    assert metrics["sent_rest_non_none_count"] == 1
     assert metrics["deployment_pair_invariant_ok"] is False
+
+
+def test_compute_replay_metrics_uses_probability_not_rest_bypassed_gate_for_applicability() -> None:
+    records = [
+        {
+            "committed_action_id": 0,
+            "committed_finger_id": 0,
+            "committed_pair_valid": True,
+            "applicability_gate_ok": True,
+            "finger_applicable_prob": 0.10,
+            "actuation_sent": False,
+            "actuation_target_action_id": 0,
+            "actuation_target_finger_id": 0,
+            "offline_compute_ms": 5.0,
+        },
+        {
+            "committed_action_id": 1,
+            "committed_finger_id": 2,
+            "committed_pair_valid": True,
+            "applicability_gate_ok": False,
+            "finger_applicable_prob": 0.90,
+            "actuation_sent": False,
+            "actuation_target_action_id": 0,
+            "actuation_target_finger_id": 0,
+            "offline_compute_ms": 5.0,
+        },
+    ]
+
+    metrics = compute_replay_metrics(
+        records=records,
+        y_action_true=np.asarray([0, 1], dtype=np.int64),
+        y_finger_true=np.asarray([0, 2], dtype=np.int64),
+        window_start_s=np.asarray([0.0, 0.25], dtype=np.float32),
+        window_end_s=np.asarray([0.25, 0.50], dtype=np.float32),
+        trial_ids=np.asarray([1, 1], dtype=np.int64),
+        session_ids=np.asarray(["S1", "S1"], dtype="U"),
+        event_ids=np.asarray([8, 9], dtype=np.int64),
+        event_onset_s=np.asarray([0.0, 0.25], dtype=np.float32),
+        applicability_threshold=0.5,
+    )
+
+    assert metrics["applicability_fp_rate_on_true_rest"] == 0.0
+    assert metrics["applicability_fn_rate_on_true_non_rest"] == 0.0
+    assert metrics["action_applicability_disagreement_rate"] == 0.0

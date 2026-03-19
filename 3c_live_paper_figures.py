@@ -18,6 +18,7 @@ from scipy.ndimage import gaussian_filter
 from sklearn.metrics import confusion_matrix, accuracy_score
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+from utils.model_outputs import infer_output_dims_from_state_dict, unpack_model_outputs
 from utils.label_schema import (
     ACTION_REST,
     ACTION_NAMES,
@@ -336,7 +337,10 @@ n_actions = (
 )
 
 model = CNNLSTMFingerActionNet(
-    n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions
+    n_channels=X.shape[2],
+    n_fingers=n_fingers,
+    n_actions=n_actions,
+    finger_applicability_head=bool(infer_output_dims_from_state_dict(state_dict)[2]),
 )
 if not model_path.exists():
     print(f"Model file not found: {model_path}")
@@ -362,7 +366,7 @@ def _mc_predict_dataset(X_arr: np.ndarray):
             action_passes = []
             finger_passes = []
             for _ in range(MC_SAMPLES):
-                finger_logits, action_logits = model(xb)
+                finger_logits, action_logits, _ = unpack_model_outputs(model(xb))
                 if temperature_state is not None:
                     action_logits = apply_temperature_to_logits(
                         action_logits, temperature_state.action_temperature

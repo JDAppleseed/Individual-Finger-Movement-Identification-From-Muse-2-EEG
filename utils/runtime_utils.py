@@ -224,8 +224,10 @@ class CalibrationState:
 class TemperatureScalingState:
     action_temperature: float = 1.0
     finger_temperature: float = 1.0
+    applicability_temperature: float = 1.0
     fit_sample_count: int = 0
     fit_non_rest_count: int = 0
+    has_applicability_temperature: bool = False
     source: str = "unavailable"
     metrics: Optional[dict] = None
 
@@ -277,8 +279,10 @@ def save_temperature_scaling(path: Path, state: TemperatureScalingState) -> None
     payload = {
         "action_temperature": float(state.action_temperature),
         "finger_temperature": float(state.finger_temperature),
+        "applicability_temperature": float(state.applicability_temperature),
         "fit_sample_count": int(state.fit_sample_count),
         "fit_non_rest_count": int(state.fit_non_rest_count),
+        "has_applicability_temperature": bool(state.has_applicability_temperature),
         "source": str(state.source),
         "metrics": state.metrics or {},
     }
@@ -291,11 +295,21 @@ def load_temperature_scaling(path: Path) -> Optional[TemperatureScalingState]:
         return None
     try:
         payload = json.loads(path.read_text())
+        has_applicability_temperature = "applicability_temperature" in payload
         return TemperatureScalingState(
             action_temperature=float(payload.get("action_temperature", 1.0)),
             finger_temperature=float(payload.get("finger_temperature", 1.0)),
+            applicability_temperature=float(
+                payload.get("applicability_temperature", 1.0)
+            ),
             fit_sample_count=int(payload.get("fit_sample_count", 0)),
             fit_non_rest_count=int(payload.get("fit_non_rest_count", 0)),
+            has_applicability_temperature=bool(
+                payload.get(
+                    "has_applicability_temperature",
+                    has_applicability_temperature,
+                )
+            ),
             source=str(payload.get("source", "loaded")),
             metrics=payload.get("metrics", {}) or {},
         )

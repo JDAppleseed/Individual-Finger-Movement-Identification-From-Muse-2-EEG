@@ -67,6 +67,7 @@ from utils.label_schema import (
     is_valid_action_finger,
 )
 from utils.live_infer_common import (
+    applicability_gate_passed as _shared_applicability_gate_passed,
     build_actuation_command_shaper as _shared_build_actuation_command_shaper,
     build_actuation_speed_mapper as _shared_build_actuation_speed_mapper,
     compute_actuation_speed_scalar as _shared_compute_actuation_speed_scalar,
@@ -79,6 +80,7 @@ from utils.live_infer_common import (
     resolve_temperature_path as _shared_resolve_temperature_path,
     uncertainty_gate_passed as _shared_uncertainty_gate_passed,
 )
+from utils.model_outputs import infer_output_dims_from_state_dict, unpack_model_outputs
 from utils.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
 from utils.runtime_utils import (
     TemperatureScalingState,
@@ -358,10 +360,14 @@ def load_model_and_scaler(
         in_ch = int(state["conv.0.weight"].shape[1])
     except Exception:
         in_ch = 4
-    n_fingers = int(state["finger_head.weight"].shape[0])
-    n_actions = int(state["action_head.weight"].shape[0])
+    n_fingers, n_actions, has_applicability_head = infer_output_dims_from_state_dict(
+        state
+    )
     model = CNNLSTMFingerActionNet(
-        n_channels=in_ch, n_fingers=n_fingers, n_actions=n_actions
+        n_channels=in_ch,
+        n_fingers=n_fingers,
+        n_actions=n_actions,
+        finger_applicability_head=bool(has_applicability_head),
     )
     model.load_state_dict(state)
     model.to(device)
@@ -488,6 +494,7 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "hysteresis_frames": int(pp_defaults.hysteresis_frames),
         "threshold_action": float(pp_defaults.threshold_action),
         "threshold_finger": float(pp_defaults.threshold_finger),
+        "threshold_applicability": float(pp_defaults.threshold_applicability),
         "adjacency_enabled": bool(pp_defaults.adjacency_enabled),
         "hysteresis_margin": float(pp_defaults.hysteresis_margin),
         "finger_delta": float(pp_defaults.finger_delta),
@@ -723,6 +730,11 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "--threshold-finger",
         type=float,
         help="Minimum finger confidence required after postprocessing.",
+    )
+    postprocess_group.add_argument(
+        "--threshold-applicability",
+        type=float,
+        help="Minimum applicability probability required before non-REST actuation.",
     )
     postprocess_group.add_argument(
         "--hysteresis-margin",
@@ -1182,6 +1194,7 @@ def _postprocess_decision(
     enabled: bool,
     settings: PostprocessSettings,
     state: PostprocessState,
+    finger_applicable_prob: Optional[float] = None,
 ) -> dict:
     if not enabled:
         raw_action = int(np.argmax(action_probs)) if action_probs.size else 0
@@ -1198,6 +1211,11 @@ def _postprocess_decision(
         finger_gate_ok = bool(
             committed_action == 0 or finger_conf >= float(settings.threshold_finger)
         )
+        applicability_gate_ok = bool(
+            committed_action == 0
+            or finger_applicable_prob is None
+            or float(finger_applicable_prob) >= float(settings.threshold_applicability)
+        )
         return {
             "committed_action_id": committed_action,
             "committed_finger_id": committed_finger,
@@ -1206,6 +1224,12 @@ def _postprocess_decision(
             "action_conf": action_conf,
             "finger_conf": finger_conf,
             "finger_gate_ok": finger_gate_ok,
+            "finger_applicable_prob": (
+                float(finger_applicable_prob)
+                if finger_applicable_prob is not None
+                else None
+            ),
+            "applicability_gate_ok": applicability_gate_ok,
             "committed_pair_valid": bool(
                 is_valid_action_finger(committed_action, committed_finger)
             ),
@@ -1214,7 +1238,13 @@ def _postprocess_decision(
             "decision_reason": "raw_argmax_gated",
             "frames_in_state": 1,
         }
-    return postprocess_predictions(action_probs, finger_probs, settings, state)
+    return postprocess_predictions(
+        action_probs,
+        finger_probs,
+        settings,
+        state,
+        finger_applicable_prob=finger_applicable_prob,
+    )
 
 
 def _build_inference_engine(
@@ -1261,7 +1291,9 @@ def _predict_window(
         window_input = standardize_window_TxC(window_f32, scaler)
         x = torch.tensor(window_input, dtype=torch.float32).unsqueeze(0).to(device)
         with torch.inference_mode():
-            finger_logits, action_logits = model(x)
+            finger_logits, action_logits, applicability_logits = unpack_model_outputs(
+                model(x)
+            )
             finger_logits = apply_temperature_to_logits(
                 finger_logits,
                 temperature_state.finger_temperature if temperature_state is not None else 1.0,
@@ -1270,8 +1302,20 @@ def _predict_window(
                 action_logits,
                 temperature_state.action_temperature if temperature_state is not None else 1.0,
             )
+            if applicability_logits is not None:
+                applicability_logits = apply_temperature_to_logits(
+                    applicability_logits,
+                    temperature_state.applicability_temperature
+                    if temperature_state is not None
+                    else 1.0,
+                )
             action_probs_t = torch.softmax(action_logits, dim=1).squeeze(0)
             finger_probs_t = torch.softmax(finger_logits, dim=1).squeeze(0)
+            applicability_prob_t = (
+                torch.sigmoid(applicability_logits).squeeze(0)
+                if applicability_logits is not None
+                else None
+            )
             if emit_viz:
                 hidden_mag = _compute_hidden_mag(model, x)
                 live_viz_payload = _build_live_viz_payload(model, x, hidden_mag=hidden_mag)
@@ -1279,8 +1323,14 @@ def _predict_window(
             "backend": "direct",
             "action_probs": action_probs_t.detach().cpu().numpy(),
             "finger_probs": finger_probs_t.detach().cpu().numpy(),
+            "finger_applicable_prob": (
+                float(applicability_prob_t.detach().cpu().item())
+                if applicability_prob_t is not None
+                else None
+            ),
             "action_uncertainty": 0.0,
             "finger_uncertainty": 0.0,
+            "applicability_uncertainty": None,
             "adaptive_threshold": None,
             "health_score": None,
             "hidden_mag": hidden_mag,
@@ -1317,8 +1367,10 @@ def _predict_window(
         "backend": "inference_engine",
         "action_probs": action_probs,
         "finger_probs": finger_probs,
+        "finger_applicable_prob": diagnostics.get("finger_applicable_prob"),
         "action_uncertainty": float(action_uncertainty),
         "finger_uncertainty": float(finger_uncertainty),
+        "applicability_uncertainty": diagnostics.get("applicability_uncertainty"),
         "adaptive_threshold": float(adaptive_threshold),
         "health_score": diagnostics.get("health_score") if isinstance(diagnostics, dict) else None,
         "hidden_mag": hidden_mag,
@@ -1398,7 +1450,7 @@ def _compute_prediction_timeline(
 def _compute_saliency(model: CNNLSTMFingerActionNet, x: torch.Tensor) -> Optional[np.ndarray]:
     try:
         x_grad = x.detach().clone().requires_grad_(True)
-        finger_logits, action_logits = model(x_grad)
+        _, action_logits, _ = unpack_model_outputs(model(x_grad))
         target_idx = int(torch.argmax(action_logits, dim=1).item())
         loss = action_logits[0, target_idx]
         model.zero_grad(set_to_none=True)
@@ -1764,6 +1816,7 @@ def main() -> int:
         hysteresis_frames=int(args.hysteresis_frames),
         threshold_action=float(args.threshold_action),
         threshold_finger=float(args.threshold_finger),
+        threshold_applicability=float(args.threshold_applicability),
         adjacency_enabled=bool(args.adjacency_enabled),
         hysteresis_margin=float(args.hysteresis_margin),
         finger_delta=float(args.finger_delta),
@@ -1793,9 +1846,10 @@ def main() -> int:
     )
     if temperature_state is not None:
         logger.info(
-            "Temperature scaling loaded: action=%.4f finger=%.4f source=%s",
+            "Temperature scaling loaded: action=%.4f finger=%.4f applicability=%.4f source=%s",
             float(temperature_state.action_temperature),
             float(temperature_state.finger_temperature),
+            float(temperature_state.applicability_temperature),
             str(temperature_state.source),
         )
     else:
@@ -1823,9 +1877,10 @@ def main() -> int:
         deployment_run_dir = Path(model_path).expanduser().resolve().parent
         deploy_info = _require_deployable_run(deployment_run_dir)
         logger.info(
-            "Deployment model validated run_dir=%s active_finger_head=%s n_fingers=%s n_actions=%s",
+            "Deployment model validated run_dir=%s active_finger_head=%s finger_applicability_head=%s n_fingers=%s n_actions=%s",
             deployment_run_dir,
             deploy_info.get("active_finger_head"),
+            deploy_info.get("finger_applicability_head"),
             deploy_info.get("n_fingers"),
             deploy_info.get("n_actions"),
         )
@@ -2026,12 +2081,16 @@ def main() -> int:
                 )
                 action_probs = np.asarray(inference_result["action_probs"], dtype=float)
                 finger_probs = np.asarray(inference_result["finger_probs"], dtype=float)
+                finger_applicable_prob = inference_result.get("finger_applicable_prob")
                 hidden_mag = inference_result.get("hidden_mag")
                 action_uncertainty = float(
                     inference_result.get("action_uncertainty", 0.0) or 0.0
                 )
                 finger_uncertainty = float(
                     inference_result.get("finger_uncertainty", 0.0) or 0.0
+                )
+                applicability_uncertainty = inference_result.get(
+                    "applicability_uncertainty"
                 )
 
                 decision_info = _postprocess_decision(
@@ -2040,6 +2099,11 @@ def main() -> int:
                     enabled=postprocess_enabled,
                     settings=post_settings,
                     state=post_state,
+                    finger_applicable_prob=(
+                        float(finger_applicable_prob)
+                        if finger_applicable_prob is not None
+                        else None
+                    ),
                 )
                 decision = ActuationDecision(
                     finger_id=int(decision_info["committed_finger_id"]),
@@ -2047,6 +2111,9 @@ def main() -> int:
                     prob=float(min(decision_info["action_conf"], decision_info["finger_conf"])),
                 )
                 finger_gate_ok = _finger_gate_passed(decision_info)
+                applicability_gate_ok = _shared_applicability_gate_passed(
+                    decision_info
+                )
                 uncertainty_gate_ok = _uncertainty_gate_passed(
                     decision_info=decision_info,
                     inference_result=inference_result,
@@ -2153,6 +2220,15 @@ def main() -> int:
                             float(decision_info.get("finger_conf", 0.0)),
                             float(args.threshold_finger),
                         )
+                    elif not applicability_gate_ok:
+                        actuation_suppressed_reason = "applicability_gate"
+                        logger.info(
+                            "Actuation suppressed by applicability gate action=%s finger=%s applicability_prob=%.3f threshold=%.3f",
+                            decision.action_id,
+                            decision.finger_id,
+                            float(decision_info.get("finger_applicable_prob", 0.0) or 0.0),
+                            float(args.threshold_applicability),
+                        )
                     elif _is_noop_decision(
                         voted_decision.finger_id, voted_decision.action_id
                     ):
@@ -2256,12 +2332,19 @@ def main() -> int:
                         "action_conf": float(decision_info.get("action_conf", 0.0)),
                         "finger_conf": float(decision_info.get("finger_conf", 0.0)),
                         "finger_gate_ok": bool(decision_info.get("finger_gate_ok", True)),
+                        "finger_applicable_prob": decision_info.get(
+                            "finger_applicable_prob"
+                        ),
+                        "applicability_gate_ok": bool(
+                            decision_info.get("applicability_gate_ok", True)
+                        ),
                         "committed_pair_valid": bool(
                             decision_info.get("committed_pair_valid", True)
                         ),
                         "joint_conf": float(decision.prob),
                         "action_uncertainty": action_uncertainty,
                         "finger_uncertainty": finger_uncertainty,
+                        "applicability_uncertainty": applicability_uncertainty,
                         "adaptive_threshold": inference_result.get("adaptive_threshold"),
                         "uncertainty_gate_ok": bool(uncertainty_gate_ok),
                         "health_score": inference_result.get("health_score"),

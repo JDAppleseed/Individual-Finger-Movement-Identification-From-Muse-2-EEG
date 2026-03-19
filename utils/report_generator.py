@@ -377,6 +377,12 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
             eval_manifest = json.loads(eval_manifest_path.read_text())
         except Exception:
             eval_manifest = {}
+    postprocess_settings = (
+        eval_manifest.get("postprocess", {}) if isinstance(eval_manifest, dict) else {}
+    )
+    report_threshold_applicability = float(
+        postprocess_settings.get("threshold_applicability", 0.5)
+    )
 
     preds = None
     if preds_path.exists():
@@ -384,9 +390,14 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
             data = np.load(preds_path)
             action_probs = np.asarray(data["action_probs"])
             finger_probs = np.asarray(data["finger_probs"])
+            applicability_probs = (
+                np.asarray(data["applicability_probs"])
+                if "applicability_probs" in data
+                else None
+            )
             y_action = np.asarray(data["y_action"]).astype(int)
             y_finger = np.asarray(data["y_finger"]).astype(int)
-            preds = (action_probs, finger_probs, y_action, y_finger)
+            preds = (action_probs, finger_probs, applicability_probs, y_action, y_finger)
         except Exception:
             preds = None
 
@@ -399,6 +410,15 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     raw_rest_non_none_rate = None
     committed_non_rest_none_count = None
     committed_non_rest_none_rate = None
+    committed_rest_non_none_count = None
+    committed_rest_non_none_rate = None
+    sent_non_rest_none_count = None
+    sent_non_rest_none_rate = None
+    sent_rest_non_none_count = None
+    sent_rest_non_none_rate = None
+    applicability_fp_rate_on_true_rest = None
+    applicability_fn_rate_on_true_non_rest = None
+    action_applicability_disagreement_rate = None
     deployment_pair_invariant_ok = None
     raw_valid_pair_rate = None
     raw_invalid_pair_rate = None
@@ -417,7 +437,7 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     action_cm = None
     finger_cm = None
     if preds is not None:
-        action_probs, finger_probs, y_action, y_finger = preds
+        action_probs, finger_probs, applicability_probs, y_action, y_finger = preds
         action_pred = np.argmax(action_probs, axis=1).astype(int)
         raw_finger_pred = decode_finger_predictions(finger_probs).astype(int)
         finger_pred = decode_finger_predictions_for_actions(
@@ -426,6 +446,7 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
         pair_diag = prediction_pair_diagnostics(
             action_pred,
             raw_finger_pred,
+            committed_action_ids=action_pred,
             committed_finger_ids=finger_pred,
         )
         raw_non_rest_none_count = int(pair_diag["raw_non_rest_none_count"])
@@ -434,6 +455,8 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
         raw_rest_non_none_rate = pair_diag["raw_rest_non_none_rate"]
         committed_non_rest_none_count = int(pair_diag["committed_non_rest_none_count"])
         committed_non_rest_none_rate = pair_diag["committed_non_rest_none_rate"]
+        committed_rest_non_none_count = int(pair_diag["committed_rest_non_none_count"])
+        committed_rest_non_none_rate = pair_diag["committed_rest_non_none_rate"]
         deployment_pair_invariant_ok = bool(pair_diag["deployment_pair_invariant_ok"])
         raw_invalid_pair_count = raw_non_rest_none_count + raw_rest_non_none_count
         raw_invalid_pair_rate = (
@@ -468,6 +491,22 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
                     denom = rest_precision + rest_tpr
                     rest_f1 = float(2 * rest_precision * rest_tpr / denom) if denom else None
         mask = y_action != ACTION_REST
+        if applicability_probs is not None:
+            applicability_pred = (
+                np.asarray(applicability_probs, dtype=np.float32)
+                >= report_threshold_applicability
+            )
+            if np.any(y_action == ACTION_REST):
+                applicability_fp_rate_on_true_rest = float(
+                    np.mean(applicability_pred[y_action == ACTION_REST])
+                )
+            if np.any(mask):
+                applicability_fn_rate_on_true_non_rest = float(
+                    np.mean(~applicability_pred[mask])
+                )
+            action_applicability_disagreement_rate = float(
+                np.mean(applicability_pred != (action_pred != ACTION_REST))
+            )
         if y_action.size:
             joint_correct = (action_pred == y_action) & (finger_pred == y_finger)
             joint_acc = float(np.mean(joint_correct))
@@ -552,6 +591,35 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
         committed_non_rest_none_rate = manifest_metrics.get(
             "committed_non_rest_none_rate", committed_non_rest_none_rate
         )
+        committed_rest_non_none_count = manifest_metrics.get(
+            "committed_rest_non_none_count", committed_rest_non_none_count
+        )
+        committed_rest_non_none_rate = manifest_metrics.get(
+            "committed_rest_non_none_rate", committed_rest_non_none_rate
+        )
+        sent_non_rest_none_count = manifest_metrics.get(
+            "sent_non_rest_none_count", sent_non_rest_none_count
+        )
+        sent_non_rest_none_rate = manifest_metrics.get(
+            "sent_non_rest_none_rate", sent_non_rest_none_rate
+        )
+        sent_rest_non_none_count = manifest_metrics.get(
+            "sent_rest_non_none_count", sent_rest_non_none_count
+        )
+        sent_rest_non_none_rate = manifest_metrics.get(
+            "sent_rest_non_none_rate", sent_rest_non_none_rate
+        )
+        applicability_fp_rate_on_true_rest = manifest_metrics.get(
+            "applicability_fp_rate_on_true_rest", applicability_fp_rate_on_true_rest
+        )
+        applicability_fn_rate_on_true_non_rest = manifest_metrics.get(
+            "applicability_fn_rate_on_true_non_rest",
+            applicability_fn_rate_on_true_non_rest,
+        )
+        action_applicability_disagreement_rate = manifest_metrics.get(
+            "action_applicability_disagreement_rate",
+            action_applicability_disagreement_rate,
+        )
         deployment_pair_invariant_ok = manifest_metrics.get(
             "deployment_pair_invariant_ok", deployment_pair_invariant_ok
         )
@@ -579,8 +647,10 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
           <li>Joint accuracy: {_safe_pct(primary_metrics.get("joint_acc"))}</li>
           <li>Finger accuracy (non-REST): {_safe_pct(primary_metrics.get("finger_acc_non_rest"))}</li>
           <li>REST TPR / Precision: {_safe_pct(primary_metrics.get("rest_tpr"))} / {_safe_pct(primary_metrics.get("rest_precision"))}</li>
+          <li>Applicability FP(rest) / FN(non-REST): {_safe_pct(primary_metrics.get("applicability_fp_rate_on_true_rest"))} / {_safe_pct(primary_metrics.get("applicability_fn_rate_on_true_non_rest"))}</li>
+          <li>Action/applicability disagreement: {_safe_pct(primary_metrics.get("action_applicability_disagreement_rate"))}</li>
           <li>Raw non-REST+NONE rate: {_safe_pct(primary_metrics.get("raw_non_rest_none_rate"))}</li>
-          <li>Raw REST+active rate: {_safe_pct(primary_metrics.get("raw_rest_non_none_rate"))}</li>
+          <li>Committed REST+active rate: {_safe_pct(primary_metrics.get("committed_rest_non_none_rate"))}</li>
           <li>Committed non-REST+NONE rate: {_safe_pct(primary_metrics.get("committed_non_rest_none_rate"))}</li>
           <li>Deployment pair invariant OK: {primary_metrics.get("deployment_pair_invariant_ok", "N/A")}</li>
         </ul>
@@ -611,8 +681,10 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
           <li>Joint accuracy: {_safe_pct(core_metrics.get("joint_acc"))}</li>
           <li>Finger accuracy (non-REST): {_safe_pct(core_metrics.get("finger_acc_non_rest"))}</li>
           <li>REST TPR / Precision: {_safe_pct(core_metrics.get("rest_tpr"))} / {_safe_pct(core_metrics.get("rest_precision"))}</li>
+          <li>Applicability FP(rest) / FN(non-REST): {_safe_pct(core_metrics.get("applicability_fp_rate_on_true_rest"))} / {_safe_pct(core_metrics.get("applicability_fn_rate_on_true_non_rest"))}</li>
+          <li>Action/applicability disagreement: {_safe_pct(core_metrics.get("action_applicability_disagreement_rate"))}</li>
           <li>Raw non-REST+NONE rate: {_safe_pct(core_metrics.get("raw_non_rest_none_rate"))}</li>
-          <li>Raw REST+active rate: {_safe_pct(core_metrics.get("raw_rest_non_none_rate"))}</li>
+          <li>Committed REST+active rate: {_safe_pct(core_metrics.get("committed_rest_non_none_rate"))}</li>
           <li>Committed non-REST+NONE rate: {_safe_pct(core_metrics.get("committed_non_rest_none_rate"))}</li>
           <li>Deployment pair invariant OK: {core_metrics.get("deployment_pair_invariant_ok", "N/A")}</li>
         </ul>
@@ -684,9 +756,13 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     <ul>
       <li>Action accuracy: {_safe_pct(action_acc)}</li>
       <li>Action F1 (macro/weighted): {_safe_float(action_f1_macro)} / {_safe_float(action_f1_weighted)}</li>
+      <li>Applicability FP(rest) / FN(non-REST): {_safe_pct(applicability_fp_rate_on_true_rest)} / {_safe_pct(applicability_fn_rate_on_true_non_rest)}</li>
+      <li>Action/applicability disagreement: {_safe_pct(action_applicability_disagreement_rate)}</li>
       <li>Raw non-REST+NONE count/rate: {raw_non_rest_none_count if raw_non_rest_none_count is not None else "N/A"} / {_safe_pct(raw_non_rest_none_rate)}</li>
-      <li>Raw REST+active count/rate: {raw_rest_non_none_count if raw_rest_non_none_count is not None else "N/A"} / {_safe_pct(raw_rest_non_none_rate)}</li>
+      <li>Committed REST+active count/rate: {committed_rest_non_none_count if committed_rest_non_none_count is not None else "N/A"} / {_safe_pct(committed_rest_non_none_rate)}</li>
       <li>Committed non-REST+NONE count/rate: {committed_non_rest_none_count if committed_non_rest_none_count is not None else "N/A"} / {_safe_pct(committed_non_rest_none_rate)}</li>
+      <li>Sent REST+active count/rate: {sent_rest_non_none_count if sent_rest_non_none_count is not None else "N/A"} / {_safe_pct(sent_rest_non_none_rate)}</li>
+      <li>Sent non-REST+NONE count/rate: {sent_non_rest_none_count if sent_non_rest_none_count is not None else "N/A"} / {_safe_pct(sent_non_rest_none_rate)}</li>
       <li>Deployment pair invariant OK: {deployment_pair_invariant_ok if deployment_pair_invariant_ok is not None else "N/A"}</li>
       <li>Joint accuracy (overall/non-REST): {_safe_pct(joint_acc)} / {_safe_pct(joint_acc_non_rest)}</li>
       <li>Finger accuracy (non-REST): {_safe_pct(finger_acc_non_rest)}</li>
@@ -695,6 +771,7 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
       <li>Finger F1 (overall macro/weighted): {_safe_float(finger_f1_overall_macro)} / {_safe_float(finger_f1_overall_weighted)}</li>
       <li>REST TPR: {_safe_pct(rest_tpr)} | REST FPR: {_safe_pct(rest_fpr)} | REST Precision: {_safe_pct(rest_precision)} | REST F1: {_safe_float(rest_f1)}</li>
       <li>Deprecated raw valid/invalid pair rate: {_safe_pct(raw_valid_pair_rate)} / {_safe_pct(raw_invalid_pair_rate)}</li>
+      <li>Deprecated raw REST+active count/rate: {raw_rest_non_none_count if raw_rest_non_none_count is not None else "N/A"} / {_safe_pct(raw_rest_non_none_rate)}</li>
     </ul>
 
     {primary_html}

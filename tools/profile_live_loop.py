@@ -15,6 +15,7 @@ from utils.runtime_utils import load_normalizer, repo_root, resolve_device
 from utils.timebase import clamp_monotonic_window
 
 from utils.label_schema import ACTION_NAMES, FINGER_NAMES
+from utils.model_outputs import infer_output_dims_from_state_dict
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 
 
@@ -63,10 +64,14 @@ def _load_engine(device: str, mc_passes: int) -> InferenceEngine:
     model: Optional[CNNLSTMFingerActionNet] = None
     if model_path.exists():
         state = torch.load(model_path, map_location="cpu", weights_only=True)
-        n_fingers = int(state["finger_head.weight"].shape[0])
-        n_actions = int(state["action_head.weight"].shape[0])
+        n_fingers, n_actions, has_applicability_head = infer_output_dims_from_state_dict(
+            state
+        )
         model = CNNLSTMFingerActionNet(
-            n_channels=4, n_fingers=n_fingers, n_actions=n_actions
+            n_channels=4,
+            n_fingers=n_fingers,
+            n_actions=n_actions,
+            finger_applicability_head=bool(has_applicability_head),
         )
         model.load_state_dict(state)
         model.eval()

@@ -138,6 +138,37 @@ def test_postprocess_decision_low_finger_conf_blocks_actuation_without_rewriting
     assert out["decision_reason"] == "commit"
 
 
+def test_postprocess_decision_low_applicability_blocks_actuation_without_rewriting_label():
+    mod = _load_live_module()
+    settings = PostprocessSettings(
+        smoothing_enabled=False,
+        hysteresis_enabled=False,
+        threshold_action=0.0,
+        threshold_finger=0.20,
+        threshold_applicability=0.75,
+        adjacency_enabled=False,
+    )
+    state = PostprocessState()
+    action_probs = np.array([0.05, 0.90, 0.05], dtype=float)
+    finger_probs = np.array([0.10, 0.72, 0.10, 0.04, 0.02, 0.02], dtype=float)
+
+    out = mod._postprocess_decision(
+        action_probs,
+        finger_probs,
+        enabled=True,
+        settings=settings,
+        state=state,
+        finger_applicable_prob=0.40,
+    )
+
+    assert out["committed_action_id"] == 1
+    assert out["committed_finger_id"] == 1
+    assert out["finger_gate_ok"] is True
+    assert out["applicability_gate_ok"] is False
+    assert out["committed_pair_valid"] is True
+    assert out["decision_reason"] == "commit"
+
+
 def test_live_infer_defaults_match_best_live_profile():
     mod = _load_live_module()
     _, defaults = mod._build_arg_parser()
@@ -156,6 +187,7 @@ def test_live_infer_defaults_match_best_live_profile():
     assert defaults["hysteresis_frames"] == 3
     assert defaults["threshold_action"] == pytest.approx(0.05)
     assert defaults["threshold_finger"] == pytest.approx(0.20)
+    assert defaults["threshold_applicability"] == pytest.approx(0.50)
     assert defaults["adjacency_enabled"] is False
     assert defaults["hysteresis_margin"] == pytest.approx(0.05)
     assert defaults["finger_delta"] == pytest.approx(0.05)
@@ -178,6 +210,7 @@ def test_live_infer_defaults_match_best_live_profile():
     assert config_defaults["hysteresis_frames"] == 3
     assert config_defaults["threshold_action"] == pytest.approx(0.05)
     assert config_defaults["threshold_finger"] == pytest.approx(0.20)
+    assert config_defaults["threshold_applicability"] == pytest.approx(0.50)
     assert config_defaults["adjacency_enabled"] is False
     assert config_defaults["hysteresis_margin"] == pytest.approx(0.05)
     assert config_defaults["finger_delta"] == pytest.approx(0.05)

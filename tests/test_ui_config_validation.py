@@ -78,6 +78,7 @@ def test_live_infer_rejects_bad_actuation_and_postprocess_values():
             "actuation_min_speed": 1.1,
             "threshold_action": "high",
             "threshold_finger": -0.1,
+            "threshold_applicability": 1.1,
             "smoothing_method": "median",
             "finger_mode": "vote",
         },
@@ -90,6 +91,7 @@ def test_live_infer_rejects_bad_actuation_and_postprocess_values():
     assert any("actuation_min_speed must be in [0.0, 1.0]." in err for err in result.errors)
     assert any("threshold_action must be numeric." in err for err in result.errors)
     assert any("threshold_finger must be in [0.0, 1.0]." in err for err in result.errors)
+    assert any("threshold_applicability must be in [0.0, 1.0]." in err for err in result.errors)
     assert any("smoothing_method must be 'vote' or 'ema'." in err for err in result.errors)
     assert any("finger_mode must be 'raw' or 'smooth'." in err for err in result.errors)
 
@@ -127,6 +129,9 @@ def test_train_accepts_new_rest_balance_mode_and_action_weights():
             "rest_balance_mode": "core_event_equalized",
             "action_weights": "1.25,0.9,1.0",
             "rest_finger_loss_weight": 0.1,
+            "finger_applicability_head": True,
+            "applicability_loss_weight": 0.5,
+            "threshold_applicability": 0.5,
         },
     )
     assert result.ok is True
@@ -138,10 +143,16 @@ def test_train_rejects_bad_action_weights_and_rest_finger_loss_weight():
         {
             "action_weights": "1.0,0.5",
             "rest_finger_loss_weight": -0.1,
+            "finger_applicability_head": "yes",
+            "applicability_loss_weight": -0.2,
+            "threshold_applicability": "high",
         },
     )
     assert any("action_weights" in err for err in result.errors)
     assert any("rest_finger_loss_weight" in err for err in result.errors)
+    assert any("finger_applicability_head must be a boolean." in err for err in result.errors)
+    assert any("applicability_loss_weight must be >= 0." in err for err in result.errors)
+    assert any("threshold_applicability must be numeric." in err for err in result.errors)
 
 
 def test_topomap_band_validation():

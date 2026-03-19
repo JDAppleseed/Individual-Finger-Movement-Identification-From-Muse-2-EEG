@@ -505,7 +505,8 @@ TOOLTIPS: Dict[str, str] = {
     "hysteresis_enabled": "Require extra evidence before switching committed classes.",
     "hysteresis_frames": "Committed frames retained before hysteresis will allow a class switch.",
     "threshold_action": "Minimum postprocessed action confidence kept as OPEN/CLOSE before falling back to REST.",
-    "threshold_finger": "Minimum postprocessed finger confidence kept as a finger movement before falling back to NONE.",
+    "threshold_finger": "Minimum postprocessed finger confidence required before a committed non-REST label is eligible to actuate.",
+    "threshold_applicability": "Minimum calibrated applicability probability required before non-REST actuation is eligible.",
     "adjacency_enabled": "Allow adjacency-based finger correction when using smoothed finger decisions.",
     "hysteresis_margin": "Additional margin required to switch classes when hysteresis is enabled.",
     "finger_delta": "Minimum winning-finger margin used by postprocessing helpers.",
@@ -536,6 +537,8 @@ TOOLTIPS: Dict[str, str] = {
     "action_weights": "Per-action loss weights in REST,OPEN,CLOSE order (CSV or JSON). Overrides rest_weight when set.",
     "rest_balance_mode": "How REST windows are reweighted across source sessions during training.",
     "rest_finger_loss_weight": "Additional finger-head loss weight applied on REST windows toward NONE.",
+    "finger_applicability_head": "Train a binary head that predicts whether a finger label is meaningful on the current window.",
+    "applicability_loss_weight": "Weight applied to the binary finger-applicability loss term.",
     "test_size": "Fraction of windows held out for testing.",
     "split_mode": "Split strategy (group_trial or holdout_session).",
     "calibration_size": "Fraction of the training split reserved for post-hoc temperature scaling (0 disables).",
@@ -1224,6 +1227,12 @@ class MainWindow(QMainWindow):
                     "--threshold-finger",
                     "float",
                     "Committed finger threshold.",
+                ),
+                ArgSpec(
+                    "threshold_applicability",
+                    "--threshold-applicability",
+                    "float",
+                    "Committed applicability threshold.",
                 ),
                 ArgSpec(
                     "adjacency_enabled",
@@ -3080,6 +3089,14 @@ class MainWindow(QMainWindow):
         post_layout.addRow("Threshold finger", threshold_finger)
         fields["threshold_finger"] = threshold_finger
 
+        threshold_applicability = OutlineDoubleSpinBox()
+        threshold_applicability.setRange(0.0, 1.0)
+        threshold_applicability.setDecimals(2)
+        threshold_applicability.setSingleStep(0.01)
+        threshold_applicability.setValue(0.40)
+        post_layout.addRow("Threshold applicability", threshold_applicability)
+        fields["threshold_applicability"] = threshold_applicability
+
         adjacency = QCheckBox("Enable adjacency assist")
         post_layout.addRow("Adjacency", adjacency)
         fields["adjacency"] = adjacency
@@ -4712,6 +4729,16 @@ class MainWindow(QMainWindow):
                 1,
                 decimals=2,
             )
+            self._add_slider(
+                step_id,
+                form,
+                "threshold_applicability",
+                "Applicability threshold",
+                defaults,
+                0,
+                1,
+                decimals=2,
+            )
             self._add_checkbox(step_id, form, "adjacency_enabled", "Adjacency assist", defaults)
             self._add_slider(
                 step_id,
@@ -5005,6 +5032,23 @@ class MainWindow(QMainWindow):
                 10,
                 is_float=True,
             )
+            self._add_checkbox(
+                step_id,
+                form,
+                "finger_applicability_head",
+                "Finger applicability head",
+                defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "applicability_loss_weight",
+                "Applicability loss weight",
+                defaults,
+                0,
+                10,
+                is_float=True,
+            )
             self._add_text(
                 step_id,
                 form,
@@ -5038,6 +5082,16 @@ class MainWindow(QMainWindow):
                 defaults,
                 0,
                 0.99,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "threshold_applicability",
+                "Applicability threshold",
+                defaults,
+                0,
+                1,
                 is_float=True,
             )
             self._add_choice_dropdown(
@@ -5327,6 +5381,7 @@ class MainWindow(QMainWindow):
                 "hysteresis_frames": "Hysteresis frames",
                 "threshold_action": "Action threshold",
                 "threshold_finger": "Finger threshold",
+                "threshold_applicability": "Applicability threshold",
                 "adjacency_enabled": "Adjacency assist",
                 "hysteresis_margin": "Hysteresis margin",
                 "finger_delta": "Finger delta",
@@ -5349,10 +5404,13 @@ class MainWindow(QMainWindow):
                 "rest_weight": "REST class weight",
                 "action_weights": "Action weights (CSV/JSON)",
                 "rest_finger_loss_weight": "REST finger loss weight",
+                "finger_applicability_head": "Finger applicability head",
+                "applicability_loss_weight": "Applicability loss weight",
                 "finger_weights": "Finger weights (CSV/JSON)",
                 "rest_balance_mode": "REST balance mode",
                 "test_size": "Test split size",
                 "calibration_size": "Calibration holdout",
+                "threshold_applicability": "Applicability threshold",
                 "split_mode": "Split mode",
                 "purge_seconds": "Purge seconds",
                 "hop_seconds": "Hop seconds (auto=0)",
@@ -7396,6 +7454,12 @@ class MainWindow(QMainWindow):
             threshold_finger = _spin_value("threshold_finger")
             if threshold_finger is not None:
                 args += ["--threshold-finger", f"{threshold_finger:.2f}"]
+            threshold_applicability = _spin_value("threshold_applicability")
+            if threshold_applicability is not None:
+                args += [
+                    "--threshold-applicability",
+                    f"{threshold_applicability:.2f}",
+                ]
             if _is_checked("adjacency"):
                 args.append("--adjacency")
         elif script_key == "evaluate_deepchecks":

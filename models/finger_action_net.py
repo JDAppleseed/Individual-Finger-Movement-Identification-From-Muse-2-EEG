@@ -21,6 +21,7 @@ class FingerActionNet(nn.Module):
         window_samples: int = 64,
         n_fingers: int = 6,
         n_actions: int = 3,
+        finger_applicability_head: bool = False,
         dropout_p: float = 0.3,
     ):
         super().__init__()
@@ -47,6 +48,9 @@ class FingerActionNet(nn.Module):
         # =========================
         self.finger_head = nn.Linear(self.latent_dim, n_fingers)
         self.action_head = nn.Linear(self.latent_dim, n_actions)
+        self.finger_applicability_head = (
+            nn.Linear(self.latent_dim, 1) if bool(finger_applicability_head) else None
+        )
 
     def forward(self, x):
         """
@@ -64,5 +68,8 @@ class FingerActionNet(nn.Module):
 
         finger_logits = self.finger_head(z)
         action_logits = self.action_head(z)
+        applicability_logits = None
+        if self.finger_applicability_head is not None:
+            applicability_logits = self.finger_applicability_head(z).squeeze(-1)
 
-        return finger_logits, action_logits
+        return finger_logits, action_logits, applicability_logits

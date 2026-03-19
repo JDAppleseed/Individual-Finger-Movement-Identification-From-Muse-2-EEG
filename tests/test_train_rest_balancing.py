@@ -154,31 +154,39 @@ def test_rest_finger_loss_only_applies_when_enabled():
     loss_f = torch.nn.CrossEntropyLoss()
     loss_a = torch.nn.CrossEntropyLoss()
 
-    loss0, _, _, rest0 = mod._compute_batch_losses(
+    loss0, _, _, rest0, app0 = mod._compute_batch_losses(
         finger_logits=finger_logits,
         action_logits=action_logits,
+        applicability_logits=None,
         y_finger=y_finger,
         y_action=y_action,
         action_loss_fn=loss_a,
         finger_loss_fn=loss_f,
+        applicability_loss_fn=None,
         loss_action_weight=1.0,
         rest_finger_loss_weight=0.0,
+        applicability_loss_weight=0.0,
         n_finger_classes=3,
     )
-    loss1, _, _, rest1 = mod._compute_batch_losses(
+    loss1, _, _, rest1, app1 = mod._compute_batch_losses(
         finger_logits=finger_logits,
         action_logits=action_logits,
+        applicability_logits=None,
         y_finger=y_finger,
         y_action=y_action,
         action_loss_fn=loss_a,
         finger_loss_fn=loss_f,
+        applicability_loss_fn=None,
         loss_action_weight=1.0,
         rest_finger_loss_weight=0.5,
+        applicability_loss_weight=0.0,
         n_finger_classes=3,
     )
 
     assert float(rest0.item()) == 0.0
     assert float(rest1.item()) > 0.0
+    assert float(app0.item()) == 0.0
+    assert float(app1.item()) == 0.0
     assert float(loss1.item()) > float(loss0.item())
 
 
@@ -191,18 +199,81 @@ def test_active_finger_head_ignores_rest_finger_loss_and_reindexes_targets():
     loss_f = torch.nn.CrossEntropyLoss()
     loss_a = torch.nn.CrossEntropyLoss()
 
-    loss, _, finger_non_rest, finger_rest = mod._compute_batch_losses(
+    loss, _, finger_non_rest, finger_rest, applicability_loss = mod._compute_batch_losses(
         finger_logits=finger_logits,
         action_logits=action_logits,
+        applicability_logits=None,
         y_finger=y_finger,
         y_action=y_action,
         action_loss_fn=loss_a,
         finger_loss_fn=loss_f,
+        applicability_loss_fn=None,
         loss_action_weight=1.0,
         rest_finger_loss_weight=0.5,
+        applicability_loss_weight=0.0,
         n_finger_classes=5,
     )
 
     assert float(finger_non_rest.item()) > 0.0
     assert float(finger_rest.item()) == 0.0
+    assert float(applicability_loss.item()) == 0.0
     assert float(loss.item()) > 0.0
+
+
+def test_applicability_loss_trains_on_all_windows_without_reintroducing_none():
+    mod = _load_train_module()
+    finger_logits = torch.tensor(
+        [
+            [0.8, 0.1, -0.2, -0.3, -0.4],
+            [0.1, 1.1, -0.1, -0.3, -0.8],
+        ],
+        dtype=torch.float32,
+    )
+    action_logits = torch.tensor(
+        [
+            [2.0, -1.0, -1.5],
+            [-1.0, 2.2, -0.4],
+        ],
+        dtype=torch.float32,
+    )
+    applicability_logits = torch.tensor([-1.5, 0.3], dtype=torch.float32)
+    y_finger = torch.tensor([1, 2], dtype=torch.long)
+    y_action = torch.tensor([0, 1], dtype=torch.long)
+    loss_f = torch.nn.CrossEntropyLoss()
+    loss_a = torch.nn.CrossEntropyLoss()
+    loss_app = torch.nn.BCEWithLogitsLoss()
+
+    loss0, _, _, _, app0 = mod._compute_batch_losses(
+        finger_logits=finger_logits,
+        action_logits=action_logits,
+        applicability_logits=None,
+        y_finger=y_finger,
+        y_action=y_action,
+        action_loss_fn=loss_a,
+        finger_loss_fn=loss_f,
+        applicability_loss_fn=None,
+        loss_action_weight=1.0,
+        rest_finger_loss_weight=0.0,
+        applicability_loss_weight=0.0,
+        n_finger_classes=5,
+    )
+    loss1, _, finger_non_rest, finger_rest, app1 = mod._compute_batch_losses(
+        finger_logits=finger_logits,
+        action_logits=action_logits,
+        applicability_logits=applicability_logits,
+        y_finger=y_finger,
+        y_action=y_action,
+        action_loss_fn=loss_a,
+        finger_loss_fn=loss_f,
+        applicability_loss_fn=loss_app,
+        loss_action_weight=1.0,
+        rest_finger_loss_weight=0.0,
+        applicability_loss_weight=0.5,
+        n_finger_classes=5,
+    )
+
+    assert float(finger_non_rest.item()) > 0.0
+    assert float(finger_rest.item()) == 0.0
+    assert float(app0.item()) == 0.0
+    assert float(app1.item()) > 0.0
+    assert float(loss1.item()) > float(loss0.item())

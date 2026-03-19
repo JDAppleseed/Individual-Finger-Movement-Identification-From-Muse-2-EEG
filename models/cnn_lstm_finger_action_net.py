@@ -7,7 +7,7 @@ class CNNLSTMFingerActionNet(nn.Module):
     """
     CNN + LSTM multi-head classifier for EEG windows.
     Input: [B, T, C] where C=channels.
-    Outputs: finger_logits, action_logits
+    Outputs: finger_logits, action_logits, applicability_logit (optional)
     """
 
     def __init__(
@@ -15,6 +15,7 @@ class CNNLSTMFingerActionNet(nn.Module):
         n_channels=4,
         n_fingers=6,
         n_actions=3,
+        finger_applicability_head=False,
         conv_channels=(16, 32),
         kernel_sizes=(5, 3),
         lstm_hidden=64,
@@ -50,6 +51,9 @@ class CNNLSTMFingerActionNet(nn.Module):
         self.head_dropout = nn.Dropout(p=dropout)
         self.finger_head = nn.Linear(lstm_hidden, n_fingers)
         self.action_head = nn.Linear(lstm_hidden, n_actions)
+        self.finger_applicability_head = (
+            nn.Linear(lstm_hidden, 1) if bool(finger_applicability_head) else None
+        )
 
     def forward(self, x):
         # x: [B, T, C] -> [B, C, T]
@@ -62,7 +66,10 @@ class CNNLSTMFingerActionNet(nn.Module):
         features = self.head_dropout(features)
         finger_logits = self.finger_head(features)
         action_logits = self.action_head(features)
-        return finger_logits, action_logits
+        applicability_logits = None
+        if self.finger_applicability_head is not None:
+            applicability_logits = self.finger_applicability_head(features).squeeze(-1)
+        return finger_logits, action_logits, applicability_logits
 
     def forward_with_state(self, x, state=None):
         # x: [B, T, C] -> [B, C, T]
@@ -75,15 +82,21 @@ class CNNLSTMFingerActionNet(nn.Module):
         features = self.head_dropout(features)
         finger_logits = self.finger_head(features)
         action_logits = self.action_head(features)
-        return finger_logits, action_logits, next_state
+        applicability_logits = None
+        if self.finger_applicability_head is not None:
+            applicability_logits = self.finger_applicability_head(features).squeeze(-1)
+        return finger_logits, action_logits, applicability_logits, next_state
 
     @torch.no_grad()
     def deterministic_forward(self, x):
         self.eval()
-        finger_logits, action_logits = self.forward(x)
+        finger_logits, action_logits, applicability_logits = self.forward(x)
         finger_probs = F.softmax(finger_logits, dim=-1)
         action_probs = F.softmax(action_logits, dim=-1)
-        return finger_probs, action_probs
+        applicability_probs = None
+        if applicability_logits is not None:
+            applicability_probs = torch.sigmoid(applicability_logits)
+        return finger_probs, action_probs, applicability_probs
 
     @torch.no_grad()
     def mc_forward(self, x, passes=20):
@@ -93,10 +106,13 @@ class CNNLSTMFingerActionNet(nn.Module):
         self.train()
         finger_probs = []
         action_probs = []
+        applicability_probs = []
         for _ in range(passes):
-            f_logits, a_logits = self.forward(x)
+            f_logits, a_logits, app_logits = self.forward(x)
             finger_probs.append(F.softmax(f_logits, dim=-1))
             action_probs.append(F.softmax(a_logits, dim=-1))
+            if app_logits is not None:
+                applicability_probs.append(torch.sigmoid(app_logits))
 
         finger_stack = torch.stack(finger_probs, dim=0)
         action_stack = torch.stack(action_probs, dim=0)
@@ -121,7 +137,7 @@ class CNNLSTMFingerActionNet(nn.Module):
         if not was_training:
             self.eval()
 
-        return {
+        result = {
             "finger_mean": finger_mean,
             "action_mean": action_mean,
             "finger_std": finger_std,
@@ -131,3 +147,8 @@ class CNNLSTMFingerActionNet(nn.Module):
             "finger_mi": finger_mi,
             "action_mi": action_mi,
         }
+        if applicability_probs:
+            applicability_stack = torch.stack(applicability_probs, dim=0)
+            result["applicability_mean"] = applicability_stack.mean(dim=0)
+            result["applicability_std"] = applicability_stack.std(dim=0)
+        return result

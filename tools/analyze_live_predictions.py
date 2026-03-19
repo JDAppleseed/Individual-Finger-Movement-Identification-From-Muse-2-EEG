@@ -204,6 +204,7 @@ def build_segments(records: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         joint_conf = _safe_float(row.get("joint_conf"))
         action_conf = _safe_float(row.get("action_conf"))
         finger_conf = _safe_float(row.get("finger_conf"))
+        applicability_prob = _safe_float(row.get("finger_applicable_prob"))
         actuation_sent = bool(row.get("actuation_sent", False))
 
         if current is None or tuple(current["pair"]) != pair:
@@ -225,6 +226,7 @@ def build_segments(records: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "joint_conf_values": [],
                 "action_conf_values": [],
                 "finger_conf_values": [],
+                "applicability_prob_values": [],
                 "actuation_sent_count": 0,
                 "any_actuation_sent": False,
                 "decision_reasons": Counter(),
@@ -247,6 +249,8 @@ def build_segments(records: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
             current["action_conf_values"].append(action_conf)
         if finger_conf is not None:
             current["finger_conf_values"].append(finger_conf)
+        if applicability_prob is not None:
+            current["applicability_prob_values"].append(applicability_prob)
         if actuation_sent:
             current["actuation_sent_count"] += 1
             current["any_actuation_sent"] = True
@@ -269,10 +273,12 @@ def _finalize_segment(segment: Dict[str, Any], origin: float) -> None:
     joint_conf_values = segment.pop("joint_conf_values", [])
     action_conf_values = segment.pop("action_conf_values", [])
     finger_conf_values = segment.pop("finger_conf_values", [])
+    applicability_prob_values = segment.pop("applicability_prob_values", [])
     segment["mean_joint_conf"] = _mean_or_none(joint_conf_values)
     segment["max_joint_conf"] = _max_or_none(joint_conf_values)
     segment["mean_action_conf"] = _mean_or_none(action_conf_values)
     segment["mean_finger_conf"] = _mean_or_none(finger_conf_values)
+    segment["mean_applicability_prob"] = _mean_or_none(applicability_prob_values)
     segment["dominant_decision_reason"] = _counter_top(segment["decision_reasons"])
     segment["decision_reasons"] = dict(segment["decision_reasons"])
 
@@ -371,6 +377,13 @@ def summarize_records(
             for row in rows
         )
     )
+    committed_rest_non_none_count = int(
+        sum(
+            _safe_int(row.get("committed_action_id")) == 0
+            and _safe_int(row.get("committed_finger_id")) != 0
+            for row in rows
+        )
+    )
     sent_non_rest_none_count = int(
         sum(
             bool(row.get("actuation_sent", False))
@@ -379,11 +392,22 @@ def summarize_records(
             for row in rows
         )
     )
+    sent_rest_non_none_count = int(
+        sum(
+            bool(row.get("actuation_sent", False))
+            and _safe_int(row.get("actuation_target_action_id")) == 0
+            and _safe_int(row.get("actuation_target_finger_id")) != 0
+            for row in rows
+        )
+    )
     committed_pair_valid_all = all(
         bool(row.get("committed_pair_valid", True)) for row in valid_rows
     )
     uncertainty_gate_fail_count = int(
         sum(not bool(row.get("uncertainty_gate_ok", True)) for row in valid_rows)
+    )
+    applicability_gate_fail_count = int(
+        sum(not bool(row.get("applicability_gate_ok", True)) for row in valid_rows)
     )
 
     summary = {
@@ -420,14 +444,24 @@ def summarize_records(
         "committed_non_rest_none_rate": (
             float(committed_non_rest_none_count / len(rows)) if rows else None
         ),
+        "committed_rest_non_none_count": committed_rest_non_none_count,
+        "committed_rest_non_none_rate": (
+            float(committed_rest_non_none_count / len(rows)) if rows else None
+        ),
         "actuation_sent_count": actuation_sent_count,
         "sent_non_rest_none_count": sent_non_rest_none_count,
         "sent_non_rest_none_rate": (
             float(sent_non_rest_none_count / len(rows)) if rows else None
         ),
+        "sent_rest_non_none_count": sent_rest_non_none_count,
+        "sent_rest_non_none_rate": (
+            float(sent_rest_non_none_count / len(rows)) if rows else None
+        ),
         "deployment_pair_invariant_ok": bool(
             committed_non_rest_none_count == 0
+            and committed_rest_non_none_count == 0
             and sent_non_rest_none_count == 0
+            and sent_rest_non_none_count == 0
             and committed_pair_valid_all
         ),
         "actuation_sent_per_min": (
@@ -438,6 +472,12 @@ def summarize_records(
         "uncertainty_gate_fail_count": int(uncertainty_gate_fail_count),
         "uncertainty_gate_fail_rate": (
             float(uncertainty_gate_fail_count / len(valid_rows))
+            if valid_rows
+            else None
+        ),
+        "applicability_gate_fail_count": int(applicability_gate_fail_count),
+        "applicability_gate_fail_rate": (
+            float(applicability_gate_fail_count / len(valid_rows))
             if valid_rows
             else None
         ),
@@ -494,6 +534,7 @@ def write_segments_csv(
             "max_joint_conf": _safe_float(seg.get("max_joint_conf")),
             "mean_action_conf": _safe_float(seg.get("mean_action_conf")),
             "mean_finger_conf": _safe_float(seg.get("mean_finger_conf")),
+            "mean_applicability_prob": _safe_float(seg.get("mean_applicability_prob")),
             "any_actuation_sent": bool(seg.get("any_actuation_sent", False)),
             "actuation_sent_count": int(seg.get("actuation_sent_count", 0)),
             "dominant_decision_reason": seg.get("dominant_decision_reason"),

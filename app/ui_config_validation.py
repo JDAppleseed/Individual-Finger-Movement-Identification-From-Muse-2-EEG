@@ -116,6 +116,7 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
     for key in (
         "threshold_action",
         "threshold_finger",
+        "threshold_applicability",
         "uncertainty_base_threshold",
         "actuation_min_prob",
         "actuation_min_speed",
@@ -150,6 +151,7 @@ def validate_train(settings: Dict[str, Any]) -> ValidationResult:
     errors: List[str] = []
     warnings: List[str] = []
     _validate_bool(settings, "active_finger_head", errors)
+    _validate_bool(settings, "finger_applicability_head", errors)
     if "rest_balance_mode" in settings:
         value = str(settings.get("rest_balance_mode"))
         if value not in {"none", "session_equalized", "core_event_equalized"}:
@@ -162,6 +164,14 @@ def validate_train(settings: Dict[str, Any]) -> ValidationResult:
                 errors.append("rest_finger_loss_weight must be >= 0.")
         except Exception:
             errors.append("rest_finger_loss_weight must be numeric.")
+    if "applicability_loss_weight" in settings:
+        try:
+            if float(settings.get("applicability_loss_weight")) < 0.0:
+                errors.append("applicability_loss_weight must be >= 0.")
+        except Exception:
+            errors.append("applicability_loss_weight must be numeric.")
+    if "threshold_applicability" in settings:
+        _validate_unit_interval(settings, "threshold_applicability", errors)
     if "action_weights" in settings and settings.get("action_weights") not in {None, "", "none", "null"}:
         raw = settings.get("action_weights")
         try:

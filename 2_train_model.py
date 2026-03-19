@@ -35,6 +35,7 @@ from utils.runtime_utils import (
     save_normalizer,
     save_temperature_scaling,
 )
+from utils.model_outputs import unpack_model_outputs
 from utils.experiment_logger import log_experiment, get_latest_experiment_hash
 from utils.label_schema import (
     ACTION_NAMES,
@@ -69,6 +70,9 @@ WINDOW_PREPROCESS = "center_detrend"
 AUX_REST_SESSION_POLICY = "auto_train_only"
 REST_FINGER_LOSS_WEIGHT = 0.0
 ACTIVE_FINGER_HEAD = True
+FINGER_APPLICABILITY_HEAD = True
+APPLICABILITY_LOSS_WEIGHT = 0.5
+THRESHOLD_APPLICABILITY = 0.5
 
 DEFAULT_NPZ = "eeg_windows.npz"
 DEFAULT_MODEL = "finger_action_model.pt"
@@ -460,6 +464,53 @@ def _fit_temperature(
     return temp, {"nll_before": nll_before, "nll_after": nll_after}
 
 
+def _fit_binary_temperature(
+    logits: np.ndarray,
+    labels: np.ndarray,
+    *,
+    device: torch.device,
+    max_iter: int = 50,
+) -> Tuple[float, Dict[str, Optional[float]]]:
+    logits = np.asarray(logits, dtype=np.float32).reshape(-1)
+    labels = np.asarray(labels, dtype=np.int64).reshape(-1)
+    if logits.shape != labels.shape or logits.size == 0:
+        return 1.0, {"nll_before": None, "nll_after": None}
+    if len(np.unique(labels)) < 2:
+        return 1.0, {"nll_before": None, "nll_after": None}
+
+    fit_device = torch.device("cpu")
+    logits_t = torch.tensor(logits, dtype=torch.float32, device=fit_device)
+    labels_t = torch.tensor(labels, dtype=torch.float32, device=fit_device)
+    criterion = nn.BCEWithLogitsLoss()
+    nll_before = float(criterion(logits_t, labels_t).item())
+
+    log_temp = torch.nn.Parameter(torch.zeros((), dtype=torch.float32, device=device))
+    opt = torch.optim.LBFGS(
+        [log_temp],
+        lr=0.1,
+        max_iter=int(max_iter),
+        line_search_fn="strong_wolfe",
+    )
+
+    def closure():
+        opt.zero_grad()
+        temp = torch.exp(log_temp).clamp(min=1e-3, max=100.0)
+        loss = criterion(logits_t / temp, labels_t)
+        loss.backward()
+        return loss
+
+    try:
+        opt.step(closure)
+        temp = float(torch.exp(log_temp).clamp(min=1e-3, max=100.0).item())
+        nll_after = float(criterion(logits_t / temp, labels_t).item())
+    except Exception:
+        temp = 1.0
+        nll_after = nll_before
+    if not np.isfinite(temp) or temp <= 0.0:
+        temp = 1.0
+    return temp, {"nll_before": nll_before, "nll_after": nll_after}
+
+
 def _split_groups_from_meta(
     meta: Dict[str, Any], n_expected: int, split_mode: str
 ) -> np.ndarray:
@@ -701,14 +752,17 @@ def _compute_batch_losses(
     *,
     finger_logits: torch.Tensor,
     action_logits: torch.Tensor,
+    applicability_logits: Optional[torch.Tensor],
     y_finger: torch.Tensor,
     y_action: torch.Tensor,
     action_loss_fn: nn.Module,
     finger_loss_fn: nn.Module,
+    applicability_loss_fn: Optional[nn.Module],
     loss_action_weight: float,
     rest_finger_loss_weight: float,
+    applicability_loss_weight: float,
     n_finger_classes: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     loss_action = action_loss_fn(action_logits, y_action)
     mask_nr = y_action != ACTION_REST
     if mask_nr.any():
@@ -734,10 +788,27 @@ def _compute_batch_losses(
     else:
         loss_finger_rest = torch.tensor(0.0, device=action_logits.device)
 
+    if applicability_logits is not None and applicability_loss_fn is not None:
+        applicability_targets = (y_action != ACTION_REST).to(
+            dtype=applicability_logits.dtype
+        )
+        loss_applicability = applicability_loss_fn(
+            applicability_logits.reshape(-1),
+            applicability_targets.reshape(-1),
+        )
+    else:
+        loss_applicability = torch.tensor(0.0, device=action_logits.device)
+
     loss = loss_action + float(loss_action_weight) * (
         loss_finger_non_rest + float(rest_finger_loss_weight) * loss_finger_rest
+    ) + float(applicability_loss_weight) * loss_applicability
+    return (
+        loss,
+        loss_action,
+        loss_finger_non_rest,
+        loss_finger_rest,
+        loss_applicability,
     )
-    return loss, loss_action, loss_finger_non_rest, loss_finger_rest
 
 
 def _window_idx_leakage_check(
@@ -917,6 +988,22 @@ def build_arg_parser():
         help="Keep the legacy 6-class finger head with NONE as an explicit class.",
     )
     training_group.add_argument(
+        "--finger-applicability-head",
+        dest="finger_applicability_head",
+        action="store_true",
+        default=FINGER_APPLICABILITY_HEAD,
+        help=(
+            "Train a binary head that predicts whether a finger label is meaningful "
+            "on the current window (REST=0, OPEN/CLOSE=1)."
+        ),
+    )
+    training_group.add_argument(
+        "--no-finger-applicability-head",
+        dest="finger_applicability_head",
+        action="store_false",
+        help="Disable the binary finger-applicability head.",
+    )
+    training_group.add_argument(
         "--rest-finger-loss-weight",
         type=float,
         default=REST_FINGER_LOSS_WEIGHT,
@@ -941,6 +1028,21 @@ def build_arg_parser():
         help=(
             "Per-window preprocessing applied before fitting and applying the channel normalizer. "
             "'center_detrend' removes DC offset and linear drift within each window."
+        ),
+    )
+    training_group.add_argument(
+        "--applicability-loss-weight",
+        type=float,
+        default=APPLICABILITY_LOSS_WEIGHT,
+        help="Relative weight applied to the finger-applicability BCE loss term.",
+    )
+    training_group.add_argument(
+        "--threshold-applicability",
+        type=float,
+        default=THRESHOLD_APPLICABILITY,
+        help=(
+            "Default calibrated applicability threshold recorded with the run for "
+            "deployment gating."
         ),
     )
     split_group = p.add_argument_group("split and leakage controls")
@@ -1723,7 +1825,10 @@ def main():
 
         # ===== MODEL =====
         model = CNNLSTMFingerActionNet(
-            n_channels=X.shape[2], n_fingers=n_fingers, n_actions=n_actions
+            n_channels=X.shape[2],
+            n_fingers=n_fingers,
+            n_actions=n_actions,
+            finger_applicability_head=bool(args.finger_applicability_head),
         )
         if args.device == "auto":
             if torch.cuda.is_available():
@@ -1771,6 +1876,9 @@ def main():
             print(f"Using action weights: {action_weights.tolist()}")
         else:
             print(f"Using scalar rest_weight via action weights: {action_weights.tolist()}")
+        applicability_loss_fn = (
+            nn.BCEWithLogitsLoss() if bool(args.finger_applicability_head) else None
+        )
 
         # ===== TRAIN =====
         for epoch in range(args.epochs):
@@ -1787,17 +1895,26 @@ def main():
                 yab = yab.to(device)
 
                 opt.zero_grad()
-                f_out, a_out = model(Xb)
+                f_out, a_out, app_out = unpack_model_outputs(model(Xb))
 
-                loss, loss_action, loss_finger_non_rest, loss_finger_rest = _compute_batch_losses(
+                (
+                    loss,
+                    loss_action,
+                    loss_finger_non_rest,
+                    loss_finger_rest,
+                    loss_applicability,
+                ) = _compute_batch_losses(
                     finger_logits=f_out,
                     action_logits=a_out,
+                    applicability_logits=app_out,
                     y_finger=yfb,
                     y_action=yab,
                     action_loss_fn=loss_a,
                     finger_loss_fn=loss_f,
+                    applicability_loss_fn=applicability_loss_fn,
                     loss_action_weight=float(args.loss_action_weight),
                     rest_finger_loss_weight=float(args.rest_finger_loss_weight),
+                    applicability_loss_weight=float(args.applicability_loss_weight),
                     n_finger_classes=n_fingers,
                 )
                 loss.backward()
@@ -1843,7 +1960,10 @@ def main():
             "action_weights_override": bool(action_weights_override),
             "rest_balance_mode": args.rest_balance_mode,
             "active_finger_head": bool(args.active_finger_head),
+            "finger_applicability_head": bool(args.finger_applicability_head),
             "rest_finger_loss_weight": float(args.rest_finger_loss_weight),
+            "applicability_loss_weight": float(args.applicability_loss_weight),
+            "threshold_applicability": float(args.threshold_applicability),
             "finger_weights": finger_weights.tolist() if finger_weights is not None else None,
             "window_preprocess": args.window_preprocess,
             "test_size": args.test_size,
@@ -1897,12 +2017,14 @@ def main():
         temperature_state = TemperatureScalingState(
             action_temperature=1.0,
             finger_temperature=1.0,
+            applicability_temperature=1.0,
             fit_sample_count=int(len(calib_idx)),
             fit_non_rest_count=int(
                 np.sum(np.asarray(y_action_calib, dtype=np.int64) != int(ACTION_REST))
             )
             if y_action_calib is not None
             else 0,
+            has_applicability_temperature=False,
             source="disabled" if calibration_size <= 0.0 else "identity",
             metrics={},
         )
@@ -1910,14 +2032,19 @@ def main():
         if calib_loader is not None:
             calib_action_logits = []
             calib_finger_logits = []
+            calib_applicability_logits = []
             calib_action_labels = []
             calib_finger_labels = []
             with torch.no_grad():
                 for Xb, yfb, yab in calib_loader:
                     Xb = Xb.to(device)
-                    f_out, a_out = model(Xb)
+                    f_out, a_out, app_out = unpack_model_outputs(model(Xb))
                     calib_action_logits.append(a_out.detach().cpu().numpy())
                     calib_finger_logits.append(f_out.detach().cpu().numpy())
+                    if app_out is not None:
+                        calib_applicability_logits.append(
+                            app_out.detach().cpu().numpy()
+                        )
                     calib_action_labels.append(yab.numpy())
                     calib_finger_labels.append(yfb.numpy())
 
@@ -1943,42 +2070,75 @@ def main():
                 )
             else:
                 finger_temp, finger_metrics = 1.0, {"nll_before": None, "nll_after": None}
+            if calib_applicability_logits:
+                applicability_logits_calib = np.concatenate(
+                    calib_applicability_logits, axis=0
+                ).astype(np.float32)
+                applicability_targets_calib = (
+                    y_action_calib_np != int(ACTION_REST)
+                ).astype(np.int64)
+                applicability_temp, applicability_metrics = _fit_binary_temperature(
+                    applicability_logits_calib,
+                    applicability_targets_calib,
+                    device=device,
+                )
+                has_applicability_temperature = True
+            else:
+                applicability_temp = 1.0
+                applicability_metrics = {"nll_before": None, "nll_after": None}
+                has_applicability_temperature = False
 
             temperature_state = TemperatureScalingState(
                 action_temperature=float(action_temp),
                 finger_temperature=float(finger_temp),
+                applicability_temperature=float(applicability_temp),
                 fit_sample_count=int(len(y_action_calib_np)),
                 fit_non_rest_count=int(np.sum(finger_mask_calib)),
+                has_applicability_temperature=bool(has_applicability_temperature),
                 source="fit_on_holdout",
                 metrics={
                     "action": action_metrics,
                     "finger": finger_metrics,
+                    "applicability": applicability_metrics,
                 },
             )
             print(
                 "Temperature scaling: "
                 f"action={temperature_state.action_temperature:.4f} "
-                f"finger={temperature_state.finger_temperature:.4f}"
+                f"finger={temperature_state.finger_temperature:.4f} "
+                f"applicability={temperature_state.applicability_temperature:.4f}"
             )
         save_temperature_scaling(save_temperature_path, temperature_state)
 
         all_action_probs = []
         all_finger_probs = []
+        all_applicability_probs = []
         with torch.no_grad():
             for Xb, yfb, yab in test_loader:
                 Xb = Xb.to(device)
-                f_out, a_out = model(Xb)
+                f_out, a_out, app_out = unpack_model_outputs(model(Xb))
                 a_out = apply_temperature_to_logits(
                     a_out, temperature_state.action_temperature
                 )
                 f_out = apply_temperature_to_logits(
                     f_out, temperature_state.finger_temperature
                 )
+                if app_out is not None:
+                    app_out = apply_temperature_to_logits(
+                        app_out, temperature_state.applicability_temperature
+                    )
                 all_finger_probs.append(torch.softmax(f_out, dim=1).cpu().numpy())
                 all_action_probs.append(torch.softmax(a_out, dim=1).cpu().numpy())
+                if app_out is not None:
+                    all_applicability_probs.append(torch.sigmoid(app_out).cpu().numpy())
 
         action_probs = np.concatenate(all_action_probs, axis=0).astype(np.float32)
         finger_probs = np.concatenate(all_finger_probs, axis=0).astype(np.float32)
+        applicability_probs = (
+            np.concatenate(all_applicability_probs, axis=0).astype(np.float32)
+            if all_applicability_probs
+            else None
+        )
 
         test_action_pred = np.argmax(action_probs, axis=1).astype(np.int64)
         test_action_acc = float(np.mean(test_action_pred == y_action_test.astype(np.int64)))
@@ -2005,8 +2165,14 @@ def main():
             "temperature_scaling": {
                 "action_temperature": float(temperature_state.action_temperature),
                 "finger_temperature": float(temperature_state.finger_temperature),
+                "applicability_temperature": float(
+                    temperature_state.applicability_temperature
+                ),
                 "fit_sample_count": int(temperature_state.fit_sample_count),
                 "fit_non_rest_count": int(temperature_state.fit_non_rest_count),
+                "has_applicability_temperature": bool(
+                    temperature_state.has_applicability_temperature
+                ),
                 "source": str(temperature_state.source),
                 "metrics": temperature_state.metrics or {},
             },
@@ -2080,7 +2246,12 @@ def main():
             finger_temperature=np.array(
                 [float(temperature_state.finger_temperature)], dtype=np.float32
             ),
+            applicability_temperature=np.array(
+                [float(temperature_state.applicability_temperature)], dtype=np.float32
+            ),
         )
+        if applicability_probs is not None:
+            save_dict["applicability_probs"] = applicability_probs
 
         if test_window_start is not None:
             save_dict["window_start"] = test_window_start

@@ -26,6 +26,7 @@ class PostprocessSettings:
     hysteresis_frames: int = 3
     threshold_action: float = 0.05
     threshold_finger: float = 0.20
+    threshold_applicability: float = 0.50
     adjacency_enabled: bool = False
     hysteresis_margin: float = 0.05
     finger_delta: float = 0.05
@@ -88,6 +89,8 @@ def postprocess_predictions(
     finger_probs: np.ndarray,
     settings: PostprocessSettings,
     state: PostprocessState,
+    *,
+    finger_applicable_prob: Optional[float] = None,
 ) -> Dict[str, object]:
     """
     ACTION: can be smoothed (vote/ema) + hysteresis.
@@ -216,6 +219,7 @@ def postprocess_predictions(
 
     decision_reason = "commit"
     finger_gate_ok = True
+    applicability_gate_ok = True
     committed_finger_conf = (
         finger_confidence_for_id(finger_probs, smoothed_finger_id)
         if finger_probs.size and getattr(settings, "finger_mode", "raw") == "raw"
@@ -322,6 +326,11 @@ def postprocess_predictions(
 
             if committed_finger_conf < float(settings.threshold_finger):
                 finger_gate_ok = False
+            if finger_applicable_prob is not None and (
+                float(finger_applicable_prob)
+                < float(settings.threshold_applicability)
+            ):
+                applicability_gate_ok = False
 
     if int(committed_action) == int(ACTION_REST):
         committed_finger_conf = (
@@ -334,6 +343,7 @@ def postprocess_predictions(
             )
         )
         finger_gate_ok = True
+        applicability_gate_ok = True
 
     # ===== Update state =====
     if int(committed_action) == int(state.last_action):
@@ -352,6 +362,10 @@ def postprocess_predictions(
         "action_conf": float(action_conf),
         "finger_conf": float(committed_finger_conf),
         "finger_gate_ok": bool(finger_gate_ok),
+        "finger_applicable_prob": (
+            float(finger_applicable_prob) if finger_applicable_prob is not None else None
+        ),
+        "applicability_gate_ok": bool(applicability_gate_ok),
         "committed_pair_valid": bool(
             is_valid_action_finger(int(committed_action), int(committed_finger))
         ),
