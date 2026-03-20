@@ -105,7 +105,9 @@ from app.repo_probe import discover_scripts
 from app.ui_config_validation import validate_step_settings
 from muse_streaming.config import DEFAULT_STREAM_NAME, DEFAULT_STREAM_TYPE
 from muse_streaming.healthcheck import run_healthcheck
+from utils.eeglab_export import default_eeglab_export_path, export_session_to_eeglab
 from utils.label_schema import ACTION_NAMES, FINGER_NAMES
+from utils.session_event_io import resolve_raw_shard_paths
 from utils.session_layout import SessionLayout, resolve_latest_run_dir
 from visualization.live_viz import parse_viz_line
 from visualization.replay_viz import ReplayVisualizer
@@ -574,6 +576,10 @@ QDockWidget { font-weight: 600; }
 QWidget#Sidebar { background-color: rgb(80, 100, 130); }
 QWidget#CentralWorkspace { background-color: rgb(220, 225, 235); }
 QWidget#BottomBar { background-color: rgb(45, 45, 45); }
+QFrame#StatusBarFrame {
+  background: rgb(243, 247, 252);
+  border: 1px solid #a9b7cc;
+}
 
 QScrollArea { border: none; }
 QScrollArea#Sidebar { background-color: rgb(80, 100, 130); }
@@ -596,6 +602,10 @@ QGroupBox::title {
   color: white;
   font-weight: 700;
 }
+QWidget#CentralWorkspace QGroupBox::title {
+  color: rgb(76, 93, 118);
+  background: transparent;
+}
 
 QToolButton#InfoButton {
   background: rgb(80, 100, 130);
@@ -609,6 +619,21 @@ QToolButton#InfoButton {
 }
 QToolButton#InfoButton:hover { background: rgb(110, 130, 170); }
 QToolButton#InfoButton:pressed { background: rgb(65, 80, 105); }
+QToolButton#DropdownButton {
+  background: rgb(110, 130, 170);
+  color: white;
+  border: 1px solid #6f85ad;
+  border-radius: 6px;
+  padding: 7px 12px;
+  font-weight: 700;
+}
+QToolButton#DropdownButton:hover { background: rgb(130, 150, 190); }
+QToolButton#DropdownButton:pressed { background: rgb(89, 108, 145); }
+QToolButton#DropdownButton:disabled {
+  background: rgb(122, 138, 168);
+  color: rgba(255,255,255,215);
+  border: 1px solid #8195bc;
+}
 
 QPushButton {
   background: rgb(110, 130, 170);
@@ -633,8 +658,15 @@ QAbstractItemView, QListWidget {
   border: 1px solid #7a8fb8;
 }
 
-QLabel { color: white; font-weight: 600; }
-QCheckBox, QRadioButton { color: white; font-weight: 600; }
+QLabel { color: rgb(33, 48, 71); font-weight: 600; }
+QCheckBox, QRadioButton { color: rgb(33, 48, 71); font-weight: 600; }
+QWidget#Sidebar QLabel, QWidget#Sidebar QCheckBox, QWidget#Sidebar QRadioButton { color: white; }
+QWidget#BottomBar QLabel, QWidget#BottomBar QCheckBox, QWidget#BottomBar QRadioButton { color: rgb(235, 240, 247); }
+QWidget#CentralWorkspace QLabel, QWidget#CentralWorkspace QCheckBox, QWidget#CentralWorkspace QRadioButton { color: rgb(33, 48, 71); }
+QWidget#CentralWorkspace QGroupBox QLabel,
+QWidget#CentralWorkspace QGroupBox QCheckBox,
+QWidget#CentralWorkspace QGroupBox QRadioButton { color: white; }
+QFrame#StatusBarFrame QLabel { color: rgb(33, 48, 71); font-weight: 700; }
 QToolTip { background-color: rgb(80, 100, 130); color: white; border: 1px solid #7a8fb8; }
 QTabBar::tab { background: rgb(80, 100, 130); color: white; padding: 6px 10px; }
 QTabBar::tab:selected { background: rgb(110, 130, 170); }
@@ -1482,10 +1514,11 @@ class MainWindow(QMainWindow):
         elif state == "red":
             label.setStyleSheet("color: rgb(255, 120, 120); font-weight: 900;")
         else:
-            label.setStyleSheet("color: white; font-weight: 700;")
+            label.setStyleSheet("color: rgb(33, 48, 71); font-weight: 700;")
 
     def _build_dropdown_button(self, title: str, panel: QWidget) -> QToolButton:
         button = QToolButton()
+        button.setObjectName("DropdownButton")
         button.setText(title)
         button.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(button)
@@ -1580,15 +1613,18 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(14)
 
-        # Use outlined labels (painted inside their own rect) to avoid the
-        # QGraphicsEffect halo overlapping adjacent widgets.
-        self.project_label = OutlinedLabel("Project: -")
-        self.subject_label = OutlinedLabel("Subject: -")
-        self.session_label = OutlinedLabel("Session: -")
-        self.stream_state_label = OutlinedLabel("Stream: idle")
-        self.ica_state_label = OutlinedLabel("ICA: off")
-        self.events_state_label = OutlinedLabel("Events: off")
-        self.battery_label = OutlinedLabel("Battery: N/A")
+        def _status_label(text: str) -> QLabel:
+            label = QLabel(text)
+            label.setObjectName("StatusSummaryLabel")
+            return label
+
+        self.project_label = _status_label("Project: -")
+        self.subject_label = _status_label("Subject: -")
+        self.session_label = _status_label("Session: -")
+        self.stream_state_label = _status_label("Stream: idle")
+        self.ica_state_label = _status_label("ICA: off")
+        self.events_state_label = _status_label("Events: off")
+        self.battery_label = _status_label("Battery: N/A")
 
         for label in (
             self.project_label,
@@ -1673,6 +1709,7 @@ class MainWindow(QMainWindow):
         self.connector_device_dock = QLabel("Muse device: -")
         self.connector_stream_dock = QLabel("LSL stream: -")
         self.connector_log_dock = QLabel("Last connector log: -")
+        self.connector_stream_dock.setWordWrap(True)
         self.connector_log_dock.setWordWrap(True)
         for label in (
             self.connector_status_dock,
@@ -1832,7 +1869,7 @@ class MainWindow(QMainWindow):
             self.subject_label_dock,
             self.session_label_dock,
         ):
-            label.setWordWrap(False)
+            label.setWordWrap(True)
             self._apply_text_outline_effect(label)
         session_layout.addWidget(self.project_label_dock)
         session_layout.addWidget(self.subject_label_dock)
@@ -1863,7 +1900,6 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(6, 6, 6, 6)
 
         model_views_header = QLabel("Model Views")
-        self._apply_text_outline_effect(model_views_header)
         layout.addWidget(model_views_header)
 
         self.live_viz_checkbox = QCheckBox("Emit Step 7 live model views")
@@ -1873,18 +1909,15 @@ class MainWindow(QMainWindow):
         self.live_viz_fps_spin.setValue(2)
         fps_row = QHBoxLayout()
         fps_label = QLabel("Step 7 live viz FPS")
-        self._apply_text_outline_effect(fps_label)
         fps_row.addWidget(fps_label)
         fps_row.addWidget(self.live_viz_fps_spin)
         fps_row.addStretch(1)
         layout.addLayout(fps_row)
         self.live_viz_status_label = QLabel("Live Model View: Step 7 inactive")
-        self._apply_text_outline_effect(self.live_viz_status_label)
         layout.addWidget(self.live_viz_status_label)
 
         if not PYQTGRAPH_AVAILABLE:
             pg_note = QLabel("pyqtgraph not available; model visualizations disabled.")
-            self._apply_text_outline_effect(pg_note)
             layout.addWidget(pg_note)
             return widget
 
@@ -1925,7 +1958,6 @@ class MainWindow(QMainWindow):
         replay_auto_row.addStretch(1)
         replay_layout.addLayout(replay_auto_row)
         self.replay_pred_label = QLabel("Current prediction: -")
-        self._apply_text_outline_effect(self.replay_pred_label)
         replay_layout.addWidget(self.replay_pred_label)
         replay_btn_row = QHBoxLayout()
         load_btn = QPushButton("Load Replay Data")
@@ -1980,10 +2012,8 @@ class MainWindow(QMainWindow):
         live_layout = QVBoxLayout(live_tab)
         live_notice = QLabel("Available only while Step 7 Live Infer + Actuate is actively running.")
         live_notice.setWordWrap(True)
-        self._apply_text_outline_effect(live_notice)
         live_layout.addWidget(live_notice)
         self.live_pred_label = QLabel("Current prediction: -")
-        self._apply_text_outline_effect(self.live_pred_label)
         live_layout.addWidget(self.live_pred_label)
         self.live_feature_view = pg.ImageView()
         try:
@@ -2082,7 +2112,6 @@ class MainWindow(QMainWindow):
     def _add_section_header(self, layout: QVBoxLayout, title: str, body: str) -> None:
         row = QHBoxLayout()
         label = QLabel(title)
-        self._apply_text_outline_effect(label)
         row.addWidget(label)
         row.addWidget(self._make_info_button(title, body))
         row.addStretch(1)
@@ -2416,6 +2445,8 @@ class MainWindow(QMainWindow):
 
     def _switch_page(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
+        if index == WORKFLOW_ROWS["export"]:
+            self._refresh_export_controls()
 
     def _set_stream_status(self, text: str) -> None:
         if hasattr(self, "stream_status") and self.stream_status is not None:
@@ -2617,6 +2648,8 @@ class MainWindow(QMainWindow):
         project_box = QGroupBox("Project")
         project_layout = QVBoxLayout(project_box)
         project_form = QFormLayout()
+        project_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        project_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
 
         self.project_combo = QComboBox()
         # Populate without triggering open until the user selects
@@ -2644,12 +2677,17 @@ class MainWindow(QMainWindow):
         subject_box = QGroupBox("Subject")
         subject_layout = QVBoxLayout(subject_box)
         subject_form = QFormLayout()
+        subject_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        subject_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
 
         self.subject_combo = QComboBox()
         self.subject_combo.currentTextChanged.connect(self._select_subject)
         subject_form.addRow("Subject", self.subject_combo)
-        self.projects_selected_session_value = QLabel("(none)")
-        self.projects_selected_session_value.setWordWrap(True)
+        self.projects_selected_session_value = QPlainTextEdit()
+        self.projects_selected_session_value.setReadOnly(True)
+        self.projects_selected_session_value.setMaximumHeight(88)
+        self.projects_selected_session_value.setTabChangesFocus(True)
+        self.projects_selected_session_value.setPlainText("(none)")
         subject_form.addRow("Selected Session", self.projects_selected_session_value)
         subject_layout.addLayout(subject_form)
 
@@ -3523,9 +3561,72 @@ class MainWindow(QMainWindow):
         header_row.addStretch(1)
         layout.addLayout(header_row)
 
-        msg = QLabel("Export to EEGLAB (.set/.mat) not found in repo; export disabled.")
+        msg = QLabel(
+            "Export the selected lossless session to an EEGLAB-compatible MAT-file. "
+            "The export uses raw shards plus canonical events and writes a `.set` or `.mat` file."
+        )
         msg.setWordWrap(True)
         layout.addWidget(msg)
+
+        source_box = QGroupBox("Source Session")
+        source_layout = QFormLayout(source_box)
+        source_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        source_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+
+        self.export_session_dir_input = OutlineLineEdit()
+        self.export_session_dir_input.textChanged.connect(self._on_export_session_dir_changed)
+        session_btn = QPushButton("Browse")
+        session_btn.clicked.connect(
+            lambda: self._browse_dir(self.export_session_dir_input, "Select Session Directory")
+        )
+        session_row = QHBoxLayout()
+        session_row.setContentsMargins(0, 0, 0, 0)
+        session_row.addWidget(self.export_session_dir_input)
+        session_row.addWidget(session_btn)
+        session_widget = QWidget()
+        session_widget.setLayout(session_row)
+        source_layout.addRow("Session Dir", session_widget)
+        layout.addWidget(source_box)
+
+        out_box = QGroupBox("Output")
+        out_layout = QFormLayout(out_box)
+        out_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        out_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+
+        self.export_out_path_input = OutlineLineEdit()
+        out_btn = QPushButton("Browse")
+        out_btn.clicked.connect(
+            lambda: self._browse_path(
+                self.export_out_path_input,
+                "EEGLAB (*.set *.mat);;All Files (*)",
+                "Save EEGLAB Export",
+                mode="save",
+            )
+        )
+        out_row = QHBoxLayout()
+        out_row.setContentsMargins(0, 0, 0, 0)
+        out_row.addWidget(self.export_out_path_input)
+        out_row.addWidget(out_btn)
+        out_widget = QWidget()
+        out_widget.setLayout(out_row)
+        out_layout.addRow("Export File", out_widget)
+        layout.addWidget(out_box)
+
+        self.export_status_label = QLabel("Pick a recorded session to enable export.")
+        self.export_status_label.setWordWrap(True)
+        layout.addWidget(self.export_status_label)
+
+        button_row = QHBoxLayout()
+        self.export_run_btn = QPushButton("Export EEGLAB Session")
+        self.export_run_btn.clicked.connect(self._run_export_eeglab)
+        self.export_open_dir_btn = QPushButton("Open Export Folder")
+        self.export_open_dir_btn.clicked.connect(self._open_export_dir)
+        button_row.addWidget(self.export_run_btn)
+        button_row.addWidget(self.export_open_dir_btn)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        self._refresh_export_controls()
         layout.addStretch(1)
         return page
 
@@ -5790,6 +5891,7 @@ class MainWindow(QMainWindow):
         self.current_project = name
         self._set_project_label(f"Project: {name}")
         self._refresh_subjects()
+        self._refresh_export_controls()
 
     def _refresh_subjects(self) -> None:
         self.subject_combo.blockSignals(True)
@@ -5869,6 +5971,7 @@ class MainWindow(QMainWindow):
         self._auto_select_latest_session_for_subject()
         self._auto_fill_paths()
         self._seed_stream_name_input()
+        self._refresh_export_controls()
 
     def _edit_subject(self) -> None:
         if not self.current_project:
@@ -6108,12 +6211,20 @@ class MainWindow(QMainWindow):
     def _update_projects_selected_session_label(self, force_none: bool = False) -> None:
         if not hasattr(self, "projects_selected_session_value"):
             return
+        widget = self.projects_selected_session_value
+
+        def _set_value(text: str) -> None:
+            if isinstance(widget, QPlainTextEdit):
+                widget.setPlainText(text)
+            elif isinstance(widget, QLabel):
+                widget.setText(text)
+
         if force_none:
-            self.projects_selected_session_value.setText("(none)")
+            _set_value("(none)")
             return
         effective = self._resolve_effective_session_dir(step_id="train")
         if not effective:
-            self.projects_selected_session_value.setText("(none)")
+            _set_value("(none)")
             return
         display_path = effective.expanduser()
         if display_path.exists():
@@ -6126,7 +6237,7 @@ class MainWindow(QMainWindow):
                 display_path = display_path.absolute()
             except Exception:
                 pass
-        self.projects_selected_session_value.setText(str(display_path))
+        _set_value(str(display_path))
 
     def _autofill_dependent_paths_from_session_dir(self) -> None:
         global_session = self._resolve_effective_session_dir(step_id=None)
@@ -6325,10 +6436,118 @@ class MainWindow(QMainWindow):
     def _on_session_dir_changed(self, _text: str) -> None:
         self._update_projects_selected_session_label()
         self._autofill_dependent_paths_from_session_dir()
+        self._refresh_export_controls()
 
     def _on_train_session_dir_changed(self, _text: str) -> None:
         self._update_projects_selected_session_label()
         self._autofill_dependent_paths_from_session_dir()
+        self._refresh_export_controls()
+
+    def _on_export_session_dir_changed(self, _text: str) -> None:
+        self._refresh_export_controls()
+
+    def _refresh_export_controls(self) -> None:
+        if not hasattr(self, "export_session_dir_input"):
+            return
+        effective = self._resolve_effective_session_dir(step_id=None)
+        if effective is not None:
+            self._maybe_autofill_text(
+                self.export_session_dir_input,
+                str(effective),
+                key="export.session_dir",
+                legacy_values={""},
+            )
+
+        session_text = self.export_session_dir_input.text().strip()
+        session_dir = Path(session_text).expanduser() if session_text else None
+        export_ready = False
+        status = "Pick a recorded session directory under `subjects/<id>/sessions/<session_id>` to enable export."
+        if session_dir and session_dir.exists():
+            try:
+                session_dir = session_dir.resolve()
+            except Exception:
+                pass
+            self._maybe_autofill_text(
+                self.export_out_path_input,
+                str(default_eeglab_export_path(session_dir)),
+                key="export.out_path",
+                legacy_values={""},
+            )
+            events_path = self._event_file_for_session(session_dir)
+            raw_paths = resolve_raw_shard_paths(session_dir)
+            export_ready = bool(raw_paths)
+            status = (
+                f"Ready to export `{session_dir.name}`: {len(raw_paths)} raw shard(s), "
+                f"{'events found' if events_path else 'no events file found'}."
+            )
+
+        self.export_run_btn.setEnabled(export_ready)
+        out_path_text = (
+            self.export_out_path_input.text().strip()
+            if hasattr(self, "export_out_path_input")
+            else ""
+        )
+        self.export_open_dir_btn.setEnabled(bool(out_path_text))
+        self.export_status_label.setText(status)
+
+    def _run_export_eeglab(self) -> None:
+        session_text = (
+            self.export_session_dir_input.text().strip()
+            if hasattr(self, "export_session_dir_input")
+            else ""
+        )
+        if not session_text:
+            QMessageBox.warning(
+                self,
+                "Session Dir Required",
+                "Select a session directory before exporting.",
+            )
+            return
+        out_text = (
+            self.export_out_path_input.text().strip()
+            if hasattr(self, "export_out_path_input")
+            else ""
+        )
+        if not out_text:
+            QMessageBox.warning(
+                self,
+                "Output Path Required",
+                "Choose an output `.set` or `.mat` file.",
+            )
+            return
+        try:
+            summary = export_session_to_eeglab(session_text, out_text)
+        except Exception as exc:
+            self._append_log(f"EEGLAB export failed: {exc}")
+            QMessageBox.warning(self, "EEGLAB Export Failed", str(exc))
+            return
+        self._append_log(
+            "EEGLAB export wrote "
+            f"{summary.out_path} ({summary.channel_count} channels, {summary.sample_count} samples, "
+            f"{summary.event_count} events, skipped={summary.skipped_event_count})."
+        )
+        self.export_status_label.setText(
+            f"Exported `{summary.out_path.name}` from `{summary.session_dir.name}` "
+            f"with {summary.event_count} event(s)."
+        )
+        QMessageBox.information(
+            self,
+            "EEGLAB Export Complete",
+            f"Wrote {summary.out_path}\n\n"
+            f"Channels: {summary.channel_count}\n"
+            f"Samples: {summary.sample_count}\n"
+            f"Events: {summary.event_count}",
+        )
+
+    def _open_export_dir(self) -> None:
+        if not hasattr(self, "export_out_path_input"):
+            return
+        out_text = self.export_out_path_input.text().strip()
+        if not out_text:
+            return
+        target = Path(out_text).expanduser().parent
+        target.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
     def _resolve_session_dir_for_current(self, subject_dir: Path) -> Optional[Path]:
         """Best-effort resolve the session directory that the UI is currently targeting."""
@@ -7857,6 +8076,7 @@ class MainWindow(QMainWindow):
         dialog.setText("Actuation enabled. Confirm the hand is safe and clear.")
         dialog.setIcon(QMessageBox.Warning)
         dialog.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        self._style_message_box(dialog)
         return dialog.exec() == QMessageBox.Ok
 
     def _show_blocking_notice(self, title: str, message: str) -> None:
@@ -7865,6 +8085,7 @@ class MainWindow(QMainWindow):
         dialog.setText(message)
         dialog.setIcon(QMessageBox.Warning)
         dialog.setStandardButtons(QMessageBox.Ok)
+        self._style_message_box(dialog)
         dialog.exec()
 
     def _show_blocking_ack(
@@ -7886,12 +8107,49 @@ class MainWindow(QMainWindow):
         layout.addWidget(btn)
         return dialog.exec() == QDialog.Accepted
 
+    def _style_message_box(self, dialog: QMessageBox) -> None:
+        dialog.setStyleSheet(
+            "QMessageBox { background: #2f3338; }"
+            "QMessageBox QLabel { color: #eef2f7; font-weight: 600; min-width: 360px; }"
+            "QMessageBox QPushButton { min-width: 72px; }"
+        )
+
     def _show_info_dialog(self, title: str, message: str) -> None:
-        dialog = QMessageBox(self)
+        dialog = QDialog(self)
         dialog.setWindowTitle(title)
-        dialog.setText(message)
-        dialog.setIcon(QMessageBox.Information)
-        dialog.setStandardButtons(QMessageBox.Ok)
+        dialog.setModal(True)
+        dialog.setStyleSheet(
+            "QDialog { background: #2f3338; }"
+            "QLabel { color: #eef2f7; font-weight: 600; }"
+        )
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(16)
+
+        content_row = QHBoxLayout()
+        content_row.setSpacing(14)
+        icon_label = QLabel()
+        icon = self.style().standardIcon(QStyle.SP_MessageBoxInformation)
+        icon_label.setPixmap(icon.pixmap(48, 48))
+        icon_label.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        content_row.addWidget(icon_label, 0, Qt.AlignTop)
+
+        body = QLabel(message)
+        body.setWordWrap(True)
+        body.setMaximumWidth(520)
+        body.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        content_row.addWidget(body, 1)
+        layout.addLayout(content_row)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        ok_btn = QPushButton("OK")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(dialog.accept)
+        button_row.addWidget(ok_btn)
+        layout.addLayout(button_row)
+
+        dialog.adjustSize()
         dialog.exec()
 
     def _make_info_button(self, title: str, message: str) -> QToolButton:
