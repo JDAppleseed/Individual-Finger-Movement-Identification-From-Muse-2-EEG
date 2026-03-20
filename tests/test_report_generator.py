@@ -19,6 +19,18 @@ def test_generate_run_report_surfaces_directional_pair_metrics(tmp_path: Path):
                     "action_acc": 0.9,
                     "joint_acc": 0.8,
                     "finger_acc_non_rest": 0.85,
+                    "finger_metrics_by_class_non_rest": {
+                        "THUMB": {
+                            "finger_id": 1,
+                            "support": 10,
+                            "predicted_count": 11,
+                            "correct": 9,
+                            "accuracy": 0.9,
+                            "precision": 0.8182,
+                            "recall": 0.9,
+                            "f1": 0.8571,
+                        }
+                    },
                     "applicability_fp_rate_on_true_rest": 0.1,
                     "applicability_fn_rate_on_true_non_rest": 0.05,
                     "action_applicability_disagreement_rate": 0.0667,
@@ -68,3 +80,5 @@ def test_generate_run_report_surfaces_directional_pair_metrics(tmp_path: Path):
     assert "Action/applicability disagreement" in html
     assert "Deployment pair invariant OK" in html
     assert "Deprecated raw valid/invalid pair rate" in html
+    assert "Per-Finger Non-REST Metrics" in html
+    assert "THUMB" in html

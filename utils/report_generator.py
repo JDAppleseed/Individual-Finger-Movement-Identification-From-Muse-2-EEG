@@ -18,6 +18,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from utils.label_schema import (
     ACTION_REST,
     ACTION_NAMES,
+    FINGER_NONE,
     FINGER_NAMES,
     decode_finger_predictions,
     decode_finger_predictions_for_actions,
@@ -82,6 +83,75 @@ def _safe_float(value):
     if value is None or np.isnan(value):
         return "N/A"
     return f"{value:.3f}"
+
+
+def _compute_per_finger_non_rest_metrics(y_true, y_pred):
+    y_true = np.asarray(y_true, dtype=np.int64).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=np.int64).reshape(-1)
+    metrics = {}
+    for finger_id in FINGER_LABELS:
+        if int(finger_id) == int(FINGER_NONE):
+            continue
+        support = int(np.sum(y_true == finger_id))
+        predicted_count = int(np.sum(y_pred == finger_id))
+        correct = int(np.sum((y_true == finger_id) & (y_pred == finger_id)))
+        accuracy = float(correct / support) if support else None
+        precision = float(correct / predicted_count) if predicted_count else None
+        recall = accuracy
+        if support == 0 and predicted_count == 0:
+            f1 = None
+        elif correct == 0:
+            f1 = 0.0
+        elif precision is not None and recall is not None:
+            denom = precision + recall
+            f1 = float(2.0 * precision * recall / denom) if denom else 0.0
+        else:
+            f1 = None
+        metrics[FINGER_NAMES.get(int(finger_id), str(int(finger_id)))] = {
+            "finger_id": int(finger_id),
+            "support": support,
+            "predicted_count": predicted_count,
+            "correct": correct,
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+        }
+    return metrics
+
+
+def _render_per_finger_non_rest_table(metrics_by_finger):
+    if not isinstance(metrics_by_finger, dict) or not metrics_by_finger:
+        return ""
+    rows = []
+    for finger_id in FINGER_LABELS:
+        if int(finger_id) == int(FINGER_NONE):
+            continue
+        finger_name = FINGER_NAMES.get(int(finger_id), str(int(finger_id)))
+        row = metrics_by_finger.get(finger_name)
+        if not isinstance(row, dict):
+            continue
+        rows.append(
+            "<tr>"
+            f"<td>{finger_name}</td>"
+            f"<td>{row.get('correct', 'N/A')}</td>"
+            f"<td>{row.get('support', 'N/A')}</td>"
+            f"<td>{row.get('predicted_count', 'N/A')}</td>"
+            f"<td>{_safe_pct(row.get('accuracy'))}</td>"
+            f"<td>{_safe_pct(row.get('precision'))}</td>"
+            f"<td>{_safe_pct(row.get('recall'))}</td>"
+            f"<td>{_safe_pct(row.get('f1'))}</td>"
+            "</tr>"
+        )
+    if not rows:
+        return ""
+    return """
+    <h2>Per-Finger Non-REST Metrics</h2>
+    <table border="1" cellpadding="4" cellspacing="0">
+      <tr><th>Finger</th><th>Correct</th><th>Support</th><th>Predicted</th><th>Accuracy</th><th>Precision</th><th>Recall</th><th>F1</th></tr>
+      {rows}
+    </table>
+    """.replace("{rows}", "".join(rows))
 
 
 def _plot_confusion_matrix(cm, labels, tick_labels, *, title, cmap, out_path):
@@ -425,6 +495,7 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     joint_acc = None
     joint_acc_non_rest = None
     finger_acc_non_rest = None
+    finger_metrics_by_class_non_rest = None
     finger_acc_overall = None
     finger_f1_non_rest_macro = None
     finger_f1_non_rest_weighted = None
@@ -524,6 +595,9 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
             )
             finger_cm = confusion_matrix(
                 y_finger[mask], finger_pred[mask], labels=FINGER_LABELS
+            )
+            finger_metrics_by_class_non_rest = _compute_per_finger_non_rest_metrics(
+                y_finger[mask], finger_pred[mask]
             )
         if y_finger.size:
             finger_acc_overall = float(accuracy_score(y_finger, finger_pred))
@@ -628,6 +702,9 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
         joint_acc = manifest_metrics.get("joint_acc", joint_acc)
         joint_acc_non_rest = manifest_metrics.get("joint_acc_non_rest", joint_acc_non_rest)
         finger_acc_non_rest = manifest_metrics.get("finger_acc_non_rest", finger_acc_non_rest)
+        finger_metrics_by_class_non_rest = manifest_metrics.get(
+            "finger_metrics_by_class_non_rest", finger_metrics_by_class_non_rest
+        )
         finger_acc_overall = manifest_metrics.get("finger_acc_overall", finger_acc_overall)
         rest_tpr = manifest_metrics.get("rest_tpr", rest_tpr)
         rest_fpr = manifest_metrics.get("rest_fpr", rest_fpr)
@@ -732,6 +809,8 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
         </table>
         """
 
+    per_finger_html = _render_per_finger_non_rest_table(finger_metrics_by_class_non_rest)
+
     html = f"""
     <html>
     <head><title>BCI Run Report - {run_dir.name}</title></head>
@@ -780,6 +859,7 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
     {repeated_html}
     {flags_html}
     {rest_breakdown_html}
+    {per_finger_html}
 
     <h2>Confusion Matrices</h2>
     {confusion_html or "<p><i>Predictions unavailable; skipping matrices.</i></p>"}

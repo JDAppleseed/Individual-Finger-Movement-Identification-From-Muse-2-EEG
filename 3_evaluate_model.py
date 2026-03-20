@@ -802,6 +802,44 @@ def _format_pair_counts(action_ids: np.ndarray, finger_ids: np.ndarray) -> Dict[
     }
 
 
+def _compute_per_finger_non_rest_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+) -> Dict[str, Dict[str, Any]]:
+    y_true = np.asarray(y_true, dtype=np.int64).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=np.int64).reshape(-1)
+    metrics: Dict[str, Dict[str, Any]] = {}
+    for finger_id in FINGER_LABELS:
+        if int(finger_id) == int(FINGER_NONE):
+            continue
+        support = int(np.sum(y_true == finger_id))
+        predicted_count = int(np.sum(y_pred == finger_id))
+        correct = int(np.sum((y_true == finger_id) & (y_pred == finger_id)))
+        accuracy = float(correct / support) if support else None
+        precision = float(correct / predicted_count) if predicted_count else None
+        recall = accuracy
+        if support == 0 and predicted_count == 0:
+            f1 = None
+        elif correct == 0:
+            f1 = 0.0
+        elif precision is not None and recall is not None:
+            denom = precision + recall
+            f1 = float(2.0 * precision * recall / denom) if denom else 0.0
+        else:
+            f1 = None
+        metrics[FINGER_NAMES.get(int(finger_id), str(int(finger_id)))] = {
+            "finger_id": int(finger_id),
+            "support": support,
+            "predicted_count": predicted_count,
+            "correct": correct,
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+        }
+    return metrics
+
+
 def _compute_prediction_metrics(
     *,
     action_probs: np.ndarray,
@@ -865,6 +903,13 @@ def _compute_prediction_metrics(
     mask_non_rest = y_action_true != ACTION_REST
     joint_correct = (action_preds == y_action_true) & (finger_preds == y_finger_true)
     rest_mask = y_action_true == ACTION_REST
+    finger_metrics_by_class_non_rest = (
+        _compute_per_finger_non_rest_metrics(
+            y_finger_true[mask_non_rest], finger_preds[mask_non_rest]
+        )
+        if np.any(mask_non_rest)
+        else None
+    )
 
     rest_tpr = None
     rest_precision = None
@@ -921,6 +966,7 @@ def _compute_prediction_metrics(
         "finger_acc_non_rest": float(accuracy_score(y_finger_true[mask_non_rest], finger_preds[mask_non_rest]))
         if np.any(mask_non_rest)
         else None,
+        "finger_metrics_by_class_non_rest": finger_metrics_by_class_non_rest,
         "finger_acc_overall": float(accuracy_score(y_finger_true, finger_preds)) if len(y_finger_true) else None,
         "rest_tpr": rest_tpr,
         "rest_fpr": rest_fpr,
@@ -971,6 +1017,7 @@ def _build_primary_benchmark(
                 "joint_acc",
                 "joint_acc_non_rest",
                 "finger_acc_non_rest",
+                "finger_metrics_by_class_non_rest",
                 "rest_tpr",
                 "rest_precision",
                 "action_ece",
@@ -1506,6 +1553,7 @@ def main():
             "joint_acc": None,
             "joint_acc_non_rest": None,
             "finger_acc_non_rest": None,
+            "finger_metrics_by_class_non_rest": None,
             "finger_acc_overall": None,
             "finger_f1_non_rest_macro": None,
             "finger_f1_non_rest_weighted": None,
@@ -2184,6 +2232,11 @@ def main():
         if (finger_metrics_ok and mask.any())
         else None
     )
+    finger_metrics_by_class_non_rest = (
+        _compute_per_finger_non_rest_metrics(y_finger_test[mask], finger_preds[mask])
+        if (finger_metrics_ok and mask.any())
+        else None
+    )
 
     finger_acc_overall = (
         accuracy_score(y_finger_test, finger_preds)
@@ -2537,6 +2590,9 @@ def main():
     manifest["metrics"]["finger_acc_non_rest"] = (
         float(finger_acc) if finger_acc is not None else None
     )
+    manifest["metrics"]["finger_metrics_by_class_non_rest"] = (
+        finger_metrics_by_class_non_rest
+    )
     manifest["metrics"]["finger_acc_overall"] = (
         float(finger_acc_overall) if finger_acc_overall is not None else None
     )
@@ -2700,6 +2756,7 @@ def main():
                     "joint_acc",
                     "joint_acc_non_rest",
                     "finger_acc_non_rest",
+                    "finger_metrics_by_class_non_rest",
                     "rest_tpr",
                     "rest_precision",
                     "action_ece",

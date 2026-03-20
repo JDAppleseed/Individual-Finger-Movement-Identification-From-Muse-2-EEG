@@ -119,6 +119,13 @@ def test_compute_prediction_metrics_reports_rest_and_pair_validity():
     assert payload["metrics"]["deployment_pair_invariant_ok"] is True
     assert payload["metrics"]["raw_invalid_pair_rate"] == 0.0
     assert payload["pair_counts"]["REST+NONE"] == 1
+    per_finger = payload["metrics"]["finger_metrics_by_class_non_rest"]
+    assert per_finger["THUMB"]["correct"] == 1
+    assert per_finger["THUMB"]["support"] == 1
+    assert per_finger["THUMB"]["accuracy"] == 1.0
+    assert per_finger["INDEX"]["correct"] == 1
+    assert per_finger["INDEX"]["support"] == 1
+    assert per_finger["INDEX"]["accuracy"] == 1.0
 
 
 def test_compute_prediction_metrics_respects_applicability_threshold() -> None:
@@ -192,6 +199,9 @@ def test_primary_benchmark_surfaces_applicability_and_committed_rest_metrics():
             "joint_acc": 0.8,
             "joint_acc_non_rest": 0.75,
             "finger_acc_non_rest": 0.85,
+            "finger_metrics_by_class_non_rest": {
+                "THUMB": {"accuracy": 1.0, "support": 1, "predicted_count": 1, "correct": 1},
+            },
             "rest_tpr": 0.7,
             "rest_precision": 0.6,
             "action_ece": 0.1,
@@ -211,3 +221,4 @@ def test_primary_benchmark_surfaces_applicability_and_committed_rest_metrics():
     assert metrics["applicability_fn_rate_on_true_non_rest"] == 0.1
     assert metrics["action_applicability_disagreement_rate"] == 0.05
     assert metrics["committed_rest_non_none_rate"] == 0.0
+    assert metrics["finger_metrics_by_class_non_rest"]["THUMB"]["accuracy"] == 1.0
