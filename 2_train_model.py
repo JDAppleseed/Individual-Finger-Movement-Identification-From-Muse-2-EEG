@@ -8,10 +8,12 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
+import contextlib
 import json
 import random
 import re
 import hashlib
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
@@ -27,10 +29,10 @@ from utils.sequence_data import (
     load_sequence_npz,
     split_indices,
     fit_channel_normalizer,
-    apply_channel_normalizer,
 )
 from utils.runtime_utils import (
     TemperatureScalingState,
+    apply_channel_normalizer as apply_saved_channel_normalizer,
     apply_temperature_to_logits,
     save_normalizer,
     save_temperature_scaling,
@@ -73,6 +75,7 @@ ACTIVE_FINGER_HEAD = True
 FINGER_APPLICABILITY_HEAD = True
 APPLICABILITY_LOSS_WEIGHT = 0.5
 THRESHOLD_APPLICABILITY = 0.5
+AMP_MODE = "off"
 
 DEFAULT_NPZ = "eeg_windows.npz"
 DEFAULT_MODEL = "finger_action_model.pt"
@@ -241,11 +244,44 @@ def set_seed(seed: int):
     torch.backends.cudnn.benchmark = False
 
 
+def _device_synchronize(device: torch.device) -> None:
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+    elif device.type == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
+        torch.mps.synchronize()
+
+
+def _resolve_amp_dtype(amp_mode: str, device: torch.device) -> Optional[torch.dtype]:
+    amp_mode = str(amp_mode or "off").strip().lower()
+    if amp_mode == "off":
+        return None
+    if amp_mode == "float16":
+        if device.type in {"cuda", "mps"}:
+            return torch.float16
+        return None
+    raise ValueError(f"Unsupported amp mode: {amp_mode}")
+
+
+def _autocast_context(device: torch.device, amp_dtype: Optional[torch.dtype]):
+    if amp_dtype is None:
+        return contextlib.nullcontext()
+    if not hasattr(torch, "amp") or not hasattr(torch.amp, "autocast"):
+        return contextlib.nullcontext()
+    return torch.amp.autocast(device_type=device.type, dtype=amp_dtype)
+
+
+def _as_contiguous_numpy(array: Any, dtype: np.dtype) -> np.ndarray:
+    arr = np.asarray(array, dtype=dtype)
+    if not arr.flags.c_contiguous:
+        arr = np.ascontiguousarray(arr)
+    return arr
+
+
 class EEGWindowDataset(Dataset):
     def __init__(self, X, y_finger, y_action):
-        self.X = torch.tensor(X, dtype=torch.float32)
-        self.y_finger = torch.tensor(y_finger, dtype=torch.long)
-        self.y_action = torch.tensor(y_action, dtype=torch.long)
+        self.X = torch.from_numpy(_as_contiguous_numpy(X, np.float32))
+        self.y_finger = torch.from_numpy(_as_contiguous_numpy(y_finger, np.int64))
+        self.y_action = torch.from_numpy(_as_contiguous_numpy(y_action, np.int64))
 
     def __len__(self):
         return len(self.X)
@@ -811,32 +847,35 @@ def _compute_batch_losses(
     loss_action_weight: float,
     rest_finger_loss_weight: float,
     applicability_loss_weight: float,
-    n_finger_classes: int,
+    active_finger_head: bool,
+    finger_loss_ignore_index: Optional[int],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     loss_action = action_loss_fn(action_logits, y_action)
-    mask_nr = y_action != ACTION_REST
-    if mask_nr.any():
-        nr_targets = y_finger[mask_nr]
-        if uses_active_finger_head(n_finger_classes):
-            if torch.any(nr_targets <= int(FINGER_NONE)):
-                raise ValueError(
-                    "Non-REST windows include FINGER_NONE targets, which are invalid for an active finger head."
-                )
-            nr_targets = nr_targets - 1
-        loss_finger_non_rest = finger_loss_fn(finger_logits[mask_nr], nr_targets)
-    else:
-        loss_finger_non_rest = torch.tensor(0.0, device=action_logits.device)
+    zero = torch.zeros((), device=action_logits.device, dtype=loss_action.dtype)
 
-    mask_rest = y_action == ACTION_REST
-    if (
-        not uses_active_finger_head(n_finger_classes)
-        and rest_finger_loss_weight > 0.0
-        and mask_rest.any()
-    ):
-        rest_targets = torch.full_like(y_finger[mask_rest], int(FINGER_NONE))
-        loss_finger_rest = finger_loss_fn(finger_logits[mask_rest], rest_targets)
+    if finger_loss_ignore_index is not None:
+        finger_targets = y_finger.sub(1) if active_finger_head else y_finger.clone()
+        finger_targets.masked_fill_(
+            y_action == ACTION_REST, int(finger_loss_ignore_index)
+        )
+        loss_finger_non_rest = finger_loss_fn(finger_logits, finger_targets)
+        loss_finger_rest = zero
     else:
-        loss_finger_rest = torch.tensor(0.0, device=action_logits.device)
+        mask_nr = y_action != ACTION_REST
+        if mask_nr.any():
+            nr_targets = y_finger[mask_nr]
+            if active_finger_head:
+                nr_targets = nr_targets - 1
+            loss_finger_non_rest = finger_loss_fn(finger_logits[mask_nr], nr_targets)
+        else:
+            loss_finger_non_rest = zero
+
+        mask_rest = y_action == ACTION_REST
+        if not active_finger_head and rest_finger_loss_weight > 0.0 and mask_rest.any():
+            rest_targets = torch.full_like(y_finger[mask_rest], int(FINGER_NONE))
+            loss_finger_rest = finger_loss_fn(finger_logits[mask_rest], rest_targets)
+        else:
+            loss_finger_rest = zero
 
     if applicability_logits is not None and applicability_loss_fn is not None:
         applicability_targets = (y_action != ACTION_REST).to(
@@ -847,7 +886,7 @@ def _compute_batch_losses(
             applicability_targets.reshape(-1),
         )
     else:
-        loss_applicability = torch.tensor(0.0, device=action_logits.device)
+        loss_applicability = zero
 
     loss = loss_action + float(loss_action_weight) * (
         loss_finger_non_rest + float(rest_finger_loss_weight) * loss_finger_rest
@@ -989,6 +1028,16 @@ def build_arg_parser():
         "--pin-memory",
         action="store_true",
         help="Pin DataLoader memory (useful for CUDA).",
+    )
+    training_group.add_argument(
+        "--amp-mode",
+        type=str,
+        default=AMP_MODE,
+        choices=["off", "float16"],
+        help=(
+            "Experimental mixed precision mode. 'off' preserves current numerics. "
+            "'float16' is opt-in for CUDA/MPS speed benchmarking."
+        ),
     )
     training_group.add_argument(
         "--loss-action-weight",
@@ -1609,6 +1658,16 @@ def main():
     if len(y_action) == 0 or len(y_finger) == 0:
         print("No windows available after subject filtering.")
         return 2
+    if bool(args.active_finger_head):
+        invalid_active_targets = np.logical_and(
+            y_action != int(ACTION_REST),
+            y_finger <= int(FINGER_NONE),
+        )
+        if np.any(invalid_active_targets):
+            print(
+                "❌ Non-REST windows include FINGER_NONE targets, which are invalid for an active finger head."
+            )
+            return 2
 
 
     # ======================
@@ -1810,11 +1869,13 @@ def main():
 
         # ===== NORMALIZE =====
         preprocess_cfg = _preprocess_config_from_mode(args.window_preprocess)
+        normalize_start = time.perf_counter()
         normalizer = fit_channel_normalizer(X_train, preprocess=preprocess_cfg)
-        X_train = apply_channel_normalizer(X_train, normalizer)
+        X_train = apply_saved_channel_normalizer(X_train, normalizer, out=X_train)
         if X_calib is not None:
-            X_calib = apply_channel_normalizer(X_calib, normalizer)
-        X_test = apply_channel_normalizer(X_test, normalizer)
+            X_calib = apply_saved_channel_normalizer(X_calib, normalizer, out=X_calib)
+        X_test = apply_saved_channel_normalizer(X_test, normalizer, out=X_test)
+        normalization_sec = time.perf_counter() - normalize_start
         save_normalizer(save_scaler_path, normalizer)
 
         sample_weights, sample_weight_summary = _build_train_sample_weights(
@@ -1891,6 +1952,25 @@ def main():
             device = torch.device(args.device)
         model.to(device)
 
+        try:
+            amp_dtype = _resolve_amp_dtype(args.amp_mode, device)
+        except ValueError as exc:
+            print(f"❌ Invalid --amp-mode: {exc}")
+            return 2
+        if args.amp_mode != "off" and amp_dtype is None:
+            print(
+                f"⚠️ AMP requested via --amp-mode={args.amp_mode}, but device={device} does not support it. Disabling AMP."
+            )
+        amp_enabled = amp_dtype is not None
+        grad_scaler = None
+        if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+            grad_scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled)
+
+        print(
+            f"Training backend: device={device} num_workers={max(0, int(args.num_workers))} "
+            f"pin_memory={bool(args.pin_memory)} amp_mode={'float16' if amp_enabled else 'off'}"
+        )
+
         opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
         # Finger loss (optionally weighted per finger)
@@ -1901,12 +1981,20 @@ def main():
             except ValueError as exc:
                 print(f"❌ Invalid --finger-weights: {exc}")
                 return 2
+        active_finger_head_enabled = uses_active_finger_head(n_fingers)
+        finger_loss_ignore_index = (
+            -100
+            if active_finger_head_enabled or float(args.rest_finger_loss_weight) <= 0.0
+            else None
+        )
+        finger_loss_kwargs: Dict[str, Any] = {}
         if finger_weights is not None:
-            loss_f = nn.CrossEntropyLoss(weight=finger_weights.to(device))
+            finger_loss_kwargs["weight"] = finger_weights.to(device)
             print(f"Using finger weights: {finger_weights.tolist()}")
-        else:
-            loss_f = nn.CrossEntropyLoss()
-        if uses_active_finger_head(n_fingers) and float(args.rest_finger_loss_weight) > 0.0:
+        if finger_loss_ignore_index is not None:
+            finger_loss_kwargs["ignore_index"] = int(finger_loss_ignore_index)
+        loss_f = nn.CrossEntropyLoss(**finger_loss_kwargs)
+        if active_finger_head_enabled and float(args.rest_finger_loss_weight) > 0.0:
             print(
                 "⚠️ rest_finger_loss_weight is ignored when active_finger_head is enabled."
             )
@@ -1931,68 +2019,84 @@ def main():
         )
 
         # ===== TRAIN =====
+        non_blocking_transfer = bool(args.pin_memory and device.type == "cuda")
+        _device_synchronize(device)
+        training_start = time.perf_counter()
+        epoch_durations: List[float] = []
         for epoch in range(args.epochs):
             model.train()
-            total_loss = 0.0
+            epoch_start = time.perf_counter()
+            total_loss = torch.zeros((), device=device)
             total_action = 0
-            total_finger = 0
-            correct_action = 0
-            correct_finger = 0
+            total_finger = torch.zeros((), device=device, dtype=torch.int64)
+            correct_action = torch.zeros((), device=device, dtype=torch.int64)
+            correct_finger = torch.zeros((), device=device, dtype=torch.int64)
 
             for Xb, yfb, yab in train_loader:
-                Xb = Xb.to(device)
-                yfb = yfb.to(device)
-                yab = yab.to(device)
+                Xb = Xb.to(device, non_blocking=non_blocking_transfer)
+                yfb = yfb.to(device, non_blocking=non_blocking_transfer)
+                yab = yab.to(device, non_blocking=non_blocking_transfer)
 
-                opt.zero_grad()
-                f_out, a_out, app_out = unpack_model_outputs(model(Xb))
+                opt.zero_grad(set_to_none=True)
+                with _autocast_context(device, amp_dtype):
+                    f_out, a_out, app_out = unpack_model_outputs(model(Xb))
 
-                (
-                    loss,
-                    loss_action,
-                    loss_finger_non_rest,
-                    loss_finger_rest,
-                    loss_applicability,
-                ) = _compute_batch_losses(
-                    finger_logits=f_out,
-                    action_logits=a_out,
-                    applicability_logits=app_out,
-                    y_finger=yfb,
-                    y_action=yab,
-                    action_loss_fn=loss_a,
-                    finger_loss_fn=loss_f,
-                    applicability_loss_fn=applicability_loss_fn,
-                    loss_action_weight=float(args.loss_action_weight),
-                    rest_finger_loss_weight=float(args.rest_finger_loss_weight),
-                    applicability_loss_weight=float(args.applicability_loss_weight),
-                    n_finger_classes=n_fingers,
-                )
-                loss.backward()
-                opt.step()
+                    (
+                        loss,
+                        loss_action,
+                        loss_finger_non_rest,
+                        loss_finger_rest,
+                        loss_applicability,
+                    ) = _compute_batch_losses(
+                        finger_logits=f_out,
+                        action_logits=a_out,
+                        applicability_logits=app_out,
+                        y_finger=yfb,
+                        y_action=yab,
+                        action_loss_fn=loss_a,
+                        finger_loss_fn=loss_f,
+                        applicability_loss_fn=applicability_loss_fn,
+                        loss_action_weight=float(args.loss_action_weight),
+                        rest_finger_loss_weight=float(args.rest_finger_loss_weight),
+                        applicability_loss_weight=float(args.applicability_loss_weight),
+                        active_finger_head=active_finger_head_enabled,
+                        finger_loss_ignore_index=finger_loss_ignore_index,
+                    )
+                if grad_scaler is not None and grad_scaler.is_enabled():
+                    grad_scaler.scale(loss).backward()
+                    grad_scaler.step(opt)
+                    grad_scaler.update()
+                else:
+                    loss.backward()
+                    opt.step()
 
-                total_loss += loss.item() * Xb.size(0)
+                total_loss += loss.detach() * Xb.size(0)
 
                 preds_action = torch.argmax(a_out, dim=1)
-                correct_action += (preds_action == yab).sum().item()
+                correct_action += (preds_action == yab).sum()
                 total_action += yab.numel()
 
                 mask_nr = yab != ACTION_REST
-                if mask_nr.any():
-                    preds_finger = torch.argmax(f_out[mask_nr], dim=1)
-                    if uses_active_finger_head(n_fingers):
-                        preds_finger = preds_finger + 1
-                    correct_finger += (preds_finger == yfb[mask_nr]).sum().item()
-                    total_finger += yfb[mask_nr].numel()
+                preds_finger = torch.argmax(f_out, dim=1)
+                if active_finger_head_enabled:
+                    preds_finger = preds_finger + 1
+                correct_finger += ((preds_finger == yfb) & mask_nr).sum()
+                total_finger += mask_nr.sum()
 
-            avg_loss = total_loss / max(1, len(train_loader.dataset))
-            action_acc = correct_action / max(1, total_action)
-            finger_acc = correct_finger / max(1, total_finger)
+            avg_loss = float(total_loss.item()) / max(1, len(train_loader.dataset))
+            action_acc = float(correct_action.item()) / max(1, total_action)
+            total_finger_count = int(total_finger.item())
+            finger_acc = float(correct_finger.item()) / max(1, total_finger_count)
+            epoch_durations.append(time.perf_counter() - epoch_start)
 
             if (epoch + 1) % 10 == 0 or epoch == 0:
                 print(
                     f"Epoch {epoch + 1:03d}/{args.epochs} | loss={avg_loss:.4f} "
                     f"action_acc={action_acc:.3f} finger_acc={finger_acc:.3f}"
                 )
+        _device_synchronize(device)
+        training_sec = time.perf_counter() - training_start
+        avg_epoch_sec = training_sec / max(1, args.epochs)
 
         # ===== SAVE MODEL =====
         model.eval()
@@ -2049,12 +2153,19 @@ def main():
             },
             "train_sampler": sample_weight_summary,
             "device": str(device),
+            "amp_mode": "float16" if amp_enabled else "off",
             "model": "CNNLSTMFingerActionNet",
             "subject_id_filter": args.subject_id or "",
             "save_model_path": str(save_model_path),
             "save_scaler_path": str(save_scaler_path),
             "save_preds_path": str(save_preds_path),
             "save_temperature_path": str(save_temperature_path),
+            "timing": {
+                "normalization_sec": float(normalization_sec),
+                "training_sec": float(training_sec),
+                "avg_epoch_sec": float(avg_epoch_sec),
+                "epoch_durations_sec": [float(v) for v in epoch_durations],
+            },
         }
         train_config_path = save_model_path.parent / "train_config.json"
         train_config_path.write_text(json.dumps(train_config, indent=2))
@@ -2079,24 +2190,29 @@ def main():
             metrics={},
         )
 
+        temperature_fit_sec = 0.0
         if calib_loader is not None:
+            temperature_fit_start = time.perf_counter()
             calib_action_logits = []
             calib_finger_logits = []
             calib_applicability_logits = []
             calib_action_labels = []
             calib_finger_labels = []
-            with torch.no_grad():
+            with torch.inference_mode():
                 for Xb, yfb, yab in calib_loader:
-                    Xb = Xb.to(device)
-                    f_out, a_out, app_out = unpack_model_outputs(model(Xb))
-                    calib_action_logits.append(a_out.detach().cpu().numpy())
-                    calib_finger_logits.append(f_out.detach().cpu().numpy())
+                    Xb = Xb.to(device, non_blocking=non_blocking_transfer)
+                    with _autocast_context(device, amp_dtype):
+                        f_out, a_out, app_out = unpack_model_outputs(model(Xb))
+                    calib_action_logits.append(a_out.float().cpu().numpy())
+                    calib_finger_logits.append(f_out.float().cpu().numpy())
                     if app_out is not None:
                         calib_applicability_logits.append(
-                            app_out.detach().cpu().numpy()
+                            app_out.float().cpu().numpy()
                         )
                     calib_action_labels.append(yab.numpy())
                     calib_finger_labels.append(yfb.numpy())
+            _device_synchronize(device)
+            temperature_fit_sec = time.perf_counter() - temperature_fit_start
 
             action_logits_calib = np.concatenate(calib_action_logits, axis=0).astype(np.float32)
             finger_logits_calib = np.concatenate(calib_finger_logits, axis=0).astype(np.float32)
@@ -2163,24 +2279,28 @@ def main():
         all_action_probs = []
         all_finger_probs = []
         all_applicability_probs = []
-        with torch.no_grad():
+        test_inference_start = time.perf_counter()
+        with torch.inference_mode():
             for Xb, yfb, yab in test_loader:
-                Xb = Xb.to(device)
-                f_out, a_out, app_out = unpack_model_outputs(model(Xb))
+                Xb = Xb.to(device, non_blocking=non_blocking_transfer)
+                with _autocast_context(device, amp_dtype):
+                    f_out, a_out, app_out = unpack_model_outputs(model(Xb))
                 a_out = apply_temperature_to_logits(
-                    a_out, temperature_state.action_temperature
+                    a_out.float(), temperature_state.action_temperature
                 )
                 f_out = apply_temperature_to_logits(
-                    f_out, temperature_state.finger_temperature
+                    f_out.float(), temperature_state.finger_temperature
                 )
                 if app_out is not None:
                     app_out = apply_temperature_to_logits(
-                        app_out, temperature_state.applicability_temperature
+                        app_out.float(), temperature_state.applicability_temperature
                     )
                 all_finger_probs.append(torch.softmax(f_out, dim=1).cpu().numpy())
                 all_action_probs.append(torch.softmax(a_out, dim=1).cpu().numpy())
                 if app_out is not None:
                     all_applicability_probs.append(torch.sigmoid(app_out).cpu().numpy())
+        _device_synchronize(device)
+        test_inference_sec = time.perf_counter() - test_inference_start
 
         action_probs = np.concatenate(all_action_probs, axis=0).astype(np.float32)
         finger_probs = np.concatenate(all_finger_probs, axis=0).astype(np.float32)
@@ -2231,6 +2351,13 @@ def main():
                 "finger_acc_non_rest": test_finger_acc,
                 "n_test": int(len(y_action_test)),
                 "n_test_non_rest": int(np.sum(test_non_rest)),
+            },
+            "timing": {
+                "normalization_sec": float(normalization_sec),
+                "training_sec": float(training_sec),
+                "avg_epoch_sec": float(avg_epoch_sec),
+                "temperature_fit_sec": float(temperature_fit_sec),
+                "test_inference_sec": float(test_inference_sec),
             },
             "artifacts": {
                 "model": str(save_model_path.name),
@@ -2319,6 +2446,14 @@ def main():
         np.savez_compressed(str(save_preds_path), **save_dict)
 
         log_experiment(subject, exp_hash, "STEP_2_COMPLETE", f"loss={avg_loss:.4f}")
+        print(
+            "Timing: "
+            f"normalize={normalization_sec:.2f}s "
+            f"train={training_sec:.2f}s "
+            f"avg_epoch={avg_epoch_sec:.2f}s "
+            f"temperature={temperature_fit_sec:.2f}s "
+            f"test_infer={test_inference_sec:.2f}s"
+        )
         print("✅ Training complete")
         print(f"DECISION: TRAINED (epochs={args.epochs})")
         print(

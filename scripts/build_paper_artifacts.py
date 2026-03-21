@@ -1027,15 +1027,30 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
         "pinky_close",
     ]
     types = [t for t in preferred_order if t in type_set] + sorted([t for t in type_set if t not in preferred_order])
+    event_header_labels = {
+        "rest": r"\shortstack{REST}",
+        "none_open": r"\shortstack{NONE\\OPEN}",
+        "thumb_open": r"\shortstack{TH\\OPEN}",
+        "thumb_close": r"\shortstack{TH\\CLOSE}",
+        "index_open": r"\shortstack{IN\\OPEN}",
+        "index_close": r"\shortstack{IN\\CLOSE}",
+        "middle_open": r"\shortstack{MID\\OPEN}",
+        "middle_close": r"\shortstack{MID\\CLOSE}",
+        "ring_open": r"\shortstack{RING\\OPEN}",
+        "ring_close": r"\shortstack{RING\\CLOSE}",
+        "pinky_open": r"\shortstack{PINK\\OPEN}",
+        "pinky_close": r"\shortstack{PINK\\CLOSE}",
+    }
 
     ev_lines: List[str] = []
     ev_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
     ev_lines.append(
-        "\\caption{Event label counts per session (from \\texttt{events/events.jsonl}).}\n"
+        "\\caption{Event label counts per session (from \\texttt{events/events.jsonl}). Column labels abbreviate thumb/index/middle/ring/pinky open and close events.}\n"
     )
     ev_lines.append("\\label{tab:events}\n")
+    ev_lines.append("\\setlength{\\tabcolsep}{4pt}\n")
     ev_lines.append("\\begin{tabular}{l" + "r" * len(types) + "}\n\\toprule\n")
-    header_cells = ["Session"] + [f"\\rotatebox{{90}}{{{_latex_escape(t)}}}" for t in types]
+    header_cells = ["Session"] + [event_header_labels.get(t, _latex_escape(t)) for t in types]
     ev_lines.append(" & ".join(header_cells) + " \\\\\n\\midrule\n")
     for s in session_meta.get("sessions", []):
         sess_id = _latex_breakable_id(_display_session_id(str(s.get("session_id"))))
