@@ -1328,8 +1328,7 @@ def _predict_window(
                 else None
             )
             if emit_viz:
-                hidden_mag = _compute_hidden_mag(model, x)
-                live_viz_payload = _build_live_viz_payload(model, x, hidden_mag=hidden_mag)
+                live_viz_payload, hidden_mag = _build_live_viz_payload(model, x)
         else:
             window_input = standardize_window_TxC(window_f32, scaler)
             x = torch.from_numpy(window_input).unsqueeze(0).to(device)
@@ -1360,8 +1359,7 @@ def _predict_window(
                     else None
                 )
                 if emit_viz:
-                    hidden_mag = _compute_hidden_mag(model, x)
-                    live_viz_payload = _build_live_viz_payload(model, x, hidden_mag=hidden_mag)
+                    live_viz_payload, hidden_mag = _build_live_viz_payload(model, x)
         return {
             "backend": "direct",
             "action_probs": action_probs_t.detach().cpu().numpy(),
@@ -1391,11 +1389,8 @@ def _predict_window(
         raise RuntimeError("InferenceEngine returned empty probabilities for a loaded model.")
 
     if emit_viz:
-        window_input = standardize_window_TxC(window_f32, scaler)
-        x = torch.tensor(window_input, dtype=torch.float32).unsqueeze(0).to(device)
-        with torch.inference_mode():
-            hidden_mag = _compute_hidden_mag(model, x)
-        live_viz_payload = _build_live_viz_payload(model, x, hidden_mag=hidden_mag)
+        _, x = inference_engine.prepare_input(window_f32)
+        live_viz_payload, hidden_mag = _build_live_viz_payload(model, x)
 
     adaptive_threshold = min(
         0.99,
@@ -1421,75 +1416,6 @@ def _predict_window(
     }
 
 
-def _compute_hidden_mag(model: CNNLSTMFingerActionNet, x: torch.Tensor) -> Optional[float]:
-    """
-    Returns the last-step LSTM hidden magnitude for a window, or None on failure.
-    x: [B, T, C]
-    """
-    try:
-        x = x.permute(0, 2, 1)
-        x = model.conv(x)
-        x = x.permute(0, 2, 1)
-        out, _ = model.lstm(x)
-        hidden_mag = torch.linalg.norm(out, dim=2).squeeze(0)
-        if hidden_mag.numel() == 0:
-            return None
-        value = float(hidden_mag[-1].item())
-        if not np.isfinite(value):
-            return None
-        return value
-    except Exception:
-        return None
-
-
-def _compute_feature_map(model: CNNLSTMFingerActionNet, x: torch.Tensor) -> Optional[np.ndarray]:
-    try:
-        with torch.inference_mode():
-            z = x.permute(0, 2, 1)
-            conv_outputs = []
-            for layer in model.conv:
-                z = layer(z)
-                if isinstance(layer, torch.nn.Conv1d):
-                    conv_outputs.append(z.detach().cpu())
-        if not conv_outputs:
-            return None
-        return conv_outputs[-1].squeeze(0).numpy()
-    except Exception:
-        return None
-
-
-def _compute_hidden_timeline(model: CNNLSTMFingerActionNet, x: torch.Tensor) -> Optional[np.ndarray]:
-    try:
-        with torch.inference_mode():
-            z = x.permute(0, 2, 1)
-            z = model.conv(z)
-            z = z.permute(0, 2, 1)
-            out, _ = model.lstm(z)
-            hidden_mag = torch.linalg.norm(out, dim=2).squeeze(0)
-        return hidden_mag.detach().cpu().numpy()
-    except Exception:
-        return None
-
-
-def _compute_prediction_timeline(
-    model: CNNLSTMFingerActionNet, x: torch.Tensor
-) -> Optional[tuple[np.ndarray, np.ndarray]]:
-    try:
-        with torch.inference_mode():
-            z = x.permute(0, 2, 1)
-            z = model.conv(z)
-            z = z.permute(0, 2, 1)
-            out, _ = model.lstm(z)
-            out = model.head_dropout(out)
-            finger_logits = model.finger_head(out)
-            action_logits = model.action_head(out)
-            finger_probs = torch.softmax(finger_logits, dim=2).squeeze(0).cpu().numpy()
-            action_probs = torch.softmax(action_logits, dim=2).squeeze(0).cpu().numpy()
-        return finger_probs, action_probs
-    except Exception:
-        return None
-
-
 def _compute_saliency(model: CNNLSTMFingerActionNet, x: torch.Tensor) -> Optional[np.ndarray]:
     try:
         x_grad = x.detach().clone().requires_grad_(True)
@@ -1506,34 +1432,77 @@ def _compute_saliency(model: CNNLSTMFingerActionNet, x: torch.Tensor) -> Optiona
         return None
 
 
+def _compute_live_viz_arrays(
+    model: CNNLSTMFingerActionNet, x: torch.Tensor
+) -> tuple[
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+    Optional[float],
+]:
+    try:
+        with torch.inference_mode():
+            z = x.permute(0, 2, 1)
+            feature_map_t = model.conv(z)
+            lstm_in = feature_map_t.permute(0, 2, 1)
+            out, _ = model.lstm(lstm_in)
+            hidden_t = torch.linalg.norm(out, dim=2).squeeze(0)
+            head_out = model.head_dropout(out)
+            finger_logits = model.finger_head(head_out)
+            action_logits = model.action_head(head_out)
+            feature_map = feature_map_t.squeeze(0).detach().cpu().numpy()
+            hidden_timeline = hidden_t.detach().cpu().numpy()
+            finger_probs = (
+                torch.softmax(finger_logits, dim=2).squeeze(0).detach().cpu().numpy()
+            )
+            action_probs = (
+                torch.softmax(action_logits, dim=2).squeeze(0).detach().cpu().numpy()
+            )
+        hidden_mag = None
+        if hidden_timeline.size:
+            value = float(hidden_timeline[-1])
+            if np.isfinite(value):
+                hidden_mag = value
+        return feature_map, hidden_timeline, finger_probs, action_probs, hidden_mag
+    except Exception:
+        return None, None, None, None, None
+
+
 def _build_live_viz_payload(
     model: CNNLSTMFingerActionNet,
     x: torch.Tensor,
-    *,
-    hidden_mag: Optional[float],
-) -> Optional[dict[str, Any]]:
-    feature_map = _compute_feature_map(model, x)
-    hidden_timeline = _compute_hidden_timeline(model, x)
-    timeline = _compute_prediction_timeline(model, x)
+) -> tuple[Optional[dict[str, Any]], Optional[float]]:
+    (
+        feature_map,
+        hidden_timeline,
+        finger_probs,
+        action_probs,
+        hidden_mag,
+    ) = _compute_live_viz_arrays(model, x)
     saliency = _compute_saliency(model, x)
     if (
         feature_map is None
         and hidden_timeline is None
-        and timeline is None
+        and finger_probs is None
+        and action_probs is None
         and saliency is None
         and hidden_mag is None
     ):
-        return None
-    finger_probs = timeline[0] if timeline is not None else None
-    action_probs = timeline[1] if timeline is not None else None
-    return {
-        "hidden_mag": float(hidden_mag) if hidden_mag is not None else None,
-        "feature_map": feature_map.tolist() if feature_map is not None else None,
-        "hidden_timeline": hidden_timeline.tolist() if hidden_timeline is not None else None,
-        "finger_probs": finger_probs.tolist() if finger_probs is not None else None,
-        "action_probs": action_probs.tolist() if action_probs is not None else None,
-        "saliency": saliency.tolist() if saliency is not None else None,
-    }
+        return None, hidden_mag
+    return (
+        {
+            "hidden_mag": float(hidden_mag) if hidden_mag is not None else None,
+            "feature_map": feature_map.tolist() if feature_map is not None else None,
+            "hidden_timeline": (
+                hidden_timeline.tolist() if hidden_timeline is not None else None
+            ),
+            "finger_probs": finger_probs.tolist() if finger_probs is not None else None,
+            "action_probs": action_probs.tolist() if action_probs is not None else None,
+            "saliency": saliency.tolist() if saliency is not None else None,
+        },
+        hidden_mag,
+    )
 
 
 def _debounced_should_send(

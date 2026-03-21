@@ -104,23 +104,20 @@ class CNNLSTMFingerActionNet(nn.Module):
             raise ValueError("passes must be >= 1")
         was_training = self.training
         self.train()
-        finger_probs = []
-        action_probs = []
-        applicability_probs = []
-        for _ in range(passes):
-            f_logits, a_logits, app_logits = self.forward(x)
-            finger_probs.append(F.softmax(f_logits, dim=-1))
-            action_probs.append(F.softmax(a_logits, dim=-1))
-            if app_logits is not None:
-                applicability_probs.append(torch.sigmoid(app_logits))
-
-        finger_stack = torch.stack(finger_probs, dim=0)
-        action_stack = torch.stack(action_probs, dim=0)
+        batch_size = int(x.shape[0])
+        mc_input = x.repeat((passes, 1, 1)) if passes > 1 else x
+        f_logits, a_logits, app_logits = self.forward(mc_input)
+        finger_stack = F.softmax(f_logits, dim=-1).reshape(passes, batch_size, -1)
+        action_stack = F.softmax(a_logits, dim=-1).reshape(passes, batch_size, -1)
 
         finger_mean = finger_stack.mean(dim=0)
         action_mean = action_stack.mean(dim=0)
-        finger_std = finger_stack.std(dim=0)
-        action_std = action_stack.std(dim=0)
+        if passes > 1:
+            finger_std = finger_stack.std(dim=0)
+            action_std = action_stack.std(dim=0)
+        else:
+            finger_std = torch.zeros_like(finger_mean)
+            action_std = torch.zeros_like(action_mean)
 
         finger_entropy = -torch.sum(finger_mean * torch.log(finger_mean + 1e-8), dim=-1)
         action_entropy = -torch.sum(action_mean * torch.log(action_mean + 1e-8), dim=-1)
@@ -147,8 +144,19 @@ class CNNLSTMFingerActionNet(nn.Module):
             "finger_mi": finger_mi,
             "action_mi": action_mi,
         }
-        if applicability_probs:
-            applicability_stack = torch.stack(applicability_probs, dim=0)
+        if app_logits is not None:
+            applicability_stack = torch.sigmoid(app_logits)
+            if applicability_stack.ndim == 1:
+                applicability_stack = applicability_stack.reshape(passes, batch_size)
+            else:
+                applicability_stack = applicability_stack.reshape(
+                    passes, batch_size, -1
+                )
             result["applicability_mean"] = applicability_stack.mean(dim=0)
-            result["applicability_std"] = applicability_stack.std(dim=0)
+            if passes > 1:
+                result["applicability_std"] = applicability_stack.std(dim=0)
+            else:
+                result["applicability_std"] = torch.zeros_like(
+                    result["applicability_mean"]
+                )
         return result
