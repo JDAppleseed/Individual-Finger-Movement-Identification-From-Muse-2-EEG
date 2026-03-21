@@ -90,6 +90,8 @@ def _coerce_bool(value: Any, default: bool) -> bool:
 def _resolve_device(requested: str) -> torch.device:
     text = str(requested or "auto").strip().lower()
     if text == "auto":
+        if sys.platform == "darwin" and getattr(torch.backends, "mps", None) is not None:
+            return torch.device("cpu")
         if torch.cuda.is_available():
             return torch.device("cuda")
         if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():

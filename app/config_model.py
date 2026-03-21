@@ -250,6 +250,7 @@ def default_infer_settings() -> Dict[str, Any]:
     return {
         "model_path": "models/finger_action_model.pt",
         "scaler_path": "scaler.npz",
+        "device": "auto",
         "stream_name": "Muse2-EEG",
         "stream_type": "EEG",
         "LIVE_VIZ_ENABLED": False,
@@ -281,7 +282,7 @@ def default_infer_settings() -> Dict[str, Any]:
         "hysteresis_frames": 3,
         "threshold_action": 0.05,
         "threshold_finger": 0.20,
-        "threshold_applicability": 0.40,
+        "threshold_applicability": 0.50,
         "adjacency_enabled": False,
         "hysteresis_margin": 0.05,
         "finger_delta": 0.05,

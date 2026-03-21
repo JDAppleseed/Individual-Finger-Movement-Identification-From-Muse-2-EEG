@@ -63,9 +63,12 @@ def _mc_predict(
 
     was_training = model.training
     model.train()
-    finger_probs = []
-    action_probs = []
-    applicability_probs = []
+    finger_sum: Optional[torch.Tensor] = None
+    finger_sum_sq: Optional[torch.Tensor] = None
+    action_sum: Optional[torch.Tensor] = None
+    action_sum_sq: Optional[torch.Tensor] = None
+    applicability_sum: Optional[torch.Tensor] = None
+    applicability_sum_sq: Optional[torch.Tensor] = None
     with torch.inference_mode():
         for _ in range(passes):
             finger_logits, action_logits, applicability_logits = unpack_model_outputs(
@@ -84,20 +87,42 @@ def _mc_predict(
                 action_logits = apply_logit_bias(
                     action_logits, logit_bias_state.action_bias
                 )
-            finger_probs.append(torch.softmax(finger_logits, dim=1))
-            action_probs.append(torch.softmax(action_logits, dim=1))
+            finger_probs = torch.softmax(finger_logits, dim=1)
+            action_probs = torch.softmax(action_logits, dim=1)
+            if finger_sum is None:
+                finger_sum = finger_probs.clone()
+                finger_sum_sq = finger_probs.square()
+                action_sum = action_probs.clone()
+                action_sum_sq = action_probs.square()
+            else:
+                finger_sum.add_(finger_probs)
+                finger_sum_sq.add_(finger_probs.square())
+                action_sum.add_(action_probs)
+                action_sum_sq.add_(action_probs.square())
             if applicability_logits is not None:
-                applicability_probs.append(torch.sigmoid(applicability_logits))
+                applicability_probs = torch.sigmoid(applicability_logits)
+                if applicability_sum is None:
+                    applicability_sum = applicability_probs.clone()
+                    applicability_sum_sq = applicability_probs.square()
+                else:
+                    applicability_sum.add_(applicability_probs)
+                    applicability_sum_sq.add_(applicability_probs.square())
     if not was_training:
         model.eval()
 
-    finger_probs = torch.stack(finger_probs, dim=0)
-    action_probs = torch.stack(action_probs, dim=0)
-
-    finger_mean = finger_probs.mean(dim=0)
-    action_mean = action_probs.mean(dim=0)
-    finger_std = finger_probs.std(dim=0)
-    action_std = action_probs.std(dim=0)
+    assert finger_sum is not None and finger_sum_sq is not None
+    assert action_sum is not None and action_sum_sq is not None
+    denom = float(max(1, int(passes)))
+    finger_mean = finger_sum / denom
+    action_mean = action_sum / denom
+    if passes > 1:
+        finger_var = (finger_sum_sq - finger_sum.square() / denom) / float(passes - 1)
+        action_var = (action_sum_sq - action_sum.square() / denom) / float(passes - 1)
+        finger_std = torch.sqrt(torch.clamp(finger_var, min=0.0))
+        action_std = torch.sqrt(torch.clamp(action_var, min=0.0))
+    else:
+        finger_std = torch.zeros_like(finger_mean)
+        action_std = torch.zeros_like(action_mean)
 
     result = {
         "finger_mean": finger_mean,
@@ -105,10 +130,17 @@ def _mc_predict(
         "finger_std": finger_std,
         "action_std": action_std,
     }
-    if applicability_probs:
-        applicability_probs = torch.stack(applicability_probs, dim=0)
-        result["applicability_mean"] = applicability_probs.mean(dim=0)
-        result["applicability_std"] = applicability_probs.std(dim=0)
+    if applicability_sum is not None and applicability_sum_sq is not None:
+        applicability_mean = applicability_sum / denom
+        if passes > 1:
+            applicability_var = (
+                applicability_sum_sq - applicability_sum.square() / denom
+            ) / float(passes - 1)
+            applicability_std = torch.sqrt(torch.clamp(applicability_var, min=0.0))
+        else:
+            applicability_std = torch.zeros_like(applicability_mean)
+        result["applicability_mean"] = applicability_mean
+        result["applicability_std"] = applicability_std
     return result
 
 
@@ -162,6 +194,9 @@ class InferenceEngine:
     def _ensure_buffers(self, shape: Tuple[int, int]) -> None:
         if self._input_np is None or self._input_np.shape != shape:
             self._input_np = np.empty(shape, dtype=np.float32)
+        if self.device.type == "cpu":
+            self._input_tensor = None
+            return
         expected = (1,) + shape
         if (
             self._input_tensor is None
@@ -180,13 +215,62 @@ class InferenceEngine:
         return apply_channel_normalizer(window, self.normalizer, out=self._input_np)
 
     def _to_tensor(self, window_TxC: np.ndarray) -> torch.Tensor:
-        if self._input_np is not None and window_TxC is self._input_np:
-            assert self._input_tensor is not None
-            self._input_tensor[0].copy_(torch.from_numpy(window_TxC))
-            return self._input_tensor
-        return torch.tensor(
-            window_TxC, dtype=torch.float32, device=self.device
-        ).unsqueeze(0)
+        host_tensor = torch.from_numpy(np.asarray(window_TxC, dtype=np.float32))
+        if self.device.type == "cpu":
+            return host_tensor.unsqueeze(0)
+        assert self._input_tensor is not None
+        self._input_tensor[0].copy_(host_tensor)
+        return self._input_tensor
+
+    def prepare_input(self, window_TxC: np.ndarray) -> Tuple[np.ndarray, torch.Tensor]:
+        normalized = self._normalize_window(window_TxC)
+        return normalized, self._to_tensor(normalized)
+
+    def forward_probabilities(
+        self, x_BTC: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        if self.model is None:
+            raise RuntimeError("forward_probabilities requires a loaded model.")
+        with torch.inference_mode():
+            (
+                finger_logits,
+                action_logits,
+                applicability_logits,
+            ) = unpack_model_outputs(self.model(x_BTC))
+            finger_logits = apply_temperature_to_logits(
+                finger_logits,
+                self.temperature_state.finger_temperature
+                if self.temperature_state is not None
+                else 1.0,
+            )
+            action_logits = apply_temperature_to_logits(
+                action_logits,
+                self.temperature_state.action_temperature
+                if self.temperature_state is not None
+                else 1.0,
+            )
+            if applicability_logits is not None:
+                applicability_logits = apply_temperature_to_logits(
+                    applicability_logits,
+                    self.temperature_state.applicability_temperature
+                    if self.temperature_state is not None
+                    else 1.0,
+                )
+            if self.logit_bias_state is not None:
+                finger_logits = apply_logit_bias(
+                    finger_logits, self.logit_bias_state.finger_bias
+                )
+                action_logits = apply_logit_bias(
+                    action_logits, self.logit_bias_state.action_bias
+                )
+            finger_probs = torch.softmax(finger_logits, dim=1)
+            action_probs = torch.softmax(action_logits, dim=1)
+            applicability_probs = (
+                torch.sigmoid(applicability_logits)
+                if applicability_logits is not None
+                else None
+            )
+        return finger_probs, action_probs, applicability_probs
 
     def predict_proba(
         self, window_TxC: np.ndarray
@@ -202,52 +286,13 @@ class InferenceEngine:
                 {"health_score": compute_health_score(window_TxC)},
             )
 
-        normalized = self._normalize_window(window_TxC)
-        x = self._to_tensor(normalized)
+        _, x = self.prepare_input(window_TxC)
 
         passes = int(self.config.mc_passes)
         if passes <= 1:
             was_training = self.model.training
             self.model.eval()
-            with torch.inference_mode():
-                (
-                    finger_logits,
-                    action_logits,
-                    applicability_logits,
-                ) = unpack_model_outputs(self.model(x))
-                finger_logits = apply_temperature_to_logits(
-                    finger_logits,
-                    self.temperature_state.finger_temperature
-                    if self.temperature_state is not None
-                    else 1.0,
-                )
-                action_logits = apply_temperature_to_logits(
-                    action_logits,
-                    self.temperature_state.action_temperature
-                    if self.temperature_state is not None
-                    else 1.0,
-                )
-                if applicability_logits is not None:
-                    applicability_logits = apply_temperature_to_logits(
-                        applicability_logits,
-                        self.temperature_state.applicability_temperature
-                        if self.temperature_state is not None
-                        else 1.0,
-                    )
-                if self.logit_bias_state is not None:
-                    finger_logits = apply_logit_bias(
-                        finger_logits, self.logit_bias_state.finger_bias
-                    )
-                    action_logits = apply_logit_bias(
-                        action_logits, self.logit_bias_state.action_bias
-                    )
-                finger_probs = torch.softmax(finger_logits, dim=1)
-                action_probs = torch.softmax(action_logits, dim=1)
-                applicability_probs = (
-                    torch.sigmoid(applicability_logits)
-                    if applicability_logits is not None
-                    else None
-                )
+            finger_probs, action_probs, applicability_probs = self.forward_probabilities(x)
             if was_training:
                 self.model.train()
             action_mean = action_probs.squeeze(0).detach().cpu().numpy()

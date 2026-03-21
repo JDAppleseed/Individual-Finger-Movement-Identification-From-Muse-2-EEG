@@ -552,7 +552,7 @@ TOOLTIPS: Dict[str, str] = {
     "hop_seconds": "Window hop override in seconds (0 = auto).",
     "window_idx_leak_threshold": "Warn if window_idx-only classifier exceeds this accuracy.",
     "strict_leakage": "Fail training if leakage checks exceed thresholds.",
-    "device": "Training device (auto/cpu/cuda/mps).",
+    "device": "Torch device override (auto/cpu/cuda/mps).",
     "num_workers": "DataLoader worker processes (0 = main process).",
     "pin_memory": "Pin DataLoader memory (useful for CUDA).",
     "save_preds": "Output path for test predictions.",
@@ -1116,6 +1116,7 @@ class MainWindow(QMainWindow):
                 ArgSpec("window_sec", "--window-sec", "float", "Window length (s)."),
                 ArgSpec("hop_sec", "--hop-sec", "float", "Window hop (s)."),
                 ArgSpec("target_fs", "--target-fs", "float", "Target FS for resampling."),
+                ArgSpec("device", "--device", "text", "Torch device override (auto/cpu/cuda/mps)."),
                 ArgSpec(
                     "use_inference_engine",
                     "--use-inference-engine",
@@ -3578,6 +3579,7 @@ class MainWindow(QMainWindow):
             "is auto-resolved; model/scaler fields act as explicit overrides. "
             "Outputs default to processed/live_infer and auto-version if the folder exists. "
             "Disable file outputs to run inference-only for max performance. "
+            "Device=auto prefers CPU on Apple silicon for lower single-window latency. "
             "Use the inference subject dropdown to target a different subject for Step 7. "
             "Actuation is opt-in and requires confirmation before running. "
             "Enable the MC-dropout inference engine to use uncertainty-aware mean probabilities "
@@ -4190,6 +4192,11 @@ class MainWindow(QMainWindow):
                 4096,
                 is_float=True,
             )
+            device = QComboBox()
+            device.addItems(["auto", "cpu", "cuda", "mps"])
+            device.setCurrentText(str(defaults.get("device", "auto")))
+            form.addRow("Device", device)
+            self.fields[step_id]["device"] = device
             self._add_checkbox(
                 step_id,
                 form,
@@ -5509,6 +5516,7 @@ class MainWindow(QMainWindow):
                 "window_sec": "Window sec",
                 "hop_sec": "Hop sec",
                 "target_fs": "Target FS",
+                "device": "Device",
                 "use_inference_engine": "Use MC-dropout inference engine",
                 "mc_passes": "MC passes",
                 "uncertainty_base_threshold": "Uncertainty base threshold",

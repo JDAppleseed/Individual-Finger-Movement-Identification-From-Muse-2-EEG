@@ -893,7 +893,14 @@ def _apply_config_to_args(
 
 def _select_device(device_override: Optional[str]) -> torch.device:
     if device_override:
-        return torch.device(device_override)
+        text = str(device_override).strip().lower()
+        if text and text != "auto":
+            return torch.device(text)
+    # Step 7 runs single-window inference. On Apple silicon that latency-sensitive
+    # path is materially faster on CPU than MPS for this model, so keep "auto"
+    # CPU-first here and reserve MPS for explicit opt-in benchmarking.
+    if sys.platform == "darwin" and getattr(torch.backends, "mps", None) is not None:
+        return torch.device("cpu")
     if torch.backends.mps.is_available():
         return torch.device("mps")
     if torch.cuda.is_available():
@@ -1273,6 +1280,25 @@ def _build_inference_engine(
     )
 
 
+def _build_direct_inference_engine(
+    model: torch.nn.Module,
+    scaler: object,
+    device: torch.device,
+    temperature_state: Optional[TemperatureScalingState],
+) -> Optional[InferenceEngine]:
+    if not hasattr(model, "to"):
+        return None
+    return InferenceEngine(
+        model=model,
+        normalizer=scaler,
+        device=device,
+        action_names={},
+        finger_names={},
+        config=InferenceConfig(mc_passes=1),
+        temperature_state=temperature_state,
+    )
+
+
 def _predict_window(
     window: np.ndarray,
     *,
@@ -1280,6 +1306,7 @@ def _predict_window(
     model: torch.nn.Module,
     device: torch.device,
     inference_engine: Optional[InferenceEngine],
+    direct_engine: Optional[InferenceEngine] = None,
     temperature_state: Optional[TemperatureScalingState] = None,
     emit_viz: bool,
 ) -> dict[str, Any]:
@@ -1288,37 +1315,53 @@ def _predict_window(
     live_viz_payload: Optional[dict[str, Any]] = None
 
     if inference_engine is None:
-        window_input = standardize_window_TxC(window_f32, scaler)
-        x = torch.tensor(window_input, dtype=torch.float32).unsqueeze(0).to(device)
-        with torch.inference_mode():
-            finger_logits, action_logits, applicability_logits = unpack_model_outputs(
-                model(x)
+        if direct_engine is not None:
+            _, x = direct_engine.prepare_input(window_f32)
+            finger_probs_t, action_probs_t, applicability_prob_t = (
+                direct_engine.forward_probabilities(x)
             )
-            finger_logits = apply_temperature_to_logits(
-                finger_logits,
-                temperature_state.finger_temperature if temperature_state is not None else 1.0,
-            )
-            action_logits = apply_temperature_to_logits(
-                action_logits,
-                temperature_state.action_temperature if temperature_state is not None else 1.0,
-            )
-            if applicability_logits is not None:
-                applicability_logits = apply_temperature_to_logits(
-                    applicability_logits,
-                    temperature_state.applicability_temperature
-                    if temperature_state is not None
-                    else 1.0,
-                )
-            action_probs_t = torch.softmax(action_logits, dim=1).squeeze(0)
-            finger_probs_t = torch.softmax(finger_logits, dim=1).squeeze(0)
+            action_probs_t = action_probs_t.squeeze(0)
+            finger_probs_t = finger_probs_t.squeeze(0)
             applicability_prob_t = (
-                torch.sigmoid(applicability_logits).squeeze(0)
-                if applicability_logits is not None
+                applicability_prob_t.squeeze(0)
+                if applicability_prob_t is not None
                 else None
             )
             if emit_viz:
                 hidden_mag = _compute_hidden_mag(model, x)
                 live_viz_payload = _build_live_viz_payload(model, x, hidden_mag=hidden_mag)
+        else:
+            window_input = standardize_window_TxC(window_f32, scaler)
+            x = torch.from_numpy(window_input).unsqueeze(0).to(device)
+            with torch.inference_mode():
+                finger_logits, action_logits, applicability_logits = unpack_model_outputs(
+                    model(x)
+                )
+                finger_logits = apply_temperature_to_logits(
+                    finger_logits,
+                    temperature_state.finger_temperature if temperature_state is not None else 1.0,
+                )
+                action_logits = apply_temperature_to_logits(
+                    action_logits,
+                    temperature_state.action_temperature if temperature_state is not None else 1.0,
+                )
+                if applicability_logits is not None:
+                    applicability_logits = apply_temperature_to_logits(
+                        applicability_logits,
+                        temperature_state.applicability_temperature
+                        if temperature_state is not None
+                        else 1.0,
+                    )
+                action_probs_t = torch.softmax(action_logits, dim=1).squeeze(0)
+                finger_probs_t = torch.softmax(finger_logits, dim=1).squeeze(0)
+                applicability_prob_t = (
+                    torch.sigmoid(applicability_logits).squeeze(0)
+                    if applicability_logits is not None
+                    else None
+                )
+                if emit_viz:
+                    hidden_mag = _compute_hidden_mag(model, x)
+                    live_viz_payload = _build_live_viz_payload(model, x, hidden_mag=hidden_mag)
         return {
             "backend": "direct",
             "action_probs": action_probs_t.detach().cpu().numpy(),
@@ -1857,6 +1900,11 @@ def main() -> int:
     inference_engine = _build_inference_engine(
         model, scaler, device, args, temperature_state
     )
+    direct_inference_engine = (
+        None
+        if inference_engine is not None
+        else _build_direct_inference_engine(model, scaler, device, temperature_state)
+    )
     actuation_speed_mapper = _build_actuation_speed_mapper(args)
     if inference_engine is not None:
         logger.info(
@@ -2076,6 +2124,7 @@ def main() -> int:
                     model=model,
                     device=device,
                     inference_engine=inference_engine,
+                    direct_engine=direct_inference_engine,
                     temperature_state=temperature_state,
                     emit_viz=emit_viz,
                 )

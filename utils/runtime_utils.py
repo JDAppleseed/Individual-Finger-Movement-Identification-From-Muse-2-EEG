@@ -87,9 +87,19 @@ def now_utc_iso() -> str:
 
 
 def resolve_device(requested: str) -> torch.device:
-    requested = str(requested).lower()
-    if requested in {"cuda", "auto"} and torch.cuda.is_available():
+    requested = str(requested or "auto").strip().lower()
+    if requested == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if sys.platform == "darwin" and getattr(torch.backends, "mps", None) is not None:
+            return torch.device("cpu")
+        if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    if requested == "cuda" and torch.cuda.is_available():
         return torch.device("cuda")
+    if requested == "mps" and getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return torch.device("mps")
     return torch.device("cpu")
 
 

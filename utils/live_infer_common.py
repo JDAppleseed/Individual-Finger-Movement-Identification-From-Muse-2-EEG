@@ -260,43 +260,57 @@ def predict_window(
     model: torch.nn.Module,
     device: torch.device,
     inference_engine: Optional[InferenceEngine],
+    direct_engine: Optional[InferenceEngine] = None,
     temperature_state: Optional[TemperatureScalingState] = None,
 ) -> dict[str, Any]:
     window_f32 = np.asarray(window, dtype=np.float32)
 
     if inference_engine is None:
-        window_input = apply_channel_normalizer(window_f32, scaler)
-        x = torch.tensor(window_input, dtype=torch.float32).unsqueeze(0).to(device)
-        with torch.inference_mode():
-            finger_logits, action_logits, applicability_logits = unpack_model_outputs(
-                model(x)
+        if direct_engine is not None:
+            _, x = direct_engine.prepare_input(window_f32)
+            finger_probs_t, action_probs_t, applicability_prob = (
+                direct_engine.forward_probabilities(x)
             )
-            finger_logits = apply_temperature_to_logits(
-                finger_logits,
-                temperature_state.finger_temperature
-                if temperature_state is not None
-                else 1.0,
+            action_probs_t = action_probs_t.squeeze(0)
+            finger_probs_t = finger_probs_t.squeeze(0)
+            applicability_prob = (
+                applicability_prob.squeeze(0)
+                if applicability_prob is not None
+                else None
             )
-            action_logits = apply_temperature_to_logits(
-                action_logits,
-                temperature_state.action_temperature
-                if temperature_state is not None
-                else 1.0,
-            )
-            if applicability_logits is not None:
-                applicability_logits = apply_temperature_to_logits(
-                    applicability_logits,
-                    temperature_state.applicability_temperature
+        else:
+            window_input = apply_channel_normalizer(window_f32, scaler)
+            x = torch.from_numpy(window_input).unsqueeze(0).to(device)
+            with torch.inference_mode():
+                finger_logits, action_logits, applicability_logits = unpack_model_outputs(
+                    model(x)
+                )
+                finger_logits = apply_temperature_to_logits(
+                    finger_logits,
+                    temperature_state.finger_temperature
                     if temperature_state is not None
                     else 1.0,
                 )
-            action_probs_t = torch.softmax(action_logits, dim=1).squeeze(0)
-            finger_probs_t = torch.softmax(finger_logits, dim=1).squeeze(0)
-            applicability_prob = (
-                torch.sigmoid(applicability_logits).squeeze(0)
-                if applicability_logits is not None
-                else None
-            )
+                action_logits = apply_temperature_to_logits(
+                    action_logits,
+                    temperature_state.action_temperature
+                    if temperature_state is not None
+                    else 1.0,
+                )
+                if applicability_logits is not None:
+                    applicability_logits = apply_temperature_to_logits(
+                        applicability_logits,
+                        temperature_state.applicability_temperature
+                        if temperature_state is not None
+                        else 1.0,
+                    )
+                action_probs_t = torch.softmax(action_logits, dim=1).squeeze(0)
+                finger_probs_t = torch.softmax(finger_logits, dim=1).squeeze(0)
+                applicability_prob = (
+                    torch.sigmoid(applicability_logits).squeeze(0)
+                    if applicability_logits is not None
+                    else None
+                )
         return {
             "backend": "direct",
             "action_probs": action_probs_t.detach().cpu().numpy(),
@@ -593,6 +607,19 @@ def replay_ordered_windows(
         runtime_config=runtime_config,
         temperature_state=temperature_state,
     )
+    direct_engine = (
+        None
+        if inference_engine is not None
+        else InferenceEngine(
+            model=model,
+            normalizer=scaler,
+            device=device,
+            action_names={},
+            finger_names={},
+            config=InferenceConfig(mc_passes=1),
+            temperature_state=temperature_state,
+        )
+    )
     post_state = PostprocessState()
     actuation_history: Deque[ActuationDecision] = collections.deque(
         maxlen=max(3, int(runtime_config.actuation_stability))
@@ -635,6 +662,7 @@ def replay_ordered_windows(
             model=model,
             device=device,
             inference_engine=inference_engine,
+            direct_engine=direct_engine,
             temperature_state=temperature_state,
         )
         action_probs = np.asarray(inference_result["action_probs"], dtype=float)
