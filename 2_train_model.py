@@ -361,6 +361,44 @@ def _calibration_stratify_labels(y_action: np.ndarray, y_finger: np.ndarray) -> 
     return (y_action * (max_finger + 1)) + y_finger
 
 
+def _rebalance_calibration_split(
+    train_idx: np.ndarray,
+    fit_idx: np.ndarray,
+    calib_idx: np.ndarray,
+    y_action: np.ndarray,
+    *,
+    calibration_size: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    train_idx = np.asarray(train_idx, dtype=np.int64)
+    fit_idx = np.asarray(fit_idx, dtype=np.int64)
+    calib_idx = np.asarray(calib_idx, dtype=np.int64)
+    y_action = np.asarray(y_action, dtype=np.int64).reshape(-1)
+
+    if len(fit_idx) == 0 or len(calib_idx) == 0:
+        return fit_idx, calib_idx
+
+    for action_id in np.unique(y_action[train_idx]).tolist():
+        total = int(np.sum(y_action[train_idx] == int(action_id)))
+        if total <= 1:
+            continue
+        desired_calib = int(np.floor(total * float(calibration_size)))
+        desired_calib = max(0, min(desired_calib, total - 1))
+        desired_fit = total - desired_calib
+        current_fit = int(np.sum(y_action[fit_idx] == int(action_id)))
+        if current_fit >= desired_fit:
+            continue
+        deficit = desired_fit - current_fit
+        movable = calib_idx[y_action[calib_idx] == int(action_id)]
+        if len(movable) == 0:
+            continue
+        move = movable[:deficit]
+        fit_idx = np.concatenate([fit_idx, move]).astype(np.int64)
+        calib_mask = ~np.isin(calib_idx, move)
+        calib_idx = calib_idx[calib_mask].astype(np.int64)
+
+    return np.unique(fit_idx), np.asarray(calib_idx, dtype=np.int64)
+
+
 def _split_calibration_indices(
     train_idx: np.ndarray,
     y_action: np.ndarray,
@@ -394,7 +432,13 @@ def _split_calibration_indices(
         fit_idx = train_idx[np.asarray(fit_local, dtype=np.int64)]
         calib_idx = train_idx[np.asarray(calib_local, dtype=np.int64)]
         if len(fit_idx) and len(calib_idx):
-            return fit_idx, calib_idx
+            return _rebalance_calibration_split(
+                train_idx,
+                fit_idx,
+                calib_idx,
+                y_action,
+                calibration_size=calibration_size,
+            )
     except Exception:
         pass
 
@@ -412,9 +456,15 @@ def _split_calibration_indices(
             random_state=int(random_state),
             stratify=None,
         )
-    return train_idx[np.asarray(fit_local, dtype=np.int64)], train_idx[
-        np.asarray(calib_local, dtype=np.int64)
-    ]
+    fit_idx = train_idx[np.asarray(fit_local, dtype=np.int64)]
+    calib_idx = train_idx[np.asarray(calib_local, dtype=np.int64)]
+    return _rebalance_calibration_split(
+        train_idx,
+        fit_idx,
+        calib_idx,
+        y_action,
+        calibration_size=calibration_size,
+    )
 
 
 def _fit_temperature(
