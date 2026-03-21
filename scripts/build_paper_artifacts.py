@@ -69,6 +69,32 @@ def _latex_escape(text: str) -> str:
     return "".join(rep.get(ch, ch) for ch in str(text))
 
 
+def _latex_breakable_id(text: str) -> str:
+    escaped = _latex_escape(text)
+    escaped = escaped.replace(r"\_", r"\_\allowbreak{}")
+    escaped = escaped.replace("-", r"-\allowbreak{}")
+    return escaped
+
+
+def _display_subject_id(subject_id: str) -> str:
+    subj = str(subject_id).strip()
+    parts = subj.split()
+    if len(parts) > 1 and all(part.isdigit() for part in parts[1:]):
+        return parts[0]
+    return subj
+
+
+def _display_session_id(session_id: str) -> str:
+    sess = str(session_id).strip()
+    if not sess:
+        return sess
+    head, sep, tail = sess.partition("_")
+    display_head = _display_subject_id(head)
+    if not sep:
+        return display_head
+    return f"{display_head}{sep}{tail}"
+
+
 def expected_calibration_error(conf: np.ndarray, preds: np.ndarray, labels: np.ndarray, n_bins: int = 10) -> float:
     """
     Match 3_evaluate_model.py expected_calibration_error(): bins in (a,b].
@@ -136,6 +162,38 @@ def min_max(vals: List[float]) -> Tuple[float, float]:
 def _load_json(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _load_featured_bundle() -> Dict[str, Any]:
+    manifest_path = next(PROJECTS_ROOT.glob("**/winning_model/winning_model_manifest.json"), None)
+    if manifest_path is None or not manifest_path.exists():
+        return {}
+
+    winning_root = manifest_path.parent
+    manifest = _load_json(manifest_path)
+
+    model_metrics_path = winning_root / "model_run" / "metrics.json"
+    eval_manifest_path = winning_root / "session_report" / "eval_manifest.json"
+
+    source_session_dir = manifest.get("source_session_dir")
+    replay_manifest_path = None
+    if source_session_dir:
+        source_session_name = Path(str(source_session_dir)).name
+        candidate = winning_root / "pseudo_live" / source_session_name / "replay_manifest.json"
+        if candidate.exists():
+            replay_manifest_path = candidate
+    if replay_manifest_path is None:
+        replay_manifest_path = next(
+            iter(sorted((winning_root / "pseudo_live").glob("*/replay_manifest.json"))),
+            None,
+        )
+
+    return {
+        "manifest": manifest,
+        "model_metrics": _load_json(model_metrics_path) if model_metrics_path.exists() else {},
+        "eval_manifest": _load_json(eval_manifest_path) if eval_manifest_path.exists() else {},
+        "replay_manifest": _load_json(replay_manifest_path) if replay_manifest_path and replay_manifest_path.exists() else {},
+    }
 
 
 def _read_events_counts(events_path: Path) -> Dict[str, Any]:
@@ -291,6 +349,38 @@ class RunMetrics:
     fig_scatter: Optional[str]
 
 
+def _metric_or_neg_inf(value: Optional[float]) -> float:
+    if value is None or not np.isfinite(value):
+        return float("-inf")
+    return float(value)
+
+
+def _run_rank_key(run: RunMetrics) -> Tuple[float, float, int, int, str, str]:
+    """
+    Deterministic ranking for manuscript run selection.
+    Primary sort is held-out action accuracy because the paper's deployment path
+    first depends on correctly separating REST vs action. Finger accuracy is the
+    first tiebreak, followed by sample counts and stable lexical IDs.
+    """
+    return (
+        _metric_or_neg_inf(run.test_action_acc_metrics),
+        _metric_or_neg_inf(run.test_finger_acc_non_rest_metrics),
+        int(run.n_test_non_rest_metrics or 0),
+        int(run.n_test_metrics or 0),
+        str(run.created_utc or ""),
+        str(run.run_id),
+    )
+
+
+def _select_best_runs_per_subject(runs: List[RunMetrics]) -> List[RunMetrics]:
+    best_by_subject: Dict[str, RunMetrics] = {}
+    for run in runs:
+        current = best_by_subject.get(run.subject_id)
+        if current is None or _run_rank_key(run) > _run_rank_key(current):
+            best_by_subject[run.subject_id] = run
+    return sorted(best_by_subject.values(), key=lambda x: (x.subject_id, x.session_id, x.run_id))
+
+
 def _copy_figure(src: Path, dest_stem: str) -> str:
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     ext = src.suffix.lower()
@@ -299,18 +389,53 @@ def _copy_figure(src: Path, dest_stem: str) -> str:
     return str(dest.relative_to(REPO_ROOT))
 
 
-def _find_report_figs(report_dir: Path) -> Dict[str, Optional[Path]]:
-    if not report_dir.exists():
-        return {"action": None, "finger": None, "reliability": None, "scatter": None}
-    action = report_dir / "action_confusion.png"
-    finger = report_dir / "finger_confusion.png"
-    mc_eval = next(iter(sorted(report_dir.glob("mc_eval_*.png"))), None)
-    mc_scatter = next(iter(sorted(report_dir.glob("mc_scatter_*.png"))), None)
+def _find_report_figs(report_dir: Path, run_id: str) -> Dict[str, Optional[Path]]:
+    repo_report_dir = REPO_ROOT / "reports" / "runs" / str(run_id)
+    winning_report_dir = next(
+        iter(sorted(PROJECTS_ROOT.glob(f"**/winning_model/repo_report"))),
+        None,
+    )
+
+    def _first_existing(*paths: Optional[Path]) -> Optional[Path]:
+        for path in paths:
+            if path is not None and path.exists():
+                return path
+        return None
+
+    def _first_glob(*patterns: Tuple[Optional[Path], str]) -> Optional[Path]:
+        for directory, pattern in patterns:
+            if directory is None or not directory.exists():
+                continue
+            match = next(iter(sorted(directory.glob(pattern))), None)
+            if match is not None and match.exists():
+                return match
+        return None
+
+    action = _first_existing(
+        report_dir / "action_confusion.png" if report_dir.exists() else None,
+        repo_report_dir / "action_confusion.png",
+        winning_report_dir / "action_confusion.png" if winning_report_dir else None,
+    )
+    finger = _first_existing(
+        report_dir / "finger_confusion.png" if report_dir.exists() else None,
+        repo_report_dir / "finger_confusion.png",
+        winning_report_dir / "finger_confusion.png" if winning_report_dir else None,
+    )
+    mc_eval = _first_glob(
+        (report_dir if report_dir.exists() else None, "mc_eval_*.png"),
+        (repo_report_dir, "mc_eval_*.png"),
+        (winning_report_dir, "mc_eval_*.png"),
+    )
+    mc_scatter = _first_glob(
+        (report_dir if report_dir.exists() else None, "mc_scatter_*.png"),
+        (repo_report_dir, "mc_scatter_*.png"),
+        (winning_report_dir, "mc_scatter_*.png"),
+    )
     return {
-        "action": action if action.exists() else None,
-        "finger": finger if finger.exists() else None,
-        "reliability": mc_eval if mc_eval and mc_eval.exists() else None,
-        "scatter": mc_scatter if mc_scatter and mc_scatter.exists() else None,
+        "action": action,
+        "finger": finger,
+        "reliability": mc_eval,
+        "scatter": mc_scatter,
     }
 
 
@@ -320,6 +445,8 @@ def _count_labels(arr: np.ndarray) -> Dict[str, int]:
 
 
 def _compute_run_metrics(metrics_path: Path) -> RunMetrics:
+    from utils.label_schema import decode_finger_predictions_for_actions, finger_confidences_for_ids
+
     run_dir = metrics_path.parent
     run_id = run_dir.name
     session_dir = run_dir.parents[2]
@@ -343,10 +470,12 @@ def _compute_run_metrics(metrics_path: Path) -> RunMetrics:
 
     action_conf = action_probs.max(axis=1)
     action_preds = action_probs.argmax(axis=1)
-    finger_conf = finger_probs.max(axis=1)
-    finger_preds = finger_probs.argmax(axis=1)
 
     non_rest_mask = y_action != 0  # ACTION_REST from utils/label_schema.py
+    finger_preds = np.asarray(
+        decode_finger_predictions_for_actions(action_preds, finger_probs), dtype=np.int64
+    )
+    finger_conf = np.asarray(finger_confidences_for_ids(finger_probs, finger_preds), dtype=float)
     test_action_acc_from_preds = float(np.mean(action_preds == y_action)) if y_action.size else None
     test_finger_acc_non_rest_from_preds = (
         float(np.mean(finger_preds[non_rest_mask] == y_finger[non_rest_mask]))
@@ -453,7 +582,7 @@ def _compute_run_metrics(metrics_path: Path) -> RunMetrics:
 
     # Report figures
     report_dir = session_dir / "processed" / "reports" / run_id
-    figs = _find_report_figs(report_dir)
+    figs = _find_report_figs(report_dir, run_id=run_id)
     subj = str(train_cfg.get("subject_id_filter") or metrics.get("subject_id") or "UNKNOWN")
     # Use the canonical session directory name (avoid embedding absolute paths into filenames).
     sess = str(session_dir.name)
@@ -541,7 +670,7 @@ def _scan_subject_demographics() -> List[SubjectDemographics]:
     return demos
 
 
-def _scan_session_meta(subject_id: str) -> Dict[str, Any]:
+def _scan_session_meta(subject_id: str, session_ids: Optional[set[str]] = None) -> Dict[str, Any]:
     """
     Aggregate session durations and event counts for all sessions matching subject_id.
     """
@@ -551,6 +680,9 @@ def _scan_session_meta(subject_id: str) -> Dict[str, Any]:
         if str(meta.get("subject_id")) != str(subject_id):
             continue
         sess_dir = run_meta.parent
+        session_id = str(meta.get("session_id") or sess_dir.name)
+        if session_ids is not None and session_id not in session_ids:
+            continue
         stream = meta.get("stream") or {}
         srate = stream.get("nominal_srate")
         samples_received = meta.get("samples_received")
@@ -568,7 +700,7 @@ def _scan_session_meta(subject_id: str) -> Dict[str, Any]:
         events_counts = _read_events_counts(events_path)
         out["sessions"].append(
             {
-                "session_id": meta.get("session_id") or sess_dir.name,
+                "session_id": session_id,
                 "created_utc": meta.get("created_utc"),
                 "samples_received": samples_received,
                 "samples_written": meta.get("samples_written"),
@@ -596,6 +728,7 @@ def _format_num(x: float, digits: int = 4) -> str:
 
 def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo_sha: str) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    featured = _load_featured_bundle()
 
     # Per-run macros (index-based to keep names stable)
     lines: List[str] = []
@@ -690,7 +823,10 @@ def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo
         from utils.label_schema import ACTIVE_FINGER_IDS
 
         m = CNNLSTMFingerActionNet(
-            n_channels=4, n_fingers=len(ACTIVE_FINGER_IDS), n_actions=3
+            n_channels=4,
+            n_fingers=len(ACTIVE_FINGER_IDS),
+            n_actions=3,
+            finger_applicability_head=True,
         )
         param_count = int(sum(p.numel() for p in m.parameters()))
     except Exception:
@@ -719,11 +855,50 @@ def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo
         lines.append(r"\newcommand{\BlockIdUniqueMin}{\textit{n/a}}" + "\n")
         lines.append(r"\newcommand{\BlockIdUniqueMax}{\textit{n/a}}" + "\n")
 
+    featured_metrics = ((featured.get("model_metrics") or {}).get("test") or {})
+    featured_eval = ((featured.get("eval_manifest") or {}).get("metrics") or {})
+    featured_replay = ((featured.get("replay_manifest") or {}).get("replay_metrics") or {})
+
+    def _macro_percent(name: str, value: Optional[float], digits: int = 2) -> None:
+        lines.append(
+            rf"\newcommand{{\{name}}}{{"
+            + (_format_pct(value, digits) if value is not None and np.isfinite(value) else r"\textit{n/a}")
+            + r"}"
+            + "\n"
+        )
+
+    def _macro_number(name: str, value: Optional[float], digits: int = 4) -> None:
+        lines.append(
+            rf"\newcommand{{\{name}}}{{"
+            + (_format_num(value, digits) if value is not None and np.isfinite(value) else r"\textit{n/a}")
+            + r"}"
+            + "\n"
+        )
+
+    def _macro_count(name: str, value: Optional[int]) -> None:
+        lines.append(
+            rf"\newcommand{{\{name}}}{{"
+            + (str(int(value)) if value is not None else r"\textit{n/a}")
+            + r"}"
+            + "\n"
+        )
+
+    _macro_percent("FeaturedActionAcc", featured_metrics.get("action_acc"))
+    _macro_percent("FeaturedFingerAcc", featured_metrics.get("finger_acc_non_rest"))
+    _macro_count("FeaturedNTest", featured_metrics.get("n_test"))
+    _macro_count("FeaturedNNonRest", featured_metrics.get("n_test_non_rest"))
+    _macro_percent("FeaturedJointAcc", featured_eval.get("joint_acc"))
+    _macro_percent("FeaturedReplayCommittedActionAcc", featured_replay.get("committed_action_acc"))
+    _macro_percent("FeaturedReplayPrecision", featured_replay.get("would_send_window_precision_non_rest"))
+    _macro_number("FeaturedActionECE", featured_eval.get("action_ece"))
+    _macro_number("FeaturedFingerECE", featured_eval.get("finger_ece_non_rest"))
+
     (OUT_DIR / "paper_macros.tex").write_text("".join(lines), encoding="utf-8")
 
 
 def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], session_meta: Dict[str, Any]) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    sorted_runs = sorted(runs, key=lambda x: (x.subject_id, x.session_id, x.run_id))
 
     # Demographics table
     demo_lines: List[str] = []
@@ -739,20 +914,20 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
         age = str(d.age) if d.age is not None else r"\textit{n/a}"
         sex = _latex_escape(d.sex) if d.sex else r"\textit{n/a}"
         hand = _latex_escape(d.handedness) if d.handedness else r"\textit{n/a}"
-        demo_lines.append(f"{_latex_escape(d.subject_id)} & {age} & {sex} & {hand} \\\\\n")
+        demo_lines.append(f"{_latex_escape(_display_subject_id(d.subject_id))} & {age} & {sex} & {hand} \\\\\n")
     demo_lines.append("\\bottomrule\n\\end{tabular}\n\\end{table}\n\n")
 
     # Performance table per run
     perf_lines: List[str] = []
     perf_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n\\setlength{\\tabcolsep}{3pt}\n")
-    perf_lines.append("\\caption{Per-subject test performance and calibration (from \\texttt{metrics.json} and \\texttt{test\\_predictions.npz}).}\n")
+    perf_lines.append("\\caption{Representative manuscript runs: one best subject-specific run per subject, with performance and calibration extracted from \\texttt{metrics.json} and \\texttt{test\\_predictions.npz}.}\n")
     perf_lines.append("\\label{tab:perf}\n")
     perf_lines.append("\\resizebox{\\textwidth}{!}{%\n")
-    perf_lines.append("\\begin{tabular}{lp{0.30\\textwidth}rrrrrrrr}\n\\toprule\n")
+    perf_lines.append("\\begin{tabular}{llp{0.28\\textwidth}rrrrrrrr}\n\\toprule\n")
     perf_lines.append(
-        "Subject & Session & $n_{test}$ & $n_{non\\text{-}REST}$ & Action Acc (\\%) & 95\\% CI & Finger Acc$_{non\\text{-}REST}$ (\\%) & 95\\% CI & Action ECE & Finger ECE$_{non\\text{-}REST}$ \\\\\n\\midrule\n"
+        "Subject & Run & Session & $n_{test}$ & $n_{non\\text{-}REST}$ & Action Acc (\\%) & 95\\% CI & Finger Acc$_{non\\text{-}REST}$ (\\%) & 95\\% CI & Action ECE & Finger ECE$_{non\\text{-}REST}$ \\\\\n\\midrule\n"
     )
-    for r in sorted(runs, key=lambda x: (x.subject_id, x.session_id, x.run_id)):
+    for r in sorted_runs:
         action_acc = r.test_action_acc_metrics
         finger_acc = r.test_finger_acc_non_rest_metrics
         a_lo, a_hi = r.action_ci95_wilson
@@ -767,25 +942,28 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
             if np.isfinite(f_lo) and np.isfinite(f_hi)
             else "\\textit{n/a}"
         )
-        session_id = _latex_escape(r.session_id)
-        session_id = session_id.replace(r"\_", r"\_\allowbreak")
+        session_id = _latex_breakable_id(_display_session_id(r.session_id))
         perf_lines.append(
-            f"{_latex_escape(r.subject_id)} & {session_id} & {int(r.n_test_metrics or 0)} & {int(r.n_test_non_rest_metrics or 0)} & "
+            f"{_latex_escape(_display_subject_id(r.subject_id))} & {_latex_breakable_id(r.run_id)} & {session_id} & {int(r.n_test_metrics or 0)} & {int(r.n_test_non_rest_metrics or 0)} & "
             f"{_format_pct(action_acc, 2)} & {a_ci} & {_format_pct(finger_acc, 2)} & {f_ci} & "
             f"{_format_num(r.test_action_ece, 4)} & {_format_num(r.test_finger_ece_non_rest, 4)} \\\\\n"
         )
     perf_lines.append("\\bottomrule\n\\end{tabular}%\n}\n\\end{table*}\n\n")
 
-    # Dataset / windowing table per run
+    # Dataset / windowing table per session
+    dataset_rows: Dict[Tuple[str, str], RunMetrics] = {}
+    for r in sorted_runs:
+        dataset_rows.setdefault((r.subject_id, r.session_id), r)
     data_lines: List[str] = []
-    data_lines.append("\\begin{table*}[t]\n\\centering\n")
-    data_lines.append("\\caption{Dataset and window extraction summary (from \\texttt{eeg\\_windows.npz} and \\texttt{run\\_meta.json}).}\n")
+    data_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n\\setlength{\\tabcolsep}{3pt}\n")
+    data_lines.append("\\caption{Dataset and window extraction summary for the two sessions represented in this manuscript.}\n")
     data_lines.append("\\label{tab:dataset}\n")
-    data_lines.append("\\begin{tabular}{llrrrrrr}\n\\toprule\n")
+    data_lines.append("\\resizebox{\\textwidth}{!}{%\n")
+    data_lines.append("\\begin{tabular}{lp{0.34\\textwidth}rrrrrr}\n\\toprule\n")
     data_lines.append(
         "Subject & Session & $N$ windows & Window (s) & Hop (s) & Mean overlap (\\%) & Artifacts (count) & Gaps (count) \\\\\n\\midrule\n"
     )
-    for r in sorted(runs, key=lambda x: (x.subject_id, x.session_id, x.run_id)):
+    for (_, _), r in dataset_rows.items():
         ov_pct = (float(r.overlap_frac_mean) * 100.0) if r.overlap_frac_mean is not None else None
         win_str = f"{float(r.window_sec):.3f}" if r.window_sec is not None else "\\textit{n/a}"
         hop_str = f"{float(r.step_sec):.3f}" if r.step_sec is not None else "\\textit{n/a}"
@@ -793,17 +971,15 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
         art_str = str(r.artifact_count) if r.artifact_count is not None else "\\textit{n/a}"
         gapc_str = str(r.gap_count) if r.gap_count is not None else "\\textit{n/a}"
         data_lines.append(
-            f"{_latex_escape(r.subject_id)} & {_latex_escape(r.session_id)} & {int(r.n_windows_total or 0)} & "
+            f"{_latex_escape(_display_subject_id(r.subject_id))} & {_latex_breakable_id(_display_session_id(r.session_id))} & {int(r.n_windows_total or 0)} & "
             f"{win_str} & {hop_str} & {ov_str} & {art_str} & {gapc_str} \\\\\n"
         )
-    data_lines.append("\\bottomrule\n\\end{tabular}\n\\end{table*}\n\n")
+    data_lines.append("\\bottomrule\n\\end{tabular}%\n}\n\\end{table*}\n\n")
 
     # Session durations / ingestion integrity table (per session, from run_meta.json)
     dur_lines: List[str] = []
     dur_lines.append("\\begin{table}[t]\n\\centering\n\\scriptsize\n\\setlength{\\tabcolsep}{3pt}\n")
-    dur_lines.append(
-        "\\caption{Session durations and write integrity (computed from \\texttt{run\\_meta.json}).}\n"
-    )
+    dur_lines.append("\\caption{Session durations and write integrity for the sessions underlying the representative runs.}\n")
     dur_lines.append("\\label{tab:sessions}\n")
     dur_lines.append("\\resizebox{\\columnwidth}{!}{%\n")
     dur_lines.append("\\begin{tabular}{p{0.30\\linewidth}rrrr}\n\\toprule\n")
@@ -821,8 +997,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
         except Exception:
             drop_pct = None
         drop_str = f"{drop_pct:.2f}" if drop_pct is not None and np.isfinite(drop_pct) else "\\textit{n/a}"
-        session_id = _latex_escape(str(s.get("session_id")))
-        session_id = session_id.replace(r"\_", r"\_\allowbreak")
+        session_id = _latex_breakable_id(_display_session_id(str(s.get("session_id"))))
         dur_lines.append(
             f"{session_id} & {int(recv or 0)} & {int(written or 0)} & {drop_str} & {dur_str} \\\\\n"
         )
@@ -863,7 +1038,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     header_cells = ["Session"] + [f"\\rotatebox{{90}}{{{_latex_escape(t)}}}" for t in types]
     ev_lines.append(" & ".join(header_cells) + " \\\\\n\\midrule\n")
     for s in session_meta.get("sessions", []):
-        sess_id = _latex_escape(str(s.get("session_id")))
+        sess_id = _latex_breakable_id(_display_session_id(str(s.get("session_id"))))
         ec = s.get("events_counts") or {}
         cbt = ec.get("counts_by_type") if ec.get("available") else {}
         row = [sess_id]
@@ -886,21 +1061,28 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
         FINGER_NAMES = {0: "0", 1: "1", 2: "2", 3: "3", 4: "4", 5: "5"}
 
     pc_lines: List[str] = []
-    pc_lines.append("\\begin{table*}[t]\n\\centering\n")
-    pc_lines.append("\\caption{Per-class accuracies on the test split (computed from saved per-window predictions).}\n")
-    pc_lines.append("\\label{tab:perclass}\n")
-    pc_lines.append("\\begin{tabular}{lllrr}\n\\toprule\n")
-    pc_lines.append("Task & Subject & Class & Count & Accuracy (\\%) \\\\\n\\midrule\n")
-    for r in sorted(runs, key=lambda x: (x.subject_id, x.session_id, x.run_id)):
-        # Action classes
+    pc_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
+    pc_lines.append("\\caption{Action-class accuracies for the representative manuscript runs.}\n")
+    pc_lines.append("\\label{tab:perclass-action}\n")
+    pc_lines.append("\\setlength{\\tabcolsep}{3pt}\n")
+    pc_lines.append("\\begin{tabular}{lp{0.30\\textwidth}lrr}\n\\toprule\n")
+    pc_lines.append("Subject & Run & Class & Count & Accuracy (\\%) \\\\\n\\midrule\n")
+    for r in sorted_runs:
         for cls_str, acc in sorted(r.test_action_acc_by_class.items(), key=lambda kv: int(kv[0])):
             cls = int(cls_str)
             name = ACTION_NAMES.get(cls, cls_str)
             count = int(r.test_action_counts.get(cls_str, 0))
             pc_lines.append(
-                f"Action & {_latex_escape(r.subject_id)} & {_latex_escape(name)} & {count} & {acc*100.0:.2f} \\\\\n"
+                f"{_latex_escape(_display_subject_id(r.subject_id))} & {_latex_breakable_id(r.run_id)} & {_latex_escape(name)} & {count} & {acc*100.0:.2f} \\\\\n"
             )
-        # Finger classes (non-REST only); count for NONE excludes action REST windows.
+    pc_lines.append("\\bottomrule\n\\end{tabular}\n\\end{table*}\n\n")
+    pc_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
+    pc_lines.append("\\caption{Finger-class accuracies on non-REST test windows for the representative manuscript runs.}\n")
+    pc_lines.append("\\label{tab:perclass-finger}\n")
+    pc_lines.append("\\setlength{\\tabcolsep}{3pt}\n")
+    pc_lines.append("\\begin{tabular}{lp{0.30\\textwidth}lrr}\n\\toprule\n")
+    pc_lines.append("Subject & Run & Class & Count & Accuracy (\\%) \\\\\n\\midrule\n")
+    for r in sorted_runs:
         rest_count = int(r.test_action_counts.get("0", 0))
         for cls_str, acc in sorted(r.test_finger_acc_by_class_non_rest.items(), key=lambda kv: int(kv[0])):
             cls = int(cls_str)
@@ -910,7 +1092,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
             else:
                 count = int(r.test_finger_counts.get(cls_str, 0))
             pc_lines.append(
-                f"Finger (non-REST) & {_latex_escape(r.subject_id)} & {_latex_escape(name)} & {count} & {acc*100.0:.2f} \\\\\n"
+                f"{_latex_escape(_display_subject_id(r.subject_id))} & {_latex_breakable_id(r.run_id)} & {_latex_escape(name)} & {count} & {acc*100.0:.2f} \\\\\n"
             )
     pc_lines.append("\\bottomrule\n\\end{tabular}\n\\end{table*}\n\n")
     (OUT_DIR / "tables_perclass.tex").write_text("".join(pc_lines), encoding="utf-8")
@@ -918,11 +1100,12 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     # Bootstrap CI table (optional rigor supplement)
     boot_lines: List[str] = []
     boot_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
-    boot_lines.append("\\caption{Bootstrap 95\\% confidence intervals for accuracy (percentile bootstrap over test windows).}\n")
+    boot_lines.append("\\caption{Bootstrap 95\\% confidence intervals for the representative manuscript runs.}\n")
     boot_lines.append("\\label{tab:bootci}\n")
-    boot_lines.append("\\begin{tabular}{lrrrr}\n\\toprule\n")
-    boot_lines.append("Subject & Action Acc (\\%) & 95\\% CI & Finger Acc$_{non\\text{-}REST}$ (\\%) & 95\\% CI \\\\\n\\midrule\n")
-    for r in sorted(runs, key=lambda x: (x.subject_id, x.session_id, x.run_id)):
+    boot_lines.append("\\resizebox{\\textwidth}{!}{%\n")
+    boot_lines.append("\\begin{tabular}{llrrrr}\n\\toprule\n")
+    boot_lines.append("Subject & Run & Action Acc (\\%) & 95\\% CI & Finger Acc$_{non\\text{-}REST}$ (\\%) & 95\\% CI \\\\\n\\midrule\n")
+    for r in sorted_runs:
         a_lo, a_hi = r.action_ci95_boot
         f_lo, f_hi = r.finger_non_rest_ci95_boot
         a_ci = (
@@ -936,32 +1119,33 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
             else "\\textit{n/a}"
         )
         boot_lines.append(
-            f"{_latex_escape(r.subject_id)} & {_format_pct(r.test_action_acc_metrics, 2)} & {a_ci} & {_format_pct(r.test_finger_acc_non_rest_metrics, 2)} & {f_ci} \\\\\n"
+            f"{_latex_escape(_display_subject_id(r.subject_id))} & {_latex_breakable_id(r.run_id)} & {_format_pct(r.test_action_acc_metrics, 2)} & {a_ci} & {_format_pct(r.test_finger_acc_non_rest_metrics, 2)} & {f_ci} \\\\\n"
         )
-    boot_lines.append("\\bottomrule\n\\end{tabular}\n\\end{table*}\n\n")
+    boot_lines.append("\\bottomrule\n\\end{tabular}%\n}\n\\end{table*}\n\n")
     (OUT_DIR / "tables_bootstrap_ci.tex").write_text("".join(boot_lines), encoding="utf-8")
 
     # Train vs test generalization gaps (from metrics.json train/test blocks)
     gap_lines: List[str] = []
-    gap_lines.append("\\begin{table*}[t]\n\\centering\n")
-    gap_lines.append("\\caption{Train--test generalization gaps (percentage points) from saved \\texttt{metrics.json}.}\n")
+    gap_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
+    gap_lines.append("\\caption{Train--test generalization gaps (percentage points) for the representative manuscript runs.}\n")
     gap_lines.append("\\label{tab:gap}\n")
-    gap_lines.append("\\begin{tabular}{lrrrrrr}\n\\toprule\n")
+    gap_lines.append("\\resizebox{\\textwidth}{!}{%\n")
+    gap_lines.append("\\begin{tabular}{llrrrrrr}\n\\toprule\n")
     gap_lines.append(
-        "Subject & Train Action (\\%) & Test Action (\\%) & Gap (pp) & Train Finger (\\%) & Test Finger$_{non\\text{-}REST}$ (\\%) & Gap (pp) \\\\\n\\midrule\n"
+        "Subject & Run & Train Action (\\%) & Test Action (\\%) & Gap (pp) & Train Finger (\\%) & Test Finger$_{non\\text{-}REST}$ (\\%) & Gap (pp) \\\\\n\\midrule\n"
     )
-    for r in sorted(runs, key=lambda x: (x.subject_id, x.session_id, x.run_id)):
+    for r in sorted_runs:
         def _gap_pp(train: Optional[float], test: Optional[float]) -> str:
             if train is None or test is None or (not np.isfinite(train)) or (not np.isfinite(test)):
                 return "\\textit{n/a}"
             return f"{(float(train) - float(test)) * 100.0:.2f}"
 
         gap_lines.append(
-            f"{_latex_escape(r.subject_id)} & "
+            f"{_latex_escape(_display_subject_id(r.subject_id))} & {_latex_breakable_id(r.run_id)} & "
             f"{_format_pct(r.train_action_acc, 2)} & {_format_pct(r.test_action_acc_metrics, 2)} & {_gap_pp(r.train_action_acc, r.test_action_acc_metrics)} & "
             f"{_format_pct(r.train_finger_acc, 2)} & {_format_pct(r.test_finger_acc_non_rest_metrics, 2)} & {_gap_pp(r.train_finger_acc, r.test_finger_acc_non_rest_metrics)} \\\\\n"
         )
-    gap_lines.append("\\bottomrule\n\\end{tabular}\n\\end{table*}\n\n")
+    gap_lines.append("\\bottomrule\n\\end{tabular}%\n}\n\\end{table*}\n\n")
     (OUT_DIR / "tables_generalization_gap.tex").write_text("".join(gap_lines), encoding="utf-8")
 
 
@@ -972,6 +1156,8 @@ def _write_figures(runs: List[RunMetrics]) -> None:
     lines.append("% AUTO-GENERATED by scripts/build_paper_artifacts.py. DO NOT EDIT BY HAND.\n")
 
     for r in sorted(runs, key=lambda x: (x.subject_id, x.session_id, x.run_id)):
+        if not any([r.fig_action_confusion, r.fig_finger_confusion, r.fig_reliability, r.fig_scatter]):
+            continue
         lines.append("\\begin{figure*}[t]\n\\centering\n")
         # 2x2 grid using minipages (IEEE-friendly, no extra packages required)
         def inc(path: Optional[str], caption: str) -> str:
@@ -984,25 +1170,28 @@ def _write_figures(runs: List[RunMetrics]) -> None:
                     + caption
                     + "\n\\end{minipage}\n"
                 )
+            safe_path = path.replace("\\", "/")
+            if not safe_path.startswith("../"):
+                safe_path = f"../{safe_path}"
             return (
                 "\\begin{minipage}[b]{0.49\\linewidth}\\centering\n"
-                + f"\\includegraphics[width=\\linewidth]{{{_latex_escape(path)}}}\n"
+                + f"\\includegraphics[width=\\linewidth]{{{safe_path}}}\n"
                 + "\\\\"
                 + "\\footnotesize "
                 + caption
                 + "\n\\end{minipage}\n"
             )
 
-        subj = _latex_escape(r.subject_id)
-        sess = _latex_escape(r.session_id)
+        subj = _latex_escape(_display_subject_id(r.subject_id))
+        sess = _latex_breakable_id(_display_session_id(r.session_id))
         lines.append(inc(r.fig_action_confusion, f"Action confusion matrix ({subj})."))
         lines.append(inc(r.fig_finger_confusion, f"Finger confusion matrix ({subj})."))
         lines.append("\\\\[0.5em]\n")
         lines.append(inc(r.fig_reliability, f"Reliability / calibration summary ({subj})."))
         lines.append(inc(r.fig_scatter, f"MC dropout confidence scatter ({subj})."))
-        run_id = _latex_escape(r.run_id)
+        run_id = _latex_breakable_id(r.run_id)
         lines.append(
-            f"\\caption{{Per-run evaluation figures for {subj} (session {sess}, run {run_id}).}}\n"
+            f"\\caption{{Representative evaluation figures for {subj} (session {sess}, run {run_id}).}}\n"
         )
         lines.append("\\end{figure*}\n\n")
 
@@ -1022,17 +1211,22 @@ def main() -> int:
     FIG_DIR.mkdir(parents=True, exist_ok=True)
 
     # Discover all runs
-    run_metrics: List[RunMetrics] = []
+    all_run_metrics: List[RunMetrics] = []
     for metrics_path in sorted(PROJECTS_ROOT.rglob("processed/models/*/metrics.json")):
-        run_metrics.append(_compute_run_metrics(metrics_path))
+        all_run_metrics.append(_compute_run_metrics(metrics_path))
+
+    run_metrics = _select_best_runs_per_subject(all_run_metrics)
 
     # Demographics (subject.json)
     demos = _scan_subject_demographics()
+    selected_subjects = {r.subject_id for r in run_metrics}
+    demos = [d for d in demos if d.subject_id in selected_subjects]
 
     # Session meta (run_meta + events) for each subject appearing in runs
     session_meta_by_subject: Dict[str, Any] = {}
-    for subj in sorted({r.subject_id for r in run_metrics}):
-        session_meta_by_subject[subj] = _scan_session_meta(subj)
+    for subj in sorted(selected_subjects):
+        subject_session_ids = {r.session_id for r in run_metrics if r.subject_id == subj}
+        session_meta_by_subject[subj] = _scan_session_meta(subj, session_ids=subject_session_ids)
 
     # Repo SHA for reproducibility section
     sha = "UNKNOWN"
@@ -1054,6 +1248,7 @@ def main() -> int:
         # Avoid embedding absolute local paths in version-controlled artifacts.
         "repo_root": ".",
         "repo_commit_sha": sha,
+        "n_available_runs": len(all_run_metrics),
         "n_runs": len(run_metrics),
         "runs": [asdict(r) for r in run_metrics],
         "subjects": [asdict(d) for d in demos],
