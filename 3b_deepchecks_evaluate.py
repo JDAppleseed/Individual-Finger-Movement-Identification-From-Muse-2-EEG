@@ -4,9 +4,11 @@ Deterministic model behavior (Dropout OFF)
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
@@ -28,10 +30,12 @@ from utils.label_schema import ACTION_NAMES, ACTION_REST, FINGER_NAMES
 from utils.sequence_data import (
     load_sequence_npz,
     split_indices,
-    apply_channel_normalizer,
     summarize_windows,
 )
-from utils.runtime_utils import load_normalizer
+from utils.runtime_utils import (
+    apply_channel_normalizer as apply_saved_channel_normalizer,
+    load_normalizer,
+)
 from utils.splitting import infer_groups, assert_no_group_overlap, assert_identifier_not_in_X
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 
@@ -152,7 +156,19 @@ def _infer_context_from_session_dir(session_dir: Path) -> Tuple[Optional[str], O
 SEED = 42
 MIN_TEST_SAMPLES = 30
 MAX_SPLIT_ATTEMPTS = 8
-DEFAULT_BATCH_SIZE = 256
+DEFAULT_BATCH_SIZE = 1024
+DEFAULT_DEVICE = "auto"
+DEFAULT_AMP_MODE = "off"
+
+
+@dataclass
+class InferenceTiming:
+    calls: int = 0
+    batches: int = 0
+    windows: int = 0
+    transfer_sec: float = 0.0
+    model_sec: float = 0.0
+    total_sec: float = 0.0
 
 
 def _set_deterministic(seed: int) -> None:
@@ -162,6 +178,43 @@ def _set_deterministic(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def _resolve_device(requested: str) -> torch.device:
+    requested = str(requested or "auto").strip().lower()
+    if requested == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(requested)
+
+
+def _resolve_amp_dtype(amp_mode: str, device: torch.device) -> Optional[torch.dtype]:
+    amp_mode = str(amp_mode or "off").strip().lower()
+    if amp_mode == "off":
+        return None
+    if amp_mode == "float16":
+        if device.type in {"cuda", "mps"}:
+            return torch.float16
+        return None
+    raise ValueError(f"Unsupported amp mode: {amp_mode}")
+
+
+def _autocast_context(device: torch.device, amp_dtype: Optional[torch.dtype]):
+    if amp_dtype is None:
+        return contextlib.nullcontext()
+    if not hasattr(torch, "amp") or not hasattr(torch.amp, "autocast"):
+        return contextlib.nullcontext()
+    return torch.amp.autocast(device_type=device.type, dtype=amp_dtype)
+
+
+def _device_synchronize(device: torch.device) -> None:
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+    elif device.type == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
+        torch.mps.synchronize()
 
 
 def _format_label_counts(values: np.ndarray, name_map: Optional[dict] = None):
@@ -485,6 +538,23 @@ runtime_group.add_argument(
     help="Inference batch size.",
 )
 runtime_group.add_argument(
+    "--device",
+    type=str,
+    default=DEFAULT_DEVICE,
+    choices=["auto", "cpu", "cuda", "mps"],
+    help="Inference device. 'auto' prefers CUDA, then MPS, then CPU.",
+)
+runtime_group.add_argument(
+    "--amp-mode",
+    type=str,
+    default=DEFAULT_AMP_MODE,
+    choices=["off", "float16"],
+    help=(
+        "Experimental mixed precision inference mode. 'off' preserves current numerics. "
+        "'float16' is opt-in for CUDA/MPS benchmarking."
+    ),
+)
+runtime_group.add_argument(
     "--test-size",
     type=float,
     default=None,
@@ -591,6 +661,25 @@ if not scaler_path.exists():
 if not model_path.exists():
     print(f"Model file not found: {model_path}")
     raise SystemExit(2)
+
+try:
+    device = _resolve_device(args.device)
+except Exception as exc:
+    print(f"Invalid --device: {exc}")
+    raise SystemExit(2)
+try:
+    amp_dtype = _resolve_amp_dtype(args.amp_mode, device)
+except Exception as exc:
+    print(f"Invalid --amp-mode: {exc}")
+    raise SystemExit(2)
+if str(args.amp_mode).lower() != "off" and amp_dtype is None:
+    print(
+        f"⚠️ AMP requested via --amp-mode={args.amp_mode}, but device={device} does not support it. Disabling AMP."
+    )
+print(
+    f"Runtime backend: device={device.type}, amp_mode={'off' if amp_dtype is None else args.amp_mode}, "
+    f"batch_size={max(1, int(args.batch_size))}"
+)
 
 X, y_action, y_finger, meta = load_sequence_npz(str(npz_path), mmap_mode="r")
 try:
@@ -738,15 +827,17 @@ normalizer = load_normalizer(scaler_path)
 if normalizer is None:
     print(f"Failed to load normalizer: {scaler_path}")
     raise SystemExit(2)
-X_train = apply_channel_normalizer(X_train, normalizer)
-X_test = apply_channel_normalizer(X_test, normalizer)
+X_train = np.ascontiguousarray(X_train, dtype=np.float32)
+X_test = np.ascontiguousarray(X_test, dtype=np.float32)
+apply_saved_channel_normalizer(X_train, normalizer, out=X_train)
+apply_saved_channel_normalizer(X_test, normalizer, out=X_test)
 # =========================
 # ===== TABULAR SUMMARY ===
 # =========================
 # Deepchecks needs tabular data; we summarize windows here but
 # run the model on normalized window tensors via synthetic lookup indices.
 
-X_lookup = np.concatenate([X_train, X_test], axis=0)
+X_lookup = np.ascontiguousarray(np.concatenate([X_train, X_test], axis=0), dtype=np.float32)
 train_lookup_ids = np.arange(len(X_train), dtype=np.int64)
 test_lookup_ids = np.arange(len(X_train), len(X_train) + len(X_test), dtype=np.int64)
 
@@ -819,6 +910,7 @@ model = CNNLSTMFingerActionNet(
     finger_applicability_head=bool(has_applicability_head),
 )
 model.load_state_dict(state_dict)
+model.to(device)
 model.eval()
 
 
@@ -830,6 +922,8 @@ class TorchModelWrapper:
 
     def __init__(self):
         self.classes_ = np.asarray(sorted(ACTION_NAMES.keys()), dtype=np.int64)
+        self._all_probs: Optional[np.ndarray] = None
+        self._timing = InferenceTiming()
 
     def _window_idx(self, X_tabular) -> np.ndarray:
         try:
@@ -839,25 +933,63 @@ class TorchModelWrapper:
                 X_tabular, feature_names, feature_row_lookup
             )
 
+    def _ensure_all_probs(self) -> np.ndarray:
+        if self._all_probs is not None:
+            return self._all_probs
+
+        n_windows = int(len(X_lookup))
+        if n_windows == 0:
+            self._all_probs = np.zeros((0, n_actions), dtype=np.float32)
+            return self._all_probs
+
+        batch_size = max(1, min(int(args.batch_size), n_windows))
+        probs_out = np.empty((n_windows, n_actions), dtype=np.float32)
+        device_batch: Optional[torch.Tensor] = None
+        self._timing.calls += 1
+        self._timing.windows += n_windows
+        total_start = time.perf_counter()
+
+        with torch.inference_mode():
+            for start in range(0, n_windows, batch_size):
+                end = min(start + batch_size, n_windows)
+                host_view = X_lookup[start:end]
+                host_tensor = torch.from_numpy(host_view)
+                if device.type == "cpu":
+                    batch_tensor = host_tensor
+                else:
+                    if (
+                        device_batch is None
+                        or device_batch.shape[1:] != host_tensor.shape[1:]
+                        or device_batch.shape[0] < host_tensor.shape[0]
+                    ):
+                        device_batch = torch.empty(
+                            (batch_size, *host_tensor.shape[1:]),
+                            dtype=torch.float32,
+                            device=device,
+                        )
+                    transfer_start = time.perf_counter()
+                    device_batch[: host_tensor.shape[0]].copy_(host_tensor)
+                    batch_tensor = device_batch[: host_tensor.shape[0]]
+                    _device_synchronize(device)
+                    self._timing.transfer_sec += time.perf_counter() - transfer_start
+                model_start = time.perf_counter()
+                with _autocast_context(device, amp_dtype):
+                    _, action_logits, _ = unpack_model_outputs(model(batch_tensor))
+                    probs = torch.softmax(action_logits, dim=1)
+                _device_synchronize(device)
+                self._timing.model_sec += time.perf_counter() - model_start
+                probs_out[start:end] = probs.float().cpu().numpy()
+                self._timing.batches += 1
+
+        self._timing.total_sec += time.perf_counter() - total_start
+        self._all_probs = probs_out
+        return self._all_probs
+
     def predict_proba(self, X_tabular):
         window_idx = self._window_idx(X_tabular)
         if (window_idx < 0).any() or (window_idx >= len(X_lookup)).any():
             raise ValueError("window_idx contains out-of-bounds indices for X_lookup.")
-
-        batch_size = max(1, int(args.batch_size))
-        probs_out = np.zeros((len(window_idx), n_actions), dtype=np.float32)
-        device = next(model.parameters()).device
-
-        with torch.no_grad():
-            for start in range(0, len(window_idx), batch_size):
-                end = min(start + batch_size, len(window_idx))
-                batch_idx = window_idx[start:end]
-                X_batch = np.asarray(X_lookup[batch_idx], dtype=np.float32)
-                X_tensor = torch.tensor(X_batch, dtype=torch.float32, device=device)
-                _, action_logits, _ = unpack_model_outputs(model(X_tensor))
-                probs = torch.softmax(action_logits, dim=1)
-                probs_out[start:end] = probs.detach().cpu().numpy()
-        return probs_out
+        return self._ensure_all_probs()[window_idx]
 
     def predict(self, X_tabular):
         probs = self.predict_proba(X_tabular)
@@ -868,8 +1000,8 @@ class TorchModelWrapper:
 print("🔍 Running Deepchecks suites...")
 
 suite = _build_eeg_deepchecks_suite()
-
-result = suite.run(train_ds, test_ds, model=TorchModelWrapper())
+wrapped_model = TorchModelWrapper()
+result = suite.run(train_ds, test_ds, model=wrapped_model)
 
 out_dir = Path(paths.eval_dir)
 out_dir.mkdir(parents=True, exist_ok=True)
@@ -881,5 +1013,14 @@ latest_html = max(
 )
 if latest_html != out_path:
     out_path.write_text(latest_html.read_text(errors="ignore"))
+print(
+    "Inference timing: "
+    f"calls={wrapped_model._timing.calls}, "
+    f"windows={wrapped_model._timing.windows}, "
+    f"batches={wrapped_model._timing.batches}, "
+    f"transfer={wrapped_model._timing.transfer_sec:.2f}s, "
+    f"model={wrapped_model._timing.model_sec:.2f}s, "
+    f"total={wrapped_model._timing.total_sec:.2f}s"
+)
 print(f"Saving report to: {out_path}")
 print(f"✅ Deepchecks report saved: {out_path}")

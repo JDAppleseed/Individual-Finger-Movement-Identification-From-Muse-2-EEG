@@ -176,6 +176,56 @@ def default_train_settings() -> Dict[str, Any]:
     }
 
 
+def default_evaluate_settings() -> Dict[str, Any]:
+    return {
+        "run_dir": None,
+        "max_samples": None,
+        "batch_size": 256,
+        "device": "auto",
+        "amp_mode": "off",
+        "split_seed": 42,
+        "save_manifest": None,
+        "no_manifest": False,
+        "export_test_pred": False,
+        "deterministic": True,
+        "smooth": False,
+        "smooth_action_only": False,
+        "smooth_method": "vote",
+        "smooth_window": 5,
+        "hysteresis": False,
+        "hysteresis_frames": 3,
+        "threshold_action": 0.75,
+        "threshold_finger": 0.75,
+        "threshold_applicability": 0.5,
+        "adjacency": False,
+    }
+
+
+def default_evaluate_deepchecks_settings() -> Dict[str, Any]:
+    return {
+        "run_dir": None,
+        "max_samples": None,
+        "batch_size": 1024,
+        "device": "auto",
+        "amp_mode": "off",
+        "split_mode": None,
+        "purge_seconds": 0.0,
+        "hop_seconds": None,
+    }
+
+
+def default_evaluate_figures_settings() -> Dict[str, Any]:
+    return {
+        "run_dir": None,
+        "show_plots": False,
+        "batch_size": 1024,
+        "device": "auto",
+        "amp_mode": "off",
+        "mc_samples": 30,
+        "seed": 42,
+    }
+
+
 def default_topomap_settings() -> Dict[str, Any]:
     return {
         "session_dir": None,

@@ -10,12 +10,14 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
+import contextlib
 from collections import Counter
 import hashlib
 import json
 import platform
 import random
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
@@ -46,18 +48,19 @@ from utils.eval_utils import (
     resolve_cached_test_indices,
     validate_cached_predictions_with_dataset_info,
 )
-from utils.sequence_data import (
-    load_sequence_npz,
-    apply_channel_normalizer,
-)
+from utils.sequence_data import load_sequence_npz
 from utils.splitting import compose_split_indices, resolve_auxiliary_rest_sessions
 from utils.postprocess import (
     PostprocessSettings,
     PostprocessState,
     postprocess_predictions,
 )
-from utils.runtime_utils import load_normalizer
-from utils.runtime_utils import apply_temperature_to_logits, load_temperature_scaling
+from utils.runtime_utils import (
+    apply_channel_normalizer as apply_saved_channel_normalizer,
+    apply_temperature_to_logits,
+    load_normalizer,
+    load_temperature_scaling,
+)
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 
 # Fixed label ordering for standardized confusion matrices
@@ -193,6 +196,19 @@ SHOW_PLOTS = os.environ.get("SHOW_PLOTS", "0") == "1"
 MIN_TEST_SAMPLES = 30
 MAX_SPLIT_ATTEMPTS = 8
 DEFAULT_BATCH_SIZE = 256
+DEFAULT_DEVICE = "auto"
+DEFAULT_AMP_MODE = "off"
+
+
+@dataclass
+class InferenceTiming:
+    calls: int = 0
+    batches: int = 0
+    windows: int = 0
+    normalize_sec: float = 0.0
+    transfer_sec: float = 0.0
+    model_sec: float = 0.0
+    total_sec: float = 0.0
 
 
 def sha256_file(path: Path) -> Optional[str]:
@@ -223,6 +239,43 @@ def numpy_sha256(arr: np.ndarray) -> Optional[str]:
 
 def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _resolve_device(requested: str) -> torch.device:
+    requested = str(requested or "auto").strip().lower()
+    if requested == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(requested)
+
+
+def _resolve_amp_dtype(amp_mode: str, device: torch.device) -> Optional[torch.dtype]:
+    amp_mode = str(amp_mode or "off").strip().lower()
+    if amp_mode == "off":
+        return None
+    if amp_mode == "float16":
+        if device.type in {"cuda", "mps"}:
+            return torch.float16
+        return None
+    raise ValueError(f"Unsupported amp mode: {amp_mode}")
+
+
+def _autocast_context(device: torch.device, amp_dtype: Optional[torch.dtype]):
+    if amp_dtype is None:
+        return contextlib.nullcontext()
+    if not hasattr(torch, "amp") or not hasattr(torch.amp, "autocast"):
+        return contextlib.nullcontext()
+    return torch.amp.autocast(device_type=device.type, dtype=amp_dtype)
+
+
+def _device_synchronize(device: torch.device) -> None:
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+    elif device.type == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
+        torch.mps.synchronize()
 
 
 def _build_dataset_info(
@@ -692,6 +745,7 @@ def _load_eval_model_and_normalizer(
     model_path: Path,
     scaler_path: Path,
     temperature_path: Path,
+    device: torch.device,
     n_channels: int,
     n_fingers: int,
     n_actions: int,
@@ -715,10 +769,9 @@ def _load_eval_model_and_normalizer(
         finger_applicability_head=bool(has_applicability_head),
     )
     model.load_state_dict(state_dict)
+    model.to(device)
     model.eval()
     temperature_state = load_temperature_scaling(temperature_path)
-    eval_model = None
-    eval_normalizer = None
     return model, normalizer, temperature_state
 
 
@@ -732,6 +785,9 @@ def _run_deterministic_inference(
     n_actions: int,
     n_fingers: int,
     batch_size: int,
+    device: torch.device,
+    amp_dtype: Optional[torch.dtype],
+    timing: Optional[InferenceTiming] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     idx = np.asarray(indices, dtype=np.int64)
     action_probs = np.zeros((len(idx), n_actions), dtype=np.float32)
@@ -741,35 +797,99 @@ def _run_deterministic_inference(
         if getattr(model, "finger_applicability_head", None) is not None
         else None
     )
+    if len(idx) == 0:
+        return action_probs, finger_probs, applicability_probs
 
-    with torch.no_grad():
+    action_temperature = (
+        float(temperature_state.action_temperature)
+        if temperature_state is not None
+        else 1.0
+    )
+    finger_temperature = (
+        float(temperature_state.finger_temperature)
+        if temperature_state is not None
+        else 1.0
+    )
+    applicability_temperature = (
+        float(temperature_state.applicability_temperature)
+        if temperature_state is not None
+        else 1.0
+    )
+
+    batch_cap = min(int(batch_size), len(idx))
+    host_batch = np.empty((batch_cap,) + tuple(X.shape[1:]), dtype=np.float32)
+    host_tensor = torch.from_numpy(host_batch)
+    device_batch = (
+        torch.empty(host_batch.shape, dtype=torch.float32, device=device)
+        if device.type != "cpu"
+        else None
+    )
+    normalize_sec = 0.0
+    transfer_sec = 0.0
+    model_sec = 0.0
+    total_start = time.perf_counter()
+
+    with torch.inference_mode():
         for start in range(0, len(idx), batch_size):
             end = min(start + batch_size, len(idx))
             batch_idx = idx[start:end]
-            X_batch = np.asarray(X[batch_idx], dtype=np.float32)
-            X_batch = apply_channel_normalizer(X_batch, normalizer)
-            X_t = torch.tensor(X_batch, dtype=torch.float32)
-            finger_logits, action_logits, applicability_logits = unpack_model_outputs(
-                model(X_t)
-            )
-            if temperature_state is not None:
+            current_len = end - start
+            host_view = host_batch[:current_len]
+
+            normalize_start = time.perf_counter()
+            np.copyto(host_view, np.asarray(X[batch_idx], dtype=np.float32), casting="unsafe")
+            apply_saved_channel_normalizer(host_view, normalizer, out=host_view)
+            normalize_sec += time.perf_counter() - normalize_start
+
+            if device_batch is not None:
+                transfer_start = time.perf_counter()
+                X_t = device_batch[:current_len]
+                X_t.copy_(host_tensor[:current_len])
+                transfer_sec += time.perf_counter() - transfer_start
+            else:
+                X_t = host_tensor[:current_len]
+
+            model_start = time.perf_counter()
+            with _autocast_context(device, amp_dtype):
+                finger_logits, action_logits, applicability_logits = unpack_model_outputs(
+                    model(X_t)
+                )
                 action_logits = apply_temperature_to_logits(
-                    action_logits, temperature_state.action_temperature
+                    action_logits, action_temperature
                 )
                 finger_logits = apply_temperature_to_logits(
-                    finger_logits, temperature_state.finger_temperature
+                    finger_logits, finger_temperature
                 )
                 if applicability_logits is not None:
                     applicability_logits = apply_temperature_to_logits(
                         applicability_logits,
-                        temperature_state.applicability_temperature,
+                        applicability_temperature,
                     )
-            action_probs[start:end] = torch.softmax(action_logits, dim=1).cpu().numpy()
-            finger_probs[start:end] = torch.softmax(finger_logits, dim=1).cpu().numpy()
+                action_prob_batch = torch.softmax(action_logits, dim=1)
+                finger_prob_batch = torch.softmax(finger_logits, dim=1)
+                applicability_prob_batch = (
+                    torch.sigmoid(applicability_logits)
+                    if applicability_logits is not None
+                    else None
+                )
+            model_sec += time.perf_counter() - model_start
+
+            action_probs[start:end] = action_prob_batch.float().cpu().numpy()
+            finger_probs[start:end] = finger_prob_batch.float().cpu().numpy()
             if applicability_probs is not None and applicability_logits is not None:
                 applicability_probs[start:end] = (
-                    torch.sigmoid(applicability_logits).cpu().numpy().reshape(-1)
+                    applicability_prob_batch.float().cpu().numpy().reshape(-1)
                 )
+
+    _device_synchronize(device)
+    if timing is not None:
+        timing.calls += 1
+        timing.batches += int((len(idx) + batch_size - 1) // batch_size)
+        timing.windows += int(len(idx))
+        timing.normalize_sec += float(normalize_sec)
+        timing.transfer_sec += float(transfer_sec)
+        timing.model_sec += float(model_sec)
+        timing.total_sec += float(time.perf_counter() - total_start)
 
     return action_probs, finger_probs, applicability_probs
 
@@ -1196,6 +1316,23 @@ def main():
         help="Inference batch size.",
     )
     runtime_group.add_argument(
+        "--device",
+        type=str,
+        default=DEFAULT_DEVICE,
+        choices=["auto", "cpu", "cuda", "mps"],
+        help="Inference device. 'auto' prefers CUDA, then MPS, then CPU.",
+    )
+    runtime_group.add_argument(
+        "--amp-mode",
+        type=str,
+        default=DEFAULT_AMP_MODE,
+        choices=["off", "float16"],
+        help=(
+            "Experimental mixed precision inference mode. 'off' preserves current numerics. "
+            "'float16' is opt-in for CUDA/MPS benchmarking."
+        ),
+    )
+    runtime_group.add_argument(
         "--save-manifest",
         type=str,
         default=None,
@@ -1336,6 +1473,24 @@ def main():
         random.seed(split_seed)
         np.random.seed(split_seed)
 
+    try:
+        device = _resolve_device(args.device)
+    except Exception as exc:
+        print(f"Invalid --device: {exc}")
+        return 2
+    try:
+        amp_dtype = _resolve_amp_dtype(args.amp_mode, device)
+    except ValueError as exc:
+        print(f"Invalid --amp-mode: {exc}")
+        return 2
+    if args.amp_mode != "off" and amp_dtype is None:
+        print(
+            f"⚠️ AMP requested via --amp-mode={args.amp_mode}, but device={device} does not support it. Disabling AMP."
+        )
+    amp_mode_effective = "float16" if amp_dtype is not None else "off"
+    inference_timing = InferenceTiming()
+    eval_start = time.perf_counter()
+
     # PATCHED: session-aware path
     legacy_session_dir: Optional[Path] = None
     run_dir_override: Optional[Path] = None
@@ -1397,6 +1552,9 @@ def main():
     )
     print(f"[✓] Loading model: {paths.model_file}")
     print(f"[✓] Saving results to: {paths.eval_dir}")
+    print(
+        f"[✓] Runtime backend: device={device} batch_size={max(1, int(args.batch_size))} amp_mode={amp_mode_effective}"
+    )
 
     npz_path = Path(paths.windows_npz).expanduser()
     pred_npz_path = Path(paths.test_predictions_npz).expanduser()
@@ -1588,6 +1746,18 @@ def main():
             "numpy": np.__version__,
             "sklearn": sklearn.__version__,
             "platform": platform.platform(),
+            "device": str(device),
+            "amp_mode": amp_mode_effective,
+        },
+        "timing": {
+            "inference_calls": 0,
+            "inference_batches": 0,
+            "inference_windows": 0,
+            "normalize_sec": 0.0,
+            "transfer_sec": 0.0,
+            "model_sec": 0.0,
+            "inference_total_sec": 0.0,
+            "evaluation_total_sec": None,
         },
     }
 
@@ -1746,6 +1916,75 @@ def main():
     cache_rejected_reasons: Optional[List[str]] = None
     temperature_state = load_temperature_scaling(temperature_path)
     applicability_probs = None
+    all_eval_probs: Optional[Dict[str, Optional[np.ndarray]]] = None
+
+    def _ensure_eval_assets() -> bool:
+        nonlocal eval_model, eval_normalizer, temperature_state
+        if eval_model is not None and eval_normalizer is not None:
+            return True
+        try:
+            eval_model, eval_normalizer, temperature_state = _load_eval_model_and_normalizer(
+                model_path=model_path,
+                scaler_path=scaler_path,
+                temperature_path=temperature_path,
+                device=device,
+                n_channels=X.shape[2],
+                n_fingers=model_n_fingers,
+                n_actions=model_n_actions,
+            )
+        except Exception as exc:
+            print(str(exc))
+            return False
+        return True
+
+    def _ensure_full_eval_predictions() -> Optional[Dict[str, Optional[np.ndarray]]]:
+        nonlocal all_eval_probs
+        if all_eval_probs is not None:
+            return all_eval_probs
+        if not _ensure_eval_assets():
+            return None
+        full_indices = np.arange(len(y_action), dtype=np.int64)
+        (
+            full_action_probs,
+            full_finger_probs,
+            full_applicability_probs,
+        ) = _run_deterministic_inference(
+            X=X,
+            indices=full_indices,
+            model=eval_model,
+            normalizer=eval_normalizer,
+            temperature_state=temperature_state,
+            n_actions=model_n_actions,
+            n_fingers=model_n_fingers,
+            batch_size=max(1, int(args.batch_size)),
+            device=device,
+            amp_dtype=amp_dtype,
+            timing=inference_timing,
+        )
+        all_eval_probs = {
+            "action_probs": full_action_probs,
+            "finger_probs": full_finger_probs,
+            "applicability_probs": full_applicability_probs,
+        }
+        return all_eval_probs
+
+    def _slice_eval_predictions(
+        indices: np.ndarray,
+    ) -> Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]]:
+        cache = _ensure_full_eval_predictions()
+        if cache is None:
+            return None
+        idx_local = np.asarray(indices, dtype=np.int64)
+        applicability_slice = cache["applicability_probs"]
+        return (
+            np.asarray(cache["action_probs"])[idx_local],
+            np.asarray(cache["finger_probs"])[idx_local],
+            (
+                np.asarray(applicability_slice)[idx_local]
+                if applicability_slice is not None
+                else None
+            ),
+        )
 
     cached_used = False
     split_attempts = 0
@@ -1907,30 +2146,10 @@ def main():
         y_action_test = y_action[test_idx]
         y_finger_test = y_finger[test_idx]
 
-        try:
-            eval_model, eval_normalizer, temperature_state = _load_eval_model_and_normalizer(
-                model_path=model_path,
-                scaler_path=scaler_path,
-                temperature_path=temperature_path,
-                n_channels=X.shape[2],
-                n_fingers=model_n_fingers,
-                n_actions=model_n_actions,
-            )
-        except Exception as exc:
-            print(str(exc))
+        predictions = _slice_eval_predictions(test_idx)
+        if predictions is None:
             return 2
-
-        batch_size = max(1, int(args.batch_size))
-        action_probs, finger_probs, applicability_probs = _run_deterministic_inference(
-            X=X,
-            indices=test_idx,
-            model=eval_model,
-            normalizer=eval_normalizer,
-            temperature_state=temperature_state,
-            n_actions=model_n_actions,
-            n_fingers=model_n_fingers,
-            batch_size=batch_size,
-        )
+        action_probs, finger_probs, applicability_probs = predictions
 
         print("✅ Ran deterministic inference (no cached predictions file found).")
 
@@ -1956,35 +2175,15 @@ def main():
 
     aux_rest_benchmark = None
     if aux_rest_plan.get("enabled") and len(aux_idx) > 0:
-        if eval_model is None or eval_normalizer is None:
-            try:
-                eval_model, eval_normalizer, temperature_state = _load_eval_model_and_normalizer(
-                    model_path=model_path,
-                    scaler_path=scaler_path,
-                    temperature_path=temperature_path,
-                    n_channels=X.shape[2],
-                    n_fingers=model_n_fingers,
-                    n_actions=model_n_actions,
-                )
-            except Exception as exc:
-                print(f"⚠️ Auxiliary REST benchmark skipped: {exc}")
-                eval_model = None
-                eval_normalizer = None
-        if eval_model is not None and eval_normalizer is not None:
+        aux_predictions = _slice_eval_predictions(aux_idx)
+        if aux_predictions is None:
+            print("⚠️ Auxiliary REST benchmark skipped: failed to load evaluation model.")
+        else:
             (
                 aux_action_probs,
                 aux_finger_probs,
                 aux_applicability_probs,
-            ) = _run_deterministic_inference(
-                X=X,
-                indices=aux_idx,
-                model=eval_model,
-                normalizer=eval_normalizer,
-                temperature_state=temperature_state,
-                n_actions=model_n_actions,
-                n_fingers=model_n_fingers,
-                batch_size=max(1, int(args.batch_size)),
-            )
+            ) = aux_predictions
             aux_y_action = y_action[aux_idx]
             aux_y_finger = y_finger[aux_idx]
             aux_action_pred = np.argmax(aux_action_probs, axis=1).astype(np.int64)
@@ -2696,36 +2895,13 @@ def main():
         "std": {},
     }
 
-    if eval_model is None or eval_normalizer is None:
-        try:
-            eval_model, eval_normalizer, temperature_state = _load_eval_model_and_normalizer(
-                model_path=model_path,
-                scaler_path=scaler_path,
-                temperature_path=temperature_path,
-                n_channels=X.shape[2],
-                n_fingers=model_n_fingers,
-                n_actions=model_n_actions,
-            )
-        except Exception as exc:
-            print(f"⚠️ Core-session replay skipped: {exc}")
-            eval_model = None
-            eval_normalizer = None
-
-    if eval_model is not None and eval_normalizer is not None:
+    core_predictions = _slice_eval_predictions(split_idx)
+    if core_predictions is not None:
         (
             core_action_probs,
             core_finger_probs,
             core_applicability_probs,
-        ) = _run_deterministic_inference(
-            X=X,
-            indices=split_idx,
-            model=eval_model,
-            normalizer=eval_normalizer,
-            temperature_state=temperature_state,
-            n_actions=model_n_actions,
-            n_fingers=model_n_fingers,
-            batch_size=max(1, int(args.batch_size)),
-        )
+        ) = core_predictions
         core_metrics_payload = _compute_prediction_metrics(
             action_probs=core_action_probs,
             finger_probs=core_finger_probs,
@@ -2832,20 +3008,17 @@ def main():
                     )
                     continue
                 rep_test_global = np.asarray(rep_test_global, dtype=np.int64)
+                rep_predictions = _slice_eval_predictions(rep_test_global)
+                if rep_predictions is None:
+                    repeated_split_summary["per_seed"].append(
+                        {"seed": int(repeat_seed), "status": "inference_failed"}
+                    )
+                    continue
                 (
                     rep_action_probs,
                     rep_finger_probs,
                     rep_applicability_probs,
-                ) = _run_deterministic_inference(
-                    X=X,
-                    indices=rep_test_global,
-                    model=eval_model,
-                    normalizer=eval_normalizer,
-                    temperature_state=temperature_state,
-                    n_actions=model_n_actions,
-                    n_fingers=model_n_fingers,
-                    batch_size=max(1, int(args.batch_size)),
-                )
+                ) = rep_predictions
                 metrics_payload = _compute_prediction_metrics(
                     action_probs=rep_action_probs,
                     finger_probs=rep_finger_probs,
@@ -2897,6 +3070,8 @@ def main():
                 f"Joint Acc mean/std {joint_acc_mean * 100:.2f}% / "
                 f"{(joint_acc_std or 0.0) * 100:.2f}%"
             )
+    else:
+        print("⚠️ Core-session replay skipped: failed to load evaluation model.")
 
     manifest["benchmarks"] = {
         "primary_mixed_holdout": primary_benchmark,
@@ -3021,6 +3196,24 @@ def main():
         plt.close()
 
     print(f"\n✅ Saved evaluation plot: {out_path}")
+    manifest["timing"] = {
+        "inference_calls": int(inference_timing.calls),
+        "inference_batches": int(inference_timing.batches),
+        "inference_windows": int(inference_timing.windows),
+        "normalize_sec": float(inference_timing.normalize_sec),
+        "transfer_sec": float(inference_timing.transfer_sec),
+        "model_sec": float(inference_timing.model_sec),
+        "inference_total_sec": float(inference_timing.total_sec),
+        "evaluation_total_sec": float(time.perf_counter() - eval_start),
+    }
+    print(
+        "⏱️ Timing: "
+        f"infer_calls={inference_timing.calls} "
+        f"windows={inference_timing.windows} "
+        f"infer_total={inference_timing.total_sec:.2f}s "
+        f"model={inference_timing.model_sec:.2f}s "
+        f"normalize={inference_timing.normalize_sec:.2f}s"
+    )
     _maybe_write_manifest()
     return exit_code
 

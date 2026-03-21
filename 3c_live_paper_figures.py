@@ -4,8 +4,10 @@ Board-facing visual summary over the entire combined dataset using the saved mod
 """
 
 import argparse
+import contextlib
 import os
 import json
+import time
 from dataclasses import dataclass
 import numpy as np
 import torch
@@ -32,9 +34,9 @@ from utils.per_subject_calibration import plot_subject_calibration
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 from utils.sequence_data import (
     load_sequence_npz,
-    apply_channel_normalizer,
 )
 from utils.runtime_utils import (
+    apply_channel_normalizer as apply_saved_channel_normalizer,
     apply_temperature_to_logits,
     load_normalizer,
     load_temperature_scaling,
@@ -162,10 +164,59 @@ def _infer_context_from_session_dir(session_dir: Path) -> Tuple[Optional[str], O
 # =========================
 
 MC_SAMPLES = 30
-BATCH_SIZE = 256
+DEFAULT_BATCH_SIZE = 1024
+DEFAULT_DEVICE = "auto"
+DEFAULT_AMP_MODE = "off"
 SEED = 42
 SHOW_PLOTS = os.environ.get("SHOW_PLOTS", "0") == "1"
 FIGURE_EXPORT_PAD_INCHES = 0.16
+
+
+@dataclass
+class InferenceTiming:
+    calls: int = 0
+    batches: int = 0
+    windows: int = 0
+    transfer_sec: float = 0.0
+    model_sec: float = 0.0
+    total_sec: float = 0.0
+
+
+def _resolve_device(requested: str) -> torch.device:
+    requested = str(requested or "auto").strip().lower()
+    if requested == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(requested)
+
+
+def _resolve_amp_dtype(amp_mode: str, device: torch.device) -> Optional[torch.dtype]:
+    amp_mode = str(amp_mode or "off").strip().lower()
+    if amp_mode == "off":
+        return None
+    if amp_mode == "float16":
+        if device.type in {"cuda", "mps"}:
+            return torch.float16
+        return None
+    raise ValueError(f"Unsupported amp mode: {amp_mode}")
+
+
+def _autocast_context(device: torch.device, amp_dtype: Optional[torch.dtype]):
+    if amp_dtype is None:
+        return contextlib.nullcontext()
+    if not hasattr(torch, "amp") or not hasattr(torch.amp, "autocast"):
+        return contextlib.nullcontext()
+    return torch.amp.autocast(device_type=device.type, dtype=amp_dtype)
+
+
+def _device_synchronize(device: torch.device) -> None:
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+    elif device.type == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
+        torch.mps.synchronize()
 
 # =========================
 # ===== LOAD DATA =========
@@ -213,6 +264,30 @@ selection_group.add_argument(
     metavar="PATH",
     help="Legacy session directory override used by the UI.",
 )
+runtime_group = parser.add_argument_group("runtime overrides")
+runtime_group.add_argument(
+    "--batch-size",
+    type=int,
+    default=DEFAULT_BATCH_SIZE,
+    help="Inference batch size used for MC-dropout passes.",
+)
+runtime_group.add_argument(
+    "--device",
+    type=str,
+    default=DEFAULT_DEVICE,
+    choices=["auto", "cpu", "cuda", "mps"],
+    help="Inference device. 'auto' prefers CUDA, then MPS, then CPU.",
+)
+runtime_group.add_argument(
+    "--amp-mode",
+    type=str,
+    default=DEFAULT_AMP_MODE,
+    choices=["off", "float16"],
+    help=(
+        "Experimental mixed precision inference mode. 'off' preserves current numerics. "
+        "'float16' is opt-in for CUDA/MPS benchmarking."
+    ),
+)
 args = parser.parse_args()
 
 # PATCHED: session-aware path
@@ -255,6 +330,21 @@ if not args.project or not args.subject:
     print("Missing --project/--subject (or provide --session-dir under Projects/.../subjects/.../sessions/...).")
     raise SystemExit(2)
 
+try:
+    device = _resolve_device(args.device)
+except Exception as exc:
+    print(f"Invalid --device: {exc}")
+    raise SystemExit(2)
+try:
+    amp_dtype = _resolve_amp_dtype(args.amp_mode, device)
+except Exception as exc:
+    print(f"Invalid --amp-mode: {exc}")
+    raise SystemExit(2)
+if str(args.amp_mode).lower() != "off" and amp_dtype is None:
+    print(
+        f"⚠️ AMP requested via --amp-mode={args.amp_mode}, but device={device} does not support it. Disabling AMP."
+    )
+
 if args.session is None:
     args.session = latest_session_for_subject(args.project, args.subject)
 if args.session is None:
@@ -272,6 +362,10 @@ print(
 )
 print(f"[✓] Loading model: {paths.model_file}")
 print(f"[✓] Saving results to: {paths.eval_dir}")
+print(
+    f"Runtime backend: device={device.type}, amp_mode={'off' if amp_dtype is None else args.amp_mode}, "
+    f"batch_size={max(1, int(args.batch_size))}, mc_samples={MC_SAMPLES}"
+)
 
 npz_path = Path(paths.windows_npz).expanduser()
 model_path = Path(paths.model_file).expanduser()
@@ -314,13 +408,17 @@ normalizer = load_normalizer(scaler_path)
 if normalizer is None:
     print(f"Failed to load normalizer: {scaler_path}")
     raise SystemExit(2)
-X_eval = apply_channel_normalizer(X_eval, normalizer)
+X_eval = np.ascontiguousarray(np.asarray(X_eval, dtype=np.float32))
+apply_saved_channel_normalizer(X_eval, normalizer, out=X_eval)
 temperature_state = load_temperature_scaling(model_path.parent / "temperature_scaling.json")
 
 # =========================
 # ===== MODEL (MATCH STEP 2)
 # =========================
 
+if not model_path.exists():
+    print(f"Model file not found: {model_path}")
+    raise SystemExit(2)
 state_dict = torch.load(str(model_path), map_location="cpu", weights_only=True)
 finger_head_weight = state_dict.get("finger_head.weight")
 action_head_weight = state_dict.get("action_head.weight")
@@ -342,58 +440,119 @@ model = CNNLSTMFingerActionNet(
     n_actions=n_actions,
     finger_applicability_head=bool(infer_output_dims_from_state_dict(state_dict)[2]),
 )
-if not model_path.exists():
-    print(f"Model file not found: {model_path}")
-    raise SystemExit(2)
 model.load_state_dict(state_dict)
+model.to(device)
+model.eval()
 
 # =========================
 # ===== MC DROPOUT =========
 # =========================
 
 def _mc_predict_dataset(X_arr: np.ndarray):
-    action_mean_parts = []
-    finger_mean_parts = []
-    action_std_parts = []
-    finger_std_parts = []
+    n_windows = int(len(X_arr))
+    action_mean = np.empty((n_windows, n_actions), dtype=np.float32)
+    finger_mean = np.empty((n_windows, n_fingers), dtype=np.float32)
+    action_std = np.empty((n_windows, n_actions), dtype=np.float32)
+    finger_std = np.empty((n_windows, n_fingers), dtype=np.float32)
+    timing = InferenceTiming()
+    if n_windows == 0:
+        return action_mean, finger_mean, action_std, finger_std, timing
 
+    batch_size = max(1, min(int(args.batch_size), n_windows))
     was_training = model.training
     model.train()
-    with torch.no_grad():
-        for start in range(0, len(X_arr), BATCH_SIZE):
-            end = min(start + BATCH_SIZE, len(X_arr))
-            xb = torch.tensor(X_arr[start:end], dtype=torch.float32)
-            action_passes = []
-            finger_passes = []
-            for _ in range(MC_SAMPLES):
-                finger_logits, action_logits, _ = unpack_model_outputs(model(xb))
-                if temperature_state is not None:
-                    action_logits = apply_temperature_to_logits(
-                        action_logits, temperature_state.action_temperature
+    device_batch: Optional[torch.Tensor] = None
+    timing.calls += 1
+    timing.windows += n_windows
+    total_start = time.perf_counter()
+    with torch.inference_mode():
+        for start in range(0, n_windows, batch_size):
+            end = min(start + batch_size, n_windows)
+            host_view = X_arr[start:end]
+            host_tensor = torch.from_numpy(host_view)
+            if device.type == "cpu":
+                xb = host_tensor
+            else:
+                if (
+                    device_batch is None
+                    or device_batch.shape[1:] != host_tensor.shape[1:]
+                    or device_batch.shape[0] < host_tensor.shape[0]
+                ):
+                    device_batch = torch.empty(
+                        (batch_size, *host_tensor.shape[1:]),
+                        dtype=torch.float32,
+                        device=device,
                     )
-                    finger_logits = apply_temperature_to_logits(
-                        finger_logits, temperature_state.finger_temperature
-                    )
-                action_passes.append(torch.softmax(action_logits, dim=1))
-                finger_passes.append(torch.softmax(finger_logits, dim=1))
-            action_stack = torch.stack(action_passes, dim=0)
-            finger_stack = torch.stack(finger_passes, dim=0)
-            action_mean_parts.append(action_stack.mean(dim=0).cpu().numpy())
-            finger_mean_parts.append(finger_stack.mean(dim=0).cpu().numpy())
-            action_std_parts.append(action_stack.std(dim=0).cpu().numpy())
-            finger_std_parts.append(finger_stack.std(dim=0).cpu().numpy())
+                transfer_start = time.perf_counter()
+                device_batch[: host_tensor.shape[0]].copy_(host_tensor)
+                xb = device_batch[: host_tensor.shape[0]]
+                _device_synchronize(device)
+                timing.transfer_sec += time.perf_counter() - transfer_start
+
+            action_sum: Optional[torch.Tensor] = None
+            action_sum_sq: Optional[torch.Tensor] = None
+            finger_sum: Optional[torch.Tensor] = None
+            finger_sum_sq: Optional[torch.Tensor] = None
+            model_start = time.perf_counter()
+            with _autocast_context(device, amp_dtype):
+                for _ in range(MC_SAMPLES):
+                    finger_logits, action_logits, _ = unpack_model_outputs(model(xb))
+                    if temperature_state is not None:
+                        action_logits = apply_temperature_to_logits(
+                            action_logits, temperature_state.action_temperature
+                        )
+                        finger_logits = apply_temperature_to_logits(
+                            finger_logits, temperature_state.finger_temperature
+                        )
+                    action_probs = torch.softmax(action_logits, dim=1).float()
+                    finger_probs = torch.softmax(finger_logits, dim=1).float()
+                    if action_sum is None:
+                        action_sum = action_probs.clone()
+                        action_sum_sq = action_probs.square()
+                        finger_sum = finger_probs.clone()
+                        finger_sum_sq = finger_probs.square()
+                    else:
+                        action_sum.add_(action_probs)
+                        action_sum_sq.add_(action_probs.square())
+                        finger_sum.add_(finger_probs)
+                        finger_sum_sq.add_(finger_probs.square())
+            _device_synchronize(device)
+            timing.model_sec += time.perf_counter() - model_start
+
+            action_mean_tensor = action_sum / float(MC_SAMPLES)
+            finger_mean_tensor = finger_sum / float(MC_SAMPLES)
+            if MC_SAMPLES > 1:
+                action_var = action_sum_sq / float(MC_SAMPLES) - action_mean_tensor.square()
+                finger_var = finger_sum_sq / float(MC_SAMPLES) - finger_mean_tensor.square()
+                action_std_tensor = torch.sqrt(torch.clamp(action_var, min=0.0))
+                finger_std_tensor = torch.sqrt(torch.clamp(finger_var, min=0.0))
+            else:
+                action_std_tensor = torch.zeros_like(action_mean_tensor)
+                finger_std_tensor = torch.zeros_like(finger_mean_tensor)
+
+            action_mean[start:end] = action_mean_tensor.cpu().numpy()
+            finger_mean[start:end] = finger_mean_tensor.cpu().numpy()
+            action_std[start:end] = action_std_tensor.cpu().numpy()
+            finger_std[start:end] = finger_std_tensor.cpu().numpy()
+            timing.batches += 1
+    timing.total_sec += time.perf_counter() - total_start
     if not was_training:
         model.eval()
 
-    return (
-        np.concatenate(action_mean_parts, axis=0),
-        np.concatenate(finger_mean_parts, axis=0),
-        np.concatenate(action_std_parts, axis=0),
-        np.concatenate(finger_std_parts, axis=0),
-    )
+    return action_mean, finger_mean, action_std, finger_std, timing
 
 
-action_mean, finger_mean, action_std, finger_std = _mc_predict_dataset(X_eval)
+action_mean, finger_mean, action_std, finger_std, inference_timing = _mc_predict_dataset(X_eval)
+print(
+    "MC inference timing: "
+    f"calls={inference_timing.calls}, "
+    f"windows={inference_timing.windows}, "
+    f"batches={inference_timing.batches}, "
+    f"mc_passes={MC_SAMPLES}, "
+    f"transfer={inference_timing.transfer_sec:.2f}s, "
+    f"model={inference_timing.model_sec:.2f}s, "
+    f"total={inference_timing.total_sec:.2f}s"
+)
 
 action_preds = np.argmax(action_mean, axis=1)
 action_conf = np.max(action_mean, axis=1)

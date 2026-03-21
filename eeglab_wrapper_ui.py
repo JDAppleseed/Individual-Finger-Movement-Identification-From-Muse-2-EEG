@@ -74,6 +74,9 @@ from app.config_model import (
     TIMEBASE_VERSION,
     SessionSnapshot,
     build_config,
+    default_evaluate_deepchecks_settings,
+    default_evaluate_figures_settings,
+    default_evaluate_settings,
     default_export_settings,
     default_infer_settings,
     default_live_review_settings,
@@ -3013,6 +3016,7 @@ class MainWindow(QMainWindow):
     def _build_eval_step3_box(self) -> QWidget:
         box = QGroupBox("Step 3: Evaluate Model + Calibration (3_evaluate_model.py)")
         layout = QVBoxLayout(box)
+        defaults = default_evaluate_settings()
         desc = QLabel(
             "Core evaluation: action/finger/joint accuracy, raw invalid-pair rate, "
             "confusion matrices, calibration curves, and cached predictions. "
@@ -3043,27 +3047,41 @@ class MainWindow(QMainWindow):
         max_samples = OutlineSpinBox()
         max_samples.setRange(0, 10_000_000)
         max_samples.setSpecialValueText("Auto")
-        max_samples.setValue(0)
+        max_samples.setValue(int(defaults.get("max_samples") or 0))
         basic_layout.addRow("Max samples (auto)", max_samples)
         fields["max_samples"] = max_samples
 
         batch_size = OutlineSpinBox()
         batch_size.setRange(1, 8192)
-        batch_size.setValue(256)
+        batch_size.setValue(int(defaults.get("batch_size", 256)))
         basic_layout.addRow("Batch size", batch_size)
         fields["batch_size"] = batch_size
 
+        device = QComboBox()
+        device.addItems(["auto", "cpu", "cuda", "mps"])
+        device.setCurrentText(str(defaults.get("device", "auto")))
+        basic_layout.addRow("Device", device)
+        fields["device"] = device
+
+        amp_mode = QComboBox()
+        amp_mode.addItems(["off", "float16"])
+        amp_mode.setCurrentText(str(defaults.get("amp_mode", "off")))
+        basic_layout.addRow("AMP mode", amp_mode)
+        fields["amp_mode"] = amp_mode
+
         split_seed = OutlineSpinBox()
         split_seed.setRange(0, 1_000_000)
-        split_seed.setValue(42)
+        split_seed.setValue(int(defaults.get("split_seed", 42)))
         basic_layout.addRow("Split seed", split_seed)
         fields["split_seed"] = split_seed
 
         export_preds = QCheckBox("Export cached test predictions")
+        export_preds.setChecked(bool(defaults.get("export_test_pred", False)))
         basic_layout.addRow("Export test preds", export_preds)
         fields["export_test_pred"] = export_preds
 
         no_manifest = QCheckBox("Disable manifest output")
+        no_manifest.setChecked(bool(defaults.get("no_manifest", False)))
         basic_layout.addRow("No manifest", no_manifest)
         fields["no_manifest"] = no_manifest
 
@@ -3073,6 +3091,7 @@ class MainWindow(QMainWindow):
         fields["save_manifest"] = save_manifest
 
         disable_det = QCheckBox("Disable deterministic eval (not recommended)")
+        disable_det.setChecked(not bool(defaults.get("deterministic", True)))
         basic_layout.addRow("Determinism", disable_det)
         fields["disable_deterministic"] = disable_det
 
@@ -3082,32 +3101,35 @@ class MainWindow(QMainWindow):
         post_layout = QFormLayout(post)
 
         smooth = QCheckBox("Enable smoothing")
+        smooth.setChecked(bool(defaults.get("smooth", False)))
         post_layout.addRow("Smooth", smooth)
         fields["smooth"] = smooth
 
         smooth_action_only = QCheckBox("Smooth action only")
+        smooth_action_only.setChecked(bool(defaults.get("smooth_action_only", False)))
         post_layout.addRow("Smooth action only", smooth_action_only)
         fields["smooth_action_only"] = smooth_action_only
 
         smooth_method = QComboBox()
         smooth_method.addItems(["vote", "ema"])
-        smooth_method.setCurrentText("vote")
+        smooth_method.setCurrentText(str(defaults.get("smooth_method", "vote")))
         post_layout.addRow("Smooth method", smooth_method)
         fields["smooth_method"] = smooth_method
 
         smooth_window = OutlineSpinBox()
         smooth_window.setRange(1, 200)
-        smooth_window.setValue(5)
+        smooth_window.setValue(int(defaults.get("smooth_window", 5)))
         post_layout.addRow("Smooth window", smooth_window)
         fields["smooth_window"] = smooth_window
 
         hysteresis = QCheckBox("Enable hysteresis")
+        hysteresis.setChecked(bool(defaults.get("hysteresis", False)))
         post_layout.addRow("Hysteresis", hysteresis)
         fields["hysteresis"] = hysteresis
 
         hysteresis_frames = OutlineSpinBox()
         hysteresis_frames.setRange(1, 50)
-        hysteresis_frames.setValue(3)
+        hysteresis_frames.setValue(int(defaults.get("hysteresis_frames", 3)))
         post_layout.addRow("Hysteresis frames", hysteresis_frames)
         fields["hysteresis_frames"] = hysteresis_frames
 
@@ -3115,7 +3137,7 @@ class MainWindow(QMainWindow):
         threshold_action.setRange(0.0, 1.0)
         threshold_action.setDecimals(2)
         threshold_action.setSingleStep(0.01)
-        threshold_action.setValue(0.05)
+        threshold_action.setValue(float(defaults.get("threshold_action", 0.75)))
         post_layout.addRow("Threshold action", threshold_action)
         fields["threshold_action"] = threshold_action
 
@@ -3123,7 +3145,7 @@ class MainWindow(QMainWindow):
         threshold_finger.setRange(0.0, 1.0)
         threshold_finger.setDecimals(2)
         threshold_finger.setSingleStep(0.01)
-        threshold_finger.setValue(0.20)
+        threshold_finger.setValue(float(defaults.get("threshold_finger", 0.75)))
         post_layout.addRow("Threshold finger", threshold_finger)
         fields["threshold_finger"] = threshold_finger
 
@@ -3131,11 +3153,12 @@ class MainWindow(QMainWindow):
         threshold_applicability.setRange(0.0, 1.0)
         threshold_applicability.setDecimals(2)
         threshold_applicability.setSingleStep(0.01)
-        threshold_applicability.setValue(0.40)
+        threshold_applicability.setValue(float(defaults.get("threshold_applicability", 0.5)))
         post_layout.addRow("Threshold applicability", threshold_applicability)
         fields["threshold_applicability"] = threshold_applicability
 
         adjacency = QCheckBox("Enable adjacency assist")
+        adjacency.setChecked(bool(defaults.get("adjacency", False)))
         post_layout.addRow("Adjacency", adjacency)
         fields["adjacency"] = adjacency
 
@@ -3154,6 +3177,7 @@ class MainWindow(QMainWindow):
     def _build_eval_deepchecks_box(self) -> QWidget:
         box = QGroupBox("Step 3b: Deepchecks Evaluation (3b_deepchecks_evaluate.py)")
         layout = QVBoxLayout(box)
+        defaults = default_evaluate_deepchecks_settings()
         desc = QLabel(
             "Dataset integrity and model evaluation checks. Aligns to the same session/model "
             "resolution as Step 3."
@@ -3179,19 +3203,34 @@ class MainWindow(QMainWindow):
         max_samples = OutlineSpinBox()
         max_samples.setRange(0, 10_000_000)
         max_samples.setSpecialValueText("Auto")
-        max_samples.setValue(0)
+        max_samples.setValue(int(defaults.get("max_samples") or 0))
         form.addRow("Max samples (auto)", max_samples)
         fields["max_samples"] = max_samples
 
         batch_size = OutlineSpinBox()
         batch_size.setRange(1, 8192)
-        batch_size.setValue(256)
+        batch_size.setValue(int(defaults.get("batch_size", 1024)))
         form.addRow("Batch size", batch_size)
         fields["batch_size"] = batch_size
 
+        device = QComboBox()
+        device.addItems(["auto", "cpu", "cuda", "mps"])
+        device.setCurrentText(str(defaults.get("device", "auto")))
+        form.addRow("Device", device)
+        fields["device"] = device
+
+        amp_mode = QComboBox()
+        amp_mode.addItems(["off", "float16"])
+        amp_mode.setCurrentText(str(defaults.get("amp_mode", "off")))
+        form.addRow("AMP mode", amp_mode)
+        fields["amp_mode"] = amp_mode
+
         split_mode = QComboBox()
         split_mode.addItems(["Auto (train_config)", "group_trial", "holdout_session"])
-        split_mode.setCurrentText("Auto (train_config)")
+        split_default = defaults.get("split_mode")
+        split_mode.setCurrentText(
+            "Auto (train_config)" if not split_default else str(split_default)
+        )
         form.addRow("Split mode", split_mode)
         fields["split_mode"] = split_mode
 
@@ -3199,7 +3238,7 @@ class MainWindow(QMainWindow):
         purge_seconds.setRange(0.0, 60.0)
         purge_seconds.setDecimals(2)
         purge_seconds.setSingleStep(0.25)
-        purge_seconds.setValue(0.0)
+        purge_seconds.setValue(float(defaults.get("purge_seconds", 0.0)))
         form.addRow("Purge seconds", purge_seconds)
         fields["purge_seconds"] = purge_seconds
 
@@ -3208,7 +3247,7 @@ class MainWindow(QMainWindow):
         hop_seconds.setDecimals(2)
         hop_seconds.setSingleStep(0.05)
         hop_seconds.setSpecialValueText("Auto")
-        hop_seconds.setValue(0.0)
+        hop_seconds.setValue(float(defaults.get("hop_seconds") or 0.0))
         form.addRow("Hop seconds (auto)", hop_seconds)
         fields["hop_seconds"] = hop_seconds
 
@@ -3227,9 +3266,10 @@ class MainWindow(QMainWindow):
     def _build_eval_figures_box(self) -> QWidget:
         box = QGroupBox("Step 3c: Paper Figures (3c_live_paper_figures.py)")
         layout = QVBoxLayout(box)
+        defaults = default_evaluate_figures_settings()
         desc = QLabel(
             "Generates reliability and confidence figures for reports/paper. "
-            "Defaults: MC_SAMPLES=30, SEED=42."
+            "Defaults: MC_SAMPLES=30, batch_size=1024, device=auto, amp_mode=off, SEED=42."
         )
         desc.setWordWrap(True)
         desc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -3249,7 +3289,26 @@ class MainWindow(QMainWindow):
         fields = self.eval_fields["evaluate_figures"]
 
         form = QFormLayout()
+        batch_size = OutlineSpinBox()
+        batch_size.setRange(1, 8192)
+        batch_size.setValue(int(defaults.get("batch_size", 1024)))
+        form.addRow("Batch size", batch_size)
+        fields["batch_size"] = batch_size
+
+        device = QComboBox()
+        device.addItems(["auto", "cpu", "cuda", "mps"])
+        device.setCurrentText(str(defaults.get("device", "auto")))
+        form.addRow("Device", device)
+        fields["device"] = device
+
+        amp_mode = QComboBox()
+        amp_mode.addItems(["off", "float16"])
+        amp_mode.setCurrentText(str(defaults.get("amp_mode", "off")))
+        form.addRow("AMP mode", amp_mode)
+        fields["amp_mode"] = amp_mode
+
         show_plots = QCheckBox("Show interactive plots (sets SHOW_PLOTS=1)")
+        show_plots.setChecked(bool(defaults.get("show_plots", False)))
         form.addRow("Live plots", show_plots)
         fields["show_plots"] = show_plots
         layout.addLayout(form)
@@ -6012,6 +6071,9 @@ class MainWindow(QMainWindow):
             "topomaps": default_topomap_settings(),
             "preprocess": default_preprocess_settings(),
             "train": default_train_settings(),
+            "evaluate": default_evaluate_settings(),
+            "evaluate_deepchecks": default_evaluate_deepchecks_settings(),
+            "evaluate_figures": default_evaluate_figures_settings(),
             "infer": default_infer_settings(),
             "live_review": default_live_review_settings(),
             "export": default_export_settings(),
@@ -7613,6 +7675,13 @@ class MainWindow(QMainWindow):
                 return text or None
             return None
 
+        def _combo_value(key: str) -> Optional[str]:
+            widget = fields.get(key)
+            if isinstance(widget, QComboBox):
+                text = widget.currentText().strip()
+                return text or None
+            return None
+
         common_fields = self.eval_fields.get("evaluate_common", {})
 
         def _text_value_common(key: str) -> Optional[str]:
@@ -7640,6 +7709,12 @@ class MainWindow(QMainWindow):
             batch_size = _spin_value("batch_size")
             if batch_size:
                 args += ["--batch-size", str(int(batch_size))]
+            device = _combo_value("device")
+            if device:
+                args += ["--device", device]
+            amp_mode = _combo_value("amp_mode")
+            if amp_mode:
+                args += ["--amp-mode", amp_mode]
             split_seed = _spin_value("split_seed")
             if split_seed is not None:
                 args += ["--split-seed", str(int(split_seed))]
@@ -7690,6 +7765,12 @@ class MainWindow(QMainWindow):
             batch_size = _spin_value("batch_size")
             if batch_size:
                 args += ["--batch-size", str(int(batch_size))]
+            device = _combo_value("device")
+            if device:
+                args += ["--device", device]
+            amp_mode = _combo_value("amp_mode")
+            if amp_mode:
+                args += ["--amp-mode", amp_mode]
             split_mode = fields.get("split_mode")
             if isinstance(split_mode, QComboBox):
                 mode_text = split_mode.currentText().strip()
@@ -7704,6 +7785,15 @@ class MainWindow(QMainWindow):
         elif script_key == "evaluate_figures":
             if common_run_dir:
                 args += ["--run-dir", common_run_dir]
+            batch_size = _spin_value("batch_size")
+            if batch_size:
+                args += ["--batch-size", str(int(batch_size))]
+            device = _combo_value("device")
+            if device:
+                args += ["--device", device]
+            amp_mode = _combo_value("amp_mode")
+            if amp_mode:
+                args += ["--amp-mode", amp_mode]
         elif script_key == "evaluate_reports":
             run_dir = _text_value("run_dir") or common_run_dir
             if run_dir:
