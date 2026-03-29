@@ -52,10 +52,11 @@ class FingerActionNet(nn.Module):
             nn.Linear(self.latent_dim, 1) if bool(finger_applicability_head) else None
         )
 
-    def forward(self, x):
+    def _prepare_input(self, x):
         """
         x shape:
           - (B, C, T) preferred
+          - (B, T, C) accepted when C=4
           - (B, C*T) fallback (auto-reshaped)
         """
 
@@ -63,13 +64,22 @@ class FingerActionNet(nn.Module):
             # Fallback compatibility with earlier scripts
             B = x.shape[0]
             x = x.view(B, 4, -1)
+        elif x.ndim == 3 and x.shape[1] != 4 and x.shape[2] == 4:
+            x = x.permute(0, 2, 1)
+        return x
 
-        z = self.encoder(x).squeeze(-1)
+    def extract_features(self, x):
+        x = self._prepare_input(x)
+        return self.encoder(x).squeeze(-1)
 
-        finger_logits = self.finger_head(z)
-        action_logits = self.action_head(z)
+    def forward_heads(self, features):
+        finger_logits = self.finger_head(features)
+        action_logits = self.action_head(features)
         applicability_logits = None
         if self.finger_applicability_head is not None:
-            applicability_logits = self.finger_applicability_head(z).squeeze(-1)
-
+            applicability_logits = self.finger_applicability_head(features).squeeze(-1)
         return finger_logits, action_logits, applicability_logits
+
+    def forward(self, x):
+        z = self.extract_features(x)
+        return self.forward_heads(z)

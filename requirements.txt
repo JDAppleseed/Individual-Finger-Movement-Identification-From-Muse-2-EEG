@@ -7,6 +7,7 @@ joblib>=1.2
 torch>=2.0
 matplotlib>=3.7
 seaborn>=0.12
+plotly>=5.0
 deepchecks>=0.17
 pylsl>=1.16
 bleak>=0.21

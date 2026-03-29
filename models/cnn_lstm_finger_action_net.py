@@ -55,23 +55,7 @@ class CNNLSTMFingerActionNet(nn.Module):
             nn.Linear(lstm_hidden, 1) if bool(finger_applicability_head) else None
         )
 
-    def forward(self, x):
-        # x: [B, T, C] -> [B, C, T]
-        x = x.permute(0, 2, 1)
-        x = self.conv(x)
-        # [B, F, T] -> [B, T, F]
-        x = x.permute(0, 2, 1)
-        out, _ = self.lstm(x)
-        features = out[:, -1, :]
-        features = self.head_dropout(features)
-        finger_logits = self.finger_head(features)
-        action_logits = self.action_head(features)
-        applicability_logits = None
-        if self.finger_applicability_head is not None:
-            applicability_logits = self.finger_applicability_head(features).squeeze(-1)
-        return finger_logits, action_logits, applicability_logits
-
-    def forward_with_state(self, x, state=None):
+    def _encode_sequence(self, x, state=None):
         # x: [B, T, C] -> [B, C, T]
         x = x.permute(0, 2, 1)
         x = self.conv(x)
@@ -80,12 +64,28 @@ class CNNLSTMFingerActionNet(nn.Module):
         out, next_state = self.lstm(x, state)
         features = out[:, -1, :]
         features = self.head_dropout(features)
+        return features, next_state
+
+    def extract_features(self, x):
+        features, _ = self._encode_sequence(x)
+        return features
+
+    def forward_heads(self, features):
         finger_logits = self.finger_head(features)
         action_logits = self.action_head(features)
         applicability_logits = None
         if self.finger_applicability_head is not None:
             applicability_logits = self.finger_applicability_head(features).squeeze(-1)
+        return finger_logits, action_logits, applicability_logits
+
+    def forward_with_state(self, x, state=None):
+        features, next_state = self._encode_sequence(x, state)
+        finger_logits, action_logits, applicability_logits = self.forward_heads(features)
         return finger_logits, action_logits, applicability_logits, next_state
+
+    def forward(self, x):
+        features = self.extract_features(x)
+        return self.forward_heads(features)
 
     @torch.no_grad()
     def deterministic_forward(self, x):
