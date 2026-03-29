@@ -57,6 +57,7 @@ Connection model:
 
 The UI writes per-step configs under `Projects/<ProjectName>/subjects/<subject_id>/config/`
 and snapshots each step to `Projects/<ProjectName>/subjects/<subject_id>/sessions/<session_id>/session_config.json`.
+Checked-in configs under `Projects/2-M16/.../config/` are subject-specific reproducibility snapshots, not the source of repo-wide generic defaults.
 
 ## Session Directory (Core Concept)
 
@@ -123,8 +124,11 @@ python 4_generate_reports.py --session-dir <session_dir>
 Training/evaluation notes:
 
 - Step 2 now reserves a calibration holdout from the training split by default (`--calibration-size 0.1`) and fits post-hoc temperature scaling.
+- The default Step 2 recipe is the current winning `2-M16` deployment recipe: `seed=43`, `split_mode=group_trial`, `aux_rest_session_policy=auto_train_only`, `rest_balance_mode=core_event_equalized`, and `window_preprocess=center_detrend`.
 - Step 2 trains the default deployable architecture with a 5-way active-finger head plus a binary finger-applicability head, and saves `finger_action_model.pt`, `scaler.npz`, `test_predictions.npz`, and `temperature_scaling.json`.
+- Step 2 still records `threshold_applicability=0.50` in train config/run metadata because that value exists in the winning train artifact. New Step 3 and Step 7 configs use the deployed postprocess default `threshold_applicability=0.40`.
 - `temperature_scaling.json` now stores calibrated temperatures for action, finger, and applicability. `test_predictions.npz` stores `applicability_probs` for runs that include the applicability head.
+- Step 3 defaults to deterministic evaluation with no smoothing or hysteresis and uses the winning deployment applicability threshold (`threshold_applicability=0.40`) when postprocess metrics are computed.
 - Step 3 applies the saved temperature scaling when recomputing predictions and treats applicability FP/FN, action-applicability disagreement, and committed deployment-pair invariants as the primary deployment health signals. Raw `REST + active finger` remains available as a deprecated structural metric for active-finger heads.
 
 Paper/manuscript note:

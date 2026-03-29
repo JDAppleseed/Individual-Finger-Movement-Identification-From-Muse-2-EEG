@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 
+from utils.default_recipe import EVAL_RECIPE_DEFAULTS
 from utils.label_schema import (
     ACTION_REST,
     ACTION_NAMES,
@@ -451,7 +452,10 @@ def generate_run_report(run_dir: Path, *, out_dir: Path) -> Path:
         eval_manifest.get("postprocess", {}) if isinstance(eval_manifest, dict) else {}
     )
     report_threshold_applicability = float(
-        postprocess_settings.get("threshold_applicability", 0.5)
+        postprocess_settings.get(
+            "threshold_applicability",
+            EVAL_RECIPE_DEFAULTS["threshold_applicability"],
+        )
     )
 
     preds = None

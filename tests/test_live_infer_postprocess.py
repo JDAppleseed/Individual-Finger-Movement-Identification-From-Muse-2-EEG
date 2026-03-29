@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from app.config_model import default_infer_settings
+from utils.default_recipe import LIVE_INFER_RECIPE_DEFAULTS
 from utils.inference import InferenceConfig, InferenceEngine
 from utils.postprocess import PostprocessSettings, PostprocessState
 from utils.runtime_utils import TemperatureScalingState
@@ -187,7 +188,9 @@ def test_live_infer_defaults_match_best_live_profile():
     assert defaults["hysteresis_frames"] == 3
     assert defaults["threshold_action"] == pytest.approx(0.05)
     assert defaults["threshold_finger"] == pytest.approx(0.20)
-    assert defaults["threshold_applicability"] == pytest.approx(0.50)
+    assert defaults["threshold_applicability"] == pytest.approx(
+        LIVE_INFER_RECIPE_DEFAULTS["threshold_applicability"]
+    )
     assert defaults["adjacency_enabled"] is False
     assert defaults["hysteresis_margin"] == pytest.approx(0.05)
     assert defaults["finger_delta"] == pytest.approx(0.05)
@@ -210,7 +213,9 @@ def test_live_infer_defaults_match_best_live_profile():
     assert config_defaults["hysteresis_frames"] == 3
     assert config_defaults["threshold_action"] == pytest.approx(0.05)
     assert config_defaults["threshold_finger"] == pytest.approx(0.20)
-    assert config_defaults["threshold_applicability"] == pytest.approx(0.50)
+    assert config_defaults["threshold_applicability"] == pytest.approx(
+        LIVE_INFER_RECIPE_DEFAULTS["threshold_applicability"]
+    )
     assert config_defaults["adjacency_enabled"] is False
     assert config_defaults["hysteresis_margin"] == pytest.approx(0.05)
     assert config_defaults["finger_delta"] == pytest.approx(0.05)

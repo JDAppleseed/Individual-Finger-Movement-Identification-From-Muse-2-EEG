@@ -15,22 +15,25 @@ from utils.label_schema import (
     is_valid_action_finger,
     model_index_to_finger_id,
 )
+from utils.default_recipe import LIVE_INFER_RECIPE_DEFAULTS
 
 
 @dataclass
 class PostprocessSettings:
-    smoothing_enabled: bool = True
-    smoothing_method: str = "ema"  # "vote" or "ema"
-    smoothing_window: int = 5
-    hysteresis_enabled: bool = False
-    hysteresis_frames: int = 3
-    threshold_action: float = 0.05
-    threshold_finger: float = 0.20
-    threshold_applicability: float = 0.50
-    adjacency_enabled: bool = False
-    hysteresis_margin: float = 0.05
-    finger_delta: float = 0.05
-    finger_mode: str = "raw"  # "raw" or "smooth"
+    smoothing_enabled: bool = bool(LIVE_INFER_RECIPE_DEFAULTS["smoothing_enabled"])
+    smoothing_method: str = str(LIVE_INFER_RECIPE_DEFAULTS["smoothing_method"])  # "vote" or "ema"
+    smoothing_window: int = int(LIVE_INFER_RECIPE_DEFAULTS["smoothing_window"])
+    hysteresis_enabled: bool = bool(LIVE_INFER_RECIPE_DEFAULTS["hysteresis_enabled"])
+    hysteresis_frames: int = int(LIVE_INFER_RECIPE_DEFAULTS["hysteresis_frames"])
+    threshold_action: float = float(LIVE_INFER_RECIPE_DEFAULTS["threshold_action"])
+    threshold_finger: float = float(LIVE_INFER_RECIPE_DEFAULTS["threshold_finger"])
+    threshold_applicability: float = float(
+        LIVE_INFER_RECIPE_DEFAULTS["threshold_applicability"]
+    )
+    adjacency_enabled: bool = bool(LIVE_INFER_RECIPE_DEFAULTS["adjacency_enabled"])
+    hysteresis_margin: float = float(LIVE_INFER_RECIPE_DEFAULTS["hysteresis_margin"])
+    finger_delta: float = float(LIVE_INFER_RECIPE_DEFAULTS["finger_delta"])
+    finger_mode: str = str(LIVE_INFER_RECIPE_DEFAULTS["finger_mode"])  # "raw" or "smooth"
 
 
 @dataclass

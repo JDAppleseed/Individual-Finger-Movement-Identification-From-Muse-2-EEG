@@ -59,6 +59,7 @@ except Exception:  # pragma: no cover - optional dependency
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from muse_streaming.resample import resample_window, verify_alignment
 from utils.command_shaper import CommandShaper, CommandShaperConfig
+from utils.default_recipe import LIVE_INFER_RECIPE_DEFAULTS
 from utils.inference import InferenceConfig, InferenceEngine
 from utils.label_schema import (
     decode_finger_prediction,
@@ -67,6 +68,7 @@ from utils.label_schema import (
     is_valid_action_finger,
 )
 from utils.live_infer_common import (
+    ReplayRuntimeConfig,
     applicability_gate_passed as _shared_applicability_gate_passed,
     build_actuation_command_shaper as _shared_build_actuation_command_shaper,
     build_actuation_speed_mapper as _shared_build_actuation_speed_mapper,
@@ -457,36 +459,37 @@ def _is_noop_decision(finger_id: int, action_id: int) -> bool:
 def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
     pp_defaults = PostprocessSettings()
     infer_defaults = InferenceConfig()
+    runtime_defaults = ReplayRuntimeConfig()
     defaults = {
         "device": None,
         "session_dir": None,
         "stream_name": None,
         "stream_type": None,
         "bluetooth_target": None,
-        "LIVE_VIZ_ENABLED": False,
-        "LIVE_VIZ_FPS": 2.0,
-        "window_sec": 0.25,
-        "hop_sec": 0.05,
-        "target_fs": 256.0,
-        "latency_threshold_ms": 750.0,
-        "latency_policy": "warn",
-        "allow_drop": False,
-        "log_every": 5.0,
-        "enable_actuation": False,
+        "LIVE_VIZ_ENABLED": bool(LIVE_INFER_RECIPE_DEFAULTS["LIVE_VIZ_ENABLED"]),
+        "LIVE_VIZ_FPS": float(LIVE_INFER_RECIPE_DEFAULTS["LIVE_VIZ_FPS"]),
+        "window_sec": float(runtime_defaults.window_sec),
+        "hop_sec": float(runtime_defaults.hop_sec),
+        "target_fs": float(LIVE_INFER_RECIPE_DEFAULTS["target_fs"]),
+        "latency_threshold_ms": float(runtime_defaults.latency_threshold_ms),
+        "latency_policy": str(LIVE_INFER_RECIPE_DEFAULTS["latency_policy"]),
+        "allow_drop": bool(LIVE_INFER_RECIPE_DEFAULTS["allow_drop"]),
+        "log_every": float(LIVE_INFER_RECIPE_DEFAULTS["log_every"]),
+        "enable_actuation": bool(LIVE_INFER_RECIPE_DEFAULTS["enable_actuation"]),
         "serial_port": None,
-        "serial_baud": 9600,
-        "actuation_min_prob": 0.2,
-        "actuation_stability": 3,
-        "actuation_cooldown_ms": 250,
-        "actuation_repeat_ms": 500,
-        "actuation_min_speed": 0.5,
-        "modulate_actuation_speed": True,
-        "actuation_speed_gamma": 1.0,
+        "serial_baud": int(LIVE_INFER_RECIPE_DEFAULTS["serial_baud"]),
+        "actuation_min_prob": float(runtime_defaults.actuation_min_prob),
+        "actuation_stability": int(runtime_defaults.actuation_stability),
+        "actuation_cooldown_ms": int(runtime_defaults.actuation_cooldown_ms),
+        "actuation_repeat_ms": int(runtime_defaults.actuation_repeat_ms),
+        "actuation_min_speed": float(runtime_defaults.actuation_min_speed),
+        "modulate_actuation_speed": bool(runtime_defaults.modulate_actuation_speed),
+        "actuation_speed_gamma": float(runtime_defaults.actuation_speed_gamma),
         "allow_outside_base": False,
-        "no_file_io": False,
+        "no_file_io": bool(LIVE_INFER_RECIPE_DEFAULTS["no_file_io"]),
         "subject_id": None,
         "project_name": None,
-        "postprocess": True,
+        "postprocess": bool(LIVE_INFER_RECIPE_DEFAULTS["postprocess"]),
         "smoothing_enabled": bool(pp_defaults.smoothing_enabled),
         "smoothing_method": str(pp_defaults.smoothing_method),
         "smoothing_window": int(pp_defaults.smoothing_window),
@@ -499,7 +502,7 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "hysteresis_margin": float(pp_defaults.hysteresis_margin),
         "finger_delta": float(pp_defaults.finger_delta),
         "finger_mode": str(pp_defaults.finger_mode),
-        "use_inference_engine": False,
+        "use_inference_engine": bool(runtime_defaults.use_inference_engine),
         "mc_passes": int(infer_defaults.mc_passes),
         "uncertainty_base_threshold": float(infer_defaults.base_threshold),
         "uncertainty_weight": float(infer_defaults.uncertainty_weight),

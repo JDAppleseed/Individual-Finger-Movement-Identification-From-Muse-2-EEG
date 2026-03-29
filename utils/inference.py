@@ -9,6 +9,7 @@ import torch
 
 from utils.label_schema import decode_prediction_pair, finger_confidence_for_id
 from utils.model_outputs import unpack_model_outputs
+from utils.default_recipe import LIVE_INFER_RECIPE_DEFAULTS
 from utils.runtime_utils import (
     LogitBiasState,
     TemperatureScalingState,
@@ -21,10 +22,10 @@ from utils.runtime_utils import (
 
 @dataclass
 class InferenceConfig:
-    base_threshold: float = 0.75
-    uncertainty_weight: float = 0.5
-    stability_frames: int = 3
-    mc_passes: int = 10
+    base_threshold: float = float(LIVE_INFER_RECIPE_DEFAULTS["uncertainty_base_threshold"])
+    uncertainty_weight: float = float(LIVE_INFER_RECIPE_DEFAULTS["uncertainty_weight"])
+    stability_frames: int = int(LIVE_INFER_RECIPE_DEFAULTS["actuation_stability"])
+    mc_passes: int = int(LIVE_INFER_RECIPE_DEFAULTS["mc_passes"])
 
 
 def _mc_predict(

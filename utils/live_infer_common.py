@@ -14,6 +14,7 @@ from sklearn.metrics import accuracy_score
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from utils.command_shaper import CommandShaper, CommandShaperConfig
+from utils.default_recipe import LIVE_INFER_RECIPE_DEFAULTS, PSEUDO_LIVE_RECIPE_DEFAULTS
 from utils.inference import InferenceConfig, InferenceEngine
 from utils.label_schema import (
     ACTIVE_FINGER_IDS,
@@ -47,24 +48,26 @@ class ActuationDecision:
 
 @dataclass(frozen=True)
 class ReplayRuntimeConfig:
-    window_sec: float = 0.25
-    hop_sec: float = 0.05
-    latency_threshold_ms: float = 750.0
-    actuation_min_prob: float = 0.2
-    actuation_stability: int = 3
-    actuation_cooldown_ms: int = 250
-    actuation_repeat_ms: int = 500
-    actuation_min_speed: float = 0.5
-    modulate_actuation_speed: bool = True
-    actuation_speed_gamma: float = 1.0
-    use_inference_engine: bool = False
-    mc_passes: int = 10
-    uncertainty_base_threshold: float = 0.75
-    uncertainty_weight: float = 0.5
-    latency_mode: str = "ignore"
-    fixed_latency_ms: Optional[float] = None
-    reset_on_trial_change: bool = True
-    deterministic: bool = True
+    window_sec: float = float(LIVE_INFER_RECIPE_DEFAULTS["window_sec"])
+    hop_sec: float = float(LIVE_INFER_RECIPE_DEFAULTS["hop_sec"])
+    latency_threshold_ms: float = float(LIVE_INFER_RECIPE_DEFAULTS["latency_threshold_ms"])
+    actuation_min_prob: float = float(LIVE_INFER_RECIPE_DEFAULTS["actuation_min_prob"])
+    actuation_stability: int = int(LIVE_INFER_RECIPE_DEFAULTS["actuation_stability"])
+    actuation_cooldown_ms: int = int(LIVE_INFER_RECIPE_DEFAULTS["actuation_cooldown_ms"])
+    actuation_repeat_ms: int = int(LIVE_INFER_RECIPE_DEFAULTS["actuation_repeat_ms"])
+    actuation_min_speed: float = float(LIVE_INFER_RECIPE_DEFAULTS["actuation_min_speed"])
+    modulate_actuation_speed: bool = bool(LIVE_INFER_RECIPE_DEFAULTS["modulate_actuation_speed"])
+    actuation_speed_gamma: float = float(LIVE_INFER_RECIPE_DEFAULTS["actuation_speed_gamma"])
+    use_inference_engine: bool = bool(LIVE_INFER_RECIPE_DEFAULTS["use_inference_engine"])
+    mc_passes: int = int(LIVE_INFER_RECIPE_DEFAULTS["mc_passes"])
+    uncertainty_base_threshold: float = float(
+        LIVE_INFER_RECIPE_DEFAULTS["uncertainty_base_threshold"]
+    )
+    uncertainty_weight: float = float(LIVE_INFER_RECIPE_DEFAULTS["uncertainty_weight"])
+    latency_mode: str = str(PSEUDO_LIVE_RECIPE_DEFAULTS["latency_mode"])
+    fixed_latency_ms: Optional[float] = PSEUDO_LIVE_RECIPE_DEFAULTS["fixed_latency_ms"]
+    reset_on_trial_change: bool = bool(PSEUDO_LIVE_RECIPE_DEFAULTS["reset_on_trial_change"])
+    deterministic: bool = bool(PSEUDO_LIVE_RECIPE_DEFAULTS["deterministic"])
 
 
 def load_train_config(run_dir: Path) -> dict:

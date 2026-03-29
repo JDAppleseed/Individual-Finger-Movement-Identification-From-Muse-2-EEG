@@ -77,11 +77,16 @@ def _synchronize_device(device: torch.device) -> None:
 
 
 def _build_args(mc_passes: int) -> Any:
+    from utils.live_infer_common import ReplayRuntimeConfig
+    from utils.inference import InferenceConfig
+
+    runtime_defaults = ReplayRuntimeConfig()
+    infer_defaults = InferenceConfig()
     return SimpleNamespace(
         use_inference_engine=True,
-        uncertainty_base_threshold=0.75,
-        uncertainty_weight=0.5,
-        actuation_stability=3,
+        uncertainty_base_threshold=float(infer_defaults.base_threshold),
+        uncertainty_weight=float(infer_defaults.uncertainty_weight),
+        actuation_stability=int(runtime_defaults.actuation_stability),
         mc_passes=max(1, int(mc_passes)),
     )
 

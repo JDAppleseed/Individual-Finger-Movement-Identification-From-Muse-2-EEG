@@ -19,7 +19,7 @@ Key values to eyeball:
 ```
 python -m compileall .
 pytest -q
-python 3_evaluate_model.py --npz eeg_windows.npz --model finger_action_model.pt --scaler scaler.npz --subject-id "" --deterministic --split-seed 42 --no-manifest
+python 3_evaluate_model.py --run-dir <run_dir> --deterministic --threshold-applicability 0.4 --no-manifest
 python 1b_extract_windows.py --help
 python -c "import json; from pathlib import Path; print('ok')"
 python -c "from utils.timebase import clamp_monotonic_time; print('ok')"

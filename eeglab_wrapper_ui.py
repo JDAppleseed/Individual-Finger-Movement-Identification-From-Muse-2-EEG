@@ -3072,7 +3072,7 @@ class MainWindow(QMainWindow):
 
         split_seed = OutlineSpinBox()
         split_seed.setRange(0, 1_000_000)
-        split_seed.setValue(int(defaults.get("split_seed", 42)))
+        split_seed.setValue(int(defaults.get("split_seed", default_evaluate_settings()["split_seed"])))
         basic_layout.addRow("Split seed", split_seed)
         fields["split_seed"] = split_seed
 
@@ -3154,7 +3154,14 @@ class MainWindow(QMainWindow):
         threshold_applicability.setRange(0.0, 1.0)
         threshold_applicability.setDecimals(2)
         threshold_applicability.setSingleStep(0.01)
-        threshold_applicability.setValue(float(defaults.get("threshold_applicability", 0.5)))
+        threshold_applicability.setValue(
+            float(
+                defaults.get(
+                    "threshold_applicability",
+                    default_evaluate_settings()["threshold_applicability"],
+                )
+            )
+        )
         post_layout.addRow("Threshold applicability", threshold_applicability)
         fields["threshold_applicability"] = threshold_applicability
 
@@ -5046,7 +5053,7 @@ class MainWindow(QMainWindow):
                 "KEEP_BASELINE_REST_EVENTS",
                 "Keep baseline rest",
                 defaults,
-                0,
+                -1,
                 50,
             )
             self._add_spin(
@@ -7335,7 +7342,7 @@ class MainWindow(QMainWindow):
         if step_id == "topomaps" and settings.get("session_dir"):
             args.extend(["--session-dir", str(settings["session_dir"])])
         # Enforce correct handoff between Step 1b → Step 2:
-        # - always train on the selected subject (avoids argparse default filtering to an unrelated subject)
+        # - always train on the selected subject when shared datasets are used
         # - prefer the windows NPZ produced for the current session to avoid stale ./eeg_windows.npz
         if step_id == "train":
             args.extend(["--subject-id", str(self.current_subject)])

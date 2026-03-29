@@ -25,6 +25,7 @@ from deepchecks.tabular.suites import (
 )
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+from utils.default_recipe import TRAIN_RECIPE_DEFAULTS
 from utils.model_outputs import infer_output_dims_from_state_dict, unpack_model_outputs
 from utils.label_schema import ACTION_NAMES, ACTION_REST, FINGER_NAMES
 from utils.sequence_data import (
@@ -153,7 +154,7 @@ def _infer_context_from_session_dir(session_dir: Path) -> Tuple[Optional[str], O
 # ===== CONFIG ============
 # =========================
 
-SEED = 42
+SEED = int(TRAIN_RECIPE_DEFAULTS["seed"])
 MIN_TEST_SAMPLES = 30
 MAX_SPLIT_ATTEMPTS = 8
 DEFAULT_BATCH_SIZE = 1024

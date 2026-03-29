@@ -46,6 +46,7 @@ def _is_finite_array(arr):
 
 import pandas as pd
 
+from utils.default_recipe import WINDOW_EXTRACTION_DEFAULTS
 from utils.label_schema import (
     ACTION_CLOSE,
     ACTION_OPEN,
@@ -61,34 +62,34 @@ from utils.label_schema import (
 # =========================
 
 SOURCE_FS_DEFAULT = 256
-TARGET_FS_DEFAULT = 256.0
-WINDOW_SEC_DEFAULT = 0.25
+TARGET_FS_DEFAULT = float(WINDOW_EXTRACTION_DEFAULTS["target_fs"])
+WINDOW_SEC_DEFAULT = float(WINDOW_EXTRACTION_DEFAULTS["window_sec"])
 WINDOW_SEC = WINDOW_SEC_DEFAULT
-STEP_SEC = 0.05
-PAD_SEC = 0.05
+STEP_SEC = float(WINDOW_EXTRACTION_DEFAULTS["step_sec"])
+PAD_SEC = float(WINDOW_EXTRACTION_DEFAULTS["pad_sec"])
 
-DEDUP_POLICY = "keep_last"
-INTERPOLATION_POLICY = "np.interp.linear"
+DEDUP_POLICY = str(WINDOW_EXTRACTION_DEFAULTS["dedupe_policy"])
+INTERPOLATION_POLICY = str(WINDOW_EXTRACTION_DEFAULTS["interpolation_policy"])
 
 # Label assignment robustness
-LABEL_GATED = True  # Legacy: drop unlabeled windows instead of REST-by-exclusion
-REST_POLICY: Optional[str] = None  # "label_gated" or "rest_by_exclusion" (preferred)
-KEEP_BASELINE_REST_EVENTS = -1  # <0 keeps all labeled REST events; 0 keeps none; >0 keeps first N
-MIN_OVERLAP_RATIO = 0.20  # fraction of WINDOW_SEC required for non-REST labels
+LABEL_GATED = str(WINDOW_EXTRACTION_DEFAULTS["rest_policy"]) == "label_gated"
+REST_POLICY: Optional[str] = str(WINDOW_EXTRACTION_DEFAULTS["rest_policy"])
+KEEP_BASELINE_REST_EVENTS = int(WINDOW_EXTRACTION_DEFAULTS["keep_baseline_rest_events"])
+MIN_OVERLAP_RATIO = float(WINDOW_EXTRACTION_DEFAULTS["min_overlap_ratio"])
 GUARD_BAND_SEC = (
-    0.00  # skip windows within ± this time of any movement boundary (midpoint-based)
+    float(WINDOW_EXTRACTION_DEFAULTS["guard_band_sec"])
 )
-ARTIFACT_MIN_OVERLAP_FRAC = 0.20  # if artifact overlaps >=20% of window, drop window
-SEED = 42
-REST_SUBSAMPLE_PROB = 1.0
-REST_SUBSAMPLE_SEED = 1337
-REST_MAX_WINDOWS: Optional[int] = None
+ARTIFACT_MIN_OVERLAP_FRAC = float(WINDOW_EXTRACTION_DEFAULTS["artifact_min_overlap_frac"])
+SEED = int(WINDOW_EXTRACTION_DEFAULTS["rest_subsample_seed"])
+REST_SUBSAMPLE_PROB = float(WINDOW_EXTRACTION_DEFAULTS["rest_subsample_prob"])
+REST_SUBSAMPLE_SEED = int(WINDOW_EXTRACTION_DEFAULTS["rest_subsample_seed"])
+REST_MAX_WINDOWS: Optional[int] = WINDOW_EXTRACTION_DEFAULTS["rest_max_windows"]
 
 LEGACY_RAW_FILE = "raw.csv"
 LEGACY_EVENT_FILE = "events.csv"
 OUT_FILE = "eeg_windows.csv"
 OUT_NPZ = "eeg_windows.npz"
-DEFAULT_SUBJECT_ID = "8-M16"
+DEFAULT_SUBJECT_ID = ""
 ROOT_DIR = Path(__file__).resolve().parent
 
 
@@ -1011,7 +1012,10 @@ def main():
         type=str,
         default=DEFAULT_SUBJECT_ID,
         metavar="ID",
-        help="Subject identifier used only when inferring a latest session from config/default locations.",
+        help=(
+            "Subject identifier used only when inferring a latest session from "
+            "config/default locations. Defaults to no subject filter."
+        ),
     )
     behavior_group.add_argument(
         "--target-fs",

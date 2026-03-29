@@ -48,6 +48,7 @@ from utils.eval_utils import (
     resolve_cached_test_indices,
     validate_cached_predictions_with_dataset_info,
 )
+from utils.default_recipe import EVAL_RECIPE_DEFAULTS, TRAIN_RECIPE_DEFAULTS
 from utils.sequence_data import load_sequence_npz
 from utils.splitting import compose_split_indices, resolve_auxiliary_rest_sessions
 from utils.postprocess import (
@@ -191,7 +192,7 @@ def _infer_context_from_session_dir(session_dir: Path) -> Tuple[Optional[str], O
 # =========================
 
 N_BINS = 10
-SEED = 42
+SEED = int(TRAIN_RECIPE_DEFAULTS["seed"])
 SHOW_PLOTS = os.environ.get("SHOW_PLOTS", "0") == "1"
 MIN_TEST_SAMPLES = 30
 MAX_SPLIT_ATTEMPTS = 8
@@ -967,7 +968,7 @@ def _compute_prediction_metrics(
     applicability_probs: Optional[np.ndarray],
     y_action_true: np.ndarray,
     y_finger_true: np.ndarray,
-    threshold_applicability: float = 0.5,
+    threshold_applicability: float = float(EVAL_RECIPE_DEFAULTS["threshold_applicability"]),
     n_bins: int = 10,
 ) -> Dict[str, Any]:
     y_action_true = np.asarray(y_action_true, dtype=np.int64).reshape(-1)
@@ -1405,14 +1406,14 @@ def main():
     post_group.add_argument(
         "--smooth-method",
         type=str,
-        default="vote",
+        default=str(EVAL_RECIPE_DEFAULTS["smooth_method"]),
         choices=["vote", "ema"],
         help="Smoothing method used when --smooth is enabled.",
     )
     post_group.add_argument(
         "--smooth-window",
         type=int,
-        default=5,
+        default=int(EVAL_RECIPE_DEFAULTS["smooth_window"]),
         help="Window size used by the smoothing stage.",
     )
     post_group.add_argument(
@@ -1421,25 +1422,25 @@ def main():
     post_group.add_argument(
         "--hysteresis-frames",
         type=int,
-        default=3,
+        default=int(EVAL_RECIPE_DEFAULTS["hysteresis_frames"]),
         help="Number of consecutive frames required by hysteresis.",
     )
     post_group.add_argument(
         "--threshold-action",
         type=float,
-        default=0.75,
+        default=float(EVAL_RECIPE_DEFAULTS["threshold_action"]),
         help="Minimum action confidence required after postprocessing.",
     )
     post_group.add_argument(
         "--threshold-finger",
         type=float,
-        default=0.75,
+        default=float(EVAL_RECIPE_DEFAULTS["threshold_finger"]),
         help="Minimum finger confidence required after postprocessing.",
     )
     post_group.add_argument(
         "--threshold-applicability",
         type=float,
-        default=0.5,
+        default=float(EVAL_RECIPE_DEFAULTS["threshold_applicability"]),
         help="Minimum applicability probability required after postprocessing.",
     )
     post_group.add_argument(

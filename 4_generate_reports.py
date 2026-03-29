@@ -42,9 +42,12 @@ def main():
     selection_group.add_argument(
         "--subject-id",
         type=str,
-        default="2-M16",
+        default="",
         metavar="ID",
-        help="Subject identifier used only for legacy --exp-hash report generation.",
+        help=(
+            "Subject identifier used only for legacy --exp-hash report "
+            "generation. Defaults to the subject recorded in the experiment log."
+        ),
     )
     selection_group.add_argument(
         "--exp-hash",

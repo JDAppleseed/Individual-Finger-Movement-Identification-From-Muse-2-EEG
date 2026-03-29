@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from sklearn.model_selection import train_test_split
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+from utils.default_recipe import ARTIFACT_DEFAULTS, TRAIN_RECIPE_DEFAULTS
 from utils.sequence_data import (
     load_sequence_npz,
     split_indices,
@@ -58,30 +59,30 @@ from utils.session_layout import SessionLayout, resolve_session_dir
 
 # Pipeline handoff: Step 2 consumes Step 1b NPZ windows, then writes model/scaler
 # and split metadata that Step 3/3b/3c/4 reuse from the same run directory.
-SEED = 42
-BATCH_SIZE = 64
-EPOCHS = 60
-LR = 1e-3
-LOSS_ACTION_WEIGHT = 1.0
+SEED = int(TRAIN_RECIPE_DEFAULTS["seed"])
+BATCH_SIZE = int(TRAIN_RECIPE_DEFAULTS["batch_size"])
+EPOCHS = int(TRAIN_RECIPE_DEFAULTS["epochs"])
+LR = float(TRAIN_RECIPE_DEFAULTS["lr"])
+LOSS_ACTION_WEIGHT = float(TRAIN_RECIPE_DEFAULTS["loss_action_weight"])
 # Default REST class weight. Historically this repo used smaller values for
 # early, REST-imbalanced datasets. Current default uses parity weighting so the
 # action head does not systematically under-emphasize REST.
-REST_WEIGHT = 1.0
-REST_BALANCE_MODE = "core_event_equalized"
-WINDOW_PREPROCESS = "center_detrend"
-AUX_REST_SESSION_POLICY = "auto_train_only"
-REST_FINGER_LOSS_WEIGHT = 0.0
-ACTIVE_FINGER_HEAD = True
-FINGER_APPLICABILITY_HEAD = True
-APPLICABILITY_LOSS_WEIGHT = 0.5
-THRESHOLD_APPLICABILITY = 0.5
-AMP_MODE = "off"
+REST_WEIGHT = float(TRAIN_RECIPE_DEFAULTS["rest_weight"])
+REST_BALANCE_MODE = str(TRAIN_RECIPE_DEFAULTS["rest_balance_mode"])
+WINDOW_PREPROCESS = str(TRAIN_RECIPE_DEFAULTS["window_preprocess"])
+AUX_REST_SESSION_POLICY = str(TRAIN_RECIPE_DEFAULTS["aux_rest_session_policy"])
+REST_FINGER_LOSS_WEIGHT = float(TRAIN_RECIPE_DEFAULTS["rest_finger_loss_weight"])
+ACTIVE_FINGER_HEAD = bool(TRAIN_RECIPE_DEFAULTS["active_finger_head"])
+FINGER_APPLICABILITY_HEAD = bool(TRAIN_RECIPE_DEFAULTS["finger_applicability_head"])
+APPLICABILITY_LOSS_WEIGHT = float(TRAIN_RECIPE_DEFAULTS["applicability_loss_weight"])
+THRESHOLD_APPLICABILITY = float(TRAIN_RECIPE_DEFAULTS["threshold_applicability"])
+AMP_MODE = str(TRAIN_RECIPE_DEFAULTS["amp_mode"])
 
-DEFAULT_NPZ = "eeg_windows.npz"
-DEFAULT_MODEL = "finger_action_model.pt"
-DEFAULT_SCALER = "scaler.npz"
-DEFAULT_PREDS = "test_predictions.npz"
-DEFAULT_TEMPERATURE = "temperature_scaling.json"
+DEFAULT_NPZ = str(ARTIFACT_DEFAULTS["windows_npz"])
+DEFAULT_MODEL = str(ARTIFACT_DEFAULTS["model"])
+DEFAULT_SCALER = str(ARTIFACT_DEFAULTS["scaler"])
+DEFAULT_PREDS = str(ARTIFACT_DEFAULTS["preds"])
+DEFAULT_TEMPERATURE = str(ARTIFACT_DEFAULTS["temperature"])
 MAX_SEARCH_DEPTH = 4
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -997,9 +998,9 @@ def build_arg_parser():
     input_group.add_argument(
         "--subject-id",
         type=str,
-        default="2-M16",
+        default="",
         metavar="ID",
-        help="Filter the dataset to a single subject_id before splitting.",
+        help="Filter the dataset to a single subject_id before splitting. Defaults to no filter.",
     )
 
     training_group = p.add_argument_group("training")
@@ -1140,27 +1141,28 @@ def build_arg_parser():
         type=float,
         default=THRESHOLD_APPLICABILITY,
         help=(
-            "Default calibrated applicability threshold recorded with the run for "
-            "deployment gating."
+            "Train-time applicability threshold recorded with the run metadata. "
+            "The winning train artifact used 0.50 here, while Step 3/Step 7 "
+            "deployment defaults use 0.40 unless explicitly overridden."
         ),
     )
     split_group = p.add_argument_group("split and leakage controls")
     split_group.add_argument(
         "--test-size",
         type=float,
-        default=0.2,
+        default=float(TRAIN_RECIPE_DEFAULTS["test_size"]),
         help="Fraction of windows reserved for the evaluation split.",
     )
     split_group.add_argument(
         "--calibration-size",
         type=float,
-        default=0.1,
+        default=float(TRAIN_RECIPE_DEFAULTS["calibration_size"]),
         help="Fraction of the training split held out for post-hoc temperature scaling. Use 0 to disable.",
     )
     split_group.add_argument(
         "--split-mode",
         type=str,
-        default="group_trial",
+        default=str(TRAIN_RECIPE_DEFAULTS["split_mode"]),
         choices=["group_trial", "holdout_session"],
         help="How train/test data are separated: by trial/event groups or by session_id.",
     )
@@ -1180,7 +1182,7 @@ def build_arg_parser():
     split_group.add_argument(
         "--purge-seconds",
         type=float,
-        default=0.0,
+        default=float(TRAIN_RECIPE_DEFAULTS["purge_seconds"]),
         help="Drop training windows within this many seconds of any test window from the same session.",
     )
     split_group.add_argument(
@@ -1197,7 +1199,7 @@ def build_arg_parser():
     split_group.add_argument(
         "--window-idx-leak-threshold",
         type=float,
-        default=0.65,
+        default=float(TRAIN_RECIPE_DEFAULTS["window_idx_leak_threshold"]),
         help="Warn if a window-index-only leakage probe exceeds this accuracy.",
     )
     split_group.add_argument(
