@@ -102,6 +102,20 @@ def _display_session_id(session_id: str) -> str:
     return f"{display_head}{sep}{tail}"
 
 
+def _paper_session_label(session_id: str) -> str:
+    sess = _display_session_id(session_id)
+    if not sess:
+        return sess
+    if sess.startswith("combined_"):
+        parts = sess.split("_")
+        if len(parts) >= 3:
+            label = f"combined_{parts[1]}_{parts[2]}"
+            if "pruned" in sess:
+                label += " (filtered)"
+            return label
+    return sess
+
+
 def _repo_rel(path: Path) -> str:
     try:
         return str(path.resolve().relative_to(REPO_ROOT))
@@ -1400,7 +1414,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     # Performance table per run
     perf_lines: List[str] = []
     perf_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n\\setlength{\\tabcolsep}{3pt}\n")
-    perf_lines.append("\\caption{Representative manuscript runs: one best subject-specific run per subject, with performance and calibration extracted from \\texttt{metrics.json} and \\texttt{test\\_predictions.npz}. Finger accuracy is computed with the deployment-consistent action-conditioned decode path on true non-REST windows.}\n")
+    perf_lines.append("\\caption{Representative subject-specific runs with held-out performance and calibration. Finger accuracy is computed with the deployment-consistent action-conditioned decode path on true non-REST windows.}\n")
     perf_lines.append("\\label{tab:perf}\n")
     perf_lines.append("\\resizebox{\\textwidth}{!}{%\n")
     perf_lines.append("\\begin{tabular}{llp{0.28\\textwidth}rrrrrrrr}\n\\toprule\n")
@@ -1422,7 +1436,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
             if np.isfinite(f_lo) and np.isfinite(f_hi)
             else "\\textit{n/a}"
         )
-        session_id = _latex_breakable_id(_display_session_id(r.session_id))
+        session_id = _latex_breakable_id(_paper_session_label(r.session_id))
         perf_lines.append(
             f"{_latex_escape(_display_subject_id(r.subject_id))} & {_latex_breakable_id(r.run_id)} & {session_id} & {int(r.n_test_metrics or 0)} & {int(r.n_test_non_rest_metrics or 0)} & "
             f"{_format_pct(action_acc, 2)} & {a_ci} & {_format_pct(finger_acc, 2)} & {f_ci} & "
@@ -1459,7 +1473,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     # Representative dataset provenance table
     dur_lines: List[str] = []
     dur_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n\\setlength{\\tabcolsep}{3pt}\n")
-    dur_lines.append("\\caption{Provenance of the representative datasets. The 2-M16 winning run is trained on a filtered derived dataset rather than a single recorded session.}\n")
+    dur_lines.append("\\caption{Representative dataset provenance. The featured 2-M16 run is trained on a filtered derived dataset rather than on a single recorded session.}\n")
     dur_lines.append("\\label{tab:sessions}\n")
     dur_lines.append("\\resizebox{\\textwidth}{!}{%\n")
     dur_lines.append("\\begin{tabular}{lllp{0.20\\textwidth}p{0.39\\textwidth}}\n\\toprule\n")
@@ -1494,26 +1508,23 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
             continue
 
         source = _latex_breakable_id(_display_session_id(str(prov.get("filter_source_session") or r.session_id)))
-        core = ", ".join(_display_session_id(s) for s in prov.get("core_sessions", []))
-        aux = ", ".join(_display_session_id(s) for s in prov.get("aux_rest_sessions", []))
+        core_sessions = [str(s) for s in prov.get("core_sessions", [])]
+        aux_sessions = [str(s) for s in prov.get("aux_rest_sessions", [])]
         notes: List[str] = []
-        if core:
-            notes.append(f"Movement sessions: {_latex_escape(core)}")
-        if aux:
-            notes.append(f"Aux REST: {_latex_escape(aux)}")
+        if core_sessions:
+            notes.append(f"{len(core_sessions)} movement session" + ("" if len(core_sessions) == 1 else "s"))
+        if aux_sessions:
+            notes.append(f"{len(aux_sessions)} aux REST session" + ("" if len(aux_sessions) == 1 else "s"))
         if prov.get("filter_removed_n") is not None and prov.get("filter_source_n") is not None:
             notes.append(
                 f"Pruned {int(prov['filter_removed_n'])}/{int(prov['filter_source_n'])} windows"
             )
         if prov.get("filter_event_ids"):
-            evs = ", ".join(str(v) for v in prov["filter_event_ids"])
-            filt_session = _display_session_id(str(prov.get("filter_session_id") or ""))
-            notes.append(f"Removed REST events {evs} from {_latex_escape(filt_session)}")
-        if prov.get("filter_reason"):
-            reason = str(prov["filter_reason"])
-            if len(reason) > 80:
-                reason = "REST events repeatedly dominated held-out REST failures"
-            notes.append(_latex_escape(reason))
+            evs = ",".join(str(v) for v in prov["filter_event_ids"])
+            filt_session = str(prov.get("filter_session_id") or "")
+            filt_parts = _display_session_id(filt_session).split("_")
+            filt_short = "_".join(filt_parts[1:3]) if len(filt_parts) >= 3 else (_display_session_id(filt_session) or "source")
+            notes.append(f"Removed REST {evs} from {_latex_escape(filt_short)}")
         dur_lines.append(
             f"{subj} & {dataset_id} & Filtered derived & {source} & {'; '.join(notes)} \\\\\n"
         )
@@ -1561,7 +1572,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     ev_lines: List[str] = []
     ev_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
     ev_lines.append(
-        "\\caption{Raw-session event label counts for the recorded sessions underlying the representative datasets (from \\texttt{events/events.jsonl}). Column labels abbreviate thumb/index/middle/ring/pinky open and close events.}\n"
+        "\\caption{Raw-session event label counts for the recorded sessions underlying the representative datasets. Column headers abbreviate thumb/index/middle/ring/pinky open and close events.}\n"
     )
     ev_lines.append("\\label{tab:events}\n")
     ev_lines.append("\\setlength{\\tabcolsep}{4pt}\n")
@@ -1725,16 +1736,16 @@ def _write_figures(runs: List[RunMetrics]) -> None:
             )
 
         subj = _latex_escape(_display_subject_id(r.subject_id))
-        sess = _latex_breakable_id(_display_session_id(r.session_id))
         lines.append(inc(r.fig_action_confusion, f"(a) Action confusion matrix ({subj})."))
         lines.append(inc(r.fig_finger_confusion, f"(b) Finger confusion matrix ({subj})."))
         lines.append("\\\\[0.5em]\n")
         lines.append(inc(r.fig_reliability, f"(c) Reliability / calibration summary ({subj})."))
         lines.append(inc(r.fig_scatter, f"(d) MC dropout confidence scatter ({subj})."))
-        run_id = _latex_breakable_id(r.run_id)
-        lines.append(
-            f"\\caption{{Representative evaluation figures for {subj} (session {sess}, run {run_id}).}}\n"
-        )
+        if r == max(runs, key=_run_rank_key):
+            fig_caption = f"Representative evaluation figures for the featured {subj} run."
+        else:
+            fig_caption = f"Representative evaluation figures for {subj}."
+        lines.append(f"\\caption{{{fig_caption}}}\n")
         lines.append("\\end{figure*}\n\n")
 
     (OUT_DIR / "figures.tex").write_text("".join(lines), encoding="utf-8")
