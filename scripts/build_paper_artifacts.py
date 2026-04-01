@@ -1180,7 +1180,8 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     dur_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n\\setlength{\\tabcolsep}{3pt}\n")
     dur_lines.append("\\caption{Provenance of the representative datasets. The 2-M16 winning run is trained on a filtered derived dataset rather than a single recorded session.}\n")
     dur_lines.append("\\label{tab:sessions}\n")
-    dur_lines.append("\\begin{tabular}{lllp{0.23\\textwidth}p{0.36\\textwidth}}\n\\toprule\n")
+    dur_lines.append("\\resizebox{\\textwidth}{!}{%\n")
+    dur_lines.append("\\begin{tabular}{lllp{0.20\\textwidth}p{0.39\\textwidth}}\n\\toprule\n")
     dur_lines.append("Subject & Dataset & Kind & Source & Notes \\\\\n\\midrule\n")
     for r in sorted_runs:
         prov = _session_provenance(_session_dir_from_rel(r.session_dir_rel))
@@ -1216,23 +1217,26 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
         aux = ", ".join(_display_session_id(s) for s in prov.get("aux_rest_sessions", []))
         notes: List[str] = []
         if core:
-            notes.append(f"Core movement sessions: {_latex_escape(core)}")
+            notes.append(f"Movement sessions: {_latex_escape(core)}")
         if aux:
-            notes.append(f"Auxiliary REST session: {_latex_escape(aux)}")
+            notes.append(f"Aux REST: {_latex_escape(aux)}")
         if prov.get("filter_removed_n") is not None and prov.get("filter_source_n") is not None:
             notes.append(
-                f"Pruned {int(prov['filter_removed_n'])} of {int(prov['filter_source_n'])} windows"
+                f"Pruned {int(prov['filter_removed_n'])}/{int(prov['filter_source_n'])} windows"
             )
         if prov.get("filter_event_ids"):
             evs = ", ".join(str(v) for v in prov["filter_event_ids"])
             filt_session = _display_session_id(str(prov.get("filter_session_id") or ""))
-            notes.append(f"Removed REST event ids {evs} from {_latex_escape(filt_session)}")
+            notes.append(f"Removed REST events {evs} from {_latex_escape(filt_session)}")
         if prov.get("filter_reason"):
-            notes.append(_latex_escape(str(prov["filter_reason"])))
+            reason = str(prov["filter_reason"])
+            if len(reason) > 80:
+                reason = "REST events repeatedly dominated held-out REST failures"
+            notes.append(_latex_escape(reason))
         dur_lines.append(
-            f"{subj} & {dataset_id} & Filtered derived dataset & {source} & {'; '.join(notes)} \\\\\n"
+            f"{subj} & {dataset_id} & Filtered derived & {source} & {'; '.join(notes)} \\\\\n"
         )
-    dur_lines.append("\\bottomrule\n\\end{tabular}\n\\end{table*}\n\n")
+    dur_lines.append("\\bottomrule\n\\end{tabular}%\n}\n\\end{table*}\n\n")
 
     # Event / movement counts (exact, from events/events.jsonl)
     # Use union of event 'type' values across sessions and rotate headers to fit IEEE table* width.
