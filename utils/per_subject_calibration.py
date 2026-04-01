@@ -56,7 +56,7 @@ def expected_calibration_error(conf, correct, n_bins=10):
     ece = 0.0
 
     for i in range(n_bins):
-        idx = (conf > bins[i]) & (conf <= bins[i + 1])
+        idx = ((conf >= bins[i]) if i == 0 else (conf > bins[i])) & (conf <= bins[i + 1])
         if np.sum(idx) == 0:
             continue
 

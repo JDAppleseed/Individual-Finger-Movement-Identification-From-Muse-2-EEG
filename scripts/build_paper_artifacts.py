@@ -228,7 +228,7 @@ def expected_calibration_error(conf: np.ndarray, preds: np.ndarray, labels: np.n
     bins = np.linspace(0.0, 1.0, n_bins + 1)
     ece = 0.0
     for i in range(n_bins):
-        idx = (conf > bins[i]) & (conf <= bins[i + 1])
+        idx = ((conf >= bins[i]) if i == 0 else (conf > bins[i])) & (conf <= bins[i + 1])
         if int(np.sum(idx)) == 0:
             continue
         bin_acc = float(np.mean(preds[idx] == labels[idx]))
@@ -316,6 +316,7 @@ def _load_featured_bundle() -> Dict[str, Any]:
         "model_metrics": _load_json(model_metrics_path) if model_metrics_path.exists() else {},
         "eval_manifest": _load_json(eval_manifest_path) if eval_manifest_path.exists() else {},
         "replay_manifest": _load_json(replay_manifest_path) if replay_manifest_path and replay_manifest_path.exists() else {},
+        "replay_manifest_path": str(replay_manifest_path) if replay_manifest_path and replay_manifest_path.exists() else None,
     }
 
 
@@ -564,6 +565,197 @@ def _find_report_figs(report_dir: Path, run_id: str) -> Dict[str, Optional[Path]
     }
 
 
+def _resolve_test_indices(preds: Any) -> Optional[np.ndarray]:
+    for key in ("test_indices_local", "test_indices", "test_indices_global"):
+        if key in preds:
+            return np.asarray(preds[key]).astype(int).reshape(-1)
+    return None
+
+
+def _write_standardized_mc_scatter(
+    *,
+    session_dir: Path,
+    run_id: str,
+    train_cfg: Dict[str, Any],
+    dest_stem: str,
+) -> Optional[str]:
+    try:
+        import torch
+
+        from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+        from utils.model_outputs import infer_output_dims_from_state_dict
+        from utils.runtime_utils import apply_channel_normalizer, load_normalizer
+    except Exception:
+        return None
+
+    run_dir = session_dir / "processed" / "models" / run_id
+    model_path = run_dir / "finger_action_model.pt"
+    scaler_path = run_dir / "scaler.npz"
+    preds_path = run_dir / "test_predictions.npz"
+    windows_path = session_dir / "processed" / "eeg_windows.npz"
+    if not all(path.exists() for path in (model_path, scaler_path, preds_path, windows_path)):
+        return None
+
+    try:
+        state_dict = torch.load(model_path, map_location="cpu")
+        if isinstance(state_dict, dict) and "state_dict" in state_dict and isinstance(state_dict["state_dict"], dict):
+            state_dict = state_dict["state_dict"]
+        n_fingers, n_actions, has_applicability = infer_output_dims_from_state_dict(state_dict)
+        n_channels = 4
+        input_shape = train_cfg.get("input_shape")
+        if isinstance(input_shape, list) and len(input_shape) >= 2:
+            try:
+                n_channels = int(input_shape[-1])
+            except Exception:
+                n_channels = 4
+        model = CNNLSTMFingerActionNet(
+            n_channels=n_channels,
+            n_fingers=n_fingers,
+            n_actions=n_actions,
+            finger_applicability_head=has_applicability,
+        )
+        model.load_state_dict(state_dict)
+        model.eval()
+
+        preds = np.load(preds_path, allow_pickle=True)
+        test_idx = _resolve_test_indices(preds)
+        if test_idx is None or test_idx.size == 0:
+            return None
+
+        windows = np.load(windows_path, allow_pickle=True)
+        X = np.asarray(windows["X"][test_idx], dtype=np.float32)
+        normalizer = load_normalizer(scaler_path)
+        X = apply_channel_normalizer(X, normalizer)
+
+        confidences: List[np.ndarray] = []
+        uncertainties: List[np.ndarray] = []
+        torch.manual_seed(0)
+        batch_size = 256
+        mc_passes = 20
+        with torch.no_grad():
+            for start in range(0, int(X.shape[0]), batch_size):
+                stop = min(int(X.shape[0]), start + batch_size)
+                xb = torch.from_numpy(X[start:stop]).float()
+                mc = model.mc_forward(xb, passes=mc_passes)
+                action_mean = mc["action_mean"]
+                action_std = mc["action_std"]
+                confidences.append(action_mean.max(dim=-1).values.detach().cpu().numpy())
+                uncertainties.append(action_std.mean(dim=-1).detach().cpu().numpy())
+
+        conf = np.concatenate(confidences) if confidences else np.empty((0,), dtype=float)
+        unc = np.concatenate(uncertainties) if uncertainties else np.empty((0,), dtype=float)
+        if conf.size == 0 or unc.size == 0:
+            return None
+
+        fig, ax = plt.subplots(figsize=(6.0, 4.9), dpi=220)
+        hb = ax.hexbin(
+            conf,
+            unc,
+            gridsize=42,
+            mincnt=1,
+            bins="log",
+            cmap="viridis",
+            linewidths=0.0,
+        )
+        cbar = fig.colorbar(hb, ax=ax, pad=0.02)
+        cbar.set_label("Counts", fontsize=8)
+        cbar.ax.tick_params(labelsize=7)
+
+        ax.set_xlim(0.35, 1.0)
+        ax.set_ylim(0.0, 0.32)
+        ax.set_xlabel("MC-dropout action confidence")
+        ax.set_ylabel("MC-dropout action uncertainty")
+        ax.grid(linestyle=":", linewidth=0.5, alpha=0.45)
+        ax.set_axisbelow(True)
+        ax.text(
+            0.98,
+            0.98,
+            f"n={conf.size}",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=7.2,
+            bbox=dict(boxstyle="round,pad=0.18", facecolor="white", edgecolor="#bbbbbb", linewidth=0.6, alpha=0.95),
+        )
+        anchor_x = float(np.quantile(conf, 0.82))
+        anchor_y = float(np.quantile(unc, 0.18))
+        ax.annotate(
+            "Dense region:\nhigh confidence,\nlow uncertainty",
+            xy=(anchor_x, anchor_y),
+            xytext=(0.58, 0.83),
+            textcoords="axes fraction",
+            fontsize=7.2,
+            ha="left",
+            va="top",
+            arrowprops=dict(arrowstyle="->", linewidth=0.8, color="#333333"),
+            bbox=dict(boxstyle="round,pad=0.18", facecolor="white", edgecolor="#bbbbbb", linewidth=0.6, alpha=0.95),
+        )
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+
+        out_path = FIG_DIR / f"{dest_stem}.png"
+        fig.tight_layout()
+        fig.savefig(out_path, bbox_inches="tight")
+        plt.close(fig)
+        return str(out_path.relative_to(REPO_ROOT))
+    except Exception:
+        return None
+
+
+def _summarize_replay_predictions(replay_manifest: Dict[str, Any], replay_manifest_path: Optional[Path]) -> Dict[str, Optional[int]]:
+    pred_path = None
+    pred_entry = replay_manifest.get("predictions_jsonl")
+    if pred_entry:
+        pred_path = Path(str(pred_entry))
+    if pred_path is None or not pred_path.exists():
+        if replay_manifest_path is not None:
+            candidate = replay_manifest_path.parent / "predictions.jsonl"
+            if candidate.exists():
+                pred_path = candidate
+    if pred_path is None or not pred_path.exists():
+        return {
+            "rest_windows": None,
+            "non_rest_windows": None,
+            "positive_send_windows": None,
+            "correct_send_windows": None,
+            "false_actuation_rest_count": None,
+        }
+
+    rest_windows = 0
+    non_rest_windows = 0
+    positive_send_windows = 0
+    correct_send_windows = 0
+    false_actuation_rest_count = 0
+    with pred_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            row = json.loads(line)
+            true_action = int(row.get("true_action_id", -1) or 0)
+            true_finger = int(row.get("true_finger_id", 0) or 0)
+            actuation_sent = bool(row.get("actuation_sent", False))
+            act_action = int(row.get("actuation_target_action_id", 0) or 0)
+            act_finger = int(row.get("actuation_target_finger_id", 0) or 0)
+            if true_action == 0:
+                rest_windows += 1
+                false_actuation_rest_count += int(actuation_sent)
+            else:
+                non_rest_windows += 1
+            positive_send_windows += int(actuation_sent and act_action != 0 and act_finger != 0)
+            correct_send_windows += int(
+                actuation_sent
+                and true_action != 0
+                and act_action == true_action
+                and act_finger == true_finger
+            )
+
+    return {
+        "rest_windows": int(rest_windows),
+        "non_rest_windows": int(non_rest_windows),
+        "positive_send_windows": int(positive_send_windows),
+        "correct_send_windows": int(correct_send_windows),
+        "false_actuation_rest_count": int(false_actuation_rest_count),
+    }
+
+
 def _count_labels(arr: np.ndarray) -> Dict[str, int]:
     u, c = np.unique(arr.astype(int), return_counts=True)
     return {str(int(k)): int(v) for k, v in zip(u.tolist(), c.tolist())}
@@ -716,7 +908,14 @@ def _compute_run_metrics(metrics_path: Path) -> RunMetrics:
     fig_action = _copy_figure(figs["action"], f"{stem_base}__action_confusion") if figs["action"] else None
     fig_finger = _copy_figure(figs["finger"], f"{stem_base}__finger_confusion") if figs["finger"] else None
     fig_rel = _copy_figure(figs["reliability"], f"{stem_base}__mc_eval") if figs["reliability"] else None
-    fig_scat = _copy_figure(figs["scatter"], f"{stem_base}__mc_scatter") if figs["scatter"] else None
+    fig_scat = _write_standardized_mc_scatter(
+        session_dir=session_dir,
+        run_id=run_id,
+        train_cfg=train_cfg,
+        dest_stem=f"{stem_base}__mc_scatter",
+    )
+    if fig_scat is None and figs["scatter"]:
+        fig_scat = _copy_figure(figs["scatter"], f"{stem_base}__mc_scatter")
 
     return RunMetrics(
         subject_id=subj,
@@ -868,7 +1067,7 @@ def _write_finger_accuracy_bar_chart(runs: List[RunMetrics]) -> str:
     x = np.arange(len(finger_ids))
     width = 0.36
 
-    fig, ax = plt.subplots(figsize=(7.2, 3.8), dpi=200)
+    fig, ax = plt.subplots(figsize=(7.6, 4.3), dpi=220)
     colors = ["#1f77b4", "#d95f02", "#2ca02c", "#7f7f7f"]
 
     for idx, run in enumerate(runs):
@@ -889,11 +1088,12 @@ def _write_finger_accuracy_bar_chart(runs: List[RunMetrics]) -> str:
             if np.isfinite(height):
                 ax.text(
                     bar.get_x() + bar.get_width() / 2.0,
-                    height + 1.0,
+                    height + 1.6,
                     f"n={count}",
                     ha="center",
                     va="bottom",
-                    fontsize=6,
+                    fontsize=7.1,
+                    bbox=dict(boxstyle="round,pad=0.10", facecolor="white", edgecolor="none", alpha=0.92),
                 )
 
     ax.axhline(20.0, color="#444444", linestyle="--", linewidth=1.0, label="5-way chance")
@@ -903,7 +1103,7 @@ def _write_finger_accuracy_bar_chart(runs: List[RunMetrics]) -> str:
     ax.set_ylim(0.0, 110.0)
     ax.grid(axis="y", linestyle=":", linewidth=0.7, alpha=0.7)
     ax.set_axisbelow(True)
-    ax.legend(frameon=False, fontsize=7, ncol=3, loc="upper center")
+    ax.legend(frameon=False, fontsize=7.5, ncol=3, loc="upper center")
     fig.tight_layout()
 
     out_path = FIG_DIR / "finger_accuracy_comparison.png"
@@ -1325,6 +1525,11 @@ def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo
     featured_eval = ((featured.get("eval_manifest") or {}).get("metrics") or {})
     featured_replay = ((featured.get("replay_manifest") or {}).get("replay_metrics") or {})
     featured_replay_summary = ((featured.get("replay_manifest") or {}).get("summary") or {})
+    featured_runtime = ((featured.get("replay_manifest") or {}).get("runtime_config") or {})
+    replay_prediction_counts = _summarize_replay_predictions(
+        featured.get("replay_manifest") or {},
+        Path(str(featured.get("replay_manifest_path"))) if featured.get("replay_manifest_path") else None,
+    )
     featured_source_dir = Path(str((featured.get("manifest") or {}).get("source_session_dir") or ""))
     featured_prov = _session_provenance(featured_source_dir) if featured_source_dir.exists() else {}
 
@@ -1361,6 +1566,16 @@ def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo
     _macro_percent("FeaturedReplayPrecision", featured_replay.get("would_send_window_precision_non_rest"))
     _macro_percent("FeaturedReplayRecall", featured_replay.get("would_send_window_recall_non_rest"))
     _macro_percent("FeaturedFalseActuationRateRest", featured_replay.get("false_actuation_rate_rest"))
+    _macro_count("FeaturedReplayRestWindows", replay_prediction_counts.get("rest_windows"))
+    _macro_count("FeaturedReplayNonRestWindows", replay_prediction_counts.get("non_rest_windows"))
+    _macro_count("FeaturedReplayPositiveSendWindows", replay_prediction_counts.get("positive_send_windows"))
+    _macro_count("FeaturedReplayCorrectSendWindows", replay_prediction_counts.get("correct_send_windows"))
+    _macro_count("FeaturedReplayFalseActuationCount", replay_prediction_counts.get("false_actuation_rest_count"))
+    _macro_count("FeaturedActuationStabilityWindows", featured_runtime.get("actuation_stability"))
+    stability_ms = None
+    if featured_runtime.get("actuation_stability") is not None and featured_runtime.get("hop_sec") is not None:
+        stability_ms = 1000.0 * float(featured_runtime.get("actuation_stability")) * float(featured_runtime.get("hop_sec"))
+    _macro_number("FeaturedActuationStabilityMs", stability_ms, digits=0)
     _macro_number("FeaturedActionECE", featured_eval.get("action_ece"))
     _macro_number("FeaturedFingerECE", featured_eval.get("finger_ece_non_rest"))
     _macro_number(
@@ -1465,7 +1680,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
         art_str = str(r.artifact_count) if r.artifact_count is not None else "\\textit{n/a}"
         gapc_str = str(r.gap_count) if r.gap_count is not None else "\\textit{n/a}"
         data_lines.append(
-            f"{_latex_escape(_display_subject_id(r.subject_id))} & {_latex_breakable_id(_display_session_id(r.session_id))} & {int(r.n_windows_total or 0)} & "
+            f"{_latex_escape(_display_subject_id(r.subject_id))} & {_latex_breakable_id(_paper_session_label(r.session_id))} & {int(r.n_windows_total or 0)} & "
             f"{win_str} & {hop_str} & {ov_str} & {art_str} & {gapc_str} \\\\\n"
         )
     data_lines.append("\\bottomrule\n\\end{tabular}%\n}\n\\end{table*}\n\n")
@@ -1481,7 +1696,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     for r in sorted_runs:
         prov = _session_provenance(_session_dir_from_rel(r.session_dir_rel))
         subj = _latex_escape(_display_subject_id(r.subject_id))
-        dataset_id = _latex_breakable_id(_display_session_id(r.session_id))
+        dataset_id = _latex_breakable_id(_paper_session_label(r.session_id))
         if prov["kind"] == "recorded":
             support = next((s for s in raw_sessions if str(s.get("session_id")) == r.session_id), None)
             note_parts: List[str] = []
@@ -1507,7 +1722,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
             )
             continue
 
-        source = _latex_breakable_id(_display_session_id(str(prov.get("filter_source_session") or r.session_id)))
+        source = _latex_breakable_id(_paper_session_label(str(prov.get("filter_source_session") or r.session_id)))
         core_sessions = [str(s) for s in prov.get("core_sessions", [])]
         aux_sessions = [str(s) for s in prov.get("aux_rest_sessions", [])]
         notes: List[str] = []
@@ -1572,7 +1787,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     ev_lines: List[str] = []
     ev_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
     ev_lines.append(
-        "\\caption{Raw-session event label counts for the recorded sessions underlying the representative datasets. Column headers abbreviate thumb/index/middle/ring/pinky open and close events.}\n"
+        "\\caption{Raw-session event label counts for the recorded sessions underlying the representative datasets. Role indicates the representative recorded session (Recorded), a movement session merged into a derived dataset (Core), or an auxiliary REST-only session added for REST coverage (Aux REST). Column headers abbreviate thumb/index/middle/ring/pinky open and close events.}\n"
     )
     ev_lines.append("\\label{tab:events}\n")
     ev_lines.append("\\setlength{\\tabcolsep}{4pt}\n")
@@ -1740,7 +1955,7 @@ def _write_figures(runs: List[RunMetrics]) -> None:
         lines.append(inc(r.fig_finger_confusion, f"(b) Finger confusion matrix ({subj})."))
         lines.append("\\\\[0.5em]\n")
         lines.append(inc(r.fig_reliability, f"(c) Reliability / calibration summary ({subj})."))
-        lines.append(inc(r.fig_scatter, f"(d) MC dropout confidence scatter ({subj})."))
+        lines.append(inc(r.fig_scatter, f"(d) MC-dropout action confidence-uncertainty plot ({subj})."))
         if r == max(runs, key=_run_rank_key):
             fig_caption = f"Representative evaluation figures for the featured {subj} run."
         else:

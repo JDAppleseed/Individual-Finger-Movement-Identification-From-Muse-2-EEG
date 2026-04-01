@@ -448,7 +448,7 @@ def reliability_bins(conf, preds, labels, n_bins=10):
     bin_centers = (bins[:-1] + bins[1:]) / 2
     bin_accs = []
     for i in range(n_bins):
-        idx = (conf > bins[i]) & (conf <= bins[i + 1])
+        idx = ((conf >= bins[i]) if i == 0 else (conf > bins[i])) & (conf <= bins[i + 1])
         if np.sum(idx) == 0:
             bin_accs.append(np.nan)
         else:
@@ -460,7 +460,7 @@ def expected_calibration_error(conf, preds, labels, n_bins=10):
     bins = np.linspace(0, 1, n_bins + 1)
     ece = 0.0
     for i in range(n_bins):
-        idx = (conf > bins[i]) & (conf <= bins[i + 1])
+        idx = ((conf >= bins[i]) if i == 0 else (conf > bins[i])) & (conf <= bins[i + 1])
         if np.sum(idx) == 0:
             continue
         bin_acc = np.mean(preds[idx] == labels[idx])
