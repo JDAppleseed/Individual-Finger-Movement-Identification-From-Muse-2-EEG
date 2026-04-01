@@ -27,11 +27,17 @@ import math
 import re
 import shutil
 import sys
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -93,6 +99,108 @@ def _display_session_id(session_id: str) -> str:
     if not sep:
         return display_head
     return f"{display_head}{sep}{tail}"
+
+
+def _repo_rel(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(REPO_ROOT))
+    except Exception:
+        return str(path)
+
+
+def _load_json_if_exists(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        return _load_json(path)
+    except Exception:
+        return {}
+
+
+def _session_dir_from_rel(session_dir_rel: str) -> Path:
+    return (REPO_ROOT / session_dir_rel).resolve()
+
+
+def _session_provenance(session_dir: Path) -> Dict[str, Any]:
+    manifest = _load_json_if_exists(session_dir / "manifest.json")
+    filter_manifest = _load_json_if_exists(session_dir / "processed" / "filter_manifest.json")
+
+    kind = "recorded"
+    combined_from_sessions: List[str] = []
+    core_sessions: List[str] = []
+    aux_rest_sessions: List[str] = []
+    filter_source_session = None
+    filter_removed_n = None
+    filter_source_n = None
+    filter_kept_n = None
+    filter_event_ids: List[int] = []
+    filter_session_id = None
+    filter_reason = None
+
+    if isinstance(manifest.get("combined_from_sessions"), list):
+        kind = "combined"
+        combined_from_sessions = [Path(str(p)).name for p in manifest.get("combined_from_sessions", [])]
+        deploy = manifest.get("deployment_training") or {}
+        core_sessions = [str(s) for s in deploy.get("core_sessions", [])]
+        aux_rest_sessions = [str(s) for s in deploy.get("aux_rest_sessions", [])]
+
+    if filter_manifest:
+        kind = "filtered"
+        filter_source_session = Path(str(filter_manifest.get("source_session_dir") or "")).name or None
+        counts = filter_manifest.get("counts") or {}
+        filter_removed_n = counts.get("removed_n")
+        filter_source_n = counts.get("source_n")
+        filter_kept_n = counts.get("kept_n")
+        filt = filter_manifest.get("filter") or {}
+        filter_event_ids = [int(v) for v in filt.get("event_ids", []) if str(v).isdigit()]
+        filter_session_id = filt.get("session_id")
+        filter_reason = filt.get("reason")
+        source_manifest = _load_json_if_exists(Path(str(filter_manifest.get("source_session_dir"))) / "manifest.json")
+        if isinstance(source_manifest.get("combined_from_sessions"), list):
+            combined_from_sessions = [
+                Path(str(p)).name for p in source_manifest.get("combined_from_sessions", [])
+            ]
+            deploy = source_manifest.get("deployment_training") or {}
+            core_sessions = [str(s) for s in deploy.get("core_sessions", [])]
+            aux_rest_sessions = [str(s) for s in deploy.get("aux_rest_sessions", [])]
+
+    return {
+        "kind": kind,
+        "session_id": session_dir.name,
+        "session_dir_rel": _repo_rel(session_dir),
+        "combined_from_sessions": combined_from_sessions,
+        "core_sessions": core_sessions,
+        "aux_rest_sessions": aux_rest_sessions,
+        "filter_source_session": filter_source_session,
+        "filter_removed_n": filter_removed_n,
+        "filter_source_n": filter_source_n,
+        "filter_kept_n": filter_kept_n,
+        "filter_event_ids": filter_event_ids,
+        "filter_session_id": filter_session_id,
+        "filter_reason": filter_reason,
+    }
+
+
+def _raw_support_sessions_for_run(run: "RunMetrics") -> List[Dict[str, str]]:
+    prov = _session_provenance(_session_dir_from_rel(run.session_dir_rel))
+    if prov["kind"] == "recorded":
+        return [{"session_id": run.session_id, "role": "recorded"}]
+
+    rows: List[Dict[str, str]] = []
+    combined_from = list(prov.get("combined_from_sessions") or [])
+    core = set(prov.get("core_sessions") or [])
+    aux = set(prov.get("aux_rest_sessions") or [])
+    if not combined_from and prov.get("filter_source_session"):
+        combined_from = [str(prov["filter_source_session"])]
+
+    for session_id in combined_from:
+        role = "supporting"
+        if session_id in core:
+            role = "core"
+        elif session_id in aux:
+            role = "aux_rest"
+        rows.append({"session_id": session_id, "role": role})
+    return rows
 
 
 def expected_calibration_error(conf: np.ndarray, preds: np.ndarray, labels: np.ndarray, n_bins: int = 10) -> float:
@@ -289,6 +397,7 @@ class SubjectDemographics:
 class RunMetrics:
     subject_id: str
     session_id: str
+    session_dir_rel: str
     run_id: str
     created_utc: Optional[str]
 
@@ -302,6 +411,7 @@ class RunMetrics:
 
     test_action_acc_metrics: Optional[float]
     test_finger_acc_non_rest_metrics: Optional[float]
+    test_finger_acc_non_rest_raw_head: Optional[float]
     n_test_metrics: Optional[int]
     n_test_non_rest_metrics: Optional[int]
 
@@ -450,6 +560,7 @@ def _compute_run_metrics(metrics_path: Path) -> RunMetrics:
     run_dir = metrics_path.parent
     run_id = run_dir.name
     session_dir = run_dir.parents[2]
+    session_dir_rel = _repo_rel(session_dir)
 
     metrics = _load_json(metrics_path)
     train = metrics.get("train", {}) or {}
@@ -597,6 +708,7 @@ def _compute_run_metrics(metrics_path: Path) -> RunMetrics:
         session_id=session_dir.name,
         run_id=run_id,
         created_utc=metrics.get("created_utc"),
+        session_dir_rel=session_dir_rel,
         train_action_acc=train.get("action_acc"),
         train_finger_acc=train.get("finger_acc"),
         train_avg_loss=train.get("avg_loss"),
@@ -605,7 +717,10 @@ def _compute_run_metrics(metrics_path: Path) -> RunMetrics:
         train_lr=train.get("lr"),
         train_seed=train.get("seed"),
         test_action_acc_metrics=test.get("action_acc"),
-        test_finger_acc_non_rest_metrics=test.get("finger_acc_non_rest"),
+        # Use deployment-consistent finger decoding for manuscript metrics so
+        # the point estimate, per-class table, and CI all refer to the same quantity.
+        test_finger_acc_non_rest_metrics=test_finger_acc_non_rest_from_preds,
+        test_finger_acc_non_rest_raw_head=test.get("finger_acc_non_rest"),
         n_test_metrics=test.get("n_test"),
         n_test_non_rest_metrics=test.get("n_test_non_rest"),
         test_action_acc_from_preds=test_action_acc_from_preds,
@@ -700,6 +815,7 @@ def _scan_session_meta(subject_id: str, session_ids: Optional[set[str]] = None) 
         events_counts = _read_events_counts(events_path)
         out["sessions"].append(
             {
+                "subject_id": subject_id,
                 "session_id": session_id,
                 "created_utc": meta.get("created_utc"),
                 "samples_received": samples_received,
@@ -724,6 +840,61 @@ def _format_num(x: float, digits: int = 4) -> str:
     if x is None or not np.isfinite(x):
         return r"\textit{n/a}"
     return f"{x:.{digits}f}"
+
+
+def _write_finger_accuracy_bar_chart(runs: List[RunMetrics]) -> str:
+    try:
+        from utils.label_schema import FINGER_NAMES  # type: ignore
+    except Exception:  # pragma: no cover
+        FINGER_NAMES = {1: "THUMB", 2: "INDEX", 3: "MIDDLE", 4: "RING", 5: "PINKY"}
+
+    finger_ids = [1, 2, 3, 4, 5]
+    labels = [FINGER_NAMES.get(fid, str(fid)).title() for fid in finger_ids]
+    x = np.arange(len(finger_ids))
+    width = 0.36
+
+    fig, ax = plt.subplots(figsize=(7.2, 3.8), dpi=200)
+    colors = ["#1f77b4", "#d95f02", "#2ca02c", "#7f7f7f"]
+
+    for idx, run in enumerate(runs):
+        values = [100.0 * float(run.test_finger_acc_by_class_non_rest.get(str(fid), float("nan"))) for fid in finger_ids]
+        offset = (idx - (len(runs) - 1) / 2.0) * width
+        bars = ax.bar(
+            x + offset,
+            values,
+            width=width,
+            label=_display_subject_id(run.subject_id),
+            color=colors[idx % len(colors)],
+            edgecolor="black",
+            linewidth=0.6,
+        )
+        for bar, fid in zip(bars, finger_ids):
+            count = int(run.test_finger_counts.get(str(fid), 0))
+            height = bar.get_height()
+            if np.isfinite(height):
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2.0,
+                    height + 1.0,
+                    f"n={count}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=6,
+                )
+
+    ax.axhline(20.0, color="#444444", linestyle="--", linewidth=1.0, label="5-way chance")
+    ax.set_ylabel("Accuracy (%)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylim(0.0, 110.0)
+    ax.grid(axis="y", linestyle=":", linewidth=0.7, alpha=0.7)
+    ax.set_axisbelow(True)
+    ax.legend(frameon=False, fontsize=7, ncol=3, loc="upper center")
+    fig.tight_layout()
+
+    out_path = FIG_DIR / "finger_accuracy_comparison.png"
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    return str(out_path.relative_to(REPO_ROOT))
 
 
 def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo_sha: str) -> None:
@@ -858,6 +1029,9 @@ def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo
     featured_metrics = ((featured.get("model_metrics") or {}).get("test") or {})
     featured_eval = ((featured.get("eval_manifest") or {}).get("metrics") or {})
     featured_replay = ((featured.get("replay_manifest") or {}).get("replay_metrics") or {})
+    featured_replay_summary = ((featured.get("replay_manifest") or {}).get("summary") or {})
+    featured_source_dir = Path(str((featured.get("manifest") or {}).get("source_session_dir") or ""))
+    featured_prov = _session_provenance(featured_source_dir) if featured_source_dir.exists() else {}
 
     def _macro_percent(name: str, value: Optional[float], digits: int = 2) -> None:
         lines.append(
@@ -883,15 +1057,25 @@ def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo
             + "\n"
         )
 
-    _macro_percent("FeaturedActionAcc", featured_metrics.get("action_acc"))
-    _macro_percent("FeaturedFingerAcc", featured_metrics.get("finger_acc_non_rest"))
+    _macro_percent("FeaturedActionAcc", featured_eval.get("action_acc") or featured_metrics.get("action_acc"))
+    _macro_percent("FeaturedFingerAcc", featured_eval.get("finger_acc_non_rest") or featured_metrics.get("finger_acc_non_rest"))
     _macro_count("FeaturedNTest", featured_metrics.get("n_test"))
     _macro_count("FeaturedNNonRest", featured_metrics.get("n_test_non_rest"))
     _macro_percent("FeaturedJointAcc", featured_eval.get("joint_acc"))
     _macro_percent("FeaturedReplayCommittedActionAcc", featured_replay.get("committed_action_acc"))
     _macro_percent("FeaturedReplayPrecision", featured_replay.get("would_send_window_precision_non_rest"))
+    _macro_percent("FeaturedReplayRecall", featured_replay.get("would_send_window_recall_non_rest"))
+    _macro_percent("FeaturedFalseActuationRateRest", featured_replay.get("false_actuation_rate_rest"))
     _macro_number("FeaturedActionECE", featured_eval.get("action_ece"))
     _macro_number("FeaturedFingerECE", featured_eval.get("finger_ece_non_rest"))
+    _macro_number(
+        "FeaturedReplayLatencyMeanMs",
+        ((featured_replay_summary.get("latency_ms") or {}).get("mean")),
+        digits=1,
+    )
+    _macro_count("FeaturedDerivedSourceN", featured_prov.get("filter_source_n"))
+    _macro_count("FeaturedDerivedRemovedN", featured_prov.get("filter_removed_n"))
+    _macro_count("FeaturedDerivedKeptN", featured_prov.get("filter_kept_n"))
 
     (OUT_DIR / "paper_macros.tex").write_text("".join(lines), encoding="utf-8")
 
@@ -899,14 +1083,29 @@ def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo
 def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], session_meta: Dict[str, Any]) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     sorted_runs = sorted(runs, key=lambda x: (x.subject_id, x.session_id, x.run_id))
+    raw_session_role: Dict[str, str] = {}
+    role_rank = {"recorded": 0, "core": 1, "aux_rest": 2, "supporting": 3}
+    for run in sorted_runs:
+        for row in _raw_support_sessions_for_run(run):
+            session_id = str(row["session_id"])
+            role = str(row["role"])
+            current = raw_session_role.get(session_id)
+            if current is None or role_rank.get(role, 99) < role_rank.get(current, 99):
+                raw_session_role[session_id] = role
+    raw_sessions = sorted(
+        session_meta.get("sessions", []),
+        key=lambda s: (
+            role_rank.get(raw_session_role.get(str(s.get("session_id")), "supporting"), 99),
+            str(s.get("subject_id") or ""),
+            str(s.get("session_id") or ""),
+        ),
+    )
 
     # Demographics table
     demo_lines: List[str] = []
     demo_lines.append("% AUTO-GENERATED by scripts/build_paper_artifacts.py. DO NOT EDIT BY HAND.\n")
     demo_lines.append("\\begin{table}[t]\n\\centering\n")
-    demo_lines.append(
-        "\\caption{Subject demographics (from \\texttt{subject.json}; sex inferred from subject ID when missing).}\n"
-    )
+    demo_lines.append("\\caption{Subject demographics from the repository metadata.}\n")
     demo_lines.append("\\label{tab:demo}\n")
     demo_lines.append("\\begin{tabular}{llll}\n\\toprule\n")
     demo_lines.append("Subject & Age & Sex & Handedness \\\\\n\\midrule\n")
@@ -920,7 +1119,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     # Performance table per run
     perf_lines: List[str] = []
     perf_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n\\setlength{\\tabcolsep}{3pt}\n")
-    perf_lines.append("\\caption{Representative manuscript runs: one best subject-specific run per subject, with performance and calibration extracted from \\texttt{metrics.json} and \\texttt{test\\_predictions.npz}.}\n")
+    perf_lines.append("\\caption{Representative manuscript runs: one best subject-specific run per subject, with performance and calibration extracted from \\texttt{metrics.json} and \\texttt{test\\_predictions.npz}. Finger accuracy is computed with the deployment-consistent action-conditioned decode path on true non-REST windows.}\n")
     perf_lines.append("\\label{tab:perf}\n")
     perf_lines.append("\\resizebox{\\textwidth}{!}{%\n")
     perf_lines.append("\\begin{tabular}{llp{0.28\\textwidth}rrrrrrrr}\n\\toprule\n")
@@ -956,7 +1155,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
         dataset_rows.setdefault((r.subject_id, r.session_id), r)
     data_lines: List[str] = []
     data_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n\\setlength{\\tabcolsep}{3pt}\n")
-    data_lines.append("\\caption{Dataset and window extraction summary for the two sessions represented in this manuscript.}\n")
+    data_lines.append("\\caption{Dataset and window extraction summary for the representative datasets reported in this manuscript.}\n")
     data_lines.append("\\label{tab:dataset}\n")
     data_lines.append("\\resizebox{\\textwidth}{!}{%\n")
     data_lines.append("\\begin{tabular}{lp{0.34\\textwidth}rrrrrr}\n\\toprule\n")
@@ -976,37 +1175,69 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
         )
     data_lines.append("\\bottomrule\n\\end{tabular}%\n}\n\\end{table*}\n\n")
 
-    # Session durations / ingestion integrity table (per session, from run_meta.json)
+    # Representative dataset provenance table
     dur_lines: List[str] = []
-    dur_lines.append("\\begin{table}[t]\n\\centering\n\\scriptsize\n\\setlength{\\tabcolsep}{3pt}\n")
-    dur_lines.append("\\caption{Session durations and write integrity for the sessions underlying the representative runs.}\n")
+    dur_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n\\setlength{\\tabcolsep}{3pt}\n")
+    dur_lines.append("\\caption{Provenance of the representative datasets. The 2-M16 winning run is trained on a filtered derived dataset rather than a single recorded session.}\n")
     dur_lines.append("\\label{tab:sessions}\n")
-    dur_lines.append("\\resizebox{\\columnwidth}{!}{%\n")
-    dur_lines.append("\\begin{tabular}{p{0.30\\linewidth}rrrr}\n\\toprule\n")
-    dur_lines.append("Session & Samples recv. & Samples written & Drop (\\%) & Duration (min) \\\\\n\\midrule\n")
-    for s in session_meta.get("sessions", []):
-        dur_s = s.get("duration_s_from_samples")
-        dur_min = (float(dur_s) / 60.0) if dur_s is not None else None
-        dur_str = f"{dur_min:.1f}" if dur_min is not None and np.isfinite(dur_min) else "\\textit{n/a}"
-        recv = s.get("samples_received")
-        written = s.get("samples_written")
-        drop_pct = None
-        try:
-            if recv is not None and written is not None and float(recv) > 0:
-                drop_pct = (1.0 - (float(written) / float(recv))) * 100.0
-        except Exception:
-            drop_pct = None
-        drop_str = f"{drop_pct:.2f}" if drop_pct is not None and np.isfinite(drop_pct) else "\\textit{n/a}"
-        session_id = _latex_breakable_id(_display_session_id(str(s.get("session_id"))))
+    dur_lines.append("\\begin{tabular}{lllp{0.23\\textwidth}p{0.36\\textwidth}}\n\\toprule\n")
+    dur_lines.append("Subject & Dataset & Kind & Source & Notes \\\\\n\\midrule\n")
+    for r in sorted_runs:
+        prov = _session_provenance(_session_dir_from_rel(r.session_dir_rel))
+        subj = _latex_escape(_display_subject_id(r.subject_id))
+        dataset_id = _latex_breakable_id(_display_session_id(r.session_id))
+        if prov["kind"] == "recorded":
+            support = next((s for s in raw_sessions if str(s.get("session_id")) == r.session_id), None)
+            note_parts: List[str] = []
+            if support is not None:
+                recv = support.get("samples_received")
+                written = support.get("samples_written")
+                dur_s = support.get("duration_s_from_samples")
+                drop_pct = None
+                try:
+                    if recv is not None and written is not None and float(recv) > 0:
+                        drop_pct = (1.0 - (float(written) / float(recv))) * 100.0
+                except Exception:
+                    drop_pct = None
+                if dur_s is not None:
+                    note_parts.append(f"{float(dur_s) / 60.0:.1f} min")
+                if recv is not None:
+                    note_parts.append(f"{int(recv)} samples")
+                if drop_pct is not None and np.isfinite(drop_pct):
+                    note_parts.append(f"{drop_pct:.2f}\\% write drop")
+            notes = "; ".join(note_parts) if note_parts else "Direct recorded session."
+            dur_lines.append(
+                f"{subj} & {dataset_id} & Recorded session & {dataset_id} & {notes} \\\\\n"
+            )
+            continue
+
+        source = _latex_breakable_id(_display_session_id(str(prov.get("filter_source_session") or r.session_id)))
+        core = ", ".join(_display_session_id(s) for s in prov.get("core_sessions", []))
+        aux = ", ".join(_display_session_id(s) for s in prov.get("aux_rest_sessions", []))
+        notes: List[str] = []
+        if core:
+            notes.append(f"Core movement sessions: {_latex_escape(core)}")
+        if aux:
+            notes.append(f"Auxiliary REST session: {_latex_escape(aux)}")
+        if prov.get("filter_removed_n") is not None and prov.get("filter_source_n") is not None:
+            notes.append(
+                f"Pruned {int(prov['filter_removed_n'])} of {int(prov['filter_source_n'])} windows"
+            )
+        if prov.get("filter_event_ids"):
+            evs = ", ".join(str(v) for v in prov["filter_event_ids"])
+            filt_session = _display_session_id(str(prov.get("filter_session_id") or ""))
+            notes.append(f"Removed REST event ids {evs} from {_latex_escape(filt_session)}")
+        if prov.get("filter_reason"):
+            notes.append(_latex_escape(str(prov["filter_reason"])))
         dur_lines.append(
-            f"{session_id} & {int(recv or 0)} & {int(written or 0)} & {drop_str} & {dur_str} \\\\\n"
+            f"{subj} & {dataset_id} & Filtered derived dataset & {source} & {'; '.join(notes)} \\\\\n"
         )
-    dur_lines.append("\\bottomrule\n\\end{tabular}%\n}\n\\end{table}\n\n")
+    dur_lines.append("\\bottomrule\n\\end{tabular}\n\\end{table*}\n\n")
 
     # Event / movement counts (exact, from events/events.jsonl)
     # Use union of event 'type' values across sessions and rotate headers to fit IEEE table* width.
     type_set = set()
-    for s in session_meta.get("sessions", []):
+    for s in raw_sessions:
         ec = (s.get("events_counts") or {}) if isinstance(s, dict) else {}
         if ec.get("available") and isinstance(ec.get("counts_by_type"), dict):
             type_set |= set(ec["counts_by_type"].keys())
@@ -1045,18 +1276,26 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     ev_lines: List[str] = []
     ev_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
     ev_lines.append(
-        "\\caption{Event label counts per session (from \\texttt{events/events.jsonl}). Column labels abbreviate thumb/index/middle/ring/pinky open and close events.}\n"
+        "\\caption{Raw-session event label counts for the recorded sessions underlying the representative datasets (from \\texttt{events/events.jsonl}). Column labels abbreviate thumb/index/middle/ring/pinky open and close events.}\n"
     )
     ev_lines.append("\\label{tab:events}\n")
     ev_lines.append("\\setlength{\\tabcolsep}{4pt}\n")
-    ev_lines.append("\\begin{tabular}{l" + "r" * len(types) + "}\n\\toprule\n")
-    header_cells = ["Session"] + [event_header_labels.get(t, _latex_escape(t)) for t in types]
+    ev_lines.append("\\begin{tabular}{lll" + "r" * len(types) + "}\n\\toprule\n")
+    header_cells = ["Subject", "Session", "Role"] + [event_header_labels.get(t, _latex_escape(t)) for t in types]
     ev_lines.append(" & ".join(header_cells) + " \\\\\n\\midrule\n")
-    for s in session_meta.get("sessions", []):
+    role_labels = {
+        "recorded": "Recorded",
+        "core": "Core",
+        "aux_rest": "Aux REST",
+        "supporting": "Supporting",
+    }
+    for s in raw_sessions:
+        subj = _latex_escape(_display_subject_id(str(s.get("subject_id") or "")))
         sess_id = _latex_breakable_id(_display_session_id(str(s.get("session_id"))))
+        role = role_labels.get(raw_session_role.get(str(s.get("session_id")), "supporting"), "Supporting")
         ec = s.get("events_counts") or {}
         cbt = ec.get("counts_by_type") if ec.get("available") else {}
-        row = [sess_id]
+        row = [subj, sess_id, _latex_escape(role)]
         for t in types:
             row.append(str(int((cbt or {}).get(t, 0))))
         ev_lines.append(" & ".join(row) + " \\\\\n")
@@ -1092,7 +1331,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
             )
     pc_lines.append("\\bottomrule\n\\end{tabular}\n\\end{table*}\n\n")
     pc_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
-    pc_lines.append("\\caption{Finger-class accuracies on non-REST test windows for the representative manuscript runs.}\n")
+    pc_lines.append("\\caption{Finger-class accuracies on true non-REST test windows for the representative manuscript runs, using the deployment-consistent action-conditioned finger decode path.}\n")
     pc_lines.append("\\label{tab:perclass-finger}\n")
     pc_lines.append("\\setlength{\\tabcolsep}{3pt}\n")
     pc_lines.append("\\begin{tabular}{lp{0.30\\textwidth}lrr}\n\\toprule\n")
@@ -1158,7 +1397,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
         gap_lines.append(
             f"{_latex_escape(_display_subject_id(r.subject_id))} & {_latex_breakable_id(r.run_id)} & "
             f"{_format_pct(r.train_action_acc, 2)} & {_format_pct(r.test_action_acc_metrics, 2)} & {_gap_pp(r.train_action_acc, r.test_action_acc_metrics)} & "
-            f"{_format_pct(r.train_finger_acc, 2)} & {_format_pct(r.test_finger_acc_non_rest_metrics, 2)} & {_gap_pp(r.train_finger_acc, r.test_finger_acc_non_rest_metrics)} \\\\\n"
+            f"{_format_pct(r.train_finger_acc, 2)} & {_format_pct(r.test_finger_acc_non_rest_raw_head, 2)} & {_gap_pp(r.train_finger_acc, r.test_finger_acc_non_rest_raw_head)} \\\\\n"
         )
     gap_lines.append("\\bottomrule\n\\end{tabular}%\n}\n\\end{table*}\n\n")
     (OUT_DIR / "tables_generalization_gap.tex").write_text("".join(gap_lines), encoding="utf-8")
@@ -1166,6 +1405,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
 
 def _write_figures(runs: List[RunMetrics]) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    _write_finger_accuracy_bar_chart(runs)
 
     lines: List[str] = []
     lines.append("% AUTO-GENERATED by scripts/build_paper_artifacts.py. DO NOT EDIT BY HAND.\n")
@@ -1199,11 +1439,11 @@ def _write_figures(runs: List[RunMetrics]) -> None:
 
         subj = _latex_escape(_display_subject_id(r.subject_id))
         sess = _latex_breakable_id(_display_session_id(r.session_id))
-        lines.append(inc(r.fig_action_confusion, f"Action confusion matrix ({subj})."))
-        lines.append(inc(r.fig_finger_confusion, f"Finger confusion matrix ({subj})."))
+        lines.append(inc(r.fig_action_confusion, f"(a) Action confusion matrix ({subj})."))
+        lines.append(inc(r.fig_finger_confusion, f"(b) Finger confusion matrix ({subj})."))
         lines.append("\\\\[0.5em]\n")
-        lines.append(inc(r.fig_reliability, f"Reliability / calibration summary ({subj})."))
-        lines.append(inc(r.fig_scatter, f"MC dropout confidence scatter ({subj})."))
+        lines.append(inc(r.fig_reliability, f"(c) Reliability / calibration summary ({subj})."))
+        lines.append(inc(r.fig_scatter, f"(d) MC dropout confidence scatter ({subj})."))
         run_id = _latex_breakable_id(r.run_id)
         lines.append(
             f"\\caption{{Representative evaluation figures for {subj} (session {sess}, run {run_id}).}}\n"
@@ -1240,7 +1480,12 @@ def main() -> int:
     # Session meta (run_meta + events) for each subject appearing in runs
     session_meta_by_subject: Dict[str, Any] = {}
     for subj in sorted(selected_subjects):
-        subject_session_ids = {r.session_id for r in run_metrics if r.subject_id == subj}
+        subject_session_ids = set()
+        for run in run_metrics:
+            if run.subject_id != subj:
+                continue
+            for row in _raw_support_sessions_for_run(run):
+                subject_session_ids.add(str(row["session_id"]))
         session_meta_by_subject[subj] = _scan_session_meta(subj, session_ids=subject_session_ids)
 
     # Repo SHA for reproducibility section
