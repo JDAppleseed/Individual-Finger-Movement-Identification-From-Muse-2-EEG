@@ -38,6 +38,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -897,6 +898,286 @@ def _write_finger_accuracy_bar_chart(runs: List[RunMetrics]) -> str:
     return str(out_path.relative_to(REPO_ROOT))
 
 
+def _load_event_rows(session_dir: Path) -> List[Dict[str, Any]]:
+    events_path = session_dir / "events" / "events.jsonl"
+    rows: List[Dict[str, Any]] = []
+    if not events_path.exists():
+        return rows
+    for idx, line in enumerate(events_path.read_text(encoding="utf-8").splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            payload = dict(payload)
+            payload["_event_index"] = idx
+            rows.append(payload)
+    return rows
+
+
+def _load_raw_segment_by_local_time(session_dir: Path, local_start: float, local_end: float) -> Tuple[np.ndarray, np.ndarray]:
+    times: List[np.ndarray] = []
+    samples: List[np.ndarray] = []
+    raw_dir = session_dir / "raw"
+    for shard in sorted(raw_dir.glob("eeg_raw_shard_*.npy")):
+        arr = np.load(shard, allow_pickle=False)
+        if "local_ts" not in arr.dtype.names or "sample" not in arr.dtype.names:
+            continue
+        mask = (arr["local_ts"] >= local_start) & (arr["local_ts"] <= local_end)
+        if not np.any(mask):
+            continue
+        times.append(np.asarray(arr["local_ts"][mask], dtype=float))
+        samples.append(np.asarray(arr["sample"][mask], dtype=float))
+    if not times or not samples:
+        return np.empty((0,), dtype=float), np.empty((0, 4), dtype=float)
+    t = np.concatenate(times, axis=0)
+    x = np.concatenate(samples, axis=0)
+    order = np.argsort(t)
+    return t[order], x[order]
+
+
+def _write_featured_provenance_figure(runs: List[RunMetrics]) -> Optional[str]:
+    if not runs:
+        return None
+    featured = max(runs, key=_run_rank_key)
+    prov = _session_provenance(_session_dir_from_rel(featured.session_dir_rel))
+    if prov.get("kind") != "filtered":
+        return None
+
+    def _short_session(session_id: str) -> str:
+        sid = _display_session_id(session_id)
+        parts = sid.split("_")
+        if len(parts) >= 3:
+            return f"{parts[0]}\n{parts[1]}_{parts[2]}"
+        return sid.replace("_", "\n", 1)
+
+    def _short_dataset(session_id: str) -> str:
+        sid = _display_session_id(session_id)
+        if sid.startswith("combined_"):
+            parts = sid.split("_")
+            if len(parts) >= 3:
+                return f"{parts[1]}_{parts[2]}"
+        return sid
+
+    def _box(ax: plt.Axes, xy: Tuple[float, float], wh: Tuple[float, float], title: str, body: str, face: str) -> None:
+        x, y = xy
+        w, h = wh
+        patch = FancyBboxPatch(
+            (x, y),
+            w,
+            h,
+            boxstyle="round,pad=0.012,rounding_size=0.02",
+            linewidth=1.1,
+            edgecolor="#2f2f2f",
+            facecolor=face,
+        )
+        ax.add_patch(patch)
+        ax.text(x + w / 2.0, y + h * 0.72, title, ha="center", va="center", fontsize=8.5, fontweight="bold")
+        ax.text(x + w / 2.0, y + h * 0.36, body, ha="center", va="center", fontsize=6.8)
+
+    fig, ax = plt.subplots(figsize=(9.0, 3.2), dpi=200)
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+
+    left_boxes = [
+        ("Movement Session 1", _short_session(str((prov.get("core_sessions") or ["unknown"])[0])), "#e8f1fb"),
+        ("Movement Session 2", _short_session(str((prov.get("core_sessions") or ["unknown", "unknown"])[1])), "#e8f1fb"),
+        ("Aux REST Session", _short_session(str((prov.get("aux_rest_sessions") or ["unknown"])[0])), "#eef6e8"),
+    ]
+    left_positions = [(0.03, 0.68), (0.03, 0.40), (0.03, 0.12)]
+    for (title, body, face), pos in zip(left_boxes, left_positions):
+        _box(ax, pos, (0.20, 0.18), title, body, face)
+
+    combined_title = "Combined Dataset"
+    combined_body = f"{_short_dataset(str(prov.get('filter_source_session') or 'combined'))}\nmerged movement + REST"
+    filtered_body = (
+        f"{_short_dataset(featured.session_id)} REST-pruned\n"
+        f"remove REST {', '.join(str(v) for v in prov.get('filter_event_ids') or [])}\n"
+        f"{int(prov.get('filter_kept_n') or 0):,} / {int(prov.get('filter_source_n') or 0):,} windows kept"
+    )
+    run_body = (
+        f"{featured.run_id}\n"
+        f"{100.0 * float(featured.test_action_acc_metrics or float('nan')):.2f}% action\n"
+        f"{100.0 * float(featured.test_finger_acc_non_rest_metrics or float('nan')):.2f}% finger"
+    )
+
+    _box(ax, (0.34, 0.28), (0.18, 0.42), combined_title, combined_body, "#d9ecff")
+    _box(ax, (0.58, 0.28), (0.18, 0.42), "Filtered Dataset", filtered_body, "#fff1cf")
+    _box(ax, (0.82, 0.28), (0.15, 0.42), "Featured Run", run_body, "#ffe1de")
+
+    arrow_kw = dict(arrowstyle="-|>", mutation_scale=12, linewidth=1.2, color="#444444")
+    for y in [0.77, 0.49, 0.21]:
+        ax.add_patch(FancyArrowPatch((0.23, y), (0.34, 0.49), connectionstyle="arc3,rad=0.0", **arrow_kw))
+    ax.add_patch(FancyArrowPatch((0.52, 0.49), (0.58, 0.49), connectionstyle="arc3,rad=0.0", **arrow_kw))
+    ax.add_patch(FancyArrowPatch((0.76, 0.49), (0.82, 0.49), connectionstyle="arc3,rad=0.0", **arrow_kw))
+    ax.text(
+        0.55,
+        0.64,
+        "targeted REST pruning",
+        fontsize=6.9,
+        ha="center",
+        va="center",
+        color="#5a4b00",
+        bbox=dict(boxstyle="round,pad=0.22", facecolor="#ffffff", edgecolor="#c7aa46", linewidth=0.7),
+    )
+
+    out_path = FIG_DIR / "featured_dataset_provenance.png"
+    fig.subplots_adjust(left=0.01, right=0.99, top=0.96, bottom=0.06)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    return str(out_path.relative_to(REPO_ROOT))
+
+
+def _write_raw_windowing_figure(runs: List[RunMetrics]) -> Optional[str]:
+    source_run = next((r for r in sorted(runs, key=_run_rank_key, reverse=True) if _session_provenance(_session_dir_from_rel(r.session_dir_rel)).get("kind") == "recorded"), None)
+    if source_run is None:
+        return None
+
+    session_dir = _session_dir_from_rel(source_run.session_dir_rel)
+    events = _load_event_rows(session_dir)
+    if not events:
+        return None
+
+    active_event = next((ev for ev in events if int(ev.get("action_id") or 0) != 0 and float(ev.get("duration_s") or 0.0) >= 0.6), None)
+    if active_event is None:
+        active_event = next((ev for ev in events if int(ev.get("action_id") or 0) != 0), None)
+    if active_event is None:
+        return None
+
+    onset_s = float(active_event["onset_s"])
+    end_s = float(active_event.get("end_s") or (onset_s + float(active_event.get("duration_s") or 0.0)))
+    anchor_local = float(active_event["local_ts"]) - onset_s
+    view_start = max(0.0, onset_s - 0.20)
+    view_end = onset_s + 0.80
+    local_start = anchor_local + view_start
+    local_end = anchor_local + view_end
+    raw_t_local, raw_samples = _load_raw_segment_by_local_time(session_dir, local_start, local_end)
+    if raw_t_local.size == 0 or raw_samples.size == 0:
+        return None
+    raw_t = raw_t_local - anchor_local
+
+    windows_npz_path = session_dir / "processed" / "eeg_windows.npz"
+    if not windows_npz_path.exists():
+        return None
+    npz = np.load(windows_npz_path, allow_pickle=True)
+    window_start = np.asarray(npz["window_start"], dtype=float)
+    window_end = np.asarray(npz["window_end"], dtype=float)
+    channel_names = [str(v) for v in np.asarray(npz["channel_names"]).tolist()] if "channel_names" in npz else ["TP9", "AF7", "AF8", "TP10"]
+    event_key = "event_index" if "event_index" in npz else ("event_id" if "event_id" in npz else None)
+    if event_key is not None:
+        event_values = np.asarray(npz[event_key]).astype(int)
+        mask = event_values == int(active_event["_event_index"])
+    else:
+        mask = (window_end >= view_start) & (window_start <= view_end)
+    mask = mask & (window_end >= view_start) & (window_start <= view_end)
+    idx = np.where(mask)[0]
+    if idx.size == 0:
+        idx = np.where((window_start >= onset_s - 0.15) & (window_start <= onset_s + 0.20))[0]
+    if idx.size == 0:
+        return None
+    idx = idx[np.argsort(window_start[idx])]
+    if idx.size > 8:
+        center = int(np.argmin(np.abs(window_start[idx] - onset_s)))
+        lo = max(0, center - 3)
+        hi = min(idx.size, lo + 8)
+        idx = idx[lo:hi]
+    highlight_i = int(np.argmin(np.abs(window_start[idx] - onset_s)))
+    h_start = float(window_start[idx[highlight_i]])
+    h_end = float(window_end[idx[highlight_i]])
+    next_start = float(window_start[idx[min(highlight_i + 1, idx.size - 1)]])
+
+    fig = plt.figure(figsize=(7.2, 4.8), dpi=200)
+    gs = fig.add_gridspec(2, 1, height_ratios=[3.2, 1.6], hspace=0.18)
+    ax = fig.add_subplot(gs[0])
+    axw = fig.add_subplot(gs[1], sharex=ax)
+
+    centered = raw_samples - np.median(raw_samples, axis=0, keepdims=True)
+    amp = np.nanpercentile(np.abs(centered), 95, axis=0)
+    amp[~np.isfinite(amp) | (amp < 1.0)] = 1.0
+    spacing = float(np.nanmax(amp) * 2.8)
+    colors = ["#1f77b4", "#d95f02", "#2ca02c", "#7f7f7f"]
+    offsets = np.arange(raw_samples.shape[1])[::-1] * spacing
+
+    for ch in range(raw_samples.shape[1]):
+        ax.plot(raw_t, centered[:, ch] + offsets[ch], color=colors[ch % len(colors)], linewidth=1.0)
+    ax.axvspan(onset_s, end_s, color="#f3d36b", alpha=0.28, lw=0.0)
+    ax.axvline(onset_s, color="#8a5a00", linestyle="--", linewidth=1.0)
+    ax.axvline(end_s, color="#8a5a00", linestyle="--", linewidth=1.0)
+    ax.text(
+        onset_s + 0.16,
+        offsets[0] + spacing * 0.48,
+        f"{str(active_event.get('type') or '').replace('_', ' ').title()} event",
+        fontsize=7.6,
+        ha="left",
+        va="bottom",
+        color="#5a4300",
+        bbox=dict(boxstyle="round,pad=0.18", facecolor="#fff6d7", edgecolor="none", alpha=0.95),
+    )
+    ax.set_xlim(view_start, view_end)
+    ax.set_yticks(offsets)
+    ax.set_yticklabels(channel_names[: raw_samples.shape[1]])
+    ax.set_ylabel("Muse 2 channel")
+    ax.grid(axis="x", linestyle=":", linewidth=0.6, alpha=0.6)
+    ax.text(0.0, 1.03, "(a) Raw recorded segment", transform=ax.transAxes, fontsize=9.5, fontweight="bold", ha="left", va="bottom")
+    ax.tick_params(axis="x", labelbottom=False)
+
+    axw.axvspan(onset_s, end_s, color="#f3d36b", alpha=0.28, lw=0.0)
+    bar_h = 0.72
+    y_positions = np.arange(idx.size)[::-1]
+    for row, i in enumerate(idx):
+        y = y_positions[row]
+        color = "#4c78a8" if row != highlight_i else "#d95f02"
+        axw.broken_barh([(float(window_start[i]), float(window_end[i] - window_start[i]))], (y - bar_h / 2.0, bar_h), facecolors=color, edgecolors="white", linewidth=0.6, alpha=0.9)
+    bottom_i = int(idx[-1])
+    bottom_start = float(window_start[bottom_i])
+    bottom_end = float(window_end[bottom_i])
+    axw.annotate("", xy=(bottom_start, -0.8), xytext=(bottom_end, -0.8), arrowprops=dict(arrowstyle="<->", linewidth=0.9, color="#333333"))
+    axw.text(
+        (bottom_start + bottom_end) / 2.0,
+        -1.00,
+        "0.25 s window",
+        ha="center",
+        va="top",
+        fontsize=6.8,
+        bbox=dict(boxstyle="round,pad=0.12", facecolor="white", edgecolor="none", alpha=0.92),
+    )
+    if idx.size > 1:
+        hop_start = float(window_start[idx[0]])
+        hop_end = float(window_start[idx[1]])
+        hop_y = y_positions[1] + 0.35 if idx.size > 1 else y_positions[0] + 0.35
+        axw.annotate("", xy=(hop_start, hop_y), xytext=(hop_end, hop_y), arrowprops=dict(arrowstyle="<->", linewidth=0.9, color="#333333"))
+        axw.text(
+            (hop_start + hop_end) / 2.0 - 0.018,
+            hop_y - 0.34,
+            "0.05 s hop",
+            ha="center",
+            va="top",
+            fontsize=6.8,
+            bbox=dict(boxstyle="round,pad=0.12", facecolor="white", edgecolor="none", alpha=0.92),
+        )
+    axw.set_yticks(y_positions)
+    axw.set_yticklabels([f"W{n+1}" for n in range(idx.size)])
+    axw.set_xlabel("Session time (s)")
+    axw.set_ylabel("Windows")
+    axw.set_ylim(-1.4, max(1.2, float(y_positions.max()) + 1.2))
+    axw.grid(axis="x", linestyle=":", linewidth=0.6, alpha=0.6)
+    axw.text(0.0, 1.03, "(b) Sliding windows", transform=axw.transAxes, fontsize=9.5, fontweight="bold", ha="left", va="bottom")
+
+    for axis in [ax, axw]:
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+
+    out_path = FIG_DIR / "raw_eeg_windowing_example.png"
+    fig.subplots_adjust(left=0.14, right=0.98, top=0.95, bottom=0.12, hspace=0.20)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    return str(out_path.relative_to(REPO_ROOT))
+
+
 def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo_sha: str) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     featured = _load_featured_bundle()
@@ -1410,6 +1691,8 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
 def _write_figures(runs: List[RunMetrics]) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     _write_finger_accuracy_bar_chart(runs)
+    _write_featured_provenance_figure(runs)
+    _write_raw_windowing_figure(runs)
 
     lines: List[str] = []
     lines.append("% AUTO-GENERATED by scripts/build_paper_artifacts.py. DO NOT EDIT BY HAND.\n")
