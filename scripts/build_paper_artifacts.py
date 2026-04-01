@@ -107,12 +107,7 @@ def _paper_session_label(session_id: str) -> str:
     if not sess:
         return sess
     if sess.startswith("combined_"):
-        parts = sess.split("_")
-        if len(parts) >= 3:
-            label = f"combined_{parts[1]}_{parts[2]}"
-            if "pruned" in sess:
-                label += " (filtered)"
-            return label
+        return "Derived dataset (filtered)" if "pruned" in sess else "Derived dataset"
     return sess
 
 
@@ -1722,7 +1717,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
             )
             continue
 
-        source = _latex_breakable_id(_paper_session_label(str(prov.get("filter_source_session") or r.session_id)))
+        source = _latex_breakable_id(_display_session_id(str(prov.get("filter_source_session") or r.session_id)))
         core_sessions = [str(s) for s in prov.get("core_sessions", [])]
         aux_sessions = [str(s) for s in prov.get("aux_rest_sessions", [])]
         notes: List[str] = []
