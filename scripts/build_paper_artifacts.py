@@ -903,14 +903,14 @@ def _compute_run_metrics(metrics_path: Path) -> RunMetrics:
     fig_action = _copy_figure(figs["action"], f"{stem_base}__action_confusion") if figs["action"] else None
     fig_finger = _copy_figure(figs["finger"], f"{stem_base}__finger_confusion") if figs["finger"] else None
     fig_rel = _copy_figure(figs["reliability"], f"{stem_base}__mc_eval") if figs["reliability"] else None
-    fig_scat = _write_standardized_mc_scatter(
-        session_dir=session_dir,
-        run_id=run_id,
-        train_cfg=train_cfg,
-        dest_stem=f"{stem_base}__mc_scatter",
-    )
-    if fig_scat is None and figs["scatter"]:
-        fig_scat = _copy_figure(figs["scatter"], f"{stem_base}__mc_scatter")
+    fig_scat = _copy_figure(figs["scatter"], f"{stem_base}__mc_scatter") if figs["scatter"] else None
+    if fig_scat is None:
+        fig_scat = _write_standardized_mc_scatter(
+            session_dir=session_dir,
+            run_id=run_id,
+            train_cfg=train_cfg,
+            dest_stem=f"{stem_base}__mc_scatter",
+        )
 
     return RunMetrics(
         subject_id=subj,
