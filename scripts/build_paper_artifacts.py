@@ -1961,6 +1961,25 @@ def _write_figures(runs: List[RunMetrics]) -> None:
     (OUT_DIR / "figures.tex").write_text("".join(lines), encoding="utf-8")
 
 
+def _prune_unused_paper_figures() -> None:
+    if not FIG_DIR.exists():
+        return
+
+    include_re = re.compile(r"includegraphics(?:\[[^\]]*\])?\{(?:\.\./)?paper_figures/([^}]+)\}")
+    keep: set[str] = set()
+    for tex_path in (REPO_ROOT / "paper" / "research_paper.tex", OUT_DIR / "figures.tex"):
+        if not tex_path.exists():
+            continue
+        text = tex_path.read_text(encoding="utf-8")
+        keep.update(m.group(1) for m in include_re.finditer(text))
+
+    for path in FIG_DIR.iterdir():
+        if not path.is_file():
+            continue
+        if path.name not in keep:
+            path.unlink()
+
+
 def main() -> int:
     if not PROJECTS_ROOT.exists():
         raise SystemExit(f"Projects/ not found at {PROJECTS_ROOT}")
@@ -2033,6 +2052,7 @@ def main() -> int:
         merged_session_meta["sessions"].extend(session_meta_by_subject[subj].get("sessions", []))
     _write_tables(run_metrics, demos, merged_session_meta)
     _write_figures(run_metrics)
+    _prune_unused_paper_figures()
 
     print(f"Wrote: {OUT_DIR / 'paper_stats.json'}")
     print(f"Wrote: {OUT_DIR / 'paper_macros.tex'}")
