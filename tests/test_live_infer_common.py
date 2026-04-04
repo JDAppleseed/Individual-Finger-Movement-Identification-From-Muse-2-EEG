@@ -7,6 +7,7 @@ from utils.live_infer_common import (
     compute_replay_metrics,
     debounced_should_send,
     resolve_actuation_candidate,
+    sanitize_live_window,
 )
 
 
@@ -83,6 +84,28 @@ def test_resolve_actuation_candidate_requires_stable_exact_nonzero_pair() -> Non
     assert stable_result["decision"].finger_id == 3
     assert stable_result["decision"].action_id == 1
     assert stable_result["resolved_finger_id"] == 3
+
+
+def test_sanitize_live_window_masks_single_bad_channel() -> None:
+    window = np.zeros((64, 4), dtype=np.float32)
+    window[:, 2] = 5.0
+
+    out = sanitize_live_window(
+        window,
+        scaler=None,
+        enabled=True,
+        input_clip_abs_z=6.0,
+        bad_channel_rms_z=4.0,
+        bad_channel_abs_p95_z=6.0,
+        bad_channel_clipped_frac=0.05,
+        bad_window_clipped_frac=0.10,
+        bad_window_max_masked_channels=1,
+    )
+
+    assert out.window_quality_bad is False
+    assert out.bad_channel_ids == (2,)
+    assert out.masked_channel_ids == (2,)
+    assert np.allclose(out.prepared_window[:, 2], 0.0)
 
 
 def test_compute_replay_metrics_reports_active_finger_behavior() -> None:

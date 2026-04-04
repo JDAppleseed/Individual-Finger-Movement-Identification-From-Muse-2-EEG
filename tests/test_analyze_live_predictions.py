@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from tools.analyze_live_predictions import (
     build_segments,
     resolve_latest_live_infer_dir,
@@ -26,6 +28,8 @@ def test_build_segments_and_summary():
             "applicability_gate_ok": False,
             "finger_applicable_prob": 0.10,
             "latency_ms": 80.0,
+            "window_quality_bad": False,
+            "masked_channel_ids": [],
         },
         {
             "window_start_s": 0.05,
@@ -43,6 +47,9 @@ def test_build_segments_and_summary():
             "applicability_gate_ok": False,
             "finger_applicable_prob": 0.15,
             "latency_ms": 82.0,
+            "window_quality_bad": True,
+            "quality_bad_reason": "too_many_bad_channels",
+            "masked_channel_ids": [],
         },
         {
             "window_start_s": 0.10,
@@ -60,6 +67,8 @@ def test_build_segments_and_summary():
             "applicability_gate_ok": True,
             "finger_applicable_prob": 0.88,
             "latency_ms": 84.0,
+            "window_quality_bad": False,
+            "masked_channel_ids": [1],
         },
         {
             "window_start_s": 0.15,
@@ -77,6 +86,8 @@ def test_build_segments_and_summary():
             "applicability_gate_ok": True,
             "finger_applicable_prob": 0.92,
             "latency_ms": 86.0,
+            "window_quality_bad": False,
+            "masked_channel_ids": [1],
         },
     ]
 
@@ -100,6 +111,10 @@ def test_build_segments_and_summary():
     assert summary["actuatable_segment_count"] == 1
     assert summary["short_actuatable_segment_count"] == 1
     assert summary["actuation_sent_count"] == 1
+    assert summary["window_quality_bad_count"] == 1
+    assert summary["quality_bad_reason_counts"]["too_many_bad_channels"] == 1
+    assert summary["masked_window_count"] == 2
+    assert summary["masked_channel_counts"]["1"] == 2
     assert summary["committed_non_rest_none_count"] == 0
     assert summary["committed_rest_non_none_count"] == 0
     assert summary["sent_non_rest_none_count"] == 0
@@ -108,6 +123,7 @@ def test_build_segments_and_summary():
     assert summary["deployment_pair_invariant_ok"] is True
     assert summary["pair_counts"]["REST+NONE"] == 2
     assert summary["pair_counts"]["OPEN+THUMB"] == 2
+    assert summary["pair_transition_rate"] == pytest.approx(1.0 / 3.0)
 
 
 def test_summarize_records_flags_invalid_pairs():

@@ -182,6 +182,13 @@ class CommandShaper:
             return None
         if (now_ms - self._last_valid_timebase_ms) < int(self.config.watchdog_ms):
             return None
+        if (
+            self._last_cmd is not None
+            and (self._last_cmd.flags & FLAG_WATCHDOG)
+            and self._last_cmd_timebase_ms is not None
+            and (now_ms - self._last_cmd_timebase_ms) < int(self.config.watchdog_ms)
+        ):
+            return None
         cmd = ActuationCommand(
             action_id=0,
             finger_id=0,

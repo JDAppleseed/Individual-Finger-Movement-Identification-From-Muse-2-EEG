@@ -13,7 +13,7 @@ from typing import Any, Dict
 WINNING_RECIPE_SOURCE: Dict[str, str] = {
     "subject_id": "2-M16",
     "session_id": "combined_20260319_081200_pruned_rest_events_0_1_2",
-    "run_id": "20260319_075520",
+    "run_id": "20260403_grouptrial_rest050",
     "snapshot_dir": "Projects/2-M16/subjects/2-M16/winning_model",
 }
 

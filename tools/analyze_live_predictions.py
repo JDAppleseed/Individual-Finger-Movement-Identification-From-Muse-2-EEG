@@ -348,6 +348,13 @@ def summarize_records(
         for row in rows
         if row.get("actuation_suppressed_reason") not in (None, "")
     )
+    quality_bad_reason_counts = Counter(
+        str(row.get("quality_bad_reason") or "none") for row in rows
+    )
+    masked_channel_counts: Counter[int] = Counter()
+    for row in rows:
+        for channel_id in row.get("masked_channel_ids", []) or []:
+            masked_channel_counts[int(channel_id)] += 1
 
     transition_count = 0
     prev_pair: tuple[int, int] | None = None
@@ -423,6 +430,9 @@ def summarize_records(
         "joint_conf": _series_summary(joint_conf),
         "action_uncertainty": _series_summary(action_unc),
         "transition_count": int(transition_count),
+        "pair_transition_rate": (
+            float(transition_count / max(1, len(rows) - 1)) if rows else None
+        ),
         "transition_rate_per_min": (
             float(transition_count / (duration_s / 60.0))
             if duration_s and duration_s > 0
@@ -440,6 +450,17 @@ def summarize_records(
         "pair_counts": dict(sorted(pair_counts.items(), key=lambda item: (-item[1], item[0]))),
         "decision_reason_counts": dict(decision_reason_counts),
         "actuation_suppressed_reason_counts": dict(suppress_counts),
+        "window_quality_bad_count": int(
+            sum(bool(row.get("window_quality_bad")) for row in rows)
+        ),
+        "quality_bad_reason_counts": dict(quality_bad_reason_counts),
+        "masked_window_count": int(
+            sum(bool(row.get("masked_channel_ids")) for row in rows)
+        ),
+        "masked_channel_counts": {
+            str(key): int(value)
+            for key, value in sorted(masked_channel_counts.items(), key=lambda item: item[0])
+        },
         "committed_non_rest_none_count": committed_non_rest_none_count,
         "committed_non_rest_none_rate": (
             float(committed_non_rest_none_count / len(rows)) if rows else None

@@ -51,8 +51,18 @@ def verify_alignment(
     monotonic = bool(np.all(diffs > 0))
     max_gap = float(np.max(diffs)) if diffs.size else None
     expected = int(round((end_s - start_s) * target_fs))
-    if max_gap is not None and max_gap > max_gap_s:
-        return AlignmentReport(False, "gap_exceeds_threshold", expected, max_gap, monotonic)
     if not monotonic:
         return AlignmentReport(False, "non_monotonic", expected, max_gap, monotonic)
+    start_gap = max(0.0, float(times[0]) - float(start_s))
+    if start_gap > max_gap_s:
+        return AlignmentReport(
+            False, "start_gap_exceeds_threshold", expected, max_gap, monotonic
+        )
+    end_gap = max(0.0, float(end_s) - float(times[-1]))
+    if end_gap > max_gap_s:
+        return AlignmentReport(
+            False, "end_gap_exceeds_threshold", expected, max_gap, monotonic
+        )
+    if max_gap is not None and max_gap > max_gap_s:
+        return AlignmentReport(False, "gap_exceeds_threshold", expected, max_gap, monotonic)
     return AlignmentReport(True, None, expected, max_gap, monotonic)

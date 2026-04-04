@@ -47,6 +47,19 @@ class ActuationDecision:
 
 
 @dataclass(frozen=True)
+class LiveWindowQuality:
+    prepared_window: np.ndarray
+    channel_rms_z: np.ndarray
+    channel_abs_p95_z: np.ndarray
+    channel_clipped_frac: np.ndarray
+    masked_channel_ids: tuple[int, ...]
+    bad_channel_ids: tuple[int, ...]
+    total_clipped_frac: float
+    window_quality_bad: bool
+    quality_bad_reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class ReplayRuntimeConfig:
     window_sec: float = float(LIVE_INFER_RECIPE_DEFAULTS["window_sec"])
     hop_sec: float = float(LIVE_INFER_RECIPE_DEFAULTS["hop_sec"])
@@ -64,6 +77,21 @@ class ReplayRuntimeConfig:
         LIVE_INFER_RECIPE_DEFAULTS["uncertainty_base_threshold"]
     )
     uncertainty_weight: float = float(LIVE_INFER_RECIPE_DEFAULTS["uncertainty_weight"])
+    live_quality_enabled: bool = bool(LIVE_INFER_RECIPE_DEFAULTS["live_quality_enabled"])
+    input_clip_abs_z: float = float(LIVE_INFER_RECIPE_DEFAULTS["input_clip_abs_z"])
+    bad_channel_rms_z: float = float(LIVE_INFER_RECIPE_DEFAULTS["bad_channel_rms_z"])
+    bad_channel_abs_p95_z: float = float(
+        LIVE_INFER_RECIPE_DEFAULTS["bad_channel_abs_p95_z"]
+    )
+    bad_channel_clipped_frac: float = float(
+        LIVE_INFER_RECIPE_DEFAULTS["bad_channel_clipped_frac"]
+    )
+    bad_window_clipped_frac: float = float(
+        LIVE_INFER_RECIPE_DEFAULTS["bad_window_clipped_frac"]
+    )
+    bad_window_max_masked_channels: int = int(
+        LIVE_INFER_RECIPE_DEFAULTS["bad_window_max_masked_channels"]
+    )
     latency_mode: str = str(PSEUDO_LIVE_RECIPE_DEFAULTS["latency_mode"])
     fixed_latency_ms: Optional[float] = PSEUDO_LIVE_RECIPE_DEFAULTS["fixed_latency_ms"]
     reset_on_trial_change: bool = bool(PSEUDO_LIVE_RECIPE_DEFAULTS["reset_on_trial_change"])
@@ -256,6 +284,83 @@ def postprocess_decision(
     )
 
 
+def sanitize_live_window(
+    window_TxC: np.ndarray,
+    *,
+    scaler: object,
+    enabled: bool,
+    input_clip_abs_z: float,
+    bad_channel_rms_z: float,
+    bad_channel_abs_p95_z: float,
+    bad_channel_clipped_frac: float,
+    bad_window_clipped_frac: float,
+    bad_window_max_masked_channels: int,
+) -> LiveWindowQuality:
+    normalized = np.asarray(apply_channel_normalizer(window_TxC, scaler), dtype=np.float32)
+    if normalized.ndim != 2:
+        raise ValueError(f"Expected 2D window, got shape {normalized.shape}")
+
+    clip_abs_z = float(max(1e-6, input_clip_abs_z))
+    if normalized.size == 0:
+        empty = np.zeros(normalized.shape[1] if normalized.ndim == 2 else 0, dtype=float)
+        return LiveWindowQuality(
+            prepared_window=normalized,
+            channel_rms_z=empty,
+            channel_abs_p95_z=empty,
+            channel_clipped_frac=empty,
+            masked_channel_ids=tuple(),
+            bad_channel_ids=tuple(),
+            total_clipped_frac=0.0,
+            window_quality_bad=False,
+            quality_bad_reason=None,
+        )
+
+    abs_normalized = np.abs(normalized)
+    channel_rms_z = np.sqrt(np.mean(normalized**2, axis=0)).astype(float)
+    channel_abs_p95_z = np.percentile(abs_normalized, 95, axis=0).astype(float)
+    clipped_mask = abs_normalized > clip_abs_z
+    channel_clipped_frac = np.mean(clipped_mask, axis=0).astype(float)
+    total_clipped_frac = float(np.mean(clipped_mask))
+
+    bad_mask = (
+        (channel_rms_z > float(bad_channel_rms_z))
+        | (channel_abs_p95_z > float(bad_channel_abs_p95_z))
+        | (channel_clipped_frac > float(bad_channel_clipped_frac))
+    )
+    bad_channel_ids = tuple(int(idx) for idx in np.flatnonzero(bad_mask))
+    masked_channel_ids: tuple[int, ...] = tuple()
+    window_quality_bad = False
+    quality_bad_reason: Optional[str] = None
+
+    prepared_window = np.clip(normalized, -clip_abs_z, clip_abs_z).astype(
+        np.float32, copy=True
+    )
+    if enabled and len(bad_channel_ids) == 1:
+        bad_idx = int(bad_channel_ids[0])
+        prepared_window[:, bad_idx] = 0.0
+        masked_channel_ids = (bad_idx,)
+
+    if enabled:
+        if len(bad_channel_ids) > int(max(0, bad_window_max_masked_channels)):
+            window_quality_bad = True
+            quality_bad_reason = "too_many_bad_channels"
+        elif total_clipped_frac > float(bad_window_clipped_frac):
+            window_quality_bad = True
+            quality_bad_reason = "total_clipped_frac"
+
+    return LiveWindowQuality(
+        prepared_window=prepared_window if enabled else normalized.astype(np.float32, copy=True),
+        channel_rms_z=channel_rms_z,
+        channel_abs_p95_z=channel_abs_p95_z,
+        channel_clipped_frac=channel_clipped_frac,
+        masked_channel_ids=masked_channel_ids,
+        bad_channel_ids=bad_channel_ids,
+        total_clipped_frac=total_clipped_frac,
+        window_quality_bad=bool(window_quality_bad),
+        quality_bad_reason=quality_bad_reason,
+    )
+
+
 def predict_window(
     window: np.ndarray,
     *,
@@ -265,12 +370,22 @@ def predict_window(
     inference_engine: Optional[InferenceEngine],
     direct_engine: Optional[InferenceEngine] = None,
     temperature_state: Optional[TemperatureScalingState] = None,
+    prepared_window: Optional[np.ndarray] = None,
 ) -> dict[str, Any]:
     window_f32 = np.asarray(window, dtype=np.float32)
+    model_window_f32 = (
+        np.asarray(prepared_window, dtype=np.float32)
+        if prepared_window is not None
+        else window_f32
+    )
+    model_window_is_normalized = prepared_window is not None
 
     if inference_engine is None:
         if direct_engine is not None:
-            _, x = direct_engine.prepare_input(window_f32)
+            _, x = direct_engine.prepare_input(
+                model_window_f32,
+                normalized=model_window_is_normalized,
+            )
             finger_probs_t, action_probs_t, applicability_prob = (
                 direct_engine.forward_probabilities(x)
             )
@@ -282,7 +397,11 @@ def predict_window(
                 else None
             )
         else:
-            window_input = apply_channel_normalizer(window_f32, scaler)
+            window_input = (
+                model_window_f32
+                if model_window_is_normalized
+                else apply_channel_normalizer(window_f32, scaler)
+            )
             x = torch.from_numpy(window_input).unsqueeze(0).to(device)
             with torch.inference_mode():
                 finger_logits, action_logits, applicability_logits = unpack_model_outputs(
@@ -336,7 +455,10 @@ def predict_window(
         action_uncertainty,
         finger_uncertainty,
         diagnostics,
-    ) = inference_engine.predict_proba(window_f32)
+    ) = inference_engine.predict_proba(
+        model_window_f32,
+        normalized=model_window_is_normalized,
+    )
     if action_probs is None or finger_probs is None:
         raise RuntimeError(
             "InferenceEngine returned empty probabilities for a loaded model."
@@ -632,7 +754,7 @@ def replay_ordered_windows(
     )
     post_state = PostprocessState()
     actuation_history: Deque[ActuationDecision] = collections.deque(
-        maxlen=max(3, int(runtime_config.actuation_stability))
+        maxlen=max(1, int(runtime_config.actuation_stability))
     )
     actuation_speed_mapper = build_actuation_speed_mapper(
         modulate_actuation_speed=bool(runtime_config.modulate_actuation_speed),
@@ -666,6 +788,19 @@ def replay_ordered_windows(
                 last_trial = current_trial
 
         loop_start = time.perf_counter()
+        quality = sanitize_live_window(
+            X[idx],
+            scaler=scaler,
+            enabled=bool(runtime_config.live_quality_enabled),
+            input_clip_abs_z=float(runtime_config.input_clip_abs_z),
+            bad_channel_rms_z=float(runtime_config.bad_channel_rms_z),
+            bad_channel_abs_p95_z=float(runtime_config.bad_channel_abs_p95_z),
+            bad_channel_clipped_frac=float(runtime_config.bad_channel_clipped_frac),
+            bad_window_clipped_frac=float(runtime_config.bad_window_clipped_frac),
+            bad_window_max_masked_channels=int(
+                runtime_config.bad_window_max_masked_channels
+            ),
+        )
         inference_result = predict_window(
             X[idx],
             scaler=scaler,
@@ -674,6 +809,7 @@ def replay_ordered_windows(
             inference_engine=inference_engine,
             direct_engine=direct_engine,
             temperature_state=temperature_state,
+            prepared_window=quality.prepared_window,
         )
         action_probs = np.asarray(inference_result["action_probs"], dtype=float)
         finger_probs = np.asarray(inference_result["finger_probs"], dtype=float)
@@ -719,11 +855,21 @@ def replay_ordered_windows(
         window_center_stream_s = window_start + (window_end - window_start) / 2.0
         current_time_ms = float(window_center_stream_s * 1000.0)
 
-        actuation_history.append(decision)
-        actuation_vote = resolve_actuation_candidate(
-            actuation_history,
-            required_finger_stability=int(runtime_config.actuation_stability),
-        )
+        if quality.window_quality_bad:
+            actuation_vote = {
+                "decision": ActuationDecision(finger_id=0, action_id=0, prob=0.0),
+                "reason": "quality_gate",
+                "finger_votes": {},
+                "action_votes": {},
+                "pair_votes": {},
+                "resolved_finger_id": 0,
+            }
+        else:
+            actuation_history.append(decision)
+            actuation_vote = resolve_actuation_candidate(
+                actuation_history,
+                required_finger_stability=int(runtime_config.actuation_stability),
+            )
         voted_decision = actuation_vote["decision"]
         actuation_target_finger_id = int(voted_decision.finger_id)
         actuation_target_action_id = int(voted_decision.action_id)
@@ -747,7 +893,9 @@ def replay_ordered_windows(
                 float(runtime_config.latency_threshold_ms),
             )
 
-        if not actuation_latency_gate_ok:
+        if quality.window_quality_bad:
+            actuation_suppressed_reason = "quality_gate"
+        elif not actuation_latency_gate_ok:
             actuation_suppressed_reason = "latency_gate"
         elif not applicability_gate_ok:
             actuation_suppressed_reason = "applicability_gate"
@@ -833,6 +981,14 @@ def replay_ordered_windows(
             "adaptive_threshold": inference_result.get("adaptive_threshold"),
             "uncertainty_gate_ok": bool(uncertainty_gate_ok),
             "health_score": inference_result.get("health_score"),
+            "window_quality_bad": bool(quality.window_quality_bad),
+            "quality_bad_reason": quality.quality_bad_reason,
+            "masked_channel_ids": list(quality.masked_channel_ids),
+            "quality_bad_channel_ids": list(quality.bad_channel_ids),
+            "channel_rms_z": quality.channel_rms_z.tolist(),
+            "channel_abs_p95_z": quality.channel_abs_p95_z.tolist(),
+            "channel_clipped_frac": quality.channel_clipped_frac.tolist(),
+            "total_clipped_frac": float(quality.total_clipped_frac),
             "inference_backend": str(inference_result.get("backend", "direct")),
             "decision_reason": str(decision_info.get("decision_reason", "")),
             "postprocess_enabled": bool(postprocess_enabled),

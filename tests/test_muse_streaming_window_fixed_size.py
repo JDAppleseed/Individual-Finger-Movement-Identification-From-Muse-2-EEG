@@ -33,3 +33,43 @@ def test_window_fixed_size_from_irregular_samples():
     )
     assert window.shape[0] == int(round(window_sec * target_fs))
     assert window.shape[0] == grid.size
+
+
+def test_verify_alignment_rejects_missing_window_start_support():
+    times = np.array([0.11, 0.15, 0.20, 0.24], dtype=float)
+    values = np.zeros((times.size, 4), dtype=float)
+
+    alignment = verify_alignment(
+        times,
+        start_s=0.0,
+        end_s=0.25,
+        target_fs=128.0,
+        max_gap_s=0.05,
+    )
+
+    assert alignment.ok is False
+    assert alignment.reason == "start_gap_exceeds_threshold"
+
+    grid, window = resample_window(
+        times,
+        values,
+        start_s=0.0,
+        end_s=0.25,
+        target_fs=128.0,
+    )
+    assert grid.size == window.shape[0]
+
+
+def test_verify_alignment_rejects_missing_window_end_support():
+    times = np.array([-0.01, 0.02, 0.08, 0.12], dtype=float)
+
+    alignment = verify_alignment(
+        times,
+        start_s=0.0,
+        end_s=0.25,
+        target_fs=128.0,
+        max_gap_s=0.05,
+    )
+
+    assert alignment.ok is False
+    assert alignment.reason == "end_gap_exceeds_threshold"

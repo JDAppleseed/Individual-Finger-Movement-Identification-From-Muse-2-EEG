@@ -105,6 +105,36 @@ def test_live_infer_warns_when_actuation_serial_port_is_implicit():
     assert any("serial_port is blank" in warning for warning in result.warnings)
 
 
+def test_live_infer_rejects_bad_live_quality_settings():
+    result = validate_step_settings(
+        "infer",
+        {
+            "live_quality_enabled": "yes",
+            "input_clip_abs_z": -1.0,
+            "bad_channel_rms_z": -2.0,
+            "bad_channel_abs_p95_z": "high",
+            "bad_channel_clipped_frac": 1.2,
+            "bad_window_clipped_frac": -0.1,
+            "bad_window_max_masked_channels": -1,
+            "rest_bias_correction_enabled": "yes",
+            "rest_bias_strength": -0.1,
+            "rest_bias_min_windows": 0,
+            "latency_policy": "slow",
+        },
+    )
+    assert any("live_quality_enabled must be a boolean." in err for err in result.errors)
+    assert any("input_clip_abs_z must be >= 0.0." in err for err in result.errors)
+    assert any("bad_channel_rms_z must be >= 0.0." in err for err in result.errors)
+    assert any("bad_channel_abs_p95_z must be numeric." in err for err in result.errors)
+    assert any("bad_channel_clipped_frac must be in [0.0, 1.0]." in err for err in result.errors)
+    assert any("bad_window_clipped_frac must be in [0.0, 1.0]." in err for err in result.errors)
+    assert any("bad_window_max_masked_channels must be >= 0." in err for err in result.errors)
+    assert any("rest_bias_correction_enabled must be a boolean." in err for err in result.errors)
+    assert any("rest_bias_strength must be >= 0.0." in err for err in result.errors)
+    assert any("rest_bias_min_windows must be >= 1." in err for err in result.errors)
+    assert any("latency_policy must be 'ignore', 'warn', or 'enforce'." in err for err in result.errors)
+
+
 def test_train_calibration_size_validation():
     result = validate_step_settings("train", {"calibration_size": 1.0})
     assert any("calibration_size must be in [0.0, 1.0)." in err for err in result.errors)

@@ -99,6 +99,8 @@ def test_runtime_defaults_match_canonical_recipe():
     assert replay.hop_sec == LIVE_INFER_RECIPE_DEFAULTS["hop_sec"]
     assert replay.actuation_min_prob == LIVE_INFER_RECIPE_DEFAULTS["actuation_min_prob"]
     assert replay.actuation_stability == LIVE_INFER_RECIPE_DEFAULTS["actuation_stability"]
+    assert replay.live_quality_enabled == LIVE_INFER_RECIPE_DEFAULTS["live_quality_enabled"]
+    assert replay.input_clip_abs_z == LIVE_INFER_RECIPE_DEFAULTS["input_clip_abs_z"]
 
 
 def test_step_entrypoints_consume_canonical_defaults():

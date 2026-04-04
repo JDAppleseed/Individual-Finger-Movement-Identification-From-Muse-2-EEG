@@ -91,3 +91,11 @@ def test_watchdog_trigger():
     assert watchdog is not None
     assert watchdog.flags & FLAG_WATCHDOG
     assert watchdog.action_id == 0
+
+
+def test_watchdog_is_throttled_after_emit():
+    shaper = CommandShaper(CommandShaperConfig(watchdog_ms=500))
+    shaper.note_valid(timebase_ms=1000)
+    assert shaper.watchdog_command(timebase_ms=1600) is not None
+    assert shaper.watchdog_command(timebase_ms=1800) is None
+    assert shaper.watchdog_command(timebase_ms=2101) is not None

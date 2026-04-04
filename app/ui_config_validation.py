@@ -105,6 +105,8 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         "hysteresis_enabled",
         "adjacency_enabled",
         "no_file_io",
+        "live_quality_enabled",
+        "rest_bias_correction_enabled",
     ):
         _validate_bool(settings, key, errors)
 
@@ -126,6 +128,17 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         _validate_unit_interval(settings, key, errors)
     for key in ("uncertainty_weight", "actuation_speed_gamma"):
         _validate_float_min(settings, key, 0.0, errors)
+    for key in (
+        "input_clip_abs_z",
+        "bad_channel_rms_z",
+        "bad_channel_abs_p95_z",
+        "rest_bias_strength",
+    ):
+        _validate_float_min(settings, key, 0.0, errors)
+    for key in ("bad_channel_clipped_frac", "bad_window_clipped_frac"):
+        _validate_unit_interval(settings, key, errors)
+    _validate_int_min(settings, "bad_window_max_masked_channels", 0, errors)
+    _validate_int_min(settings, "rest_bias_min_windows", 1, errors)
 
     if "smoothing_method" in settings:
         value = str(settings.get("smoothing_method"))
@@ -135,6 +148,10 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         value = str(settings.get("finger_mode"))
         if value not in {"raw", "smooth"}:
             errors.append("finger_mode must be 'raw' or 'smooth'.")
+    if "latency_policy" in settings:
+        value = str(settings.get("latency_policy"))
+        if value not in {"ignore", "warn", "enforce"}:
+            errors.append("latency_policy must be 'ignore', 'warn', or 'enforce'.")
 
     if settings.get("enable_actuation") and not str(settings.get("serial_port") or "").strip():
         warnings.append(

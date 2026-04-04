@@ -68,6 +68,7 @@ from utils.label_schema import (
     is_valid_action_finger,
 )
 from utils.live_infer_common import (
+    LiveWindowQuality,
     ReplayRuntimeConfig,
     applicability_gate_passed as _shared_applicability_gate_passed,
     build_actuation_command_shaper as _shared_build_actuation_command_shaper,
@@ -80,6 +81,7 @@ from utils.live_infer_common import (
     require_deployable_run as _shared_require_deployable_run,
     resolve_actuation_candidate as _shared_resolve_actuation_candidate,
     resolve_temperature_path as _shared_resolve_temperature_path,
+    sanitize_live_window as _shared_sanitize_live_window,
     uncertainty_gate_passed as _shared_uncertainty_gate_passed,
 )
 from utils.model_outputs import infer_output_dims_from_state_dict, unpack_model_outputs
@@ -92,7 +94,11 @@ from utils.runtime_utils import (
     load_temperature_scaling,
 )
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
-from utils.stream_timebase import clamp_lsl_timestamp
+from utils.stream_timebase import (
+    clamp_lsl_timestamp,
+    is_gap,
+    should_segment_break_backwards,
+)
 
 # Pipeline handoff: Step 7 runs online inference with the trained Step 2 model
 # and optional hardware actuation, while writing live-session artifacts.
@@ -176,6 +182,37 @@ def _warmup_actuation(actuator: SerialHandActuator, *, pause_s: float = 0.8, int
             time.sleep(inter_cmd_s)
         logger.info("Warmup: %s sent for all fingers; waiting %.2fs", label, pause_s)
         time.sleep(pause_s)
+
+
+def _safe_send_actuation(
+    actuator: Optional[SerialHandActuator],
+    *,
+    finger_id: int,
+    action_id: int,
+    speed_scalar: Optional[float] = None,
+) -> bool:
+    if actuator is None:
+        return False
+    try:
+        actuator.send(
+            finger_id=int(finger_id),
+            action_id=int(action_id),
+            speed_scalar=speed_scalar,
+        )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "Actuation send failed finger=%s action=%s speed=%s error=%s",
+            int(finger_id),
+            int(action_id),
+            None if speed_scalar is None else float(speed_scalar),
+            exc,
+        )
+        try:
+            actuator.close()
+        except Exception:
+            pass
+        return False
 
 
 # -------------------- Helpers --------------------
@@ -400,19 +437,6 @@ class RestFingerBiasCorrection:
         return adjusted / total
 
 
-@dataclass(frozen=True)
-class LiveWindowQuality:
-    prepared_window: np.ndarray
-    channel_rms_z: np.ndarray
-    channel_abs_p95_z: np.ndarray
-    channel_clipped_frac: np.ndarray
-    masked_channel_ids: tuple[int, ...]
-    bad_channel_ids: tuple[int, ...]
-    total_clipped_frac: float
-    window_quality_bad: bool
-    quality_bad_reason: Optional[str] = None
-
-
 def _sanitize_live_window(
     window_TxC: np.ndarray,
     *,
@@ -425,68 +449,16 @@ def _sanitize_live_window(
     bad_window_clipped_frac: float,
     bad_window_max_masked_channels: int,
 ) -> LiveWindowQuality:
-    normalized = np.asarray(standardize_window_TxC(window_TxC, scaler), dtype=np.float32)
-    if normalized.ndim != 2:
-        raise ValueError(f"Expected 2D window, got shape {normalized.shape}")
-
-    clip_abs_z = float(max(1e-6, input_clip_abs_z))
-    if normalized.size == 0:
-        empty = np.zeros(normalized.shape[1] if normalized.ndim == 2 else 0, dtype=float)
-        return LiveWindowQuality(
-            prepared_window=normalized,
-            channel_rms_z=empty,
-            channel_abs_p95_z=empty,
-            channel_clipped_frac=empty,
-            masked_channel_ids=tuple(),
-            bad_channel_ids=tuple(),
-            total_clipped_frac=0.0,
-            window_quality_bad=False,
-            quality_bad_reason=None,
-        )
-
-    abs_normalized = np.abs(normalized)
-    channel_rms_z = np.sqrt(np.mean(normalized**2, axis=0)).astype(float)
-    channel_abs_p95_z = np.percentile(abs_normalized, 95, axis=0).astype(float)
-    clipped_mask = abs_normalized > clip_abs_z
-    channel_clipped_frac = np.mean(clipped_mask, axis=0).astype(float)
-    total_clipped_frac = float(np.mean(clipped_mask))
-
-    bad_mask = (
-        (channel_rms_z > float(bad_channel_rms_z))
-        | (channel_abs_p95_z > float(bad_channel_abs_p95_z))
-        | (channel_clipped_frac > float(bad_channel_clipped_frac))
-    )
-    bad_channel_ids = tuple(int(idx) for idx in np.flatnonzero(bad_mask))
-    masked_channel_ids: tuple[int, ...] = tuple()
-    window_quality_bad = False
-    quality_bad_reason: Optional[str] = None
-
-    prepared_window = np.clip(normalized, -clip_abs_z, clip_abs_z).astype(
-        np.float32, copy=True
-    )
-    if enabled and len(bad_channel_ids) == 1:
-        bad_idx = int(bad_channel_ids[0])
-        prepared_window[:, bad_idx] = 0.0
-        masked_channel_ids = (bad_idx,)
-
-    if enabled:
-        if len(bad_channel_ids) > int(max(0, bad_window_max_masked_channels)):
-            window_quality_bad = True
-            quality_bad_reason = "too_many_bad_channels"
-        elif total_clipped_frac > float(bad_window_clipped_frac):
-            window_quality_bad = True
-            quality_bad_reason = "total_clipped_frac"
-
-    return LiveWindowQuality(
-        prepared_window=prepared_window if enabled else normalized.astype(np.float32, copy=True),
-        channel_rms_z=channel_rms_z,
-        channel_abs_p95_z=channel_abs_p95_z,
-        channel_clipped_frac=channel_clipped_frac,
-        masked_channel_ids=masked_channel_ids,
-        bad_channel_ids=bad_channel_ids,
-        total_clipped_frac=total_clipped_frac,
-        window_quality_bad=bool(window_quality_bad),
-        quality_bad_reason=quality_bad_reason,
+    return _shared_sanitize_live_window(
+        window_TxC,
+        scaler=scaler,
+        enabled=enabled,
+        input_clip_abs_z=input_clip_abs_z,
+        bad_channel_rms_z=bad_channel_rms_z,
+        bad_channel_abs_p95_z=bad_channel_abs_p95_z,
+        bad_channel_clipped_frac=bad_channel_clipped_frac,
+        bad_window_clipped_frac=bad_window_clipped_frac,
+        bad_window_max_masked_channels=bad_window_max_masked_channels,
     )
 
 
@@ -2057,6 +2029,7 @@ def _build_live_prediction_summary(
     dropped_windows: int,
     dropped_nonfinite_samples: int,
     dropped_nonfinite_windows: int,
+    segment_break_count: int,
 ) -> None:
     records = _load_prediction_records(pred_log_path)
     if not records:
@@ -2067,6 +2040,7 @@ def _build_live_prediction_summary(
                     "dropped_windows": int(dropped_windows),
                     "dropped_nonfinite_samples": int(dropped_nonfinite_samples),
                     "dropped_nonfinite_windows": int(dropped_nonfinite_windows),
+                    "segment_break_count": int(segment_break_count),
                     "raw_channel_stats": _compute_raw_channel_stats(raw_dir),
                 },
                 indent=2,
@@ -2177,6 +2151,7 @@ def _build_live_prediction_summary(
         "dropped_windows": int(dropped_windows),
         "dropped_nonfinite_samples": int(dropped_nonfinite_samples),
         "dropped_nonfinite_windows": int(dropped_nonfinite_windows),
+        "segment_break_count": int(segment_break_count),
         "raw_channel_stats": _compute_raw_channel_stats(raw_dir),
     }
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True))
@@ -2547,13 +2522,17 @@ def main() -> int:
     stream_origin_mono: Optional[float] = None
     stream_origin_lsl: Optional[float] = None
     prev_lsl_mono: Optional[float] = None
+    backwards_events_mono: Deque[float] = deque(maxlen=256)
     latest_sample_mono: Optional[float] = None
     latest_stream_time_s = 0.0
+    last_buffer_time_s: Optional[float] = None
     dropped_windows = 0
     dropped_nonfinite_samples = 0
     dropped_nonfinite_windows = 0
     quality_bad_windows = 0
     quality_masked_windows = 0
+    segment_break_count = 0
+    segment_id = 0
     masked_channel_counts: collections.Counter[int] = collections.Counter()
     last_masked_channel_warning: Optional[Tuple[int, int]] = None
     last_log = time.monotonic()
@@ -2578,6 +2557,8 @@ def main() -> int:
                 for sample, lsl_ts in zip(chunk, timestamps):
                     sample_mono = time.monotonic()
                     latest_sample_mono = float(sample_mono)
+                    last_stream_time_before_sample = float(latest_stream_time_s)
+                    prev_lsl_before = prev_lsl_mono
                     (
                         time_s,
                         lsl_ts_mono,
@@ -2592,6 +2573,56 @@ def main() -> int:
                         stream_origin_lsl=stream_origin_lsl,
                         prev_lsl_mono=prev_lsl_mono,
                     )
+                    segment_break_reason: Optional[str] = None
+                    raw_lsl_ts = float(lsl_ts)
+                    if (
+                        np.isfinite(raw_lsl_ts)
+                        and prev_lsl_before is not None
+                        and raw_lsl_ts < float(prev_lsl_before)
+                    ):
+                        backwards_delta_s = float(prev_lsl_before - raw_lsl_ts)
+                        if backwards_delta_s > 0.010 and should_segment_break_backwards(
+                            backwards_events_mono,
+                            float(sample_mono),
+                            hard_backwards=backwards_delta_s >= 0.200,
+                        ):
+                            segment_break_reason = "backwards_lsl"
+                            time_s = float(last_stream_time_before_sample)
+                            stream_origin_lsl = float(raw_lsl_ts) - float(time_s)
+                            stream_origin_mono = float(sample_mono) - float(time_s)
+                            prev_lsl_mono = float(raw_lsl_ts)
+                            lsl_ts_mono = float(raw_lsl_ts)
+                    if (
+                        segment_break_reason is None
+                        and last_buffer_time_s is not None
+                        and float(time_s) > float(last_buffer_time_s)
+                        and is_gap(
+                            float(time_s) - float(last_buffer_time_s),
+                            1.0 / float(args.target_fs),
+                        )
+                    ):
+                        segment_break_reason = "stream_gap"
+                    if segment_break_reason is not None:
+                        segment_id += 1
+                        segment_break_count += 1
+                        buffer.clear()
+                        latency_window.clear()
+                        actuation_history.clear()
+                        actuation_command_shaper.reset()
+                        post_state.reset()
+                        last_sent = None
+                        last_send_ts = 0.0
+                        next_window_start_s = float(time_s)
+                        last_buffer_time_s = None
+                        backwards_events_mono.clear()
+                        logger.warning(
+                            "Live stream segment break reason=%s new_segment_id=%s stream_time_s=%.3f raw_lsl_ts=%s prev_lsl_ts=%s",
+                            segment_break_reason,
+                            int(segment_id),
+                            float(time_s),
+                            raw_lsl_ts,
+                            prev_lsl_before,
+                        )
                     latest_stream_time_s = max(float(latest_stream_time_s), float(time_s))
                     vec = np.asarray(sample, dtype=np.float32)
                     sample_flags = 0
@@ -2609,10 +2640,10 @@ def main() -> int:
                                 local_ts=time.time(),
                                 sample=np.asarray(sample, dtype=float),
                                 flags=sample_flags,
-                                segment_id=0,
+                                segment_id=int(segment_id),
                                 clamped=clamped,
                                 raw_path=None,
-                                segment_break_reason=None,
+                                segment_break_reason=segment_break_reason,
                             )
                         )
                         sample_seq += 1
@@ -2623,7 +2654,20 @@ def main() -> int:
                     if sample_flags & RAW_FLAG_NONFINITE:
                         continue
 
+                    if (
+                        last_buffer_time_s is not None
+                        and float(time_s) <= float(last_buffer_time_s)
+                    ):
+                        actuation_command_shaper.note_valid(
+                            timebase_ms=int(round(float(sample_mono) * 1000.0))
+                        )
+                        continue
+
                     buffer.append((time_s, vec))
+                    last_buffer_time_s = float(time_s)
+                    actuation_command_shaper.note_valid(
+                        timebase_ms=int(round(float(sample_mono) * 1000.0))
+                    )
 
             # Infer over available windows
             time_s = float(latest_stream_time_s)
@@ -2634,14 +2678,25 @@ def main() -> int:
                 times = np.array([t for t, _ in buffer], dtype=float)
                 values = np.array([v for _, v in buffer], dtype=float)
 
-                mask = (times >= window_start) & (times < window_end)
-                if not np.any(mask):
+                if times.size < 2:
                     dropped_windows += 1
                     next_window_start_s += args.hop_sec
                     continue
 
-                window_times = times[mask]
-                window_values = values[mask]
+                left_idx = max(
+                    0, int(np.searchsorted(times, window_start, side="left")) - 1
+                )
+                right_idx = min(
+                    int(times.size),
+                    int(np.searchsorted(times, window_end, side="right")) + 1,
+                )
+                if (right_idx - left_idx) < 2:
+                    dropped_windows += 1
+                    next_window_start_s += args.hop_sec
+                    continue
+
+                window_times = times[left_idx:right_idx]
+                window_values = values[left_idx:right_idx]
                 if not np.all(np.isfinite(window_values)):
                     dropped_windows += 1
                     dropped_nonfinite_windows += 1
@@ -2939,6 +2994,7 @@ def main() -> int:
                             action_uncertainty,
                         )
                     else:
+                        shaper_timebase_ms = int(round(float(now) * 1000.0))
                         shaped_command = actuation_command_shaper.shape(
                             action_id=int(voted_decision.action_id),
                             finger_id=int(voted_decision.finger_id),
@@ -2946,7 +3002,7 @@ def main() -> int:
                             speed_scalar_override=float(actuation_speed_scalar),
                             timestamp_stream_ms=int(round(window_center_stream_s * 1000.0)),
                             stability_ok=True,
-                            timebase_ms=int(round(window_center_stream_s * 1000.0)),
+                            timebase_ms=shaper_timebase_ms,
                         )
                         actuation_target_finger_id = int(shaped_command.finger_id)
                         actuation_target_action_id = int(shaped_command.action_id)
@@ -2979,27 +3035,32 @@ def main() -> int:
                             repeat_same_ms=int(args.actuation_repeat_ms),
                         ):
                             send_start = time.monotonic()
-                            actuator.send(
-                                actuation_decision.finger_id,
-                                actuation_decision.action_id,
+                            send_ok = _safe_send_actuation(
+                                actuator,
+                                finger_id=actuation_decision.finger_id,
+                                action_id=actuation_decision.action_id,
                                 speed_scalar=actuation_speed_scalar,
                             )
                             send_end = time.monotonic()
-                            last_sent = actuation_key
-                            last_send_ts = send_end
-                            actuation_sent = True
-                            actuation_latency_ms = (send_end - window_center_mono) * 1000.0
-                            actuation_decision_delay_ms = (send_start - now) * 1000.0
-                            logger.info(
-                                "ACTUATE sent finger=%s action=%s prob=%.3f speed=%.3f prediction_latency_ms=%.1f actuation_latency_ms=%.1f decision_to_send_ms=%.1f",
-                                actuation_decision.finger_id,
-                                actuation_decision.action_id,
-                                voted_decision.prob,
-                                actuation_speed_scalar,
-                                latency_ms,
-                                actuation_latency_ms,
-                                actuation_decision_delay_ms,
-                            )
+                            if send_ok:
+                                last_sent = actuation_key
+                                last_send_ts = send_end
+                                actuation_sent = True
+                                actuation_latency_ms = (send_end - window_center_mono) * 1000.0
+                                actuation_decision_delay_ms = (send_start - now) * 1000.0
+                                logger.info(
+                                    "ACTUATE sent finger=%s action=%s prob=%.3f speed=%.3f prediction_latency_ms=%.1f actuation_latency_ms=%.1f decision_to_send_ms=%.1f",
+                                    actuation_decision.finger_id,
+                                    actuation_decision.action_id,
+                                    voted_decision.prob,
+                                    actuation_speed_scalar,
+                                    latency_ms,
+                                    actuation_latency_ms,
+                                    actuation_decision_delay_ms,
+                                )
+                            else:
+                                actuator = None
+                                actuation_suppressed_reason = "actuator_error"
                         else:
                             actuation_suppressed_reason = "cooldown_or_duplicate"
 
@@ -3093,18 +3154,43 @@ def main() -> int:
 
                 next_window_start_s += args.hop_sec
 
+            if args.enable_actuation and actuator is not None:
+                watchdog_now_ms = int(round(time.monotonic() * 1000.0))
+                watchdog_command = actuation_command_shaper.watchdog_command(
+                    timebase_ms=watchdog_now_ms
+                )
+                if watchdog_command is not None:
+                    if _safe_send_actuation(
+                        actuator,
+                        finger_id=int(watchdog_command.finger_id),
+                        action_id=int(watchdog_command.action_id),
+                        speed_scalar=float(watchdog_command.speed_scalar),
+                    ):
+                        last_sent = (
+                            int(watchdog_command.finger_id),
+                            int(watchdog_command.action_id),
+                        )
+                        last_send_ts = time.monotonic()
+                        logger.warning(
+                            "Actuation watchdog sent REST due to stalled valid input watchdog_ms=%s",
+                            int(actuation_command_shaper.config.watchdog_ms),
+                        )
+                    else:
+                        actuator = None
+
             # periodic status log
             now = time.monotonic()
             if now - last_log >= args.log_every:
                 masked_snapshot = _top_counter_snapshot(masked_channel_counts, top_k=2)
                 logger.info(
-                    "buffer=%s dropped_windows=%s dropped_nonfinite_samples=%s dropped_nonfinite_windows=%s quality_bad_windows=%s quality_masked_windows=%s masked_channels=%s rest_bias_ready=%s rest_bias_windows=%s",
+                    "buffer=%s dropped_windows=%s dropped_nonfinite_samples=%s dropped_nonfinite_windows=%s quality_bad_windows=%s quality_masked_windows=%s segment_breaks=%s masked_channels=%s rest_bias_ready=%s rest_bias_windows=%s",
                     len(buffer),
                     dropped_windows,
                     dropped_nonfinite_samples,
                     dropped_nonfinite_windows,
                     quality_bad_windows,
                     quality_masked_windows,
+                    int(segment_break_count),
                     masked_snapshot or None,
                     bool(rest_bias.ready),
                     int(rest_bias.rest_count),
@@ -3160,6 +3246,7 @@ def main() -> int:
                         dropped_windows=dropped_windows,
                         dropped_nonfinite_samples=dropped_nonfinite_samples,
                         dropped_nonfinite_windows=dropped_nonfinite_windows,
+                        segment_break_count=segment_break_count,
                     )
                     logger.info("Prediction summary written: %s", summary_path)
                 except Exception as exc:
@@ -3171,12 +3258,13 @@ def main() -> int:
             if actuator is not None:
                 actuator.close()
             logger.info(
-                "Shutdown complete (reason=%s, dropped_nonfinite_samples=%s, dropped_nonfinite_windows=%s, quality_bad_windows=%s, quality_masked_windows=%s, masked_channels=%s, rest_bias_ready=%s, rest_bias_windows=%s).",
+                "Shutdown complete (reason=%s, dropped_nonfinite_samples=%s, dropped_nonfinite_windows=%s, quality_bad_windows=%s, quality_masked_windows=%s, segment_breaks=%s, masked_channels=%s, rest_bias_ready=%s, rest_bias_windows=%s).",
                 termination_reason,
                 dropped_nonfinite_samples,
                 dropped_nonfinite_windows,
                 quality_bad_windows,
                 quality_masked_windows,
+                int(segment_break_count),
                 _top_counter_snapshot(masked_channel_counts, top_k=4) or None,
                 bool(rest_bias.ready),
                 int(rest_bias.rest_count),

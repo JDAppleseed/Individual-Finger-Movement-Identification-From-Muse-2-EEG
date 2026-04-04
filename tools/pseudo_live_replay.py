@@ -244,6 +244,13 @@ def _build_runtime_config(
         mc_passes=int(kwargs["mc_passes"]),
         uncertainty_base_threshold=float(kwargs["uncertainty_base_threshold"]),
         uncertainty_weight=float(kwargs["uncertainty_weight"]),
+        live_quality_enabled=_coerce_bool(kwargs["live_quality_enabled"], True),
+        input_clip_abs_z=float(kwargs["input_clip_abs_z"]),
+        bad_channel_rms_z=float(kwargs["bad_channel_rms_z"]),
+        bad_channel_abs_p95_z=float(kwargs["bad_channel_abs_p95_z"]),
+        bad_channel_clipped_frac=float(kwargs["bad_channel_clipped_frac"]),
+        bad_window_clipped_frac=float(kwargs["bad_window_clipped_frac"]),
+        bad_window_max_masked_channels=int(kwargs["bad_window_max_masked_channels"]),
         latency_mode=str(kwargs["latency_mode"]),
         fixed_latency_ms=(
             float(kwargs["fixed_latency_ms"])
