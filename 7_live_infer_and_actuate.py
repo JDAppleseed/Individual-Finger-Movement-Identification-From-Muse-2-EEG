@@ -2031,6 +2031,8 @@ def _build_live_prediction_summary(
     dropped_nonfinite_windows: int,
     segment_break_count: int,
 ) -> None:
+    from tools.analyze_live_predictions import summarize_records
+
     records = _load_prediction_records(pred_log_path)
     if not records:
         summary_path.write_text(
@@ -2048,6 +2050,10 @@ def _build_live_prediction_summary(
             )
         )
         return
+
+    summary_bundle = summarize_records(records)
+    summary = dict(summary_bundle.get("summary", {}))
+    segment_rows = list(summary_bundle.get("segments", []))
 
     committed_pairs = [
         (
@@ -2072,41 +2078,29 @@ def _build_live_prediction_summary(
     )
 
     segments: list[dict[str, Any]] = []
-    seg_start = 0
-    prev_pair = committed_pairs[0]
-    for idx, pair in enumerate(committed_pairs[1:], start=1):
-        if pair != prev_pair:
-            if prev_pair != (0, 0):
-                segments.append(
-                    {
-                        "finger_id": int(prev_pair[0]),
-                        "action_id": int(prev_pair[1]),
-                        "frames": int(idx - seg_start),
-                        "start_s": float(records[seg_start].get("window_start_s", 0.0)),
-                        "end_s": float(records[idx - 1].get("window_end_s", 0.0)),
-                    }
-                )
-            seg_start = idx
-            prev_pair = pair
-    if prev_pair != (0, 0):
+    for segment in segment_rows:
+        if int(segment.get("action_id", 0) or 0) == 0:
+            continue
+        if int(segment.get("finger_id", 0) or 0) == 0:
+            continue
         segments.append(
             {
-                "finger_id": int(prev_pair[0]),
-                "action_id": int(prev_pair[1]),
-                "frames": int(len(records) - seg_start),
-                "start_s": float(records[seg_start].get("window_start_s", 0.0)),
-                "end_s": float(records[-1].get("window_end_s", 0.0)),
+                "finger_id": int(segment.get("finger_id", 0) or 0),
+                "action_id": int(segment.get("action_id", 0) or 0),
+                "frames": int(segment.get("window_count", 0) or 0),
+                "start_s": float(segment.get("start_s", 0.0) or 0.0),
+                "end_s": float(segment.get("end_s", 0.0) or 0.0),
             }
         )
-    segments.sort(key=lambda item: int(item["frames"]), reverse=True)
+    segments.sort(key=lambda item: int(item.get("frames", 0)), reverse=True)
 
     masked_channel_counts: collections.Counter[int] = collections.Counter()
     for row in records:
         for channel_id in row.get("masked_channel_ids", []) or []:
             masked_channel_counts[int(channel_id)] += 1
 
-    summary = {
-        "record_count": int(len(records)),
+    summary.update(
+        {
         "raw_action_counts": _stringify_counter(
             collections.Counter(row.get("raw_top_action_id") for row in records)
         ),
@@ -2141,9 +2135,6 @@ def _build_live_prediction_summary(
             sum(bool(row.get("masked_channel_ids")) for row in records)
         ),
         "masked_channel_counts": _stringify_counter(masked_channel_counts),
-        "pair_transition_rate": float(
-            committed_transitions / max(1, len(committed_pairs) - 1)
-        ),
         "actuation_sent_pair_transition_rate": float(
             sent_transitions / max(1, len(sent_pairs) - 1)
         ),
@@ -2153,7 +2144,16 @@ def _build_live_prediction_summary(
         "dropped_nonfinite_windows": int(dropped_nonfinite_windows),
         "segment_break_count": int(segment_break_count),
         "raw_channel_stats": _compute_raw_channel_stats(raw_dir),
-    }
+        }
+    )
+    # Backward-compatible alias for consumers that still read the shortened key.
+    if (
+        "actuation_suppressed_reason_counts" in summary
+        and "actuation_suppressed_counts" not in summary
+    ):
+        summary["actuation_suppressed_counts"] = dict(
+            summary["actuation_suppressed_reason_counts"]
+        )
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True))
 
 

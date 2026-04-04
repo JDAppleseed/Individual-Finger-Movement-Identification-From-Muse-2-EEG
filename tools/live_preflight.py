@@ -84,11 +84,19 @@ def main() -> int:
         if args.session_dir
         else _resolve_repo_path(settings.get("session_dir"))
     )
+    deployment_session_dir = _resolve_repo_path(settings.get("deployment_session_dir"))
     model_path = _resolve_repo_path(settings.get("model_path"))
     scaler_path = _resolve_repo_path(settings.get("scaler_path"))
     run_dir = model_path.parent.resolve() if model_path is not None else None
     temperature_path = resolve_temperature_path(run_dir) if run_dir is not None else None
-    windows_npz = SessionLayout(session_dir).windows_npz if session_dir is not None else None
+    smoke_session_dir = session_dir
+    if smoke_session_dir is not None and smoke_session_dir.exists():
+        smoke_windows_npz = SessionLayout(smoke_session_dir).windows_npz
+        if not smoke_windows_npz.exists() and deployment_session_dir is not None:
+            smoke_session_dir = deployment_session_dir
+    elif deployment_session_dir is not None:
+        smoke_session_dir = deployment_session_dir
+    windows_npz = SessionLayout(smoke_session_dir).windows_npz if smoke_session_dir is not None else None
 
     errors = list(validation.errors)
     warnings = list(validation.warnings)
@@ -101,6 +109,8 @@ def main() -> int:
         errors.append(f"temperature_scaling.json not found: {temperature_path}")
     if session_dir is None or not session_dir.exists():
         warnings.append(f"session_dir missing or unresolved: {session_dir}")
+    if smoke_session_dir is None or not smoke_session_dir.exists():
+        warnings.append(f"smoke_session_dir missing or unresolved: {smoke_session_dir}")
     elif not windows_npz.exists():
         warnings.append(f"session windows NPZ missing for smoke inference: {windows_npz}")
 
@@ -115,6 +125,8 @@ def main() -> int:
     print("-" * 40)
     _print_kv("config", config_path)
     _print_kv("session_dir", session_dir)
+    _print_kv("deployment_session_dir", deployment_session_dir)
+    _print_kv("smoke_session_dir", smoke_session_dir)
     _print_kv("run_dir", run_dir)
     _print_kv("model_path", model_path)
     _print_kv("scaler_path", scaler_path)

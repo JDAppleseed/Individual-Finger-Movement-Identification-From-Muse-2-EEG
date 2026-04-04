@@ -60,6 +60,7 @@ def test_config_templates_match_canonical_recipe():
     )
 
     infer = default_infer_settings()
+    assert infer["deployment_session_dir"] is None
     assert infer["window_sec"] == LIVE_INFER_RECIPE_DEFAULTS["window_sec"]
     assert infer["hop_sec"] == LIVE_INFER_RECIPE_DEFAULTS["hop_sec"]
     assert infer["threshold_action"] == LIVE_INFER_RECIPE_DEFAULTS["threshold_action"]

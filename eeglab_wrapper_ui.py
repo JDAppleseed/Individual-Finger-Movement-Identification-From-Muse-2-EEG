@@ -6114,6 +6114,10 @@ class MainWindow(QMainWindow):
         settings = payload.get("settings")
         if not isinstance(settings, dict):
             return
+        if step_id == "step1":
+            settings = dict(settings)
+            settings.pop("lsl_source_id", None)
+            settings.pop("LSL_SOURCE_ID", None)
         defaults = self.defaults.get(step_id)
         if isinstance(defaults, dict):
             defaults.update(settings)
@@ -6137,14 +6141,14 @@ class MainWindow(QMainWindow):
             self._sync_infer_actuation_controls()
 
     def _clear_live_lsl_source_id(self, *, reason: Optional[str] = None) -> None:
-        if not getattr(self, "live_lsl_source_id", None):
-            return
+        had_cached = bool(getattr(self, "live_lsl_source_id", None))
+        had_env = bool(os.environ.get("LSL_SOURCE_ID"))
         self.live_lsl_source_id = None
         try:
             os.environ.pop("LSL_SOURCE_ID", None)
         except Exception:
             pass
-        if reason:
+        if reason and (had_cached or had_env):
             self._append_log(f"[connector] cleared LSL_SOURCE_ID ({reason})")
 
     def _edit_subject(self) -> None:
@@ -7223,6 +7227,7 @@ class MainWindow(QMainWindow):
 
         settings = self._collect_settings(step_id)
         settings["TIMEBASE_VERSION"] = TIMEBASE_VERSION
+        connector_source_id = str(getattr(self, "live_lsl_source_id", "") or "").strip() or None
         if step_id == "infer":
             settings.pop("infer_subject_override", None)
         if step_id == "step1":
@@ -7231,6 +7236,10 @@ class MainWindow(QMainWindow):
             settings["SAVE_RAW"] = True
             settings["ENABLE_FEATURES"] = False
             settings["ENABLE_INFERENCE"] = False
+            settings.pop("lsl_source_id", None)
+            settings.pop("LSL_SOURCE_ID", None)
+            if connector_source_id:
+                settings["lsl_source_id"] = connector_source_id
             # Step 1 always writes into a canonical session directory under Projects/<project>/subjects/<subject>/sessions/.
             session_dir_path = self._resolve_effective_session_dir(step_id=None)
             if session_dir_path:
@@ -7472,6 +7481,8 @@ class MainWindow(QMainWindow):
             args.extend(["--mode", "train_record"])
             if settings.get("session_dir"):
                 args.extend(["--session-dir", str(settings["session_dir"])])
+            if connector_source_id:
+                args.extend(["--lsl-source-id", connector_source_id])
         if step_id == "step1b":
             session_dir_path = self._resolve_effective_session_dir(step_id=None)
             session_dir_value = str(session_dir_path) if session_dir_path else ""
@@ -7529,17 +7540,25 @@ class MainWindow(QMainWindow):
         if getattr(self, "dry_run_checkbox", None) and self.dry_run_checkbox.isChecked():
             self._append_log("Dry run enabled; command not executed.")
             return
-        # Export LSL source-id (captured from the connector) so downstream steps can resolve
-        # the exact stream instance even if multiple similarly-named streams are present.
-        if getattr(self, "live_lsl_source_id", None):
-            os.environ["LSL_SOURCE_ID"] = str(self.live_lsl_source_id)
-        # Also export stream name/type as a convenience for scripts that support env overrides.
-        if getattr(self, "live_stream_name", None):
-            os.environ["LSL_STREAM_NAME"] = str(self.live_stream_name)
-        if getattr(self, "live_stream_type", None):
-            os.environ["LSL_STREAM_TYPE"] = str(self.live_stream_type)
+        launch_env: Dict[str, Optional[str]] = {
+            "LSL_SOURCE_ID": connector_source_id,
+            "LSL_STREAM_NAME": str(self.live_stream_name).strip() or None,
+            "LSL_STREAM_TYPE": str(self.live_stream_type).strip() or None,
+        }
+        for env_key, env_val in launch_env.items():
+            try:
+                if env_val is None:
+                    os.environ.pop(env_key, None)
+                else:
+                    os.environ[env_key] = env_val
+            except Exception:
+                pass
+        if step_id == "step1":
+            self._append_log(
+                f"[launcher] Step 1 LSL_SOURCE_ID={connector_source_id or '-'}"
+            )
 
-        self.runner.start(sys.executable, args, cwd=cwd)
+        self.runner.start(sys.executable, args, cwd=cwd, env=launch_env)
 
     def _write_session_snapshot(
         self, subject_dir: Path, step_payload: Dict[str, Any], step_id: str

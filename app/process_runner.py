@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import os
 import signal
@@ -39,6 +39,21 @@ def _normalize_exit_status(exit_status: Any) -> int:
     return 0 if status_val == 0 else 1
 
 
+def build_process_environment(
+    env: Optional[Mapping[str, Optional[str]]] = None,
+) -> QProcessEnvironment:
+    process_env = QProcessEnvironment.systemEnvironment()
+    process_env.insert("PYTHONUNBUFFERED", "1")
+    process_env.insert("PYTHONIOENCODING", "utf-8")
+    if env:
+        for key, val in env.items():
+            if val is None:
+                process_env.remove(str(key))
+            else:
+                process_env.insert(str(key), str(val))
+    return process_env
+
+
 class ProcessRunner(QObject):
     line_ready = Signal(str)
     started = Signal()
@@ -66,22 +81,14 @@ class ProcessRunner(QObject):
         program: str,
         args: list[str],
         cwd: Optional[str] = None,
-        env: Optional[Dict[str, str]] = None,
+        env: Optional[Dict[str, Optional[str]]] = None,
     ) -> None:
         if self.is_running():
             self.failed.emit("Process already running")
             return
         if cwd:
             self._process.setWorkingDirectory(cwd)
-        process_env = self._process.processEnvironment()
-        if process_env.isEmpty():
-            process_env = QProcessEnvironment.systemEnvironment()
-        process_env.insert("PYTHONUNBUFFERED", "1")
-        process_env.insert("PYTHONIOENCODING", "utf-8")
-        if env:
-            for key, val in env.items():
-                process_env.insert(key, val)
-        self._process.setProcessEnvironment(process_env)
+        self._process.setProcessEnvironment(build_process_environment(env))
         self._process.setProgram(program)
         self._process.setArguments(args)
         self._process.start()

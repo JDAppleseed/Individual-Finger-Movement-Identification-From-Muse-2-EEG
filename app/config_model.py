@@ -263,6 +263,7 @@ def default_topomap_settings() -> Dict[str, Any]:
 
 def default_infer_settings() -> Dict[str, Any]:
     return {
+        "deployment_session_dir": None,
         "model_path": f"models/{ARTIFACT_DEFAULTS['model']}",
         "scaler_path": str(ARTIFACT_DEFAULTS["scaler"]),
         "device": "auto",

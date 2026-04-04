@@ -31,6 +31,13 @@ from muse_streaming.io_paths import default_raw_dir
 from muse_streaming.packets import SamplePacket
 from muse_streaming.session_writer import SessionWriter
 from muse_streaming.timebase import clamp_monotonic
+from utils.lsl_stream_select import (
+    MultipleStreamsMatchedError,
+    NoStreamMatchedError,
+    resolve_source_id_preference,
+    select_stream_by_source_id,
+    stream_signature,
+)
 from utils.stream_runtime import FailedWriters, HardStopPolicy, HealthStopState, StreamRequirements
 from utils.label_schema import (
     ACTION_CLOSE,
@@ -1550,6 +1557,7 @@ def _apply_config_to_args(
 def _run_recording(
     args: argparse.Namespace,
     *,
+    cli_source_id: Optional[str] = None,
     config_payload: Dict[str, Any],
     config_settings: Dict[str, Any],
     config_warnings: Optional[List[str]] = None,
@@ -1645,7 +1653,16 @@ def _run_recording(
 
     stream_name = args.stream_name
     stream_type = args.stream_type
-    source_id = args.lsl_source_id
+    config_source_id = (
+        config_settings.get("lsl_source_id")
+        or config_settings.get("LSL_SOURCE_ID")
+    )
+    source_id_preference = resolve_source_id_preference(
+        cli_source_id,
+        os.environ.get("LSL_SOURCE_ID"),
+        config_source_id,
+    )
+    source_id = source_id_preference.requested_source_id
 
     def _clamp_positive(name: str, value: float, default: float) -> float:
         if (not np.isfinite(value)) or value <= 0:
@@ -1819,6 +1836,16 @@ def _run_recording(
         required_labels,
         require_exact,
     )
+    logger.info("[lsl] cli_source_id=%s", source_id_preference.cli_source_id or "-")
+    logger.info("[lsl] env_source_id=%s", source_id_preference.env_source_id or "-")
+    logger.info(
+        "[lsl] config_source_id=%s", source_id_preference.config_source_id or "-"
+    )
+    logger.info(
+        "[lsl] requested_source_id=%s source=%s",
+        source_id_preference.requested_source_id or "-",
+        source_id_preference.source,
+    )
     logger.info(
         "Timing: resolve_timeout=%.2fs inlet_buflen=%ss inlet_chunklen=%s heartbeat=%.2fs no_sample_timeout=%.2fs write_stall_timeout=%.2fs",
         resolve_timeout_s,
@@ -1832,54 +1859,18 @@ def _run_recording(
     # --------------------------
     # Resolve LSL stream robustly
     # --------------------------
-    desired_source_id = args.lsl_source_id
-    env_source_id = os.environ.get("LSL_SOURCE_ID")
-
-    # UI historically passed a placeholder like "muse2_internal".
-    # Treat these as "auto" and prefer the connector-provided env var if present.
-    # If no env var is available, DO NOT filter by source_id (pick the best matching EEG stream).
-    AUTO_TOKENS = {None, "", "auto", "muse2_internal", "internal"}
-    desired_is_auto = (desired_source_id in AUTO_TOKENS)
-    if desired_is_auto:
-        desired_source_id = env_source_id or None
-
-    def _score_stream(info_obj) -> float:
-        sid = ""
-        try:
-            sid = info_obj.source_id()
-        except Exception:
-            sid = ""
-        score = 0.0
-        if env_source_id and sid == env_source_id:
-            score += 1e12
-        if desired_source_id and sid == desired_source_id:
-            score += 5e11
-        # Parse trailing epoch-ms if present: muse2-<rand>-<epochms>
-        try:
-            tail = sid.split("-")[-1]
-            score += float(int(tail))
-        except Exception:
-            pass
-        try:
-            score += 1e4 * float(info_obj.channel_count())
-        except Exception:
-            pass
-        try:
-            score += 10.0 * float(info_obj.nominal_srate())
-        except Exception:
-            pass
-        return score
+    requested_source_id = source_id_preference.requested_source_id
+    env_source_id = source_id_preference.env_source_id
 
     def _list_candidates():
         # Resolve ALL streams, then filter. This is more robust than resolve_byprop/resolve_stream
         # (which require exact matches and can miss streams during startup or when stale streams exist).
         all_streams = resolve_streams(wait_time=resolve_timeout_s)
-        def norm(s: str) -> str:
-            return (s or "").strip()
+        def norm(value: Any) -> str:
+            return str(value or "").strip()
         want_name = norm(args.stream_name)
         want_type = norm(args.stream_type)
-        want_source_id = norm(desired_source_id)  # may be '', exact match preferred when user provided it
-        env_sid = norm(env_source_id)
+
         def stream_ok(info: StreamInfo) -> bool:
             # Basic sanity
             try:
@@ -1907,71 +1898,49 @@ def _run_recording(
                 if abs(sr - float(expected_srate)) > tol:
                     return False
             return True
-        # Candidate pre-filter
-        candidates = [s for s in all_streams if stream_ok(s)]
-        # If user/environment requested a specific source_id and it exists, prefer it.
-        # Otherwise, prefer any stream whose source_id contains "muse2" (case-insensitive),
-        # which matches Muse connector-generated IDs like "muse2-....".
-        muse2_substr = "muse2"
-        def sid(info: StreamInfo) -> str:
-
-            try:
-                return norm(info.source_id())
-            except Exception:
-                return ""
-        # If no candidates by name/type, fall back to "any Muse2 EEG-like stream"
-        if not candidates:
-            loose = []
-            for s in all_streams:
-                try:
-                    if norm(s.type()) != want_type and want_type:
-                        continue
-                    if int(s.channel_count()) < int(requirements.expected_channels or 4):
-                        continue
-                    if muse2_substr not in sid(s).lower():
-                        continue
-                    loose.append(s)
-                except Exception:
-                    continue
-            candidates = loose
+        candidates = []
+        for stream_info in all_streams:
+            if not stream_ok(stream_info):
+                continue
+            candidate = stream_signature(stream_info)
+            candidate["info"] = stream_info
+            candidates.append(candidate)
 
         # Emit a helpful debug dump when desired
         if args.verbose:
             print("[lsl] resolve_streams found:", len(all_streams))
             for s in all_streams:
                 try:
-                    print(f"  - name={s.name()} type={s.type()} ch={s.channel_count()} sr={s.nominal_srate()} source_id={sid(s)}")
+                    print(
+                        f"  - name={s.name()} type={s.type()} ch={s.channel_count()} sr={s.nominal_srate()} source_id={getattr(s, 'source_id', lambda: '')()}"
+                    )
                 except Exception:
                     pass
             print("[lsl] candidates:", len(candidates))
-            for s in candidates[:10]:
-                print(f"  * name={s.name()} type={s.type()} ch={s.channel_count()} sr={s.nominal_srate()} source_id={sid(s)}")
-
-        streams = candidates
+            for candidate in candidates[:10]:
+                print(
+                    "[lsl]  * name=%s type=%s ch=%s sr=%s source_id=%s"
+                    % (
+                        candidate.get("name"),
+                        candidate.get("type"),
+                        candidate.get("channel_count"),
+                        candidate.get("nominal_srate"),
+                        candidate.get("source_id"),
+                    )
+                )
 
         # Optional label check (only enforced when required_labels provided).
         # When the stream has >4 channels, we still only select the required labels or the first 4.
         if requirements.required_labels:
-            def get_stream_labels(stream):
-                labels = []
-                try:
-                    ch = stream.desc().child("channels").child("channel")
-                    for _ in range(stream.channel_count()):
-                        labels.append(ch.child_value("label") or "")
-                        ch = ch.next_sibling()
-                except Exception:
-                    labels = []
-                return [lab.strip() for lab in labels if lab is not None]
-
             labeled = []
-            for s in streams:
-                labels = get_stream_labels(s)
+            for candidate in candidates:
+                labels = candidate.get("labels") or []
                 if labels and all(lab in labels for lab in requirements.required_labels):
-                    labeled.append(s)
+                    labeled.append(candidate)
             if labeled:
-                streams = labeled
+                candidates = labeled
 
-        return streams, all_streams
+        return candidates, all_streams
 
     candidates, all_streams = _list_candidates()
     if not candidates:
@@ -1981,7 +1950,7 @@ def _run_recording(
             args.stream_type,
             args.stream_ch,
             args.stream_rate,
-            args.lsl_source_id,
+            requested_source_id,
             env_source_id,
         )
         if all_streams:
@@ -1997,8 +1966,9 @@ def _run_recording(
 
     # Log all candidates for debugging / operator disambiguation.
     candidates_sorted = list(candidates)
-    logger.info("[lsl] Found %d candidate stream(s):", len(candidates_sorted))
-    for i, s in enumerate(candidates_sorted):
+    logger.info("[lsl] found %d candidate stream(s)", len(candidates_sorted))
+    for i, candidate in enumerate(candidates_sorted):
+        s = candidate["info"]
         try:
             logger.info(
                 "[lsl]  #%d name=%s type=%s ch=%s rate=%s source_id=%s uid=%s",
@@ -2013,51 +1983,43 @@ def _run_recording(
         except Exception:
             logger.info("[lsl]  #%d (unable to print full stream info)", i)
 
-    explicit_source_id = str(args.lsl_source_id).strip() if args.lsl_source_id else ""
-    AUTO_TOKENS = {"", "auto", "muse2_internal", "internal"}
-    if explicit_source_id.lower() in AUTO_TOKENS:
-        explicit_source_id = ""
-    preferred_source_id = explicit_source_id or (str(env_source_id).strip() if env_source_id else "")
-
-    def _sid(stream) -> str:
-        try:
-            return str(stream.source_id()).strip()
-        except Exception:
-            return ""
-
-    filtered = candidates_sorted
-    if preferred_source_id:
-        filtered = [s for s in filtered if _sid(s) == preferred_source_id]
-        if not filtered:
+    try:
+        selection = select_stream_by_source_id(
+            candidates_sorted,
+            requested_source_id=requested_source_id,
+            require_unique_when_unspecified=True,
+        )
+    except NoStreamMatchedError as exc:
+        if requested_source_id:
+            logger.error("[lsl] stale requested source_id detected: %s", requested_source_id)
+        logger.error("%s", exc)
+        _update_manifest_termination(session_dir, "lsl_source_id_mismatch")
+        return 1
+    except MultipleStreamsMatchedError as exc:
+        if requested_source_id:
+            logger.error("[lsl] multiple candidates present; refusing ambiguous fallback")
+            _update_manifest_termination(session_dir, "lsl_ambiguous_source_id")
+        else:
             logger.error(
-                "[lsl] No candidate matched source_id=%s. Set --lsl-source-id or LSL_SOURCE_ID to one of:",
-                preferred_source_id,
+                "[lsl] Multiple streams match name/type/ch/rate. Provide --lsl-source-id or set LSL_SOURCE_ID."
             )
-            for s in candidates_sorted:
-                logger.error("  - %s", _format_stream_info(s))
-            _update_manifest_termination(session_dir, "lsl_source_id_mismatch")
-            return 1
-
-    if not preferred_source_id and len(filtered) > 1:
-        logger.error(
-            "[lsl] Multiple streams match name/type/ch/rate. Provide --lsl-source-id or set LSL_SOURCE_ID."
-        )
-        for i, s in enumerate(filtered):
-            logger.error("  #%d %s", i, _format_stream_info(s))
-        _update_manifest_termination(session_dir, "lsl_ambiguous")
+            _update_manifest_termination(session_dir, "lsl_ambiguous")
+        logger.error("%s", exc)
         return 1
 
-    if len(filtered) > 1:
-        logger.error(
-            "[lsl] Multiple streams matched source_id=%s. Stop duplicates or refine stream-name/type.",
-            preferred_source_id,
+    info = selection.selected["info"]
+    selected_source_id = selection.selected_source_id or "-"
+    if requested_source_id and selection.recovery_used:
+        logger.warning("[lsl] stale requested source_id detected")
+        logger.warning(
+            "[lsl] recovering to sole live candidate source_id=%s",
+            selected_source_id,
         )
-        for i, s in enumerate(filtered):
-            logger.error("  #%d %s", i, _format_stream_info(s))
-        _update_manifest_termination(session_dir, "lsl_ambiguous_source_id")
-        return 1
+    logger.info("[lsl] selected candidate stream source_id=%s", selected_source_id)
+    logger.info(
+        "[lsl] recovery_used=%s", "yes" if selection.recovery_used else "no"
+    )
 
-    info = filtered[0]
     try:
         inlet = StreamInlet(
             info, max_buflen=inlet_max_buflen_sec, max_chunklen=inlet_max_chunklen
@@ -2424,7 +2386,12 @@ def _run_recording(
         "session_dir": str(session_dir),
         "stream_name": str(stream_name),
         "stream_type": str(stream_type),
-        "lsl_source_id": str(args.lsl_source_id) if args.lsl_source_id is not None else None,
+        "lsl_source_id": source_id_preference.requested_source_id,
+        "cli_lsl_source_id": source_id_preference.cli_source_id,
+        "env_lsl_source_id": source_id_preference.env_source_id,
+        "config_lsl_source_id": source_id_preference.config_source_id,
+        "selected_lsl_source_id": None if selected_source_id == "-" else selected_source_id,
+        "lsl_recovery_used": bool(selection.recovery_used),
         "expected_channels": int(expected_channels),
         "expected_sampling_rate": float(expected_srate),
         "enable_plot": bool(enable_plot),
@@ -3310,6 +3277,7 @@ def main() -> int:
     )
 
     args = parser.parse_args()
+    cli_source_id = args.lsl_source_id
     defaults = {a.dest: a.default for a in parser._actions if hasattr(a, "dest")}
     # Keep config + CLI merge centralized so UI/default settings and CLI overrides
     # go through one code path before the runtime loop starts.
@@ -3320,7 +3288,11 @@ def main() -> int:
 
     # _run_recording owns stream ingest + writer lifecycle; main is an arg/config shim.
     return _run_recording(
-        args, config_payload=config_payload, config_settings=config_settings, config_warnings=config_warnings
+        args,
+        cli_source_id=cli_source_id,
+        config_payload=config_payload,
+        config_settings=config_settings,
+        config_warnings=config_warnings,
     )
 
 

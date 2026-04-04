@@ -1,4 +1,4 @@
-from app.process_runner import _normalize_exit_status
+from app.process_runner import _normalize_exit_status, build_process_environment
 
 
 class FakeEnum:
@@ -40,3 +40,21 @@ def test_normalize_exit_status_value_exception() -> None:
             raise TypeError("boom")
 
     assert _normalize_exit_status(BadValue()) == 1
+
+
+def test_build_process_environment_overrides_source_id_per_run(monkeypatch) -> None:
+    monkeypatch.setenv("LSL_SOURCE_ID", "stale")
+
+    env_a = build_process_environment({"LSL_SOURCE_ID": "fresh-a"})
+    env_b = build_process_environment({"LSL_SOURCE_ID": "fresh-b"})
+
+    assert env_a.value("LSL_SOURCE_ID") == "fresh-a"
+    assert env_b.value("LSL_SOURCE_ID") == "fresh-b"
+
+
+def test_build_process_environment_can_remove_stale_source_id(monkeypatch) -> None:
+    monkeypatch.setenv("LSL_SOURCE_ID", "stale")
+
+    env = build_process_environment({"LSL_SOURCE_ID": None})
+
+    assert env.contains("LSL_SOURCE_ID") is False
