@@ -304,6 +304,26 @@ def default_infer_settings() -> Dict[str, Any]:
         "hysteresis_margin": float(LIVE_INFER_RECIPE_DEFAULTS["hysteresis_margin"]),
         "finger_delta": float(LIVE_INFER_RECIPE_DEFAULTS["finger_delta"]),
         "finger_mode": str(LIVE_INFER_RECIPE_DEFAULTS["finger_mode"]),
+        "rest_bias_correction_enabled": bool(
+            LIVE_INFER_RECIPE_DEFAULTS["rest_bias_correction_enabled"]
+        ),
+        "rest_bias_strength": float(LIVE_INFER_RECIPE_DEFAULTS["rest_bias_strength"]),
+        "rest_bias_min_windows": int(LIVE_INFER_RECIPE_DEFAULTS["rest_bias_min_windows"]),
+        "live_quality_enabled": bool(LIVE_INFER_RECIPE_DEFAULTS["live_quality_enabled"]),
+        "input_clip_abs_z": float(LIVE_INFER_RECIPE_DEFAULTS["input_clip_abs_z"]),
+        "bad_channel_rms_z": float(LIVE_INFER_RECIPE_DEFAULTS["bad_channel_rms_z"]),
+        "bad_channel_abs_p95_z": float(
+            LIVE_INFER_RECIPE_DEFAULTS["bad_channel_abs_p95_z"]
+        ),
+        "bad_channel_clipped_frac": float(
+            LIVE_INFER_RECIPE_DEFAULTS["bad_channel_clipped_frac"]
+        ),
+        "bad_window_clipped_frac": float(
+            LIVE_INFER_RECIPE_DEFAULTS["bad_window_clipped_frac"]
+        ),
+        "bad_window_max_masked_channels": int(
+            LIVE_INFER_RECIPE_DEFAULTS["bad_window_max_masked_channels"]
+        ),
         "use_inference_engine": bool(LIVE_INFER_RECIPE_DEFAULTS["use_inference_engine"]),
         "mc_passes": int(LIVE_INFER_RECIPE_DEFAULTS["mc_passes"]),
         "uncertainty_base_threshold": float(

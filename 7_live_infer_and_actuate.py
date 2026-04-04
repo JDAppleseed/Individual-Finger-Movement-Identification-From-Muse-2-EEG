@@ -240,6 +240,13 @@ def _resample_window(
     target_fs: float,
 ) -> Optional[np.ndarray]:
     try:
+        if not np.all(np.isfinite(times)) or not np.all(np.isfinite(values)):
+            logger.warning(
+                "Resampling skipped for window [%.3f, %.3f]: non-finite input samples",
+                start_s,
+                end_s,
+            )
+            return None
         _, window = resample_window(
             times,
             values,
@@ -247,6 +254,13 @@ def _resample_window(
             end_s=end_s,
             target_fs=target_fs,
         )
+        if not np.all(np.isfinite(window)):
+            logger.warning(
+                "Resampling skipped for window [%.3f, %.3f]: non-finite values after interpolation",
+                start_s,
+                end_s,
+            )
+            return None
         return window
     except Exception as exc:
         logger.warning(
@@ -306,6 +320,174 @@ class Packet:
     clamped: bool
     raw_path: Optional[Path] = None
     segment_break_reason: Optional[str] = None
+
+
+RAW_FLAG_NONFINITE = 1
+
+
+@dataclass
+class RestFingerBiasCorrection:
+    enabled: bool = True
+    min_rest_windows: int = 10
+    strength: float = 1.5
+    ratio_clip_min: float = 0.25
+    ratio_clip_max: float = 4.0
+    rest_sum: Optional[np.ndarray] = None
+    rest_count: int = 0
+
+    def _active_slice(self, probs: np.ndarray) -> slice:
+        # Active-finger heads use length 5; legacy heads may include NONE at index 0.
+        return slice(1, None) if int(np.asarray(probs).size) == 6 else slice(None)
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.enabled) and int(self.rest_count) >= max(1, int(self.min_rest_windows))
+
+    def prior(self) -> Optional[np.ndarray]:
+        if self.rest_sum is None or int(self.rest_count) <= 0:
+            return None
+        prior = np.asarray(self.rest_sum, dtype=float) / float(self.rest_count)
+        total = float(np.sum(prior))
+        if prior.size == 0 or not np.isfinite(total) or total <= 0.0:
+            return None
+        return prior / total
+
+    def update(self, action_probs: np.ndarray, finger_probs: np.ndarray) -> bool:
+        if not bool(self.enabled):
+            return False
+        action_probs = np.asarray(action_probs, dtype=float).reshape(-1)
+        finger_probs = np.asarray(finger_probs, dtype=float).reshape(-1)
+        if (
+            action_probs.size == 0
+            or finger_probs.size == 0
+            or not np.all(np.isfinite(action_probs))
+            or not np.all(np.isfinite(finger_probs))
+            or int(np.argmax(action_probs)) != 0
+        ):
+            return False
+        was_ready = self.ready
+        if self.rest_sum is None or self.rest_sum.shape != finger_probs.shape:
+            self.rest_sum = np.zeros_like(finger_probs, dtype=float)
+            self.rest_count = 0
+        self.rest_sum += finger_probs
+        self.rest_count += 1
+        return (not was_ready) and self.ready
+
+    def apply(self, finger_probs: np.ndarray) -> np.ndarray:
+        finger_probs = np.asarray(finger_probs, dtype=float).reshape(-1)
+        if finger_probs.size == 0 or not np.all(np.isfinite(finger_probs)):
+            return finger_probs
+        prior = self.prior()
+        if prior is None or not self.ready or prior.shape != finger_probs.shape:
+            return finger_probs
+        active_slice = self._active_slice(prior)
+        prior_active = np.asarray(prior[active_slice], dtype=float)
+        if prior_active.size == 0:
+            return finger_probs
+        uniform = 1.0 / float(prior_active.size)
+        ratio = prior_active / float(uniform)
+        ratio = np.clip(
+            ratio,
+            float(self.ratio_clip_min),
+            float(self.ratio_clip_max),
+        )
+        correction = np.power(ratio, float(max(0.0, self.strength)))
+        adjusted = finger_probs.copy()
+        adjusted[active_slice] = adjusted[active_slice] / correction
+        total = float(np.sum(adjusted))
+        if not np.all(np.isfinite(adjusted)) or total <= 0.0:
+            return finger_probs
+        return adjusted / total
+
+
+@dataclass(frozen=True)
+class LiveWindowQuality:
+    prepared_window: np.ndarray
+    channel_rms_z: np.ndarray
+    channel_abs_p95_z: np.ndarray
+    channel_clipped_frac: np.ndarray
+    masked_channel_ids: tuple[int, ...]
+    bad_channel_ids: tuple[int, ...]
+    total_clipped_frac: float
+    window_quality_bad: bool
+    quality_bad_reason: Optional[str] = None
+
+
+def _sanitize_live_window(
+    window_TxC: np.ndarray,
+    *,
+    scaler: object,
+    enabled: bool,
+    input_clip_abs_z: float,
+    bad_channel_rms_z: float,
+    bad_channel_abs_p95_z: float,
+    bad_channel_clipped_frac: float,
+    bad_window_clipped_frac: float,
+    bad_window_max_masked_channels: int,
+) -> LiveWindowQuality:
+    normalized = np.asarray(standardize_window_TxC(window_TxC, scaler), dtype=np.float32)
+    if normalized.ndim != 2:
+        raise ValueError(f"Expected 2D window, got shape {normalized.shape}")
+
+    clip_abs_z = float(max(1e-6, input_clip_abs_z))
+    if normalized.size == 0:
+        empty = np.zeros(normalized.shape[1] if normalized.ndim == 2 else 0, dtype=float)
+        return LiveWindowQuality(
+            prepared_window=normalized,
+            channel_rms_z=empty,
+            channel_abs_p95_z=empty,
+            channel_clipped_frac=empty,
+            masked_channel_ids=tuple(),
+            bad_channel_ids=tuple(),
+            total_clipped_frac=0.0,
+            window_quality_bad=False,
+            quality_bad_reason=None,
+        )
+
+    abs_normalized = np.abs(normalized)
+    channel_rms_z = np.sqrt(np.mean(normalized**2, axis=0)).astype(float)
+    channel_abs_p95_z = np.percentile(abs_normalized, 95, axis=0).astype(float)
+    clipped_mask = abs_normalized > clip_abs_z
+    channel_clipped_frac = np.mean(clipped_mask, axis=0).astype(float)
+    total_clipped_frac = float(np.mean(clipped_mask))
+
+    bad_mask = (
+        (channel_rms_z > float(bad_channel_rms_z))
+        | (channel_abs_p95_z > float(bad_channel_abs_p95_z))
+        | (channel_clipped_frac > float(bad_channel_clipped_frac))
+    )
+    bad_channel_ids = tuple(int(idx) for idx in np.flatnonzero(bad_mask))
+    masked_channel_ids: tuple[int, ...] = tuple()
+    window_quality_bad = False
+    quality_bad_reason: Optional[str] = None
+
+    prepared_window = np.clip(normalized, -clip_abs_z, clip_abs_z).astype(
+        np.float32, copy=True
+    )
+    if enabled and len(bad_channel_ids) == 1:
+        bad_idx = int(bad_channel_ids[0])
+        prepared_window[:, bad_idx] = 0.0
+        masked_channel_ids = (bad_idx,)
+
+    if enabled:
+        if len(bad_channel_ids) > int(max(0, bad_window_max_masked_channels)):
+            window_quality_bad = True
+            quality_bad_reason = "too_many_bad_channels"
+        elif total_clipped_frac > float(bad_window_clipped_frac):
+            window_quality_bad = True
+            quality_bad_reason = "total_clipped_frac"
+
+    return LiveWindowQuality(
+        prepared_window=prepared_window if enabled else normalized.astype(np.float32, copy=True),
+        channel_rms_z=channel_rms_z,
+        channel_abs_p95_z=channel_abs_p95_z,
+        channel_clipped_frac=channel_clipped_frac,
+        masked_channel_ids=masked_channel_ids,
+        bad_channel_ids=bad_channel_ids,
+        total_clipped_frac=total_clipped_frac,
+        window_quality_bad=bool(window_quality_bad),
+        quality_bad_reason=quality_bad_reason,
+    )
 
 
 class SessionWriter:
@@ -502,6 +684,28 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "hysteresis_margin": float(pp_defaults.hysteresis_margin),
         "finger_delta": float(pp_defaults.finger_delta),
         "finger_mode": str(pp_defaults.finger_mode),
+        "rest_bias_correction_enabled": bool(
+            LIVE_INFER_RECIPE_DEFAULTS["rest_bias_correction_enabled"]
+        ),
+        "rest_bias_strength": float(LIVE_INFER_RECIPE_DEFAULTS["rest_bias_strength"]),
+        "rest_bias_min_windows": int(
+            LIVE_INFER_RECIPE_DEFAULTS["rest_bias_min_windows"]
+        ),
+        "live_quality_enabled": bool(LIVE_INFER_RECIPE_DEFAULTS["live_quality_enabled"]),
+        "input_clip_abs_z": float(LIVE_INFER_RECIPE_DEFAULTS["input_clip_abs_z"]),
+        "bad_channel_rms_z": float(LIVE_INFER_RECIPE_DEFAULTS["bad_channel_rms_z"]),
+        "bad_channel_abs_p95_z": float(
+            LIVE_INFER_RECIPE_DEFAULTS["bad_channel_abs_p95_z"]
+        ),
+        "bad_channel_clipped_frac": float(
+            LIVE_INFER_RECIPE_DEFAULTS["bad_channel_clipped_frac"]
+        ),
+        "bad_window_clipped_frac": float(
+            LIVE_INFER_RECIPE_DEFAULTS["bad_window_clipped_frac"]
+        ),
+        "bad_window_max_masked_channels": int(
+            LIVE_INFER_RECIPE_DEFAULTS["bad_window_max_masked_channels"]
+        ),
         "use_inference_engine": bool(runtime_defaults.use_inference_engine),
         "mc_passes": int(infer_defaults.mc_passes),
         "uncertainty_base_threshold": float(infer_defaults.base_threshold),
@@ -754,6 +958,93 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         type=str,
         choices=["raw", "smooth"],
         help="Which finger signal to use after postprocessing: raw or smoothed.",
+    )
+    rest_bias_group = postprocess_group.add_mutually_exclusive_group()
+    rest_bias_group.add_argument(
+        "--rest-bias-correction-enabled",
+        "--rest_bias_correction_enabled",
+        dest="rest_bias_correction_enabled",
+        action="store_true",
+        help="Debias finger probabilities online using a live rest-window prior.",
+    )
+    rest_bias_group.add_argument(
+        "--no-rest-bias-correction",
+        "--no_rest_bias_correction",
+        dest="rest_bias_correction_enabled",
+        action="store_false",
+        help="Disable the live rest-window finger debiasing stage.",
+    )
+    postprocess_group.add_argument(
+        "--rest-bias-strength",
+        "--rest_bias_strength",
+        dest="rest_bias_strength",
+        type=float,
+        help="Strength of the online rest-window finger debiasing correction.",
+    )
+    postprocess_group.add_argument(
+        "--rest-bias-min-windows",
+        "--rest_bias_min_windows",
+        dest="rest_bias_min_windows",
+        type=int,
+        help="Number of rest windows required before finger debiasing activates.",
+    )
+    quality_group = p.add_argument_group("live signal quality")
+    quality_toggle = quality_group.add_mutually_exclusive_group()
+    quality_toggle.add_argument(
+        "--live-quality-enabled",
+        "--live_quality_enabled",
+        dest="live_quality_enabled",
+        action="store_true",
+        help="Enable live-only clipping, channel masking, and quality gating.",
+    )
+    quality_toggle.add_argument(
+        "--no-live-quality",
+        "--no_live_quality",
+        dest="live_quality_enabled",
+        action="store_false",
+        help="Disable the live-only signal quality sanitizer.",
+    )
+    quality_group.add_argument(
+        "--input-clip-abs-z",
+        "--input_clip_abs_z",
+        dest="input_clip_abs_z",
+        type=float,
+        help="Clip normalized live inputs to +/- this absolute z-score.",
+    )
+    quality_group.add_argument(
+        "--bad-channel-rms-z",
+        "--bad_channel_rms_z",
+        dest="bad_channel_rms_z",
+        type=float,
+        help="Mark a channel bad when its normalized RMS exceeds this threshold.",
+    )
+    quality_group.add_argument(
+        "--bad-channel-abs-p95-z",
+        "--bad_channel_abs_p95_z",
+        dest="bad_channel_abs_p95_z",
+        type=float,
+        help="Mark a channel bad when its normalized abs p95 exceeds this threshold.",
+    )
+    quality_group.add_argument(
+        "--bad-channel-clipped-frac",
+        "--bad_channel_clipped_frac",
+        dest="bad_channel_clipped_frac",
+        type=float,
+        help="Mark a channel bad when its clipped fraction exceeds this threshold.",
+    )
+    quality_group.add_argument(
+        "--bad-window-clipped-frac",
+        "--bad_window_clipped_frac",
+        dest="bad_window_clipped_frac",
+        type=float,
+        help="Skip actuation when total clipped fraction exceeds this threshold.",
+    )
+    quality_group.add_argument(
+        "--bad-window-max-masked-channels",
+        "--bad_window_max_masked_channels",
+        dest="bad_window_max_masked_channels",
+        type=int,
+        help="Maximum bad-channel count that can be masked instead of quality-gating the window.",
     )
     postprocess_group.add_argument(
         "--use-inference-engine",
@@ -1312,14 +1603,24 @@ def _predict_window(
     direct_engine: Optional[InferenceEngine] = None,
     temperature_state: Optional[TemperatureScalingState] = None,
     emit_viz: bool,
+    prepared_window: Optional[np.ndarray] = None,
 ) -> dict[str, Any]:
     window_f32 = np.asarray(window, dtype=np.float32)
+    model_window_f32 = (
+        np.asarray(prepared_window, dtype=np.float32)
+        if prepared_window is not None
+        else window_f32
+    )
+    model_window_is_normalized = prepared_window is not None
     hidden_mag: Optional[float] = None
     live_viz_payload: Optional[dict[str, Any]] = None
 
     if inference_engine is None:
         if direct_engine is not None:
-            _, x = direct_engine.prepare_input(window_f32)
+            _, x = direct_engine.prepare_input(
+                model_window_f32,
+                normalized=model_window_is_normalized,
+            )
             finger_probs_t, action_probs_t, applicability_prob_t = (
                 direct_engine.forward_probabilities(x)
             )
@@ -1333,7 +1634,11 @@ def _predict_window(
             if emit_viz:
                 live_viz_payload, hidden_mag = _build_live_viz_payload(model, x)
         else:
-            window_input = standardize_window_TxC(window_f32, scaler)
+            window_input = (
+                model_window_f32
+                if model_window_is_normalized
+                else standardize_window_TxC(window_f32, scaler)
+            )
             x = torch.from_numpy(window_input).unsqueeze(0).to(device)
             with torch.inference_mode():
                 finger_logits, action_logits, applicability_logits = unpack_model_outputs(
@@ -1387,12 +1692,18 @@ def _predict_window(
         action_uncertainty,
         finger_uncertainty,
         diagnostics,
-    ) = inference_engine.predict_proba(window_f32)
+    ) = inference_engine.predict_proba(
+        model_window_f32,
+        normalized=model_window_is_normalized,
+    )
     if action_probs is None or finger_probs is None:
         raise RuntimeError("InferenceEngine returned empty probabilities for a loaded model.")
 
     if emit_viz:
-        _, x = inference_engine.prepare_input(window_f32)
+        _, x = inference_engine.prepare_input(
+            model_window_f32,
+            normalized=model_window_is_normalized,
+        )
         live_viz_payload, hidden_mag = _build_live_viz_payload(model, x)
 
     adaptive_threshold = min(
@@ -1611,6 +1922,264 @@ def _resolve_actuation_candidate(
         history,
         required_finger_stability=required_finger_stability,
     )
+
+
+def _resolve_live_actuation_vote(
+    history: Deque[ActuationDecision],
+    decision: ActuationDecision,
+    *,
+    required_pair_stability: int,
+    ignore_window: bool,
+    ignore_reason: str = "quality_gate",
+) -> dict[str, Any]:
+    if ignore_window:
+        return {
+            "decision": ActuationDecision(finger_id=0, action_id=0, prob=0.0),
+            "reason": str(ignore_reason),
+            "finger_votes": {},
+            "action_votes": {},
+            "pair_votes": {},
+            "resolved_finger_id": 0,
+            "history_appended": False,
+        }
+    history.append(decision)
+    out = _resolve_actuation_candidate(
+        history,
+        required_finger_stability=required_pair_stability,
+    )
+    out["history_appended"] = True
+    return out
+
+
+def _stringify_counter(counter: collections.Counter[Any]) -> dict[str, int]:
+    return {str(key): int(value) for key, value in counter.items()}
+
+
+def _top_counter_snapshot(
+    counter: collections.Counter[Any], *, top_k: int = 2
+) -> dict[str, int]:
+    return {
+        str(key): int(value)
+        for key, value in counter.most_common(max(0, int(top_k)))
+    }
+
+
+def _pair_key(finger_id: Any, action_id: Any) -> str:
+    return f"{int(finger_id)}:{int(action_id)}"
+
+
+def _load_prediction_records(pred_log_path: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    if not pred_log_path.exists():
+        return records
+    with pred_log_path.open("r") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                payload = json.loads(text)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                records.append(payload)
+    return records
+
+
+def _compute_raw_channel_stats(raw_dir: Optional[Path]) -> Optional[dict[str, Any]]:
+    if raw_dir is None or not raw_dir.exists():
+        return None
+    per_channel_values: list[list[np.ndarray]] = []
+    rows = 0
+    nonfinite_rows = 0
+    nonfinite_values = 0
+    flagged_nonfinite_rows = 0
+    shard_count = 0
+    for path in sorted(raw_dir.glob("*.npy")):
+        shard = np.load(path, allow_pickle=False)
+        samples = np.asarray(shard["sample"], dtype=float)
+        if samples.ndim != 2:
+            continue
+        if not per_channel_values:
+            per_channel_values = [[] for _ in range(samples.shape[1])]
+        shard_count += 1
+        rows += int(samples.shape[0])
+        finite_rows = np.all(np.isfinite(samples), axis=1)
+        nonfinite_rows += int((~finite_rows).sum())
+        nonfinite_values += int(np.size(samples) - np.isfinite(samples).sum())
+        if shard.dtype.names is not None and "flags" in shard.dtype.names:
+            flagged_nonfinite_rows += int(((np.asarray(shard["flags"], dtype=int) & RAW_FLAG_NONFINITE) != 0).sum())
+        for ch_idx in range(samples.shape[1]):
+            values = samples[:, ch_idx]
+            finite = values[np.isfinite(values)]
+            if finite.size:
+                per_channel_values[ch_idx].append(finite.astype(float, copy=False))
+
+    channel_stats: list[dict[str, Any]] = []
+    for channel_id, chunks in enumerate(per_channel_values):
+        if not chunks:
+            channel_stats.append(
+                {
+                    "channel_id": int(channel_id),
+                    "count": 0,
+                    "mean": None,
+                    "std": None,
+                    "abs_p95": None,
+                }
+            )
+            continue
+        values = np.concatenate(chunks)
+        channel_stats.append(
+            {
+                "channel_id": int(channel_id),
+                "count": int(values.size),
+                "mean": float(np.mean(values)),
+                "std": float(np.std(values)),
+                "abs_p95": float(np.percentile(np.abs(values), 95)),
+            }
+        )
+
+    return {
+        "shard_count": int(shard_count),
+        "rows": int(rows),
+        "nonfinite_rows": int(nonfinite_rows),
+        "nonfinite_values": int(nonfinite_values),
+        "flagged_nonfinite_rows": int(flagged_nonfinite_rows),
+        "channels": channel_stats,
+    }
+
+
+def _build_live_prediction_summary(
+    *,
+    pred_log_path: Path,
+    summary_path: Path,
+    raw_dir: Optional[Path],
+    dropped_windows: int,
+    dropped_nonfinite_samples: int,
+    dropped_nonfinite_windows: int,
+) -> None:
+    records = _load_prediction_records(pred_log_path)
+    if not records:
+        summary_path.write_text(
+            json.dumps(
+                {
+                    "record_count": 0,
+                    "dropped_windows": int(dropped_windows),
+                    "dropped_nonfinite_samples": int(dropped_nonfinite_samples),
+                    "dropped_nonfinite_windows": int(dropped_nonfinite_windows),
+                    "raw_channel_stats": _compute_raw_channel_stats(raw_dir),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    committed_pairs = [
+        (
+            int(row.get("committed_finger_id", 0) or 0),
+            int(row.get("committed_action_id", 0) or 0),
+        )
+        for row in records
+    ]
+    sent_pairs = [
+        (
+            int(row.get("actuation_target_finger_id", 0) or 0),
+            int(row.get("actuation_target_action_id", 0) or 0),
+        )
+        for row in records
+        if bool(row.get("actuation_sent"))
+    ]
+    committed_transitions = sum(
+        1 for prev, cur in zip(committed_pairs, committed_pairs[1:]) if prev != cur
+    )
+    sent_transitions = sum(
+        1 for prev, cur in zip(sent_pairs, sent_pairs[1:]) if prev != cur
+    )
+
+    segments: list[dict[str, Any]] = []
+    seg_start = 0
+    prev_pair = committed_pairs[0]
+    for idx, pair in enumerate(committed_pairs[1:], start=1):
+        if pair != prev_pair:
+            if prev_pair != (0, 0):
+                segments.append(
+                    {
+                        "finger_id": int(prev_pair[0]),
+                        "action_id": int(prev_pair[1]),
+                        "frames": int(idx - seg_start),
+                        "start_s": float(records[seg_start].get("window_start_s", 0.0)),
+                        "end_s": float(records[idx - 1].get("window_end_s", 0.0)),
+                    }
+                )
+            seg_start = idx
+            prev_pair = pair
+    if prev_pair != (0, 0):
+        segments.append(
+            {
+                "finger_id": int(prev_pair[0]),
+                "action_id": int(prev_pair[1]),
+                "frames": int(len(records) - seg_start),
+                "start_s": float(records[seg_start].get("window_start_s", 0.0)),
+                "end_s": float(records[-1].get("window_end_s", 0.0)),
+            }
+        )
+    segments.sort(key=lambda item: int(item["frames"]), reverse=True)
+
+    masked_channel_counts: collections.Counter[int] = collections.Counter()
+    for row in records:
+        for channel_id in row.get("masked_channel_ids", []) or []:
+            masked_channel_counts[int(channel_id)] += 1
+
+    summary = {
+        "record_count": int(len(records)),
+        "raw_action_counts": _stringify_counter(
+            collections.Counter(row.get("raw_top_action_id") for row in records)
+        ),
+        "raw_finger_counts": _stringify_counter(
+            collections.Counter(row.get("raw_top_finger_id") for row in records)
+        ),
+        "committed_action_counts": _stringify_counter(
+            collections.Counter(int(row.get("committed_action_id", 0) or 0) for row in records)
+        ),
+        "committed_finger_counts": _stringify_counter(
+            collections.Counter(int(row.get("committed_finger_id", 0) or 0) for row in records)
+        ),
+        "actuation_sent_pair_counts": _stringify_counter(
+            collections.Counter(_pair_key(fid, aid) for fid, aid in sent_pairs)
+        ),
+        "actuation_suppressed_counts": _stringify_counter(
+            collections.Counter(
+                str(row.get("actuation_suppressed_reason") or "none")
+                for row in records
+            )
+        ),
+        "actuation_vote_reason_counts": _stringify_counter(
+            collections.Counter(str(row.get("actuation_vote_reason") or "none") for row in records)
+        ),
+        "window_quality_bad_count": int(
+            sum(bool(row.get("window_quality_bad")) for row in records)
+        ),
+        "quality_bad_reason_counts": _stringify_counter(
+            collections.Counter(str(row.get("quality_bad_reason") or "none") for row in records)
+        ),
+        "masked_window_count": int(
+            sum(bool(row.get("masked_channel_ids")) for row in records)
+        ),
+        "masked_channel_counts": _stringify_counter(masked_channel_counts),
+        "pair_transition_rate": float(
+            committed_transitions / max(1, len(committed_pairs) - 1)
+        ),
+        "actuation_sent_pair_transition_rate": float(
+            sent_transitions / max(1, len(sent_pairs) - 1)
+        ),
+        "longest_committed_non_rest_segments": segments[:10],
+        "dropped_windows": int(dropped_windows),
+        "dropped_nonfinite_samples": int(dropped_nonfinite_samples),
+        "dropped_nonfinite_windows": int(dropped_nonfinite_windows),
+        "raw_channel_stats": _compute_raw_channel_stats(raw_dir),
+    }
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True))
 
 
 # -------------------- Main --------------------
@@ -1838,6 +2407,27 @@ def main() -> int:
         finger_mode=str(args.finger_mode),
     )
     post_state = PostprocessState()
+    rest_bias = RestFingerBiasCorrection(
+        enabled=bool(args.rest_bias_correction_enabled),
+        min_rest_windows=max(1, int(args.rest_bias_min_windows)),
+        strength=float(args.rest_bias_strength),
+    )
+    logger.info(
+        "Rest-bias correction enabled=%s strength=%.3f min_rest_windows=%s",
+        bool(rest_bias.enabled),
+        float(rest_bias.strength),
+        int(rest_bias.min_rest_windows),
+    )
+    logger.info(
+        "Live quality enabled=%s clip_abs_z=%.2f bad_channel_rms_z=%.2f bad_channel_abs_p95_z=%.2f bad_channel_clipped_frac=%.3f bad_window_clipped_frac=%.3f bad_window_max_masked_channels=%s",
+        bool(args.live_quality_enabled),
+        float(args.input_clip_abs_z),
+        float(args.bad_channel_rms_z),
+        float(args.bad_channel_abs_p95_z),
+        float(args.bad_channel_clipped_frac),
+        float(args.bad_window_clipped_frac),
+        int(args.bad_window_max_masked_channels),
+    )
 
     pred_log = None
     pred_log_path = None
@@ -1960,18 +2550,22 @@ def main() -> int:
     latest_sample_mono: Optional[float] = None
     latest_stream_time_s = 0.0
     dropped_windows = 0
+    dropped_nonfinite_samples = 0
+    dropped_nonfinite_windows = 0
+    quality_bad_windows = 0
+    quality_masked_windows = 0
+    masked_channel_counts: collections.Counter[int] = collections.Counter()
+    last_masked_channel_warning: Optional[Tuple[int, int]] = None
     last_log = time.monotonic()
 
     next_window_start_s = 0.0
 
     # Debounce state
-    last_decision: Optional[Tuple[int, int]] = None
-    stable_count = 0
     last_sent: Optional[Tuple[int, int]] = None
     last_send_ts = 0.0
     sample_seq = 0
     actuation_history: Deque[ActuationDecision] = deque(
-        maxlen=max(3, int(args.actuation_stability))
+        maxlen=max(1, int(args.actuation_stability))
     )
     actuation_command_shaper = _build_actuation_command_shaper(args)
 
@@ -2000,7 +2594,10 @@ def main() -> int:
                     )
                     latest_stream_time_s = max(float(latest_stream_time_s), float(time_s))
                     vec = np.asarray(sample, dtype=np.float32)
-                    buffer.append((time_s, vec))
+                    sample_flags = 0
+                    if not np.all(np.isfinite(vec)):
+                        sample_flags |= RAW_FLAG_NONFINITE
+                        dropped_nonfinite_samples += 1
 
                     # Persist raw packets (optional)
                     if record_raw and session_writer is not None:
@@ -2011,7 +2608,7 @@ def main() -> int:
                                 lsl_ts_mono=lsl_ts_mono,
                                 local_ts=time.time(),
                                 sample=np.asarray(sample, dtype=float),
-                                flags=0,
+                                flags=sample_flags,
                                 segment_id=0,
                                 clamped=clamped,
                                 raw_path=None,
@@ -2022,6 +2619,11 @@ def main() -> int:
                         if len(raw_buffer) >= raw_flush_size:
                             session_writer.append_packets(raw_buffer)
                             raw_buffer = []
+
+                    if sample_flags & RAW_FLAG_NONFINITE:
+                        continue
+
+                    buffer.append((time_s, vec))
 
             # Infer over available windows
             time_s = float(latest_stream_time_s)
@@ -2040,6 +2642,11 @@ def main() -> int:
 
                 window_times = times[mask]
                 window_values = values[mask]
+                if not np.all(np.isfinite(window_values)):
+                    dropped_windows += 1
+                    dropped_nonfinite_windows += 1
+                    next_window_start_s += args.hop_sec
+                    continue
 
                 alignment = verify_alignment(
                     window_times,
@@ -2090,6 +2697,26 @@ def main() -> int:
                     emit_viz = True
                     viz_ts = float(window_end)
 
+                quality = _sanitize_live_window(
+                    window,
+                    scaler=scaler,
+                    enabled=bool(args.live_quality_enabled),
+                    input_clip_abs_z=float(args.input_clip_abs_z),
+                    bad_channel_rms_z=float(args.bad_channel_rms_z),
+                    bad_channel_abs_p95_z=float(args.bad_channel_abs_p95_z),
+                    bad_channel_clipped_frac=float(args.bad_channel_clipped_frac),
+                    bad_window_clipped_frac=float(args.bad_window_clipped_frac),
+                    bad_window_max_masked_channels=int(
+                        args.bad_window_max_masked_channels
+                    ),
+                )
+                if quality.window_quality_bad:
+                    quality_bad_windows += 1
+                if quality.masked_channel_ids:
+                    quality_masked_windows += 1
+                    for channel_id in quality.masked_channel_ids:
+                        masked_channel_counts[int(channel_id)] += 1
+
                 inference_result = _predict_window(
                     window,
                     scaler=scaler,
@@ -2099,9 +2726,12 @@ def main() -> int:
                     direct_engine=direct_inference_engine,
                     temperature_state=temperature_state,
                     emit_viz=emit_viz,
+                    prepared_window=quality.prepared_window,
                 )
                 action_probs = np.asarray(inference_result["action_probs"], dtype=float)
-                finger_probs = np.asarray(inference_result["finger_probs"], dtype=float)
+                model_raw_finger_probs = np.asarray(
+                    inference_result["finger_probs"], dtype=float
+                )
                 finger_applicable_prob = inference_result.get("finger_applicable_prob")
                 hidden_mag = inference_result.get("hidden_mag")
                 action_uncertainty = float(
@@ -2112,6 +2742,35 @@ def main() -> int:
                 )
                 applicability_uncertainty = inference_result.get(
                     "applicability_uncertainty"
+                )
+                model_raw_top_finger_id = decode_finger_prediction(model_raw_finger_probs)
+                rest_bias_became_ready = rest_bias.update(
+                    action_probs, model_raw_finger_probs
+                )
+                if rest_bias_became_ready:
+                    prior = rest_bias.prior()
+                    logger.info(
+                        "Rest-bias correction armed rest_windows=%s prior=%s strength=%.3f",
+                        int(rest_bias.rest_count),
+                        (
+                            np.round(np.asarray(prior, dtype=float), 4).tolist()
+                            if prior is not None
+                            else None
+                        ),
+                        float(rest_bias.strength),
+                    )
+                finger_probs = np.asarray(
+                    rest_bias.apply(model_raw_finger_probs), dtype=float
+                )
+                rest_bias_applied = bool(
+                    rest_bias.ready
+                    and not np.allclose(
+                        finger_probs,
+                        model_raw_finger_probs,
+                        rtol=1e-6,
+                        atol=1e-8,
+                        equal_nan=True,
+                    )
                 )
 
                 decision_info = _postprocess_decision(
@@ -2162,27 +2821,31 @@ def main() -> int:
 
                 if _is_noop_decision(decision.finger_id, decision.action_id):
                     logger.info(
-                        "PREDICT NO-OP finger=%s action=%s joint_prob=%.3f raw_finger=%s raw_action=%s reason=%s action_unc=%.4f latency_ms=%.1f dropped_windows=%s",
+                        "PREDICT NO-OP finger=%s action=%s joint_prob=%.3f model_raw_finger=%s post_bias_finger=%s raw_action=%s reason=%s quality_bad=%s masked=%s latency_ms=%.1f dropped_windows=%s",
                         decision.finger_id,
                         decision.action_id,
                         decision.prob,
+                        model_raw_top_finger_id,
                         decision_info.get("raw_top_finger_id"),
                         decision_info.get("raw_top_action_id"),
                         decision_info.get("decision_reason"),
-                        action_uncertainty,
+                        bool(quality.window_quality_bad),
+                        list(quality.masked_channel_ids),
                         latency_ms,
                         dropped_windows,
                     )
                 else:
                     logger.info(
-                        "PREDICT ACTUATABLE finger=%s action=%s joint_prob=%.3f raw_finger=%s raw_action=%s reason=%s action_unc=%.4f latency_ms=%.1f dropped_windows=%s",
+                        "PREDICT ACTUATABLE finger=%s action=%s joint_prob=%.3f model_raw_finger=%s post_bias_finger=%s raw_action=%s reason=%s quality_bad=%s masked=%s latency_ms=%.1f dropped_windows=%s",
                         decision.finger_id,
                         decision.action_id,
                         decision.prob,
+                        model_raw_top_finger_id,
                         decision_info.get("raw_top_finger_id"),
                         decision_info.get("raw_top_action_id"),
                         decision_info.get("decision_reason"),
-                        action_uncertainty,
+                        bool(quality.window_quality_bad),
+                        list(quality.masked_channel_ids),
                         latency_ms,
                         dropped_windows,
                     )
@@ -2201,32 +2864,38 @@ def main() -> int:
                         last_live_viz_emit = now_mono
                         print(f"VIZ t={viz_ts:.3f} hidden_mag={hidden_mag:.6f}", flush=True)
 
-                # Stability / debounce
-                key = (decision.finger_id, decision.action_id)
-                if last_decision == key:
-                    stable_count += 1
-                else:
-                    stable_count = 1
-                    last_decision = key
-                actuation_history.append(decision)
-
                 # Decide to actuate
                 actuation_sent = False
                 actuation_latency_ms = None
                 actuation_decision_delay_ms = None
-                actuation_vote = _resolve_actuation_candidate(
+                actuation_vote = _resolve_live_actuation_vote(
                     actuation_history,
-                    required_finger_stability=int(args.actuation_stability),
+                    decision,
+                    required_pair_stability=int(args.actuation_stability),
+                    ignore_window=bool(quality.window_quality_bad),
+                    ignore_reason="quality_gate",
                 )
                 voted_decision = actuation_vote["decision"]
                 actuation_target_finger_id = int(voted_decision.finger_id)
                 actuation_target_action_id = int(voted_decision.action_id)
                 actuation_suppressed_reason = None
-                actuation_latency_gate_ok = _latency_gate_passed(
-                    latency_ms, float(args.latency_threshold_ms)
+                latency_policy = str(getattr(args, "latency_policy", "warn")).strip().lower()
+                actuation_latency_gate_ok = (
+                    True
+                    if latency_policy == "warn"
+                    else _latency_gate_passed(latency_ms, float(args.latency_threshold_ms))
                 )
                 if args.enable_actuation and actuator is not None:
-                    if not actuation_latency_gate_ok:
+                    if quality.window_quality_bad:
+                        actuation_suppressed_reason = "quality_gate"
+                        logger.info(
+                            "Actuation suppressed by quality gate reason=%s bad_channels=%s masked_channels=%s total_clipped_frac=%.3f",
+                            quality.quality_bad_reason or "quality_gate",
+                            list(quality.bad_channel_ids),
+                            list(quality.masked_channel_ids),
+                            float(quality.total_clipped_frac),
+                        )
+                    elif not actuation_latency_gate_ok:
                         actuation_suppressed_reason = "latency_gate"
                         logger.info(
                             "Actuation suppressed by latency gate latency_ms=%.1f threshold_ms=%.1f",
@@ -2343,9 +3012,11 @@ def main() -> int:
                         "prediction_latency_ms": float(latency_ms),
                         "alignment_ok": True,
                         "action_probs": action_probs.tolist(),
+                        "model_raw_finger_probs": model_raw_finger_probs.tolist(),
                         "finger_probs": finger_probs.tolist(),
                         "raw_top_action_id": int(decision_info.get("raw_top_action_id", 0)),
                         "raw_top_finger_id": int(decision_info.get("raw_top_finger_id", 0)),
+                        "model_raw_top_finger_id": int(model_raw_top_finger_id),
                         "smoothed_action_id": int(decision_info.get("smoothed_action_id", 0)),
                         "smoothed_finger_id": int(decision_info.get("smoothed_finger_id", 0)),
                         "committed_action_id": int(decision_info.get("committed_action_id", 0)),
@@ -2369,9 +3040,22 @@ def main() -> int:
                         "adaptive_threshold": inference_result.get("adaptive_threshold"),
                         "uncertainty_gate_ok": bool(uncertainty_gate_ok),
                         "health_score": inference_result.get("health_score"),
+                        "window_quality_bad": bool(quality.window_quality_bad),
+                        "quality_bad_reason": quality.quality_bad_reason,
+                        "masked_channel_ids": list(quality.masked_channel_ids),
+                        "quality_bad_channel_ids": list(quality.bad_channel_ids),
+                        "channel_rms_z": quality.channel_rms_z.tolist(),
+                        "channel_abs_p95_z": quality.channel_abs_p95_z.tolist(),
+                        "channel_clipped_frac": quality.channel_clipped_frac.tolist(),
+                        "total_clipped_frac": float(quality.total_clipped_frac),
                         "inference_backend": str(inference_result.get("backend", "direct")),
                         "decision_reason": str(decision_info.get("decision_reason", "")),
                         "postprocess_enabled": bool(postprocess_enabled),
+                        "rest_bias_correction_enabled": bool(rest_bias.enabled),
+                        "rest_bias_correction_ready": bool(rest_bias.ready),
+                        "rest_bias_correction_applied": bool(rest_bias_applied),
+                        "rest_bias_rest_window_count": int(rest_bias.rest_count),
+                        "rest_bias_strength": float(rest_bias.strength),
                         "dropped_windows": int(dropped_windows),
                         "actuation_speed_scalar": float(actuation_speed_scalar),
                         "actuation_target_finger_id": int(actuation_target_finger_id),
@@ -2384,6 +3068,9 @@ def main() -> int:
                         ),
                         "actuation_vote_action_counts": actuation_vote.get(
                             "action_votes", {}
+                        ),
+                        "actuation_vote_pair_counts": actuation_vote.get(
+                            "pair_votes", {}
                         ),
                         "actuation_latency_gate_ok": bool(actuation_latency_gate_ok),
                         "actuation_suppressed_reason": actuation_suppressed_reason,
@@ -2409,7 +3096,35 @@ def main() -> int:
             # periodic status log
             now = time.monotonic()
             if now - last_log >= args.log_every:
-                logger.info("buffer=%s dropped_windows=%s", len(buffer), dropped_windows)
+                masked_snapshot = _top_counter_snapshot(masked_channel_counts, top_k=2)
+                logger.info(
+                    "buffer=%s dropped_windows=%s dropped_nonfinite_samples=%s dropped_nonfinite_windows=%s quality_bad_windows=%s quality_masked_windows=%s masked_channels=%s rest_bias_ready=%s rest_bias_windows=%s",
+                    len(buffer),
+                    dropped_windows,
+                    dropped_nonfinite_samples,
+                    dropped_nonfinite_windows,
+                    quality_bad_windows,
+                    quality_masked_windows,
+                    masked_snapshot or None,
+                    bool(rest_bias.ready),
+                    int(rest_bias.rest_count),
+                )
+                if masked_channel_counts:
+                    top_channel, top_count = masked_channel_counts.most_common(1)[0]
+                    should_warn = top_count >= 20
+                    if should_warn and last_masked_channel_warning is not None:
+                        last_channel, last_count = last_masked_channel_warning
+                        should_warn = bool(
+                            int(top_channel) != int(last_channel)
+                            or int(top_count) >= int(last_count) + 20
+                        )
+                    if should_warn:
+                        logger.warning(
+                            "Live quality warning: channel_id=%s has been masked in %s windows. Check headset contact, hair obstruction, and motion on that sensor.",
+                            int(top_channel),
+                            int(top_count),
+                        )
+                        last_masked_channel_warning = (int(top_channel), int(top_count))
                 last_log = now
 
     except KeyboardInterrupt:
@@ -2431,9 +3146,41 @@ def main() -> int:
                     pred_log.close()
                 except Exception:
                     pass
+            if (
+                not no_file_io
+                and pred_log_path is not None
+                and Path(pred_log_path).exists()
+            ):
+                summary_path = Path(out_dir) / "live_prediction_summary.json"
+                try:
+                    _build_live_prediction_summary(
+                        pred_log_path=Path(pred_log_path),
+                        summary_path=summary_path,
+                        raw_dir=(Path(out_dir) / "raw") if record_raw else None,
+                        dropped_windows=dropped_windows,
+                        dropped_nonfinite_samples=dropped_nonfinite_samples,
+                        dropped_nonfinite_windows=dropped_nonfinite_windows,
+                    )
+                    logger.info("Prediction summary written: %s", summary_path)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to write prediction summary %s: %s",
+                        summary_path,
+                        exc,
+                    )
             if actuator is not None:
                 actuator.close()
-            logger.info("Shutdown complete (reason=%s).", termination_reason)
+            logger.info(
+                "Shutdown complete (reason=%s, dropped_nonfinite_samples=%s, dropped_nonfinite_windows=%s, quality_bad_windows=%s, quality_masked_windows=%s, masked_channels=%s, rest_bias_ready=%s, rest_bias_windows=%s).",
+                termination_reason,
+                dropped_nonfinite_samples,
+                dropped_nonfinite_windows,
+                quality_bad_windows,
+                quality_masked_windows,
+                _top_counter_snapshot(masked_channel_counts, top_k=4) or None,
+                bool(rest_bias.ready),
+                int(rest_bias.rest_count),
+            )
 
     return 0
 

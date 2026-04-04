@@ -76,10 +76,7 @@ def test_config_templates_match_canonical_recipe():
         EVAL_RECIPE_DEFAULTS["threshold_applicability"]
         == CANONICAL_DEPLOYMENT_APPLICABILITY_THRESHOLD
     )
-    assert (
-        LIVE_INFER_RECIPE_DEFAULTS["threshold_applicability"]
-        == CANONICAL_DEPLOYMENT_APPLICABILITY_THRESHOLD
-    )
+    assert LIVE_INFER_RECIPE_DEFAULTS["threshold_applicability"] == 0.0
 
 
 def test_runtime_defaults_match_canonical_recipe():

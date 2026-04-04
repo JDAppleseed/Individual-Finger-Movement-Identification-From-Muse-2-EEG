@@ -58,30 +58,28 @@ def test_debounced_should_send_respects_cooldown_and_repeat() -> None:
     )
 
 
-def test_resolve_actuation_candidate_requires_stable_nonzero_finger() -> None:
+def test_resolve_actuation_candidate_requires_stable_exact_nonzero_pair() -> None:
     unstable = [
         ActuationDecision(finger_id=3, action_id=1, prob=0.7),
-        ActuationDecision(finger_id=0, action_id=1, prob=0.6),
-        ActuationDecision(finger_id=3, action_id=2, prob=0.8),
+        ActuationDecision(finger_id=3, action_id=2, prob=0.6),
     ]
     unstable_result = resolve_actuation_candidate(
         unstable,
-        required_finger_stability=3,
+        required_finger_stability=2,
     )
-    assert unstable_result["reason"] == "finger_stability"
+    assert unstable_result["reason"] == "pair_stability"
     assert unstable_result["decision"].finger_id == 0
     assert unstable_result["decision"].action_id == 0
 
     stable = [
         ActuationDecision(finger_id=3, action_id=1, prob=0.7),
         ActuationDecision(finger_id=3, action_id=1, prob=0.8),
-        ActuationDecision(finger_id=3, action_id=2, prob=0.9),
     ]
     stable_result = resolve_actuation_candidate(
         stable,
-        required_finger_stability=3,
+        required_finger_stability=2,
     )
-    assert stable_result["reason"] == "finger_majority_action_vote"
+    assert stable_result["reason"] == "exact_pair_stability"
     assert stable_result["decision"].finger_id == 3
     assert stable_result["decision"].action_id == 1
     assert stable_result["resolved_finger_id"] == 3

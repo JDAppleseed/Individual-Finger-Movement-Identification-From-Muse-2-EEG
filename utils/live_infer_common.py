@@ -449,16 +449,27 @@ def build_actuation_command_shaper(
     actuation_stability: int,
     actuation_cooldown_ms: int,
 ) -> CommandShaper:
-    min_hold_ms = max(
-        int(actuation_cooldown_ms),
-        int(round(float(hop_sec) * 1000.0 * max(1, int(actuation_stability)))),
+    immediate_mode = (
+        float(actuation_min_prob) <= 0.0
+        and int(actuation_stability) <= 2
+        and int(actuation_cooldown_ms) <= 0
     )
+    if immediate_mode:
+        hold_ms = 0
+        hold_conf_margin = 0.0
+    else:
+        min_hold_ms = max(
+            int(actuation_cooldown_ms),
+            int(round(float(hop_sec) * 1000.0 * max(1, int(actuation_stability)))),
+        )
+        hold_ms = max(150, min_hold_ms)
+        hold_conf_margin = 0.05
     return CommandShaper(
         CommandShaperConfig(
             base_conf_thresh=float(actuation_min_prob),
             speed_gamma=float(actuation_speed_gamma),
-            hold_ms=max(150, min_hold_ms),
-            hold_conf_margin=0.05,
+            hold_ms=int(hold_ms),
+            hold_conf_margin=float(hold_conf_margin),
         )
     )
 
@@ -478,54 +489,50 @@ def resolve_actuation_candidate(
     if len(history) < required:
         return {
             "decision": ActuationDecision(finger_id=0, action_id=0, prob=0.0),
-            "reason": "finger_stability",
+            "reason": "pair_stability",
             "finger_votes": {},
             "action_votes": {},
+            "pair_votes": {},
             "resolved_finger_id": 0,
         }
 
     tail = list(history)[-required:]
     finger_ids = [int(d.finger_id) for d in tail]
-    nonzero_fingers = [fid for fid in finger_ids if fid != 0]
-    if len(nonzero_fingers) != required or len(set(nonzero_fingers)) != 1:
+    action_ids = [int(d.action_id) for d in tail]
+    pair_ids = [(int(d.finger_id), int(d.action_id)) for d in tail]
+    pair_counts = collections.Counter(pair_ids)
+    nonzero_pairs = [
+        pair for pair in pair_ids if int(pair[0]) != 0 and int(pair[1]) != 0
+    ]
+    if len(nonzero_pairs) != required or len(set(nonzero_pairs)) != 1:
         return {
             "decision": ActuationDecision(finger_id=0, action_id=0, prob=0.0),
-            "reason": "finger_stability",
+            "reason": "pair_stability",
             "finger_votes": dict(collections.Counter(finger_ids)),
-            "action_votes": {},
+            "action_votes": dict(collections.Counter(action_ids)),
+            "pair_votes": {
+                f"{int(fid)}:{int(aid)}": int(count)
+                for (fid, aid), count in pair_counts.items()
+            },
             "resolved_finger_id": 0,
         }
 
-    resolved_finger_id = int(nonzero_fingers[0])
-    action_counts = collections.Counter(int(d.action_id) for d in tail)
-    action_prob_sums: dict[int, float] = {}
-    for d in tail:
-        action_id = int(d.action_id)
-        action_prob_sums[action_id] = action_prob_sums.get(action_id, 0.0) + float(
-            d.prob
-        )
-    chosen_action_id = max(
-        action_counts,
-        key=lambda action_id: (
-            int(action_counts[action_id]),
-            float(action_prob_sums.get(action_id, 0.0)),
-            int(action_id),
-        ),
-    )
-    chosen_probs = [
-        float(d.prob) for d in tail if int(d.action_id) == int(chosen_action_id)
-    ]
-    chosen_prob = float(np.mean(chosen_probs)) if chosen_probs else 0.0
+    resolved_finger_id, chosen_action_id = nonzero_pairs[0]
+    chosen_prob = float(np.mean([float(d.prob) for d in tail])) if tail else 0.0
     return {
         "decision": ActuationDecision(
-            finger_id=resolved_finger_id,
+            finger_id=int(resolved_finger_id),
             action_id=int(chosen_action_id),
             prob=chosen_prob,
         ),
-        "reason": "finger_majority_action_vote",
+        "reason": "exact_pair_stability",
         "finger_votes": dict(collections.Counter(finger_ids)),
-        "action_votes": dict(action_counts),
-        "resolved_finger_id": resolved_finger_id,
+        "action_votes": dict(collections.Counter(action_ids)),
+        "pair_votes": {
+            f"{int(fid)}:{int(aid)}": int(count)
+            for (fid, aid), count in pair_counts.items()
+        },
+        "resolved_finger_id": int(resolved_finger_id),
     }
 
 

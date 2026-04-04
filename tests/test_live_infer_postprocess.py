@@ -1,5 +1,6 @@
 import importlib.util
 import json
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -170,63 +171,238 @@ def test_postprocess_decision_low_applicability_blocks_actuation_without_rewriti
     assert out["decision_reason"] == "commit"
 
 
+def test_postprocess_decision_nonfinite_probs_reset_state_and_recover():
+    mod = _load_live_module()
+    settings = PostprocessSettings(
+        smoothing_enabled=True,
+        smoothing_method="ema",
+        hysteresis_enabled=False,
+        threshold_action=0.0,
+        threshold_finger=0.0,
+        adjacency_enabled=False,
+    )
+    state = PostprocessState()
+
+    healthy = mod._postprocess_decision(
+        np.array([0.05, 0.90, 0.05], dtype=float),
+        np.array([0.10, 0.72, 0.10, 0.04, 0.02], dtype=float),
+        enabled=True,
+        settings=settings,
+        state=state,
+        finger_applicable_prob=0.80,
+    )
+    assert healthy["committed_action_id"] == 1
+    assert healthy["committed_finger_id"] == 2
+    assert state.ema_action is not None
+
+    poisoned = mod._postprocess_decision(
+        np.array([np.nan, np.nan, np.nan], dtype=float),
+        np.array([np.nan, np.nan, np.nan, np.nan, np.nan], dtype=float),
+        enabled=True,
+        settings=settings,
+        state=state,
+        finger_applicable_prob=float("nan"),
+    )
+    assert poisoned["committed_action_id"] == 0
+    assert poisoned["committed_finger_id"] == 0
+    assert poisoned["decision_reason"] == "nonfinite_probs"
+    assert state.ema_action is None
+    assert state.ema_finger is None
+    assert state.frames_in_state == 0
+
+    recovered = mod._postprocess_decision(
+        np.array([0.05, 0.88, 0.07], dtype=float),
+        np.array([0.08, 0.76, 0.08, 0.05, 0.03], dtype=float),
+        enabled=True,
+        settings=settings,
+        state=state,
+        finger_applicable_prob=0.85,
+    )
+    assert recovered["committed_action_id"] == 1
+    assert recovered["committed_finger_id"] == 2
+    assert recovered["decision_reason"] == "commit"
+
+
+def test_resample_window_rejects_nonfinite_values():
+    mod = _load_live_module()
+    times = np.array([0.00, 0.01, 0.02, 0.03], dtype=float)
+    values = np.array(
+        [
+            [1.0, 2.0, 3.0, 4.0],
+            [1.1, np.nan, 3.1, 4.1],
+            [1.2, 2.2, 3.2, 4.2],
+            [1.3, 2.3, 3.3, 4.3],
+        ],
+        dtype=float,
+    )
+
+    window = mod._resample_window(
+        times,
+        values,
+        start_s=0.00,
+        end_s=0.03,
+        target_fs=100.0,
+    )
+
+    assert window is None
+
+
+def test_rest_finger_bias_correction_reduces_pinky_bias_after_rest_warmup():
+    mod = _load_live_module()
+    correction = mod.RestFingerBiasCorrection(
+        enabled=True,
+        min_rest_windows=3,
+        strength=1.5,
+    )
+    rest_action_probs = np.array([0.90, 0.05, 0.05], dtype=float)
+
+    for _ in range(3):
+        became_ready = correction.update(
+            rest_action_probs,
+            np.array([0.02, 0.10, 0.12, 0.06, 0.70], dtype=float),
+        )
+
+    assert became_ready is True
+    assert correction.ready is True
+
+    raw = np.array([0.05, 0.11, 0.14, 0.10, 0.60], dtype=float)
+    corrected = correction.apply(raw)
+
+    assert np.isclose(np.sum(corrected), 1.0)
+    assert corrected[-1] < raw[-1]
+    assert corrected[1] > raw[1]
+
+
+def test_sanitize_live_window_masks_single_bad_channel_without_quality_gate():
+    mod = _load_live_module()
+    window = np.zeros((64, 4), dtype=np.float32)
+    window[:, 1] = 5.0
+
+    out = mod._sanitize_live_window(
+        window,
+        scaler=None,
+        enabled=True,
+        input_clip_abs_z=6.0,
+        bad_channel_rms_z=4.0,
+        bad_channel_abs_p95_z=6.0,
+        bad_channel_clipped_frac=0.05,
+        bad_window_clipped_frac=0.10,
+        bad_window_max_masked_channels=1,
+    )
+
+    assert out.window_quality_bad is False
+    assert out.quality_bad_reason is None
+    assert out.bad_channel_ids == (1,)
+    assert out.masked_channel_ids == (1,)
+    assert np.allclose(out.prepared_window[:, 1], 0.0)
+
+
+def test_sanitize_live_window_quality_gates_two_bad_channels():
+    mod = _load_live_module()
+    window = np.zeros((64, 4), dtype=np.float32)
+    window[:, 1] = 5.0
+    window[:, 2] = 5.0
+
+    out = mod._sanitize_live_window(
+        window,
+        scaler=None,
+        enabled=True,
+        input_clip_abs_z=6.0,
+        bad_channel_rms_z=4.0,
+        bad_channel_abs_p95_z=6.0,
+        bad_channel_clipped_frac=0.05,
+        bad_window_clipped_frac=0.10,
+        bad_window_max_masked_channels=1,
+    )
+
+    assert out.window_quality_bad is True
+    assert out.quality_bad_reason == "too_many_bad_channels"
+    assert out.bad_channel_ids == (1, 2)
+    assert out.masked_channel_ids == ()
+
+
 def test_live_infer_defaults_match_best_live_profile():
     mod = _load_live_module()
     _, defaults = mod._build_arg_parser()
     config_defaults = default_infer_settings()
 
     assert PostprocessSettings().finger_mode == "raw"
-    assert PostprocessSettings().threshold_action == pytest.approx(0.05)
-    assert PostprocessSettings().threshold_finger == pytest.approx(0.20)
+    assert PostprocessSettings().threshold_action == pytest.approx(0.0)
+    assert PostprocessSettings().threshold_finger == pytest.approx(0.0)
+    assert PostprocessSettings().smoothing_enabled is False
+    assert defaults["postprocess"] is False
     assert defaults["finger_mode"] == "raw"
     assert defaults["window_sec"] == pytest.approx(0.25)
     assert defaults["hop_sec"] == pytest.approx(0.05)
     assert defaults["latency_threshold_ms"] == pytest.approx(750.0)
     assert defaults["smoothing_method"] == "ema"
-    assert defaults["smoothing_window"] == 5
+    assert defaults["smoothing_enabled"] is False
+    assert defaults["smoothing_window"] == 1
     assert defaults["hysteresis_enabled"] is False
     assert defaults["hysteresis_frames"] == 3
-    assert defaults["threshold_action"] == pytest.approx(0.05)
-    assert defaults["threshold_finger"] == pytest.approx(0.20)
+    assert defaults["threshold_action"] == pytest.approx(0.0)
+    assert defaults["threshold_finger"] == pytest.approx(0.0)
     assert defaults["threshold_applicability"] == pytest.approx(
         LIVE_INFER_RECIPE_DEFAULTS["threshold_applicability"]
     )
     assert defaults["adjacency_enabled"] is False
     assert defaults["hysteresis_margin"] == pytest.approx(0.05)
     assert defaults["finger_delta"] == pytest.approx(0.05)
+    assert defaults["rest_bias_correction_enabled"] is False
+    assert defaults["rest_bias_strength"] == pytest.approx(1.5)
+    assert defaults["rest_bias_min_windows"] == 10
+    assert defaults["live_quality_enabled"] is True
+    assert defaults["input_clip_abs_z"] == pytest.approx(6.0)
+    assert defaults["bad_channel_rms_z"] == pytest.approx(4.0)
+    assert defaults["bad_channel_abs_p95_z"] == pytest.approx(6.0)
+    assert defaults["bad_channel_clipped_frac"] == pytest.approx(0.05)
+    assert defaults["bad_window_clipped_frac"] == pytest.approx(0.10)
+    assert defaults["bad_window_max_masked_channels"] == 1
     assert defaults["serial_port"] is None
     assert defaults["serial_baud"] == 9600
-    assert defaults["actuation_min_prob"] == pytest.approx(0.2)
-    assert defaults["actuation_stability"] == 3
-    assert defaults["actuation_cooldown_ms"] == 250
-    assert defaults["actuation_repeat_ms"] == 500
+    assert defaults["actuation_min_prob"] == pytest.approx(0.0)
+    assert defaults["actuation_stability"] == 1
+    assert defaults["actuation_cooldown_ms"] == 0
+    assert defaults["actuation_repeat_ms"] == 100
     assert defaults["actuation_min_speed"] == pytest.approx(0.5)
-    assert defaults["modulate_actuation_speed"] is True
+    assert defaults["modulate_actuation_speed"] is False
     assert defaults["actuation_speed_gamma"] == pytest.approx(1.0)
+    assert config_defaults["postprocess"] is False
     assert config_defaults["finger_mode"] == "raw"
     assert config_defaults["window_sec"] == pytest.approx(0.25)
     assert config_defaults["hop_sec"] == pytest.approx(0.05)
     assert config_defaults["latency_threshold_ms"] == pytest.approx(750.0)
     assert config_defaults["smoothing_method"] == "ema"
-    assert config_defaults["smoothing_window"] == 5
+    assert config_defaults["smoothing_enabled"] is False
+    assert config_defaults["smoothing_window"] == 1
     assert config_defaults["hysteresis_enabled"] is False
     assert config_defaults["hysteresis_frames"] == 3
-    assert config_defaults["threshold_action"] == pytest.approx(0.05)
-    assert config_defaults["threshold_finger"] == pytest.approx(0.20)
+    assert config_defaults["threshold_action"] == pytest.approx(0.0)
+    assert config_defaults["threshold_finger"] == pytest.approx(0.0)
     assert config_defaults["threshold_applicability"] == pytest.approx(
         LIVE_INFER_RECIPE_DEFAULTS["threshold_applicability"]
     )
     assert config_defaults["adjacency_enabled"] is False
     assert config_defaults["hysteresis_margin"] == pytest.approx(0.05)
     assert config_defaults["finger_delta"] == pytest.approx(0.05)
+    assert config_defaults["rest_bias_correction_enabled"] is False
+    assert config_defaults["rest_bias_strength"] == pytest.approx(1.5)
+    assert config_defaults["rest_bias_min_windows"] == 10
+    assert config_defaults["live_quality_enabled"] is True
+    assert config_defaults["input_clip_abs_z"] == pytest.approx(6.0)
+    assert config_defaults["bad_channel_rms_z"] == pytest.approx(4.0)
+    assert config_defaults["bad_channel_abs_p95_z"] == pytest.approx(6.0)
+    assert config_defaults["bad_channel_clipped_frac"] == pytest.approx(0.05)
+    assert config_defaults["bad_window_clipped_frac"] == pytest.approx(0.10)
+    assert config_defaults["bad_window_max_masked_channels"] == 1
     assert config_defaults["serial_port"] is None
     assert config_defaults["serial_baud"] == 9600
-    assert config_defaults["actuation_min_prob"] == pytest.approx(0.2)
-    assert config_defaults["actuation_stability"] == 3
-    assert config_defaults["actuation_cooldown_ms"] == 250
-    assert config_defaults["actuation_repeat_ms"] == 500
+    assert config_defaults["actuation_min_prob"] == pytest.approx(0.0)
+    assert config_defaults["actuation_stability"] == 1
+    assert config_defaults["actuation_cooldown_ms"] == 0
+    assert config_defaults["actuation_repeat_ms"] == 100
     assert config_defaults["actuation_min_speed"] == pytest.approx(0.5)
-    assert config_defaults["modulate_actuation_speed"] is True
+    assert config_defaults["modulate_actuation_speed"] is False
     assert config_defaults["actuation_speed_gamma"] == pytest.approx(1.0)
 
 
@@ -849,53 +1025,75 @@ def test_latency_gate_rejects_negative_and_stale_predictions():
     assert mod._latency_gate_passed(900.0, 750.0) is False
 
 
-def test_resolve_actuation_candidate_requires_same_finger_for_three():
+def test_resolve_actuation_candidate_requires_exact_pair_match():
     mod = _load_live_module()
 
     history = [
         mod.ActuationDecision(finger_id=1, action_id=1, prob=0.9),
-        mod.ActuationDecision(finger_id=2, action_id=1, prob=0.9),
-        mod.ActuationDecision(finger_id=1, action_id=1, prob=0.9),
+        mod.ActuationDecision(finger_id=1, action_id=2, prob=0.9),
     ]
 
-    out = mod._resolve_actuation_candidate(history, required_finger_stability=3)
+    out = mod._resolve_actuation_candidate(history, required_finger_stability=2)
 
     assert out["decision"].finger_id == 0
     assert out["decision"].action_id == 0
-    assert out["reason"] == "finger_stability"
+    assert out["reason"] == "pair_stability"
 
 
-def test_resolve_actuation_candidate_votes_open_when_two_of_three_open():
+def test_resolve_actuation_candidate_returns_exact_pair_when_tail_matches():
     mod = _load_live_module()
 
     history = [
         mod.ActuationDecision(finger_id=2, action_id=1, prob=0.8),
-        mod.ActuationDecision(finger_id=2, action_id=2, prob=0.95),
         mod.ActuationDecision(finger_id=2, action_id=1, prob=0.9),
     ]
 
-    out = mod._resolve_actuation_candidate(history, required_finger_stability=3)
+    out = mod._resolve_actuation_candidate(history, required_finger_stability=2)
 
     assert out["decision"].finger_id == 2
     assert out["decision"].action_id == 1
-    assert out["reason"] == "finger_majority_action_vote"
+    assert out["reason"] == "exact_pair_stability"
 
 
-def test_resolve_actuation_candidate_votes_close_when_two_of_three_close():
+def test_resolve_live_actuation_vote_ignores_quality_window_without_advancing_history():
+    mod = _load_live_module()
+    history = deque(maxlen=2)
+
+    first = mod._resolve_live_actuation_vote(
+        history,
+        mod.ActuationDecision(finger_id=3, action_id=2, prob=0.82),
+        required_pair_stability=2,
+        ignore_window=False,
+    )
+    skipped = mod._resolve_live_actuation_vote(
+        history,
+        mod.ActuationDecision(finger_id=4, action_id=2, prob=0.97),
+        required_pair_stability=2,
+        ignore_window=True,
+    )
+    second = mod._resolve_live_actuation_vote(
+        history,
+        mod.ActuationDecision(finger_id=3, action_id=2, prob=0.88),
+        required_pair_stability=2,
+        ignore_window=False,
+    )
+
+    assert first["reason"] == "pair_stability"
+    assert skipped["reason"] == "quality_gate"
+    assert len(history) == 2
+    assert second["decision"].finger_id == 3
+    assert second["decision"].action_id == 2
+    assert second["reason"] == "exact_pair_stability"
+
+
+def test_top_counter_snapshot_returns_most_common_items():
     mod = _load_live_module()
 
-    history = [
-        mod.ActuationDecision(finger_id=3, action_id=2, prob=0.82),
-        mod.ActuationDecision(finger_id=3, action_id=1, prob=0.97),
-        mod.ActuationDecision(finger_id=3, action_id=2, prob=0.88),
-    ]
+    snapshot = mod._top_counter_snapshot(
+        mod.collections.Counter({1: 7, 2: 3, 5: 11}), top_k=2
+    )
 
-    out = mod._resolve_actuation_candidate(history, required_finger_stability=3)
-
-    assert out["decision"].finger_id == 3
-    assert out["decision"].action_id == 2
-    assert out["reason"] == "finger_majority_action_vote"
-
+    assert snapshot == {"5": 11, "1": 7}
 
 
 def test_actuation_command_shaper_holds_unstable_changes():
@@ -974,3 +1172,42 @@ def test_actuation_command_shaper_recovers_after_initial_unstable_noops():
     assert first.finger_id == 0
     assert second.action_id == 1
     assert second.finger_id == 3
+
+
+def test_actuation_command_shaper_immediate_profile_does_not_hold_changed_command():
+    mod = _load_live_module()
+    shaper = mod._build_actuation_command_shaper(
+        type(
+            "Args",
+            (),
+            {
+                "actuation_min_prob": 0.0,
+                "actuation_speed_gamma": 1.0,
+                "actuation_cooldown_ms": 0,
+                "hop_sec": 0.05,
+                "actuation_stability": 1,
+            },
+        )()
+    )
+
+    first = shaper.shape(
+        action_id=1,
+        finger_id=2,
+        action_conf=0.20,
+        timestamp_stream_ms=1000,
+        stability_ok=True,
+        timebase_ms=1000,
+    )
+    second = shaper.shape(
+        action_id=2,
+        finger_id=4,
+        action_conf=0.15,
+        timestamp_stream_ms=1050,
+        stability_ok=True,
+        timebase_ms=1050,
+    )
+
+    assert first.action_id == 1
+    assert first.finger_id == 2
+    assert second.action_id == 2
+    assert second.finger_id == 4

@@ -188,11 +188,16 @@ class InferenceEngine:
                 expected, dtype=torch.float32, device=self.device
             )
 
-    def _normalize_window(self, window_TxC: np.ndarray) -> np.ndarray:
+    def _normalize_window(
+        self, window_TxC: np.ndarray, *, normalized: bool = False
+    ) -> np.ndarray:
         window = np.asarray(window_TxC, dtype=np.float32)
         self._ensure_buffers(window.shape)
         if self._input_np is None:
-            return window
+            return np.array(window, dtype=np.float32, copy=True)
+        if normalized:
+            np.copyto(self._input_np, window)
+            return self._input_np
         return apply_channel_normalizer(window, self.normalizer, out=self._input_np)
 
     def _to_tensor(self, window_TxC: np.ndarray) -> torch.Tensor:
@@ -203,9 +208,13 @@ class InferenceEngine:
         self._input_tensor[0].copy_(host_tensor)
         return self._input_tensor
 
-    def prepare_input(self, window_TxC: np.ndarray) -> Tuple[np.ndarray, torch.Tensor]:
-        normalized = self._normalize_window(window_TxC)
-        return normalized, self._to_tensor(normalized)
+    def prepare_input(
+        self, window_TxC: np.ndarray, *, normalized: bool = False
+    ) -> Tuple[np.ndarray, torch.Tensor]:
+        normalized_window = self._normalize_window(
+            window_TxC, normalized=normalized
+        )
+        return normalized_window, self._to_tensor(normalized_window)
 
     def forward_probabilities(
         self, x_BTC: torch.Tensor
@@ -254,7 +263,7 @@ class InferenceEngine:
         return finger_probs, action_probs, applicability_probs
 
     def predict_proba(
-        self, window_TxC: np.ndarray
+        self, window_TxC: np.ndarray, *, normalized: bool = False
     ) -> Tuple[
         Optional[np.ndarray], Optional[np.ndarray], float, float, Dict[str, Any]
     ]:
@@ -267,7 +276,7 @@ class InferenceEngine:
                 {"health_score": compute_health_score(window_TxC)},
             )
 
-        _, x = self.prepare_input(window_TxC)
+        _, x = self.prepare_input(window_TxC, normalized=normalized)
 
         passes = int(self.config.mc_passes)
         if passes <= 1:
@@ -339,7 +348,7 @@ class InferenceEngine:
         )
 
     def predict(
-        self, window_TxC: np.ndarray
+        self, window_TxC: np.ndarray, *, normalized: bool = False
     ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         if self.model is None:
             return self._empty_prediction(window_TxC)
@@ -350,7 +359,7 @@ class InferenceEngine:
             action_uncertainty,
             finger_uncertainty,
             diagnostics,
-        ) = self.predict_proba(window_TxC)
+        ) = self.predict_proba(window_TxC, normalized=normalized)
         if action_mean is None or finger_mean is None:
             return self._empty_prediction(window_TxC)
 

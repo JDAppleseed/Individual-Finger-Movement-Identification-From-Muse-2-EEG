@@ -87,6 +87,20 @@ def _adjacent_to(last_finger: int, candidate: int) -> bool:
     return abs(chain.index(last_finger) - chain.index(candidate)) == 1
 
 
+def _has_nonfinite_probs(
+    action_probs: np.ndarray,
+    finger_probs: np.ndarray,
+    finger_applicable_prob: Optional[float],
+) -> bool:
+    if not np.all(np.isfinite(np.asarray(action_probs, dtype=float))):
+        return True
+    if not np.all(np.isfinite(np.asarray(finger_probs, dtype=float))):
+        return True
+    if finger_applicable_prob is None:
+        return False
+    return not np.isfinite(float(finger_applicable_prob))
+
+
 def postprocess_predictions(
     action_probs: np.ndarray,
     finger_probs: np.ndarray,
@@ -99,6 +113,28 @@ def postprocess_predictions(
     ACTION: can be smoothed (vote/ema) + hysteresis.
     FINGER: default "raw" per-frame (no smoothing) because smoothing reduced accuracy in eval.
     """
+
+    action_probs = np.asarray(action_probs, dtype=float)
+    finger_probs = np.asarray(finger_probs, dtype=float)
+    if _has_nonfinite_probs(action_probs, finger_probs, finger_applicable_prob):
+        # A single NaN frame can permanently poison EMA state. Reset and emit a noop.
+        state.reset()
+        return {
+            "committed_action_id": int(ACTION_REST),
+            "committed_finger_id": int(FINGER_NONE),
+            "raw_top_action_id": int(ACTION_REST),
+            "raw_top_finger_id": int(FINGER_NONE),
+            "action_conf": 0.0,
+            "finger_conf": 0.0,
+            "finger_gate_ok": True,
+            "finger_applicable_prob": None,
+            "applicability_gate_ok": True,
+            "committed_pair_valid": True,
+            "smoothed_action_id": int(ACTION_REST),
+            "smoothed_finger_id": int(FINGER_NONE),
+            "decision_reason": "nonfinite_probs",
+            "frames_in_state": 0,
+        }
 
     smoothing_window = max(1, int(settings.smoothing_window))
 
