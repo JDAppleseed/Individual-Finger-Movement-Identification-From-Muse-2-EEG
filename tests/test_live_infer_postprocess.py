@@ -360,8 +360,8 @@ def test_live_infer_defaults_match_best_live_profile():
     assert defaults["bad_window_max_masked_channels"] == 1
     assert defaults["serial_port"] is None
     assert defaults["serial_baud"] == 9600
-    assert defaults["actuation_min_prob"] == pytest.approx(0.0)
-    assert defaults["actuation_stability"] == 1
+    assert defaults["actuation_min_prob"] == pytest.approx(0.2)
+    assert defaults["actuation_stability"] == 2
     assert defaults["actuation_cooldown_ms"] == 0
     assert defaults["actuation_repeat_ms"] == 100
     assert defaults["actuation_min_speed"] == pytest.approx(0.5)
@@ -397,8 +397,8 @@ def test_live_infer_defaults_match_best_live_profile():
     assert config_defaults["bad_window_max_masked_channels"] == 1
     assert config_defaults["serial_port"] is None
     assert config_defaults["serial_baud"] == 9600
-    assert config_defaults["actuation_min_prob"] == pytest.approx(0.0)
-    assert config_defaults["actuation_stability"] == 1
+    assert config_defaults["actuation_min_prob"] == pytest.approx(0.2)
+    assert config_defaults["actuation_stability"] == 2
     assert config_defaults["actuation_cooldown_ms"] == 0
     assert config_defaults["actuation_repeat_ms"] == 100
     assert config_defaults["actuation_min_speed"] == pytest.approx(0.5)

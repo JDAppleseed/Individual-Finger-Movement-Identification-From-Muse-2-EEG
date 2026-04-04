@@ -3582,17 +3582,18 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(box)
         note = QLabel(
             "Live inference runs in 7_live_infer_and_actuate.py. "
+            "The UI writes the selected subject's Step 7 config, then launches the same "
+            "runner and session-dir path used from the terminal. "
             "When a session (or subject/project) is selected, the latest trained run "
-            "is auto-resolved; model/scaler fields act as explicit overrides. "
+            "is auto-resolved unless you provide explicit model/scaler overrides. "
             "Outputs default to processed/live_infer and auto-version if the folder exists. "
             "Disable file outputs to run inference-only for max performance. "
-            "Device=auto prefers CPU on Apple silicon for lower single-window latency. "
+            "Saved subject Step 7 settings are reloaded into this form when you change subjects. "
             "Use the inference subject dropdown to target a different subject for Step 7. "
             "Actuation is opt-in and requires confirmation before running. "
-            "Enable the MC-dropout inference engine to use uncertainty-aware mean probabilities "
-            "and adaptive actuation gating from utils/inference.py. "
             "Saved run-specific temperature scaling is auto-loaded and applied before softmax. "
-            "Actuation speed is confidence-modulated by default unless you disable it."
+            "The Stream Setup page remains the source of truth for a selected live LSL stream; "
+            "the Step 7 stream fields stay synced for manual overrides."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -4169,6 +4170,16 @@ class MainWindow(QMainWindow):
             )
             self._add_text(step_id, form, "stream_name", "Stream name", defaults)
             self._add_text(step_id, form, "stream_type", "Stream type", defaults)
+            infer_stream_name_widget = self.fields[step_id].get("stream_name")
+            if isinstance(infer_stream_name_widget, QLineEdit):
+                infer_stream_name_widget.textChanged.connect(
+                    self._on_infer_stream_name_changed
+                )
+            infer_stream_type_widget = self.fields[step_id].get("stream_type")
+            if isinstance(infer_stream_type_widget, QLineEdit):
+                infer_stream_type_widget.textChanged.connect(
+                    self._on_infer_stream_type_changed
+                )
             self._add_spin(
                 step_id,
                 form,
@@ -6014,6 +6025,7 @@ class MainWindow(QMainWindow):
         if not self.current_project or not subject_id:
             return
         subject_dir = subject_root(self.current_project, subject_id)
+        self._load_saved_step_settings(subject_dir, "infer")
         session_dir = self._latest_session_for_subject(subject_id)
         run_dir = resolve_latest_run_dir(session_dir) if session_dir else None
         if not run_dir:
@@ -6044,8 +6056,96 @@ class MainWindow(QMainWindow):
             self._ensure_default_configs(subject_dir)
         self._auto_select_latest_session_for_subject()
         self._auto_fill_paths()
+        if self.current_project:
+            subject_dir = subject_root(self.current_project, subject_id)
+            self._load_saved_step_settings(subject_dir, "infer")
+            self._load_saved_step_settings(subject_dir, "live_review")
         self._seed_stream_name_input()
         self._refresh_export_controls()
+
+    def _set_widget_value(self, widget: QWidget, value: Any) -> None:
+        if isinstance(widget, QCheckBox):
+            widget.blockSignals(True)
+            widget.setChecked(bool(value))
+            widget.blockSignals(False)
+            return
+        if isinstance(widget, FloatSlider):
+            widget.blockSignals(True)
+            widget.setValue(float(value or 0.0))
+            widget.blockSignals(False)
+            return
+        if isinstance(widget, QDoubleSpinBox):
+            widget.blockSignals(True)
+            widget.setValue(float(value or 0.0))
+            widget.blockSignals(False)
+            return
+        if isinstance(widget, QSpinBox):
+            widget.blockSignals(True)
+            widget.setValue(int(value or 0))
+            widget.blockSignals(False)
+            return
+        if isinstance(widget, QLineEdit):
+            widget.blockSignals(True)
+            widget.setText("" if value is None else str(value))
+            widget.blockSignals(False)
+            return
+        if isinstance(widget, QTextEdit):
+            widget.blockSignals(True)
+            widget.setPlainText("" if value is None else str(value))
+            widget.blockSignals(False)
+            return
+        if isinstance(widget, QComboBox):
+            text_val = "" if value is None else str(value)
+            widget.blockSignals(True)
+            if text_val and widget.findText(text_val) < 0:
+                widget.addItem(text_val)
+            widget.setCurrentText(text_val)
+            widget.blockSignals(False)
+
+    def _load_saved_step_settings(self, subject_dir: Path, step_id: str) -> None:
+        path = subject_dir / "config" / f"{step_id}.json"
+        if not path.exists():
+            return
+        try:
+            payload = json.loads(path.read_text())
+        except Exception as exc:
+            self._append_log(f"⚠️ Failed to load saved {step_id} config: {exc}")
+            return
+        settings = payload.get("settings")
+        if not isinstance(settings, dict):
+            return
+        defaults = self.defaults.get(step_id)
+        if isinstance(defaults, dict):
+            defaults.update(settings)
+        for key, widget in self.fields.get(step_id, {}).items():
+            if key not in settings:
+                continue
+            self._set_widget_value(widget, settings.get(key))
+        if step_id == "infer":
+            saved_stream_name = str(settings.get("stream_name") or "").strip()
+            saved_stream_type = str(settings.get("stream_type") or "").strip()
+            if saved_stream_name:
+                self.live_stream_name = saved_stream_name
+                self._set_connector_stream(saved_stream_name)
+                if getattr(self, "stream_name_input", None):
+                    current = self.stream_name_input.text().strip()
+                    if not current or current == self._default_stream_name():
+                        self._sync_line_edit(self.stream_name_input, saved_stream_name)
+            if saved_stream_type:
+                self.live_stream_type = saved_stream_type
+            self._sync_infer_inference_engine_controls()
+            self._sync_infer_actuation_controls()
+
+    def _clear_live_lsl_source_id(self, *, reason: Optional[str] = None) -> None:
+        if not getattr(self, "live_lsl_source_id", None):
+            return
+        self.live_lsl_source_id = None
+        try:
+            os.environ.pop("LSL_SOURCE_ID", None)
+        except Exception:
+            pass
+        if reason:
+            self._append_log(f"[connector] cleared LSL_SOURCE_ID ({reason})")
 
     def _edit_subject(self) -> None:
         if not self.current_project:
@@ -6877,11 +6977,29 @@ class MainWindow(QMainWindow):
     def _on_lsl_stream_changed(self, _text: str) -> None:
         name = self._selected_stream_name()
         stype = self._selected_stream_type()
+        prev_name = self.live_stream_name
+        prev_type = self.live_stream_type
+        if getattr(self, "live_lsl_source_id", None) and (
+            (name and name != prev_name) or (stype and stype != prev_type)
+        ):
+            self._clear_live_lsl_source_id(reason="selected LSL stream changed")
         if name:
             self.live_stream_name = name
             self._set_connector_stream(name)
+            self._maybe_autofill_text(
+                self.fields.get("infer", {}).get("stream_name"),
+                name,
+                key="infer.stream_name",
+                legacy_values={"", DEFAULT_STREAM_NAME, self._default_stream_name()},
+            )
         if stype:
             self.live_stream_type = stype
+            self._maybe_autofill_text(
+                self.fields.get("infer", {}).get("stream_type"),
+                stype,
+                key="infer.stream_type",
+                legacy_values={"", DEFAULT_STREAM_TYPE},
+            )
         if self._auto_scan_active and name:
             self._stop_auto_scan()
             if self._auto_scan_wants_healthcheck:
@@ -6891,8 +7009,37 @@ class MainWindow(QMainWindow):
     def _on_stream_name_input(self, text: str) -> None:
         cleaned = text.strip()
         if cleaned:
+            if (
+                getattr(self, "live_lsl_source_id", None)
+                and cleaned != self.live_stream_name
+            ):
+                self._clear_live_lsl_source_id(reason="connector stream name changed")
             self.live_stream_name = cleaned
             self._set_connector_stream(cleaned)
+            self._maybe_autofill_text(
+                self.fields.get("infer", {}).get("stream_name"),
+                cleaned,
+                key="infer.stream_name",
+                legacy_values={"", DEFAULT_STREAM_NAME, self._default_stream_name()},
+            )
+
+    def _on_infer_stream_name_changed(self, text: str) -> None:
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        if getattr(self, "live_lsl_source_id", None) and cleaned != self.live_stream_name:
+            self._clear_live_lsl_source_id(reason="Step 7 stream name changed")
+        self.live_stream_name = cleaned
+        self._set_connector_stream(cleaned)
+        if getattr(self, "stream_name_input", None):
+            current = self.stream_name_input.text().strip()
+            if not current or current == self._default_stream_name():
+                self._sync_line_edit(self.stream_name_input, cleaned)
+
+    def _on_infer_stream_type_changed(self, text: str) -> None:
+        cleaned = text.strip()
+        if cleaned:
+            self.live_stream_type = cleaned
 
     def _default_stream_name(self) -> str:
         if self.current_subject:
@@ -6908,6 +7055,12 @@ class MainWindow(QMainWindow):
         self.stream_name_input.setText(seeded)
         self.live_stream_name = seeded
         self._set_connector_stream(seeded)
+        self._maybe_autofill_text(
+            self.fields.get("infer", {}).get("stream_name"),
+            seeded,
+            key="infer.stream_name",
+            legacy_values={"", DEFAULT_STREAM_NAME},
+        )
 
     def _effective_stream_name(self) -> str:
         if getattr(self, "stream_name_input", None):
@@ -7881,26 +8034,10 @@ class MainWindow(QMainWindow):
     def _reset_step(self, step_id: str) -> None:
         defaults = self.defaults.get(step_id, {})
         for key, widget in self.fields.get(step_id, {}).items():
-            val = defaults.get(key)
-            if isinstance(widget, QCheckBox):
-                widget.setChecked(bool(val))
-            elif isinstance(widget, FloatSlider):
-                widget.setValue(float(val or 0.0))
-            elif isinstance(widget, QDoubleSpinBox):
-                widget.setValue(float(val or 0.0))
-            elif isinstance(widget, QSpinBox):
-                widget.setValue(int(val or 0))
-            elif isinstance(widget, QLineEdit):
-                widget.setText("" if val is None else str(val))
-            elif isinstance(widget, QTextEdit):
-                widget.setPlainText("" if val is None else str(val))
-            elif isinstance(widget, QComboBox):
-                text_val = "" if val is None else str(val)
-                if widget.findText(text_val) < 0:
-                    widget.addItem(text_val)
-                widget.setCurrentText(text_val)
+            self._set_widget_value(widget, defaults.get(key))
         if step_id == "infer":
             self._sync_infer_inference_engine_controls()
+            self._sync_infer_actuation_controls()
 
     def _stop_process(self) -> None:
         runner_pid = self.runner.process_id() if self.runner.is_running() else 0
@@ -7952,6 +8089,7 @@ class MainWindow(QMainWindow):
         self.live_stream_ready = False
         self.live_label_acknowledged = False
         self.live_label_details = {}
+        self._clear_live_lsl_source_id(reason="starting connector")
         self._set_connector_status("scanning")
         labels, rate, _ = self._current_live_config()
         stream_name = self._effective_stream_name()
@@ -7984,6 +8122,7 @@ class MainWindow(QMainWindow):
             self._append_log("Disconnecting Muse connector...")
             self.muse_connector.stop_staged()
         self.live_stream_ready = False
+        self._clear_live_lsl_source_id(reason="connector stopped")
         self._stop_auto_scan()
         self._set_live_buttons_state()
 
@@ -8025,6 +8164,12 @@ class MainWindow(QMainWindow):
             return
         self.live_stream_name = stream_name
         self._set_connector_stream(stream_name)
+        self._maybe_autofill_text(
+            self.fields.get("infer", {}).get("stream_name"),
+            stream_name,
+            key="infer.stream_name",
+            legacy_values={"", DEFAULT_STREAM_NAME, self._default_stream_name()},
+        )
         if getattr(self, "stream_name_input", None) and not self.stream_name_input.text().strip():
             self.stream_name_input.setText(stream_name)
 
@@ -8126,6 +8271,7 @@ class MainWindow(QMainWindow):
         else:
             self._set_connector_status("idle")
         self.live_stream_ready = False
+        self._clear_live_lsl_source_id(reason="connector process exited")
         self._stop_auto_scan()
         self._set_live_buttons_state()
         self._stop_waiting_connector = False

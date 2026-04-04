@@ -848,9 +848,16 @@ def _compute_batch_losses(
     loss_action_weight: float,
     rest_finger_loss_weight: float,
     applicability_loss_weight: float,
-    active_finger_head: bool,
-    finger_loss_ignore_index: Optional[int],
+    active_finger_head: Optional[bool] = None,
+    finger_loss_ignore_index: Optional[int] = None,
+    n_finger_classes: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if active_finger_head is None:
+        if n_finger_classes is None:
+            active_finger_head = False
+        else:
+            active_finger_head = bool(uses_active_finger_head(int(n_finger_classes)))
+
     loss_action = action_loss_fn(action_logits, y_action)
     zero = torch.zeros((), device=action_logits.device, dtype=loss_action.dtype)
 

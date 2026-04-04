@@ -204,6 +204,10 @@ Labeling constraint:
 Preferred (auto-resolve latest model/scaler from the session directory):
 
 ```bash
+python tools/live_preflight.py \
+  --config Projects/<project>/subjects/<subject>/config/infer.json \
+  --session-dir <session_dir>
+
 python 7_live_infer_and_actuate.py \
   --config Projects/<project>/subjects/<subject>/config/infer.json \
   --session-dir <session_dir>
@@ -236,8 +240,9 @@ Notes:
 - When `--enable_actuation` is set and `--serial_port` is omitted, Step 7 auto-detects a likely USB serial Arduino port (for example `/dev/cu.usbmodem*` on macOS).
 - Pass `--serial_port` explicitly if multiple candidate serial devices are attached or auto-detection is ambiguous.
 - Actuation is safety-gated; REST/NONE never actuate.
-- Current live defaults enable postprocessing with EMA smoothing (`smoothing_window=5`), `finger_mode=raw`, `threshold_action=0.05`, `threshold_finger=0.20`, `threshold_applicability=0.40`, and no hysteresis.
-- Current actuation defaults use `actuation_min_prob=0.20`, `actuation_stability=3`, and `actuation_cooldown_ms=250`.
+- Current live defaults use raw committed predictions with `postprocess=false`, `smoothing_enabled=false`, `finger_mode=raw`, `threshold_action=0.0`, `threshold_finger=0.0`, and `threshold_applicability=0.0`.
+- Current actuation defaults use `actuation_min_prob=0.20`, `actuation_stability=2`, `actuation_repeat_ms=100`, and `actuation_cooldown_ms=0`.
+- Current live-quality defaults are enabled: `input_clip_abs_z=6.0`, `bad_channel_rms_z=4.0`, `bad_channel_abs_p95_z=6.0`, `bad_channel_clipped_frac=0.05`, `bad_window_clipped_frac=0.10`, and `bad_window_max_masked_channels=1`.
 - Step 7 logs prediction latency by default in `predictions.jsonl`; actuation events now also record `actuation_sent`, `actuation_latency_ms`, `actuation_speed_scalar`, `finger_applicable_prob`, and `applicability_gate_ok`.
 - Raw shards and prediction logs are preserved by default. They are only disabled when `no_file_io` is set to `true`.
 - Optional MC-dropout backend: set `use_inference_engine: true` in the infer config to route Step 7 through `utils/inference.py`. Relevant keys are `mc_passes`, `uncertainty_base_threshold`, and `uncertainty_weight`.

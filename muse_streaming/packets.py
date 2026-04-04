@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 from typing import Optional
 
 import numpy as np
 
 
-@dataclass(frozen=True, slots=True)
+_DATACLASS_KWARGS = {"frozen": True}
+if sys.version_info >= (3, 10):
+    _DATACLASS_KWARGS["slots"] = True
+
+
+@dataclass(**_DATACLASS_KWARGS)
 class SamplePacket:
     seq: int
     lsl_ts_raw: float
