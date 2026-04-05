@@ -106,8 +106,18 @@ def _mc_predict(
         "action_mean": action_mean,
         "finger_std": finger_std,
         "action_std": action_std,
+        "finger_logits_mean": finger_logits.reshape(passes, batch_size, -1).mean(dim=0),
+        "action_logits_mean": action_logits.reshape(passes, batch_size, -1).mean(dim=0),
     }
     if applicability_logits is not None:
+        if applicability_logits.ndim == 1:
+            result["applicability_logits_mean"] = applicability_logits.reshape(
+                passes, batch_size
+            ).mean(dim=0)
+        else:
+            result["applicability_logits_mean"] = applicability_logits.reshape(
+                passes, batch_size, -1
+            ).mean(dim=0)
         applicability_probs = torch.sigmoid(applicability_logits)
         if applicability_probs.ndim == 1:
             applicability_probs = applicability_probs.reshape(passes, batch_size)
@@ -262,6 +272,66 @@ class InferenceEngine:
             )
         return finger_probs, action_probs, applicability_probs
 
+    def forward_trace(
+        self, x_BTC: torch.Tensor
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        Optional[torch.Tensor],
+        torch.Tensor,
+        torch.Tensor,
+        Optional[torch.Tensor],
+    ]:
+        if self.model is None:
+            raise RuntimeError("forward_trace requires a loaded model.")
+        with torch.inference_mode():
+            (
+                finger_logits,
+                action_logits,
+                applicability_logits,
+            ) = unpack_model_outputs(self.model(x_BTC))
+            finger_logits = apply_temperature_to_logits(
+                finger_logits,
+                self.temperature_state.finger_temperature
+                if self.temperature_state is not None
+                else 1.0,
+            )
+            action_logits = apply_temperature_to_logits(
+                action_logits,
+                self.temperature_state.action_temperature
+                if self.temperature_state is not None
+                else 1.0,
+            )
+            if applicability_logits is not None:
+                applicability_logits = apply_temperature_to_logits(
+                    applicability_logits,
+                    self.temperature_state.applicability_temperature
+                    if self.temperature_state is not None
+                    else 1.0,
+                )
+            if self.logit_bias_state is not None:
+                finger_logits = apply_logit_bias(
+                    finger_logits, self.logit_bias_state.finger_bias
+                )
+                action_logits = apply_logit_bias(
+                    action_logits, self.logit_bias_state.action_bias
+                )
+            finger_probs = torch.softmax(finger_logits, dim=1)
+            action_probs = torch.softmax(action_logits, dim=1)
+            applicability_probs = (
+                torch.sigmoid(applicability_logits)
+                if applicability_logits is not None
+                else None
+            )
+        return (
+            finger_logits,
+            action_logits,
+            applicability_logits,
+            finger_probs,
+            action_probs,
+            applicability_probs,
+        )
+
     def predict_proba(
         self, window_TxC: np.ndarray, *, normalized: bool = False
     ) -> Tuple[
@@ -282,16 +352,30 @@ class InferenceEngine:
         if passes <= 1:
             was_training = self.model.training
             self.model.eval()
-            finger_probs, action_probs, applicability_probs = self.forward_probabilities(x)
+            (
+                finger_logits_t,
+                action_logits_t,
+                applicability_logits_t,
+                finger_probs,
+                action_probs,
+                applicability_probs,
+            ) = self.forward_trace(x)
             if was_training:
                 self.model.train()
             action_mean = action_probs.squeeze(0).detach().cpu().numpy()
             finger_mean = finger_probs.squeeze(0).detach().cpu().numpy()
+            action_logits = action_logits_t.squeeze(0).detach().cpu().numpy()
+            finger_logits = finger_logits_t.squeeze(0).detach().cpu().numpy()
             action_std = np.zeros_like(action_mean)
             finger_std = np.zeros_like(finger_mean)
             applicability_mean = (
                 applicability_probs.squeeze(0).detach().cpu().numpy()
                 if applicability_probs is not None
+                else None
+            )
+            applicability_logits = (
+                applicability_logits_t.squeeze(0).detach().cpu().numpy()
+                if applicability_logits_t is not None
                 else None
             )
             applicability_std = (
@@ -309,11 +393,26 @@ class InferenceEngine:
             )
             action_mean = mc["action_mean"].squeeze(0).detach().cpu().numpy()
             finger_mean = mc["finger_mean"].squeeze(0).detach().cpu().numpy()
+            action_logits = (
+                mc["action_logits_mean"].squeeze(0).detach().cpu().numpy()
+                if "action_logits_mean" in mc
+                else None
+            )
+            finger_logits = (
+                mc["finger_logits_mean"].squeeze(0).detach().cpu().numpy()
+                if "finger_logits_mean" in mc
+                else None
+            )
             action_std = mc["action_std"].squeeze(0).detach().cpu().numpy()
             finger_std = mc["finger_std"].squeeze(0).detach().cpu().numpy()
             applicability_mean = (
                 mc["applicability_mean"].squeeze(0).detach().cpu().numpy()
                 if "applicability_mean" in mc
+                else None
+            )
+            applicability_logits = (
+                mc["applicability_logits_mean"].squeeze(0).detach().cpu().numpy()
+                if "applicability_logits_mean" in mc
                 else None
             )
             applicability_std = (
@@ -335,6 +434,13 @@ class InferenceEngine:
             "finger_applicable_prob": (
                 float(np.asarray(applicability_mean).reshape(-1)[0])
                 if applicability_mean is not None
+                else None
+            ),
+            "action_logits": action_logits.tolist() if action_logits is not None else None,
+            "finger_logits": finger_logits.tolist() if finger_logits is not None else None,
+            "applicability_logit": (
+                float(np.asarray(applicability_logits).reshape(-1)[0])
+                if applicability_logits is not None
                 else None
             ),
             "applicability_uncertainty": applicability_uncertainty,

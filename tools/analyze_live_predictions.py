@@ -454,6 +454,9 @@ def summarize_records(
             sum(bool(row.get("window_quality_bad")) for row in rows)
         ),
         "quality_bad_reason_counts": dict(quality_bad_reason_counts),
+        "alignment_interpolated_count": int(
+            sum(bool(row.get("alignment_interpolated", False)) for row in valid_rows)
+        ),
         "masked_window_count": int(
             sum(bool(row.get("masked_channel_ids")) for row in rows)
         ),

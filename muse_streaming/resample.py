@@ -13,6 +13,8 @@ class AlignmentReport:
     window_size: int
     max_gap_s: Optional[float]
     monotonic: bool
+    start_gap_s: Optional[float] = None
+    end_gap_s: Optional[float] = None
 
 
 def resample_window(
@@ -44,25 +46,47 @@ def verify_alignment(
     end_s: float,
     target_fs: float,
     max_gap_s: float,
+    max_edge_gap_s: Optional[float] = None,
 ) -> AlignmentReport:
     if times.size < 2:
-        return AlignmentReport(False, "insufficient_samples", 0, None, False)
+        return AlignmentReport(False, "insufficient_samples", 0, None, False, None, None)
     diffs = np.diff(times)
     monotonic = bool(np.all(diffs > 0))
     max_gap = float(np.max(diffs)) if diffs.size else None
     expected = int(round((end_s - start_s) * target_fs))
     if not monotonic:
-        return AlignmentReport(False, "non_monotonic", expected, max_gap, monotonic)
+        return AlignmentReport(False, "non_monotonic", expected, max_gap, monotonic, None, None)
+    edge_gap_s = float(max_gap_s if max_edge_gap_s is None else max_edge_gap_s)
     start_gap = max(0.0, float(times[0]) - float(start_s))
-    if start_gap > max_gap_s:
+    if start_gap > edge_gap_s:
         return AlignmentReport(
-            False, "start_gap_exceeds_threshold", expected, max_gap, monotonic
+            False,
+            "start_gap_exceeds_threshold",
+            expected,
+            max_gap,
+            monotonic,
+            start_gap,
+            max(0.0, float(end_s) - float(times[-1])),
         )
     end_gap = max(0.0, float(end_s) - float(times[-1]))
-    if end_gap > max_gap_s:
+    if end_gap > edge_gap_s:
         return AlignmentReport(
-            False, "end_gap_exceeds_threshold", expected, max_gap, monotonic
+            False,
+            "end_gap_exceeds_threshold",
+            expected,
+            max_gap,
+            monotonic,
+            start_gap,
+            end_gap,
         )
     if max_gap is not None and max_gap > max_gap_s:
-        return AlignmentReport(False, "gap_exceeds_threshold", expected, max_gap, monotonic)
-    return AlignmentReport(True, None, expected, max_gap, monotonic)
+        return AlignmentReport(
+            False,
+            "gap_exceeds_threshold",
+            expected,
+            max_gap,
+            monotonic,
+            start_gap,
+            end_gap,
+        )
+    return AlignmentReport(True, None, expected, max_gap, monotonic, start_gap, end_gap)

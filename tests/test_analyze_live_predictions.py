@@ -69,6 +69,7 @@ def test_build_segments_and_summary():
             "latency_ms": 84.0,
             "window_quality_bad": False,
             "masked_channel_ids": [1],
+            "alignment_interpolated": True,
         },
         {
             "window_start_s": 0.15,
@@ -113,6 +114,7 @@ def test_build_segments_and_summary():
     assert summary["actuation_sent_count"] == 1
     assert summary["window_quality_bad_count"] == 1
     assert summary["quality_bad_reason_counts"]["too_many_bad_channels"] == 1
+    assert summary["alignment_interpolated_count"] == 1
     assert summary["masked_window_count"] == 2
     assert summary["masked_channel_counts"]["1"] == 2
     assert summary["committed_non_rest_none_count"] == 0

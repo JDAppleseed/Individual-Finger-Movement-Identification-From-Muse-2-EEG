@@ -139,6 +139,8 @@ class CNNLSTMFingerActionNet(nn.Module):
             "action_mean": action_mean,
             "finger_std": finger_std,
             "action_std": action_std,
+            "finger_logits_mean": f_logits.reshape(passes, batch_size, -1).mean(dim=0),
+            "action_logits_mean": a_logits.reshape(passes, batch_size, -1).mean(dim=0),
             "finger_entropy": finger_entropy,
             "action_entropy": action_entropy,
             "finger_mi": finger_mi,
@@ -146,6 +148,12 @@ class CNNLSTMFingerActionNet(nn.Module):
         }
         if app_logits is not None:
             applicability_stack = torch.sigmoid(app_logits)
+            if app_logits.ndim == 1:
+                result["applicability_logits_mean"] = app_logits.reshape(passes, batch_size).mean(dim=0)
+            else:
+                result["applicability_logits_mean"] = app_logits.reshape(
+                    passes, batch_size, -1
+                ).mean(dim=0)
             if applicability_stack.ndim == 1:
                 applicability_stack = applicability_stack.reshape(passes, batch_size)
             else:

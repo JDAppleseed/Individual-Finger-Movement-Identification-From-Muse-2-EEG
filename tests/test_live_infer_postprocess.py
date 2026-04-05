@@ -730,15 +730,19 @@ def test_resolve_lsl_inlet_retries_and_prefers_source_id(monkeypatch):
     monkeypatch.setattr(mod, "StreamInlet", _FakeInlet)
     monkeypatch.setattr(mod.time, "sleep", lambda *_args, **_kwargs: None)
 
-    inlet = mod._resolve_lsl_inlet(
+    resolved = mod._resolve_lsl_inlet(
         "Muse2-EEG-2-M16",
         "EEG",
         timeout_s=1.0,
-        source_id="wanted",
+        cli_source_id="wanted",
+        env_source_id=None,
+        config_source_id=None,
     )
 
-    assert isinstance(inlet, _FakeInlet)
-    assert inlet.info_obj.source_id() == "wanted"
+    assert isinstance(resolved.inlet, _FakeInlet)
+    assert resolved.inlet.info_obj.source_id() == "wanted"
+    assert resolved.resolution["source_id_source"] == "cli"
+    assert resolved.resolution["selection_matched_by_source_id"] is True
     assert calls["count"] >= 3
 
 
@@ -810,9 +814,11 @@ def test_main_uses_config_model_override_with_session_dir(tmp_path, monkeypatch)
     (session_dir / "processed").mkdir(parents=True)
     model_path = tmp_path / "trained" / "finger_action_model.pt"
     scaler_path = tmp_path / "trained" / "scaler.npz"
+    temperature_path = tmp_path / "trained" / "temperature_scaling.json"
     model_path.parent.mkdir(parents=True)
     model_path.write_bytes(b"model")
     scaler_path.write_bytes(b"scaler")
+    temperature_path.write_text("{}")
     config_path = tmp_path / "infer.json"
     config_path.write_text(
         json.dumps(
@@ -827,6 +833,7 @@ def test_main_uses_config_model_override_with_session_dir(tmp_path, monkeypatch)
                     "stream_name": "Muse2-EEG-2-M16",
                     "stream_type": "EEG",
                     "no_file_io": True,
+                    "parity_capture_enabled": False,
                 },
             }
         )
@@ -882,8 +889,10 @@ def test_main_falls_back_to_latest_trained_sibling_session(tmp_path, monkeypatch
     trained_run.mkdir(parents=True)
     model_path = trained_run / "finger_action_model.pt"
     scaler_path = trained_run / "scaler.npz"
+    temperature_path = trained_run / "temperature_scaling.json"
     model_path.write_bytes(b"model")
     scaler_path.write_bytes(b"scaler")
+    temperature_path.write_text("{}")
     config_path = repo_root / "Projects" / "P" / "subjects" / "S" / "config" / "infer.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
@@ -897,6 +906,7 @@ def test_main_falls_back_to_latest_trained_sibling_session(tmp_path, monkeypatch
                     "stream_name": "Muse2-EEG-S",
                     "stream_type": "EEG",
                     "no_file_io": True,
+                    "parity_capture_enabled": False,
                 },
             }
         )

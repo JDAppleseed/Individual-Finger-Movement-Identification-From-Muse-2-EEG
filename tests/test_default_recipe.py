@@ -61,8 +61,21 @@ def test_config_templates_match_canonical_recipe():
 
     infer = default_infer_settings()
     assert infer["deployment_session_dir"] is None
+    assert infer["session_dir"] is None
+    assert infer["out_dir"] is None
+    assert infer["lsl_source_id"] is None
+    assert infer["LSL_RESOLVE_TIMEOUT"] == 25.0
+    assert infer["REQUIRED_LSL_LABELS"] == ["TP9", "AF7", "AF8", "TP10"]
+    assert infer["REQUIRE_EXACTLY_4_CHANNELS"] is True
+    assert infer["parity_capture_enabled"] is True
+    assert infer["parity_capture_max_windows"] == 64
+    assert infer["parity_capture_flush_every"] == 8
     assert infer["window_sec"] == LIVE_INFER_RECIPE_DEFAULTS["window_sec"]
     assert infer["hop_sec"] == LIVE_INFER_RECIPE_DEFAULTS["hop_sec"]
+    assert (
+        infer["alignment_internal_max_gap_s"]
+        == LIVE_INFER_RECIPE_DEFAULTS["alignment_internal_max_gap_s"]
+    )
     assert infer["threshold_action"] == LIVE_INFER_RECIPE_DEFAULTS["threshold_action"]
     assert infer["threshold_finger"] == LIVE_INFER_RECIPE_DEFAULTS["threshold_finger"]
     assert (

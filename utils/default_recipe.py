@@ -104,6 +104,7 @@ LIVE_INFER_RECIPE_DEFAULTS: Dict[str, Any] = {
     "window_sec": float(WINDOW_EXTRACTION_DEFAULTS["window_sec"]),
     "hop_sec": float(WINDOW_EXTRACTION_DEFAULTS["step_sec"]),
     "target_fs": float(WINDOW_EXTRACTION_DEFAULTS["target_fs"]),
+    "alignment_internal_max_gap_s": 0.06,
     "latency_threshold_ms": 750.0,
     "latency_policy": "warn",
     "allow_drop": False,
@@ -147,6 +148,9 @@ LIVE_INFER_RECIPE_DEFAULTS: Dict[str, Any] = {
     "mc_passes": 10,
     "uncertainty_base_threshold": 0.75,
     "uncertainty_weight": 0.5,
+    "parity_capture_enabled": True,
+    "parity_capture_max_windows": 64,
+    "parity_capture_flush_every": 8,
 }
 
 PSEUDO_LIVE_RECIPE_DEFAULTS: Dict[str, Any] = {

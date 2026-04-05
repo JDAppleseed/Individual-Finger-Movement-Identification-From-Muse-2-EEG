@@ -192,6 +192,25 @@ def load_model_artifacts(
     run_dir = Path(run_dir).expanduser().resolve()
     model_path = run_dir / "finger_action_model.pt"
     scaler_path = run_dir / "scaler.npz"
+    return load_model_artifacts_from_files(
+        model_path=model_path,
+        scaler_path=scaler_path,
+        device=device,
+        n_channels=n_channels,
+        temperature_path=resolve_temperature_path(run_dir),
+    )
+
+
+def load_model_artifacts_from_files(
+    *,
+    model_path: Path,
+    scaler_path: Path,
+    device: torch.device,
+    n_channels: int,
+    temperature_path: Path | None = None,
+) -> tuple[CNNLSTMFingerActionNet, Any, Optional[TemperatureScalingState]]:
+    model_path = Path(model_path).expanduser().resolve()
+    scaler_path = Path(scaler_path).expanduser().resolve()
     if not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
     if not scaler_path.exists():
@@ -215,7 +234,12 @@ def load_model_artifacts(
     model.to(device)
     model.eval()
 
-    temperature_state = load_temperature_scaling(resolve_temperature_path(run_dir))
+    resolved_temperature_path = (
+        Path(temperature_path).expanduser().resolve()
+        if temperature_path is not None
+        else resolve_temperature_path(model_path.parent)
+    )
+    temperature_state = load_temperature_scaling(resolved_temperature_path)
     return model, normalizer, temperature_state
 
 
@@ -386,8 +410,20 @@ def predict_window(
                 model_window_f32,
                 normalized=model_window_is_normalized,
             )
-            finger_probs_t, action_probs_t, applicability_prob = (
-                direct_engine.forward_probabilities(x)
+            (
+                finger_logits_t,
+                action_logits_t,
+                applicability_logits_t,
+                finger_probs_t,
+                action_probs_t,
+                applicability_prob,
+            ) = direct_engine.forward_trace(x)
+            action_logits_t = action_logits_t.squeeze(0)
+            finger_logits_t = finger_logits_t.squeeze(0)
+            applicability_logits_t = (
+                applicability_logits_t.squeeze(0)
+                if applicability_logits_t is not None
+                else None
             )
             action_probs_t = action_probs_t.squeeze(0)
             finger_probs_t = finger_probs_t.squeeze(0)
@@ -433,10 +469,24 @@ def predict_window(
                     if applicability_logits is not None
                     else None
                 )
+                finger_logits_t = finger_logits.squeeze(0)
+                action_logits_t = action_logits.squeeze(0)
+                applicability_logits_t = (
+                    applicability_logits.squeeze(0)
+                    if applicability_logits is not None
+                    else None
+                )
         return {
             "backend": "direct",
             "action_probs": action_probs_t.detach().cpu().numpy(),
             "finger_probs": finger_probs_t.detach().cpu().numpy(),
+            "action_logits": action_logits_t.detach().cpu().numpy(),
+            "finger_logits": finger_logits_t.detach().cpu().numpy(),
+            "applicability_logit": (
+                float(applicability_logits_t.detach().cpu().reshape(-1)[0].item())
+                if applicability_logits_t is not None
+                else None
+            ),
             "finger_applicable_prob": (
                 float(applicability_prob.detach().cpu().item())
                 if applicability_prob is not None
@@ -476,6 +526,9 @@ def predict_window(
         "backend": "inference_engine",
         "action_probs": action_probs,
         "finger_probs": finger_probs,
+        "action_logits": diagnostics.get("action_logits"),
+        "finger_logits": diagnostics.get("finger_logits"),
+        "applicability_logit": diagnostics.get("applicability_logit"),
         "finger_applicable_prob": diagnostics.get("finger_applicable_prob"),
         "action_uncertainty": float(action_uncertainty),
         "finger_uncertainty": float(finger_uncertainty),
@@ -813,6 +866,18 @@ def replay_ordered_windows(
         )
         action_probs = np.asarray(inference_result["action_probs"], dtype=float)
         finger_probs = np.asarray(inference_result["finger_probs"], dtype=float)
+        action_logits = inference_result.get("action_logits")
+        finger_logits = inference_result.get("finger_logits")
+        action_logits_arr = (
+            np.asarray(action_logits, dtype=float)
+            if action_logits is not None
+            else None
+        )
+        finger_logits_arr = (
+            np.asarray(finger_logits, dtype=float)
+            if finger_logits is not None
+            else None
+        )
         finger_applicable_prob = inference_result.get("finger_applicable_prob")
         action_uncertainty = float(inference_result.get("action_uncertainty", 0.0) or 0.0)
         finger_uncertainty = float(inference_result.get("finger_uncertainty", 0.0) or 0.0)
@@ -958,6 +1023,13 @@ def replay_ordered_windows(
             "alignment_ok": True,
             "action_probs": action_probs.tolist(),
             "finger_probs": finger_probs.tolist(),
+            "action_logits": (
+                action_logits_arr.tolist() if action_logits_arr is not None else None
+            ),
+            "finger_logits": (
+                finger_logits_arr.tolist() if finger_logits_arr is not None else None
+            ),
+            "applicability_logit": inference_result.get("applicability_logit"),
             "raw_top_action_id": int(decision_info.get("raw_top_action_id", 0)),
             "raw_top_finger_id": int(decision_info.get("raw_top_finger_id", 0)),
             "smoothed_action_id": int(decision_info.get("smoothed_action_id", 0)),
@@ -984,6 +1056,7 @@ def replay_ordered_windows(
             "window_quality_bad": bool(quality.window_quality_bad),
             "quality_bad_reason": quality.quality_bad_reason,
             "masked_channel_ids": list(quality.masked_channel_ids),
+            "masked_channel_count": int(len(quality.masked_channel_ids)),
             "quality_bad_channel_ids": list(quality.bad_channel_ids),
             "channel_rms_z": quality.channel_rms_z.tolist(),
             "channel_abs_p95_z": quality.channel_abs_p95_z.tolist(),

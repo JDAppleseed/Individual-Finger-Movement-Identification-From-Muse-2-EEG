@@ -264,16 +264,25 @@ def default_topomap_settings() -> Dict[str, Any]:
 def default_infer_settings() -> Dict[str, Any]:
     return {
         "deployment_session_dir": None,
+        "session_dir": None,
         "model_path": f"models/{ARTIFACT_DEFAULTS['model']}",
         "scaler_path": str(ARTIFACT_DEFAULTS["scaler"]),
+        "out_dir": None,
         "device": "auto",
         "stream_name": "Muse2-EEG",
         "stream_type": "EEG",
+        "lsl_source_id": None,
+        "LSL_RESOLVE_TIMEOUT": 25.0,
+        "REQUIRED_LSL_LABELS": ["TP9", "AF7", "AF8", "TP10"],
+        "REQUIRE_EXACTLY_4_CHANNELS": True,
         "LIVE_VIZ_ENABLED": bool(LIVE_INFER_RECIPE_DEFAULTS["LIVE_VIZ_ENABLED"]),
         "LIVE_VIZ_FPS": int(LIVE_INFER_RECIPE_DEFAULTS["LIVE_VIZ_FPS"]),
         "window_sec": float(LIVE_INFER_RECIPE_DEFAULTS["window_sec"]),
         "hop_sec": float(LIVE_INFER_RECIPE_DEFAULTS["hop_sec"]),
         "target_fs": DEFAULT_TARGET_FS,
+        "alignment_internal_max_gap_s": float(
+            LIVE_INFER_RECIPE_DEFAULTS["alignment_internal_max_gap_s"]
+        ),
         "allow_drop": bool(LIVE_INFER_RECIPE_DEFAULTS["allow_drop"]),
         "latency_threshold_ms": float(LIVE_INFER_RECIPE_DEFAULTS["latency_threshold_ms"]),
         "latency_policy": str(LIVE_INFER_RECIPE_DEFAULTS["latency_policy"]),
@@ -331,6 +340,9 @@ def default_infer_settings() -> Dict[str, Any]:
             LIVE_INFER_RECIPE_DEFAULTS["uncertainty_base_threshold"]
         ),
         "uncertainty_weight": float(LIVE_INFER_RECIPE_DEFAULTS["uncertainty_weight"]),
+        "parity_capture_enabled": True,
+        "parity_capture_max_windows": 64,
+        "parity_capture_flush_every": 8,
         "pred_log": None,
     }
 

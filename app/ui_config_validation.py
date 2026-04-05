@@ -61,6 +61,27 @@ def _validate_unit_interval(
         errors.append(f"{key} must be in [0.0, 1.0].")
 
 
+def _validate_label_list(
+    settings: Dict[str, Any], key: str, errors: List[str]
+) -> None:
+    if key not in settings:
+        return
+    value = settings.get(key)
+    if value in (None, ""):
+        return
+    if isinstance(value, str):
+        labels = [part.strip() for part in value.split(",") if part.strip()]
+        if not labels:
+            errors.append(f"{key} must contain at least one non-empty label.")
+        return
+    if isinstance(value, (list, tuple)):
+        labels = [str(item).strip() for item in value if str(item).strip()]
+        if not labels:
+            errors.append(f"{key} must contain at least one non-empty label.")
+        return
+    errors.append(f"{key} must be a CSV string or a list of labels.")
+
+
 def validate_train_record(settings: Dict[str, Any]) -> ValidationResult:
     errors: List[str] = []
     warnings: List[str] = []
@@ -107,10 +128,20 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         "no_file_io",
         "live_quality_enabled",
         "rest_bias_correction_enabled",
+        "parity_capture_enabled",
+        "REQUIRE_EXACTLY_4_CHANNELS",
     ):
         _validate_bool(settings, key, errors)
 
-    for key in ("mc_passes", "serial_baud", "smoothing_window", "hysteresis_frames", "actuation_stability"):
+    for key in (
+        "mc_passes",
+        "serial_baud",
+        "smoothing_window",
+        "hysteresis_frames",
+        "actuation_stability",
+        "parity_capture_max_windows",
+        "parity_capture_flush_every",
+    ):
         _validate_int_min(settings, key, 1, errors)
     for key in ("actuation_cooldown_ms", "actuation_repeat_ms"):
         _validate_int_min(settings, key, 0, errors)
@@ -133,12 +164,14 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         "bad_channel_rms_z",
         "bad_channel_abs_p95_z",
         "rest_bias_strength",
+        "LSL_RESOLVE_TIMEOUT",
     ):
         _validate_float_min(settings, key, 0.0, errors)
     for key in ("bad_channel_clipped_frac", "bad_window_clipped_frac"):
         _validate_unit_interval(settings, key, errors)
     _validate_int_min(settings, "bad_window_max_masked_channels", 0, errors)
     _validate_int_min(settings, "rest_bias_min_windows", 1, errors)
+    _validate_label_list(settings, "REQUIRED_LSL_LABELS", errors)
 
     if "smoothing_method" in settings:
         value = str(settings.get("smoothing_method"))
@@ -150,8 +183,44 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
             errors.append("finger_mode must be 'raw' or 'smooth'.")
     if "latency_policy" in settings:
         value = str(settings.get("latency_policy"))
-        if value not in {"ignore", "warn", "enforce"}:
-            errors.append("latency_policy must be 'ignore', 'warn', or 'enforce'.")
+        if value == "enforce":
+            settings["latency_policy"] = "drop"
+            warnings.append(
+                "latency_policy='enforce' is legacy; using 'drop' for Step 7 compatibility."
+            )
+        elif value not in {"warn", "drop", "degrade"}:
+            errors.append("latency_policy must be 'warn', 'drop', or 'degrade'.")
+    if settings.get("no_file_io") and settings.get("parity_capture_enabled"):
+        errors.append(
+            "parity_capture_enabled cannot be true when no_file_io is enabled."
+        )
+    if (
+        not settings.get("session_dir")
+        and not (
+            settings.get("model_path")
+            and settings.get("scaler_path")
+            and settings.get("out_dir")
+        )
+    ):
+        warnings.append(
+            "Runtime requires session_dir or explicit model_path/scaler_path/out_dir unless Step 7 can infer the latest subject session from the config location or CLI overrides supply them."
+        )
+    if not settings.get("parity_capture_enabled"):
+        warnings.append(
+            "parity_capture_enabled is not enabled; accepted-window inference parity will remain unproven after the next live run."
+        )
+    if not settings.get("REQUIRED_LSL_LABELS"):
+        warnings.append(
+            "REQUIRED_LSL_LABELS is blank; wrong-stream detection will rely on name/type/rate/channel-count only."
+        )
+    if settings.get("REQUIRE_EXACTLY_4_CHANNELS") is False:
+        warnings.append(
+            "REQUIRE_EXACTLY_4_CHANNELS is false; runtime will accept non-4-channel streams."
+        )
+    if not str(settings.get("lsl_source_id") or "").strip():
+        warnings.append(
+            "lsl_source_id is blank in config. Pin the live stream identity via --lsl-source-id or the LSL_SOURCE_ID environment variable before launch."
+        )
 
     if settings.get("enable_actuation") and not str(settings.get("serial_port") or "").strip():
         warnings.append(

@@ -132,7 +132,46 @@ def test_live_infer_rejects_bad_live_quality_settings():
     assert any("rest_bias_correction_enabled must be a boolean." in err for err in result.errors)
     assert any("rest_bias_strength must be >= 0.0." in err for err in result.errors)
     assert any("rest_bias_min_windows must be >= 1." in err for err in result.errors)
-    assert any("latency_policy must be 'ignore', 'warn', or 'enforce'." in err for err in result.errors)
+    assert any("latency_policy must be 'warn', 'drop', or 'degrade'." in err for err in result.errors)
+
+
+def test_live_infer_maps_legacy_latency_policy_enforce_to_drop():
+    settings = {"latency_policy": "enforce"}
+    result = validate_step_settings("infer", settings)
+
+    assert result.ok is True
+    assert settings["latency_policy"] == "drop"
+    assert any("legacy" in warning and "drop" in warning for warning in result.warnings)
+
+
+def test_live_infer_rejects_parity_capture_when_no_file_io_is_enabled():
+    result = validate_step_settings(
+        "infer",
+        {
+            "no_file_io": True,
+            "parity_capture_enabled": True,
+        },
+    )
+
+    assert any(
+        "parity_capture_enabled cannot be true when no_file_io is enabled."
+        in err
+        for err in result.errors
+    )
+
+
+def test_live_infer_warns_when_stream_contract_is_relaxed():
+    settings = default_infer_settings()
+    settings["REQUIRE_EXACTLY_4_CHANNELS"] = False
+    settings["REQUIRED_LSL_LABELS"] = ""
+    settings["lsl_source_id"] = ""
+
+    result = validate_step_settings("infer", settings)
+
+    assert result.ok is True
+    assert any("non-4-channel streams" in warning for warning in result.warnings)
+    assert any("REQUIRED_LSL_LABELS is blank" in warning for warning in result.warnings)
+    assert any("lsl_source_id is blank" in warning for warning in result.warnings)
 
 
 def test_train_calibration_size_validation():

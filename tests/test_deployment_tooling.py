@@ -2,6 +2,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -256,6 +257,66 @@ def test_live_prediction_summary_includes_full_runtime_metrics(tmp_path: Path):
     shard["sample"][1] = np.asarray([np.nan, np.nan, np.nan, np.nan], dtype=np.float64)
     np.save(raw_dir / "eeg_raw_shard_000.npy", shard, allow_pickle=False)
 
+    window_audit_path = tmp_path / "window_audit.jsonl"
+    window_audit_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "candidate_index": 0,
+                        "status": "accepted",
+                        "masked_channel_count": 0,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "candidate_index": 1,
+                        "status": "accepted",
+                        "masked_channel_count": 1,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "candidate_index": 2,
+                        "status": "dropped",
+                        "drop_reason": "gap_exceeds_threshold",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+    segment_break_path = tmp_path / "segment_breaks.jsonl"
+    segment_break_path.write_text(
+        json.dumps({"reason": "stream_gap"}) + "\n",
+    )
+    runtime_manifest_path = tmp_path / "live_runtime_manifest.json"
+    runtime_manifest_path.write_text(
+        json.dumps(
+            {
+                "stream_resolution": {
+                    "requested_source_id": "fresh-id",
+                    "selected_source_id": "fresh-id",
+                    "source_id_source": "env",
+                    "selection_matched_by_source_id": True,
+                },
+                "stream_contract": {
+                    "expected_name": "Muse2-EEG",
+                    "expected_type": "EEG",
+                },
+                "artifacts": {
+                    "run_dir": str(tmp_path),
+                    "model_path": str(tmp_path / "finger_action_model.pt"),
+                    "model_sha256": "modelhash",
+                    "scaler_path": str(tmp_path / "scaler.npz"),
+                    "scaler_sha256": "scalerhash",
+                    "temperature_path": str(tmp_path / "temperature_scaling.json"),
+                    "temperature_sha256": "temphash",
+                },
+            }
+        )
+    )
+
     summary_path = tmp_path / "live_prediction_summary.json"
     mod._build_live_prediction_summary(
         pred_log_path=pred_log,
@@ -265,6 +326,11 @@ def test_live_prediction_summary_includes_full_runtime_metrics(tmp_path: Path):
         dropped_nonfinite_samples=4,
         dropped_nonfinite_windows=1,
         segment_break_count=0,
+        candidate_window_count=3,
+        accepted_window_count=2,
+        window_audit_path=window_audit_path,
+        segment_break_path=segment_break_path,
+        runtime_manifest_path=runtime_manifest_path,
     )
 
     summary = json.loads(summary_path.read_text())
@@ -280,4 +346,373 @@ def test_live_prediction_summary_includes_full_runtime_metrics(tmp_path: Path):
     assert summary["actuation_vote_reason_counts"]["exact_pair_stability"] == 1
     assert summary["actuation_suppressed_counts"]["pair_stability"] == 1
     assert summary["dropped_windows"] == 3
+    assert summary["candidate_window_count"] == 3
+    assert summary["accepted_window_count"] == 2
+    assert summary["dropped_window_reason_counts"]["gap_exceeds_threshold"] == 1
+    assert summary["segment_break_count"] == 1
+    assert summary["segment_break_reason_counts"]["stream_gap"] == 1
+    assert summary["stream_resolution"]["requested_source_id"] == "fresh-id"
+    assert summary["artifact_provenance"]["model_sha256"] == "modelhash"
+    assert summary["runtime_manifest_path"] == str(runtime_manifest_path)
+    assert "segment_break_count_vs_segment_break_log" in summary["reconciliation"]["mismatches"]
     assert summary["raw_channel_stats"]["flagged_nonfinite_rows"] == 1
+
+
+class _FakeDesc:
+    def __init__(self, labels: list[str], index: int = 0):
+        self._labels = labels
+        self._index = index
+
+    def child(self, name: str):
+        if name == "channels":
+            return self
+        if name == "channel":
+            return _FakeDesc(self._labels, 0)
+        return _FakeDesc([], 0)
+
+    def child_value(self, name: str) -> str:
+        if name == "label" and self._index < len(self._labels):
+            return str(self._labels[self._index])
+        return ""
+
+    def next_sibling(self):
+        return _FakeDesc(self._labels, self._index + 1)
+
+
+class _FakeStream:
+    def __init__(
+        self,
+        *,
+        name: str,
+        stream_type: str,
+        source_id: str,
+        uid: str,
+        labels: list[str],
+    ):
+        self._name = name
+        self._type = stream_type
+        self._source_id = source_id
+        self._uid = uid
+        self._labels = labels
+
+    def name(self) -> str:
+        return self._name
+
+    def type(self) -> str:
+        return self._type
+
+    def channel_count(self) -> int:
+        return len(self._labels)
+
+    def nominal_srate(self) -> float:
+        return 256.0
+
+    def source_id(self) -> str:
+        return self._source_id
+
+    def uid(self) -> str:
+        return self._uid
+
+    def desc(self):
+        return _FakeDesc(self._labels)
+
+
+class _FakeInlet:
+    def __init__(self, stream, max_chunklen: int = 64):
+        self._stream = stream
+
+    def info(self):
+        return self._stream
+
+    def pull_sample(self, timeout: float = 0.1):
+        return [0.1, 0.2, 0.3, 0.4], 1.234
+
+
+def test_step7_resolve_lsl_inlet_prefers_env_over_stale_config(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _load_module("7_live_infer_and_actuate.py", "live_lsl_resolution_env_test")
+    streams = [
+        _FakeStream(
+            name="Muse2-EEG",
+            stream_type="EEG",
+            source_id="stale-id",
+            uid="uid-stale",
+            labels=["TP9", "AF7", "AF8", "TP10"],
+        ),
+        _FakeStream(
+            name="Muse2-EEG",
+            stream_type="EEG",
+            source_id="fresh-id",
+            uid="uid-fresh",
+            labels=["TP9", "AF7", "AF8", "TP10"],
+        ),
+    ]
+    monkeypatch.setattr(mod, "LSL_AVAILABLE", True)
+    monkeypatch.setattr(mod, "resolve_streams", lambda wait_time=0.1: streams)
+    monkeypatch.setattr(mod, "resolve_byprop", None)
+    monkeypatch.setattr(mod, "StreamInlet", _FakeInlet)
+
+    resolved = mod._resolve_lsl_inlet(
+        "Muse2-EEG",
+        "EEG",
+        timeout_s=0.1,
+        cli_source_id=None,
+        env_source_id="fresh-id",
+        config_source_id="stale-id",
+    )
+
+    assert resolved.resolution["source_id_source"] == "env"
+    assert resolved.resolution["selected_source_id"] == "fresh-id"
+    assert resolved.resolution["selection_matched_by_source_id"] is True
+
+
+def test_step7_resolve_lsl_inlet_refuses_ambiguous_type_only_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _load_module("7_live_infer_and_actuate.py", "live_lsl_resolution_ambiguous_test")
+    streams = [
+        _FakeStream(
+            name="Muse-A",
+            stream_type="EEG",
+            source_id="fresh-a",
+            uid="uid-a",
+            labels=["TP9", "AF7", "AF8", "TP10"],
+        ),
+        _FakeStream(
+            name="Muse-B",
+            stream_type="EEG",
+            source_id="fresh-b",
+            uid="uid-b",
+            labels=["TP9", "AF7", "AF8", "TP10"],
+        ),
+    ]
+    monkeypatch.setattr(mod, "LSL_AVAILABLE", True)
+    monkeypatch.setattr(mod, "resolve_streams", lambda wait_time=0.1: streams)
+    monkeypatch.setattr(mod, "resolve_byprop", None)
+    monkeypatch.setattr(mod, "StreamInlet", _FakeInlet)
+    monkeypatch.setattr(mod.time, "sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError, match="ambiguous recovery"):
+        mod._resolve_lsl_inlet(
+            "Muse2-EEG",
+            "EEG",
+            timeout_s=0.1,
+            cli_source_id=None,
+            env_source_id="stale-id",
+            config_source_id=None,
+        )
+
+
+def test_step7_resolve_lsl_inlet_refuses_stale_single_candidate_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _load_module("7_live_infer_and_actuate.py", "live_lsl_resolution_stale_single_test")
+    streams = [
+        _FakeStream(
+            name="Muse-Only",
+            stream_type="EEG",
+            source_id="fresh-id",
+            uid="uid-fresh",
+            labels=["TP9", "AF7", "AF8", "TP10"],
+        ),
+    ]
+    monkeypatch.setattr(mod, "LSL_AVAILABLE", True)
+    monkeypatch.setattr(mod, "resolve_streams", lambda wait_time=0.1: streams)
+    monkeypatch.setattr(mod, "resolve_byprop", None)
+    monkeypatch.setattr(mod, "StreamInlet", _FakeInlet)
+    monkeypatch.setattr(mod.time, "sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError, match="refusing single-candidate recovery"):
+        mod._resolve_lsl_inlet(
+            "Muse2-EEG",
+            "EEG",
+            timeout_s=0.1,
+            cli_source_id=None,
+            env_source_id="stale-id",
+            config_source_id=None,
+        )
+
+
+def test_resolve_live_launch_plan_rejects_nonempty_output_dir(tmp_path: Path):
+    mod = _load_module("7_live_infer_and_actuate.py", "live_launch_plan_nonempty_out")
+
+    session_dir = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "sessions" / "sessA"
+    models_run = session_dir / "processed" / "models" / "run_001"
+    models_run.mkdir(parents=True)
+    out_dir = session_dir / "processed" / "live_infer"
+    out_dir.mkdir(parents=True)
+    (out_dir / "stale.txt").write_text("stale")
+    config_path = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "config" / "infer.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps({"project_name": "Demo", "subject_id": "S01"}))
+
+    with pytest.raises(RuntimeError, match="Choose a fresh --out-dir"):
+        mod.resolve_live_launch_plan(
+            config_path=config_path,
+            config_payload={"project_name": "Demo", "subject_id": "S01"},
+            config_settings={"session_dir": str(session_dir)},
+            session_dir_override=str(session_dir),
+            project_name_override=None,
+            subject_id_override=None,
+            model_path_override=None,
+            scaler_path_override=None,
+            out_dir_override=None,
+            allow_outside_base=False,
+        )
+
+
+def test_resolve_live_launch_plan_requires_session_run_or_explicit_artifacts(tmp_path: Path):
+    mod = _load_module("7_live_infer_and_actuate.py", "live_launch_plan_missing_run")
+
+    session_dir = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "sessions" / "sessB"
+    session_dir.mkdir(parents=True)
+    config_path = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "config" / "infer.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps({"project_name": "Demo", "subject_id": "S01"}))
+
+    with pytest.raises(RuntimeError, match="Selected session has no model run directory"):
+        mod.resolve_live_launch_plan(
+            config_path=config_path,
+            config_payload={"project_name": "Demo", "subject_id": "S01"},
+            config_settings={"session_dir": str(session_dir)},
+            session_dir_override=str(session_dir),
+            project_name_override=None,
+            subject_id_override=None,
+            model_path_override=None,
+            scaler_path_override=None,
+            out_dir_override=None,
+            allow_outside_base=False,
+        )
+
+
+def test_resolve_live_launch_plan_accepts_explicit_artifacts_without_session_run(tmp_path: Path):
+    mod = _load_module("7_live_infer_and_actuate.py", "live_launch_plan_explicit_artifacts")
+
+    session_dir = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "sessions" / "sessC"
+    session_dir.mkdir(parents=True)
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    model_path = artifact_dir / "finger_action_model.pt"
+    scaler_path = artifact_dir / "custom_scaler.npz"
+    model_path.write_text("model")
+    scaler_path.write_text("scaler")
+    out_dir = session_dir / "processed" / "live_infer_explicit"
+    config_path = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "config" / "infer.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps({"project_name": "Demo", "subject_id": "S01"}))
+
+    plan = mod.resolve_live_launch_plan(
+        config_path=config_path,
+        config_payload={"project_name": "Demo", "subject_id": "S01"},
+        config_settings={
+            "session_dir": str(session_dir),
+            "model_path": str(model_path),
+            "scaler_path": str(scaler_path),
+            "out_dir": str(out_dir),
+        },
+        session_dir_override=str(session_dir),
+        project_name_override=None,
+        subject_id_override=None,
+        model_path_override=str(model_path),
+        scaler_path_override=str(scaler_path),
+        out_dir_override=str(out_dir),
+        allow_outside_base=False,
+    )
+
+    assert plan.selected_session_dir == session_dir.resolve()
+    assert plan.chosen_run_dir is None
+    assert plan.model_path == model_path.resolve()
+    assert plan.scaler_path == scaler_path.resolve()
+    assert plan.temperature_path == (artifact_dir / "temperature_scaling.json").resolve()
+    assert plan.out_dir == out_dir.resolve()
+    assert set(plan.explicit_overrides) == {"model_path", "scaler_path", "out_dir"}
+
+
+def test_resolve_live_launch_plan_accepts_repo_root_relative_artifact_paths(tmp_path: Path):
+    mod = _load_module("7_live_infer_and_actuate.py", "live_launch_plan_repo_relative")
+
+    session_dir = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "sessions" / "sessD"
+    session_dir.mkdir(parents=True)
+    artifact_dir = (
+        tmp_path
+        / "Projects"
+        / "Demo"
+        / "subjects"
+        / "S01"
+        / "sessions"
+        / "trained"
+        / "processed"
+        / "models"
+        / "run_001"
+    )
+    artifact_dir.mkdir(parents=True)
+    model_path = artifact_dir / "finger_action_model.pt"
+    scaler_path = artifact_dir / "scaler.npz"
+    model_path.write_text("model")
+    scaler_path.write_text("scaler")
+    out_dir = session_dir / "processed" / "live_infer_repo_relative"
+    config_path = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "config" / "infer.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps({"project_name": "Demo", "subject_id": "S01"}))
+
+    plan = mod.resolve_live_launch_plan(
+        config_path=config_path,
+        config_payload={"project_name": "Demo", "subject_id": "S01"},
+        config_settings={
+            "session_dir": str(session_dir),
+            "model_path": "Projects/Demo/subjects/S01/sessions/trained/processed/models/run_001/finger_action_model.pt",
+            "scaler_path": "Projects/Demo/subjects/S01/sessions/trained/processed/models/run_001/scaler.npz",
+            "out_dir": str(out_dir),
+        },
+        session_dir_override=str(session_dir),
+        project_name_override=None,
+        subject_id_override=None,
+        model_path_override=None,
+        scaler_path_override=None,
+        out_dir_override=str(out_dir),
+        allow_outside_base=False,
+    )
+
+    assert plan.model_path == model_path.resolve()
+    assert plan.scaler_path == scaler_path.resolve()
+
+
+def test_collect_required_output_status_flags_missing_required_files(tmp_path: Path):
+    mod = _load_module("7_live_infer_and_actuate.py", "live_required_output_status")
+
+    out_dir = tmp_path / "live_infer"
+    out_dir.mkdir()
+    live_log = out_dir / "live_infer.log"
+    pred_log = out_dir / "predictions.jsonl"
+    window_audit = out_dir / "window_audit.jsonl"
+    segment_breaks = out_dir / "segment_breaks.jsonl"
+    parity_dir = out_dir / "parity_capture"
+    parity_dir.mkdir()
+    live_log.write_text("log")
+    pred_log.write_text("{}\n")
+    window_audit.write_text("{}\n")
+    segment_breaks.write_text("{}\n")
+    (parity_dir / "capture_manifest.json").write_text("{}\n")
+
+    output_hashes, errors = mod._collect_required_output_status(
+        no_file_io=False,
+        out_dir=out_dir,
+        pred_log_path=pred_log,
+        window_audit_path=window_audit,
+        segment_break_path=segment_breaks,
+        summary_path=out_dir / "live_prediction_summary.json",
+        parity_capture=SimpleNamespace(
+            manifest_path=parity_dir / "capture_manifest.json",
+            records_path=parity_dir / "captured_windows.json",
+        ),
+        parity_capture_required=True,
+        cleanup_errors=["prediction_log_close_error: broken pipe"],
+        summary_write_error="summary build failed",
+    )
+
+    assert output_hashes["live_log_sha256"] is not None
+    assert any("summary_write_error" in err for err in errors)
+    assert any("summary_missing_or_unreadable" in err for err in errors)
+    assert any("parity_capture_records_missing_or_unreadable" in err for err in errors)
+    assert any("prediction_log_close_error" in err for err in errors)

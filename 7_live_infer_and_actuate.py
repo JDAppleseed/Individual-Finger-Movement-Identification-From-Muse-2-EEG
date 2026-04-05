@@ -30,9 +30,9 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Deque, Optional, Tuple
+from typing import Any, Deque, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -84,6 +84,22 @@ from utils.live_infer_common import (
     sanitize_live_window as _shared_sanitize_live_window,
     uncertainty_gate_passed as _shared_uncertainty_gate_passed,
 )
+from utils.live_parity import (
+    LiveParityCapture,
+    ParityCaptureSettings,
+    parse_required_labels,
+    sha256_file,
+    write_json,
+    write_jsonl_row,
+)
+from utils.lsl_stream_select import (
+    MultipleStreamsMatchedError,
+    NoStreamFoundError,
+    NoStreamMatchedError,
+    resolve_source_id_preference,
+    select_stream_by_source_id,
+    stream_signature,
+)
 from utils.model_outputs import infer_output_dims_from_state_dict, unpack_model_outputs
 from utils.postprocess import PostprocessSettings, PostprocessState, postprocess_predictions
 from utils.runtime_utils import (
@@ -92,6 +108,7 @@ from utils.runtime_utils import (
     apply_temperature_to_logits,
     load_normalizer,
     load_temperature_scaling,
+    now_utc_iso,
 )
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 from utils.stream_timebase import (
@@ -113,6 +130,29 @@ class ActuationDecision:
     finger_id: int
     action_id: int
     prob: float
+
+
+@dataclass(frozen=True)
+class LSLResolutionResult:
+    inlet: Any
+    resolution: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LiveLaunchPlan:
+    project_name: Optional[str]
+    subject_id: Optional[str]
+    selection_source: str
+    session_dir_inferred: bool
+    selected_session_dir: Optional[Path]
+    explicit_overrides: tuple[str, ...]
+    chosen_run_dir: Optional[Path]
+    model_path: Path
+    scaler_path: Path
+    temperature_path: Path
+    out_dir: Path
+    no_file_io: bool
+    record_raw: bool
 
 
 class SerialHandActuator:
@@ -242,6 +282,109 @@ def _load_train_config(run_dir: Path) -> dict:
         return payload if isinstance(payload, dict) else {}
     except Exception:
         return {}
+
+
+def _load_channel_labels_from_npz(npz_path: Path) -> list[str]:
+    path = Path(npz_path).expanduser().resolve()
+    if not path.exists():
+        return []
+    try:
+        with np.load(path, allow_pickle=False) as npz:
+            if "channel_names" not in npz:
+                return []
+            raw = np.asarray(npz["channel_names"]).reshape(-1)
+            return [str(item).strip() for item in raw if str(item).strip()]
+    except Exception:
+        return []
+
+
+def _resolve_expected_channel_labels(
+    config_settings: dict[str, Any],
+    deployment_run_dir: Path,
+) -> tuple[list[str], Optional[str]]:
+    config_labels = parse_required_labels(config_settings.get("REQUIRED_LSL_LABELS"))
+    if config_labels:
+        return config_labels, "config.REQUIRED_LSL_LABELS"
+
+    ack_labels = parse_required_labels(config_settings.get("LABEL_CHECK_EXPECTED_LABELS"))
+    if ack_labels:
+        return ack_labels, "config.LABEL_CHECK_EXPECTED_LABELS"
+
+    npz_labels = _load_channel_labels_from_npz(
+        Path(deployment_run_dir).expanduser().resolve().parent.parent / "eeg_windows.npz"
+    )
+    if npz_labels:
+        return npz_labels, "training_npz.channel_names"
+    return [], None
+
+
+def _build_channel_reorder(
+    expected_labels: Sequence[str],
+    resolved_labels: Sequence[str],
+) -> Optional[tuple[int, ...]]:
+    expected = [str(label).strip().lower() for label in expected_labels if str(label).strip()]
+    found = [str(label).strip().lower() for label in resolved_labels if str(label).strip()]
+    if not expected or not found:
+        return None
+    index_by_label: dict[str, int] = {}
+    for idx, label in enumerate(found):
+        if label in index_by_label:
+            return None
+        index_by_label[label] = int(idx)
+    try:
+        return tuple(int(index_by_label[label]) for label in expected)
+    except KeyError:
+        return None
+
+
+def _resolve_effective_target_fs(
+    *,
+    train_config: dict[str, Any],
+    window_sec: float,
+    requested_target_fs: float,
+) -> tuple[float, dict[str, Any]]:
+    window_sec_f = float(window_sec)
+    requested_f = float(requested_target_fs)
+    info: dict[str, Any] = {
+        "requested_target_fs": requested_f,
+        "effective_target_fs": requested_f,
+        "canonical_target_fs": None,
+        "model_input_time_samples": None,
+        "adjusted": False,
+        "reason": None,
+    }
+    input_shape = train_config.get("input_shape")
+    if not isinstance(input_shape, (list, tuple)) or not input_shape:
+        return requested_f, info
+    try:
+        expected_samples = int(input_shape[0])
+    except Exception:
+        return requested_f, info
+    if expected_samples < 1 or window_sec_f <= 0.0:
+        return requested_f, info
+
+    canonical_target_fs = float(expected_samples) / window_sec_f
+    allowed_delta_hz = max(0.25, 0.005 * canonical_target_fs)
+    effective_target_fs = requested_f
+    info["canonical_target_fs"] = canonical_target_fs
+    info["model_input_time_samples"] = expected_samples
+
+    if abs(requested_f - canonical_target_fs) <= allowed_delta_hz:
+        effective_target_fs = canonical_target_fs
+        if abs(requested_f - canonical_target_fs) > 1e-9:
+            info["adjusted"] = True
+            info["reason"] = "canonicalized_from_model_time_axis"
+    elif int(round(window_sec_f * requested_f)) != expected_samples:
+        raise RuntimeError(
+            "Configured window_sec/target_fs does not match the trained model input "
+            f"time axis. window_sec={window_sec_f:.6f} target_fs={requested_f:.6f} "
+            f"produces {int(round(window_sec_f * requested_f))} samples, but the model "
+            f"expects {expected_samples}. Use target_fs={canonical_target_fs:.6f} or "
+            "a compatible window_sec."
+        )
+
+    info["effective_target_fs"] = float(effective_target_fs)
+    return float(effective_target_fs), info
 
 
 def _resolve_temperature_path(run_dir: Path) -> Path:
@@ -528,14 +671,14 @@ def load_model_and_scaler(
     model.load_state_dict(state)
     model.to(device)
 
-    scaler = None
     scaler_path_p = Path(scaler_path).expanduser().resolve()
-    if scaler_path_p.exists():
-        if scaler_path_p.suffix.lower() != ".npz":
-            logger.warning("Unexpected scaler extension: %s", scaler_path_p.suffix)
-        scaler = load_normalizer(scaler_path_p)
-        if scaler is None:
-            logger.warning("Failed to load scaler from %s", scaler_path_p)
+    if not scaler_path_p.exists():
+        raise FileNotFoundError(f"Scaler not found: {scaler_path_p}")
+    if scaler_path_p.suffix.lower() != ".npz":
+        raise ValueError(f"Unexpected scaler file extension: {scaler_path_p.suffix}")
+    scaler = load_normalizer(scaler_path_p)
+    if scaler is None:
+        raise RuntimeError(f"Failed to load scaler from {scaler_path_p}")
     return model, scaler
 
 
@@ -619,12 +762,16 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "session_dir": None,
         "stream_name": None,
         "stream_type": None,
+        "lsl_source_id": None,
         "bluetooth_target": None,
         "LIVE_VIZ_ENABLED": bool(LIVE_INFER_RECIPE_DEFAULTS["LIVE_VIZ_ENABLED"]),
         "LIVE_VIZ_FPS": float(LIVE_INFER_RECIPE_DEFAULTS["LIVE_VIZ_FPS"]),
         "window_sec": float(runtime_defaults.window_sec),
         "hop_sec": float(runtime_defaults.hop_sec),
         "target_fs": float(LIVE_INFER_RECIPE_DEFAULTS["target_fs"]),
+        "alignment_internal_max_gap_s": float(
+            LIVE_INFER_RECIPE_DEFAULTS["alignment_internal_max_gap_s"]
+        ),
         "latency_threshold_ms": float(runtime_defaults.latency_threshold_ms),
         "latency_policy": str(LIVE_INFER_RECIPE_DEFAULTS["latency_policy"]),
         "allow_drop": bool(LIVE_INFER_RECIPE_DEFAULTS["allow_drop"]),
@@ -683,6 +830,11 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "uncertainty_base_threshold": float(infer_defaults.base_threshold),
         "uncertainty_weight": float(infer_defaults.uncertainty_weight),
         "pred_log": None,
+        "parity_capture_enabled": bool(
+            LIVE_INFER_RECIPE_DEFAULTS["parity_capture_enabled"]
+        ),
+        "parity_capture_max_windows": 64,
+        "parity_capture_flush_every": 8,
     }
     p = argparse.ArgumentParser(
         description=(
@@ -759,6 +911,14 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         help="Override the LSL stream type used for live inference.",
     )
     stream_group.add_argument(
+        "--lsl-source-id",
+        "--lsl_source_id",
+        dest="lsl_source_id",
+        type=str,
+        metavar="SOURCE_ID",
+        help="Explicit LSL source_id override. Precedence is CLI, then env, then config.",
+    )
+    stream_group.add_argument(
         "--window-sec",
         "--window_sec",
         dest="window_sec",
@@ -781,6 +941,17 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         type=float,
         metavar="HZ",
         help="Target sampling rate, in Hz, for resampling incoming windows.",
+    )
+    stream_group.add_argument(
+        "--alignment-internal-max-gap-s",
+        "--alignment_internal_max_gap_s",
+        dest="alignment_internal_max_gap_s",
+        type=float,
+        metavar="SECONDS",
+        help=(
+            "Maximum internal sample gap tolerated inside a live window before "
+            "alignment drops it. Window-edge coverage remains strict."
+        ),
     )
 
     stream_group.add_argument(
@@ -1018,6 +1189,36 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         type=int,
         help="Maximum bad-channel count that can be masked instead of quality-gating the window.",
     )
+    audit_group = p.add_argument_group("audit and parity")
+    parity_toggle = audit_group.add_mutually_exclusive_group()
+    parity_toggle.add_argument(
+        "--parity-capture-enabled",
+        "--parity_capture_enabled",
+        dest="parity_capture_enabled",
+        action="store_true",
+        help="Persist a bounded rolling sample of accepted live windows for replay parity checks.",
+    )
+    parity_toggle.add_argument(
+        "--no-parity-capture",
+        "--no_parity_capture",
+        dest="parity_capture_enabled",
+        action="store_false",
+        help="Disable accepted-window parity capture.",
+    )
+    audit_group.add_argument(
+        "--parity-capture-max-windows",
+        "--parity_capture_max_windows",
+        dest="parity_capture_max_windows",
+        type=int,
+        help="Maximum number of accepted windows retained in the rolling parity capture buffer.",
+    )
+    audit_group.add_argument(
+        "--parity-capture-flush-every",
+        "--parity_capture_flush_every",
+        dest="parity_capture_flush_every",
+        type=int,
+        help="Flush parity capture files after this many accepted windows.",
+    )
     postprocess_group.add_argument(
         "--use-inference-engine",
         dest="use_inference_engine",
@@ -1196,6 +1397,264 @@ def _is_default_infer_artifact_path(path_value: Optional[str], filename: str) ->
     }
 
 
+def _dir_has_entries(path: Path) -> bool:
+    try:
+        return any(path.iterdir())
+    except FileNotFoundError:
+        return False
+
+
+def _collect_required_output_status(
+    *,
+    no_file_io: bool,
+    out_dir: Path,
+    pred_log_path: Optional[Path],
+    window_audit_path: Optional[Path],
+    segment_break_path: Optional[Path],
+    summary_path: Optional[Path],
+    parity_capture: Optional[LiveParityCapture],
+    parity_capture_required: bool,
+    cleanup_errors: Optional[list[str]] = None,
+    summary_write_error: Optional[str] = None,
+) -> tuple[dict[str, Optional[str]], list[str]]:
+    output_hashes = {
+        "live_log_sha256": None if no_file_io else sha256_file(Path(out_dir) / "live_infer.log"),
+        "prediction_log_sha256": sha256_file(pred_log_path),
+        "window_audit_sha256": sha256_file(window_audit_path),
+        "segment_break_sha256": sha256_file(segment_break_path),
+        "summary_sha256": sha256_file(summary_path),
+        "parity_capture_manifest_sha256": (
+            sha256_file(parity_capture.manifest_path) if parity_capture is not None else None
+        ),
+        "parity_capture_records_sha256": (
+            sha256_file(parity_capture.records_path) if parity_capture is not None else None
+        ),
+    }
+    errors = list(cleanup_errors or [])
+    if summary_write_error:
+        errors.append(f"summary_write_error: {summary_write_error}")
+    if no_file_io:
+        return output_hashes, errors
+
+    required_outputs = [
+        ("live_log", Path(out_dir) / "live_infer.log", output_hashes["live_log_sha256"]),
+        ("prediction_log", pred_log_path, output_hashes["prediction_log_sha256"]),
+        ("window_audit", window_audit_path, output_hashes["window_audit_sha256"]),
+        ("segment_break", segment_break_path, output_hashes["segment_break_sha256"]),
+        ("summary", summary_path, output_hashes["summary_sha256"]),
+    ]
+    for label, path, sha_value in required_outputs:
+        if path is None:
+            errors.append(f"{label}_path_missing")
+            continue
+        if sha_value is None:
+            errors.append(f"{label}_missing_or_unreadable: {path}")
+
+    if parity_capture_required:
+        if parity_capture is None:
+            errors.append("parity_capture_missing")
+        else:
+            if output_hashes["parity_capture_manifest_sha256"] is None:
+                errors.append(
+                    f"parity_capture_manifest_missing_or_unreadable: {parity_capture.manifest_path}"
+                )
+            if output_hashes["parity_capture_records_sha256"] is None:
+                errors.append(
+                    f"parity_capture_records_missing_or_unreadable: {parity_capture.records_path}"
+                )
+
+    return output_hashes, errors
+
+
+def resolve_live_launch_plan(
+    *,
+    config_path: Path,
+    config_payload: dict[str, Any],
+    config_settings: dict[str, Any],
+    session_dir_override: Optional[str],
+    project_name_override: Optional[str],
+    subject_id_override: Optional[str],
+    model_path_override: Optional[str],
+    scaler_path_override: Optional[str],
+    out_dir_override: Optional[str],
+    allow_outside_base: bool,
+    no_file_io_override: Optional[bool] = None,
+) -> LiveLaunchPlan:
+    repo_root = _resolve_repo_root(config_path)
+    project_name, subject_id = _derive_project_subject(
+        config_payload,
+        config_path,
+        project_name_override,
+        subject_id_override,
+        config_settings,
+    )
+    session_dir_value = session_dir_override or config_settings.get("session_dir")
+    session_dir_inferred = False
+    if not session_dir_value and project_name and subject_id:
+        sessions_root = (
+            repo_root
+            / "Projects"
+            / str(project_name)
+            / "subjects"
+            / str(subject_id)
+            / "sessions"
+        )
+        latest_session = _latest_dir_by_mtime(sessions_root)
+        if latest_session is not None:
+            session_dir_value = str(latest_session)
+            session_dir_inferred = True
+
+    config_dir = config_path.parent
+
+    def _resolve_path(path_str: str, base_dir: Optional[Path]) -> Path:
+        candidate = Path(path_str).expanduser()
+        if candidate.is_absolute():
+            return candidate.resolve()
+
+        search_roots: list[Path] = []
+        if base_dir is not None:
+            search_roots.append(base_dir.expanduser().resolve())
+        search_roots.append(Path.cwd().resolve())
+        repo_root_resolved = repo_root.expanduser().resolve()
+        if repo_root_resolved not in search_roots:
+            search_roots.append(repo_root_resolved)
+
+        for root in search_roots:
+            resolved = (root / candidate).resolve()
+            if resolved.exists():
+                return resolved
+        return (search_roots[0] / candidate).resolve()
+
+    def _is_relative_to(path: Path, base: Path) -> bool:
+        try:
+            path.relative_to(base)
+            return True
+        except ValueError:
+            return False
+
+    raw_model_path = model_path_override or config_settings.get("model_path")
+    raw_scaler_path = scaler_path_override or config_settings.get("scaler_path")
+    raw_out_dir = out_dir_override or config_settings.get("out_dir")
+
+    explicit_overrides: list[str] = []
+    chosen_run_dir: Optional[Path] = None
+    selected_session_dir: Optional[Path] = None
+    selection_source = "legacy_explicit"
+
+    if session_dir_value:
+        session_dir_path = resolve_session_dir(str(session_dir_value))
+        if not session_dir_path.exists():
+            raise RuntimeError(f"Session dir not found: {session_dir_path}")
+        selected_session_dir = session_dir_path
+        base_dir = session_dir_path
+
+        model_explicit = bool(model_path_override) or not _is_default_infer_artifact_path(
+            raw_model_path, "finger_action_model.pt"
+        )
+        scaler_explicit = bool(
+            scaler_path_override
+        ) or not _is_default_infer_artifact_path(raw_scaler_path, "scaler.npz")
+
+        if model_explicit:
+            explicit_overrides.append("model_path")
+        if scaler_explicit:
+            explicit_overrides.append("scaler_path")
+        if raw_out_dir:
+            explicit_overrides.append("out_dir")
+
+        run_dir = None
+        if not model_explicit or not scaler_explicit:
+            run_dir = resolve_latest_run_dir(session_dir_path)
+            if run_dir is None or not run_dir.exists():
+                fallback_pair = _resolve_latest_run_dir_across_subject_sessions(
+                    repo_root,
+                    project_name,
+                    subject_id,
+                    exclude_session_dir=session_dir_path,
+                )
+                if fallback_pair is None:
+                    raise RuntimeError(
+                        "Selected session has no model run directory. "
+                        "Pin model_path/scaler_path explicitly or choose a session with "
+                        "a processed/models run."
+                    )
+                _, run_dir = fallback_pair
+                selection_source = "session_dir_subject_latest_run"
+            chosen_run_dir = Path(run_dir).resolve()
+
+        if model_explicit:
+            assert raw_model_path
+            model_path = _resolve_path(str(raw_model_path), config_dir)
+        else:
+            assert chosen_run_dir is not None
+            model_path = chosen_run_dir / "finger_action_model.pt"
+
+        if scaler_explicit:
+            assert raw_scaler_path
+            scaler_path = _resolve_path(str(raw_scaler_path), config_dir)
+        else:
+            assert chosen_run_dir is not None
+            scaler_path = chosen_run_dir / "scaler.npz"
+
+        if raw_out_dir:
+            out_dir = _resolve_path(str(raw_out_dir), config_dir)
+        else:
+            out_dir = SessionLayout(session_dir_path).processed_dir / "live_infer"
+
+        if explicit_overrides:
+            selection_source = "legacy_explicit"
+        elif selection_source != "session_dir_subject_latest_run":
+            selection_source = "subject_latest" if session_dir_inferred else "session_dir"
+    else:
+        if not raw_model_path or not raw_scaler_path or not raw_out_dir:
+            raise RuntimeError(
+                "Missing session_dir. Pin model_path, scaler_path, and out_dir explicitly."
+            )
+        base_dir = config_dir
+        model_path = _resolve_path(str(raw_model_path), config_dir)
+        scaler_path = _resolve_path(str(raw_scaler_path), config_dir)
+        out_dir = _resolve_path(str(raw_out_dir), config_dir)
+
+    out_dir = out_dir.expanduser().resolve()
+    base_dir = base_dir.expanduser().resolve()
+    if not allow_outside_base and not _is_relative_to(out_dir, base_dir):
+        raise ValueError(
+            f"out_dir must be within {base_dir} (got {out_dir}). "
+            "Pass --allow_outside_base to override."
+        )
+
+    config_no_file_io = config_settings.get("no_file_io")
+    if config_no_file_io is None and "record_raw" in config_settings:
+        config_no_file_io = not bool(config_settings.get("record_raw"))
+    no_file_io = (
+        bool(no_file_io_override)
+        if no_file_io_override is not None
+        else bool(config_no_file_io)
+    )
+    record_raw = not no_file_io
+    if record_raw and out_dir.exists() and _dir_has_entries(out_dir):
+        raise RuntimeError(
+            f"Output dir already exists and is not empty: {out_dir}. "
+            "Choose a fresh --out-dir for an unambiguous live run."
+        )
+
+    return LiveLaunchPlan(
+        project_name=str(project_name) if project_name is not None else None,
+        subject_id=str(subject_id) if subject_id is not None else None,
+        selection_source=str(selection_source),
+        session_dir_inferred=bool(session_dir_inferred),
+        selected_session_dir=selected_session_dir,
+        explicit_overrides=tuple(explicit_overrides),
+        chosen_run_dir=chosen_run_dir,
+        model_path=model_path.expanduser().resolve(),
+        scaler_path=scaler_path.expanduser().resolve(),
+        temperature_path=_resolve_temperature_path(model_path.parent).expanduser().resolve(),
+        out_dir=out_dir,
+        no_file_io=bool(no_file_io),
+        record_raw=bool(record_raw),
+    )
+
+
 def _resolve_latest_run_dir_across_subject_sessions(
     repo_root: Path,
     project_name: Optional[str],
@@ -1260,6 +1719,126 @@ def _format_lsl_stream(info: Any) -> str:
     if uid:
         parts.append(f"uid={uid}")
     return ", ".join(parts)
+
+
+def _stream_labels(info: Any) -> list[str]:
+    try:
+        signature = stream_signature(info)
+    except Exception:
+        return []
+    labels = signature.get("labels") or signature.get("channel_labels") or []
+    return [str(label).strip() for label in labels if str(label).strip()]
+
+
+def _stream_contract_summary(
+    *,
+    config_settings: dict[str, Any],
+    expected_name: str,
+    expected_type: str,
+    source_id_preference: dict[str, Any],
+    resolved_stream: dict[str, Any],
+    expected_labels: Optional[Sequence[str]] = None,
+    expected_rate: Optional[float] = None,
+    expected_labels_source: Optional[str] = None,
+) -> dict[str, Any]:
+    expected_labels_list = (
+        [str(label).strip() for label in expected_labels if str(label).strip()]
+        if expected_labels is not None
+        else parse_required_labels(config_settings.get("REQUIRED_LSL_LABELS"))
+    )
+    expected_rate_value = (
+        float(expected_rate) if expected_rate is not None else config_settings.get("SAMPLING_RATE")
+    )
+    require_exactly_4 = bool(config_settings.get("REQUIRE_EXACTLY_4_CHANNELS", True))
+    resolved_labels = [
+        str(label).strip()
+        for label in resolved_stream.get("channel_labels", []) or []
+        if str(label).strip()
+    ]
+    mismatches: list[str] = []
+    if expected_name and str(resolved_stream.get("name") or "") != str(expected_name):
+        mismatches.append("stream_name")
+    if expected_type and str(resolved_stream.get("type") or "") != str(expected_type):
+        mismatches.append("stream_type")
+    if expected_labels_list:
+        found_norm = {label.lower() for label in resolved_labels}
+        required_norm = {label.lower() for label in expected_labels_list}
+        if not required_norm.issubset(found_norm):
+            mismatches.append("labels")
+    if require_exactly_4 and int(resolved_stream.get("channel_count") or 0) != 4:
+        mismatches.append("channel_count")
+    if expected_rate_value is not None:
+        try:
+            expected_rate_f = float(expected_rate_value)
+            resolved_rate_f = float(resolved_stream.get("nominal_srate") or 0.0)
+            if abs(resolved_rate_f - expected_rate_f) > 1.0:
+                mismatches.append("sampling_rate")
+        except Exception:
+            pass
+    return {
+        "expected": {
+            "stream_name": str(expected_name),
+            "stream_type": str(expected_type),
+            "required_labels": expected_labels_list,
+            "required_labels_source": expected_labels_source,
+            "sampling_rate": (
+                float(expected_rate_value) if expected_rate_value is not None else None
+            ),
+            "require_exactly_4_channels": bool(require_exactly_4),
+            "source_id_preference": source_id_preference,
+        },
+        "resolved": resolved_stream,
+        "mismatches": mismatches,
+        "contract_ok": bool(not mismatches),
+    }
+
+
+def _require_stream_contract_ok(stream_contract: dict[str, Any]) -> None:
+    mismatches = list(stream_contract.get("mismatches") or [])
+    if not mismatches:
+        return
+    resolved = dict(stream_contract.get("resolved") or {})
+    expected = dict(stream_contract.get("expected") or {})
+    raise RuntimeError(
+        "Resolved LSL stream violates the configured stream contract. "
+        f"mismatches={mismatches} expected={expected} resolved={resolved}"
+    )
+
+
+def _load_jsonl_records(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                rows.append(payload)
+    return rows
+
+
+def _counter_with_max(
+    base: collections.Counter[str],
+    extra: Optional[collections.Counter[Any]],
+) -> collections.Counter[str]:
+    merged: collections.Counter[str] = collections.Counter(
+        {str(key): int(value) for key, value in base.items()}
+    )
+    if extra is None:
+        return merged
+    for key, value in extra.items():
+        label = str(key)
+        try:
+            merged[label] = max(int(merged.get(label, 0)), int(value))
+        except Exception:
+            continue
+    return merged
 
 
 def _serial_port_score(port: Any) -> int:
@@ -1342,23 +1921,41 @@ def _resolve_lsl_inlet(
     name: str,
     type_: str,
     timeout_s: float = 5.0,
-    source_id: Optional[str] = None,
-) -> StreamInlet:
+    *,
+    cli_source_id: Optional[str] = None,
+    env_source_id: Optional[str] = None,
+    config_source_id: Optional[str] = None,
+) -> LSLResolutionResult:
     if not LSL_AVAILABLE or StreamInlet is None or (
         resolve_streams is None and resolve_byprop is None
     ):
         raise RuntimeError("pylsl is required for live inference.")
     timeout_s = max(0.1, float(timeout_s))
-    desired_source_id = str(source_id or os.environ.get("LSL_SOURCE_ID") or "").strip()
+    source_pref = resolve_source_id_preference(
+        cli_source_id=cli_source_id,
+        env_source_id=env_source_id,
+        config_source_id=config_source_id,
+    )
+    desired_source_id = str(source_pref.requested_source_id or "").strip()
     logger.info(
-        "Resolving LSL stream name=%s type=%s source_id=%s timeout=%.1fs",
+        "Resolving LSL stream name=%s type=%s source_id=%s source=%s timeout=%.1fs",
         name,
         type_,
         desired_source_id or "-",
+        source_pref.source,
         timeout_s,
     )
     deadline = time.monotonic() + timeout_s
-    last_seen: list[Any] = []
+    last_seen: list[dict[str, Any]] = []
+    last_error: Optional[str] = None
+
+    def _candidate_match(candidate: dict[str, Any], *, match_name: bool) -> bool:
+        if type_ and str(candidate.get("type") or "") != str(type_):
+            return False
+        if match_name and name and str(candidate.get("name") or "") != str(name):
+            return False
+        return True
+
     while True:
         remaining = max(0.0, deadline - time.monotonic())
         query_wait = min(0.5, remaining)
@@ -1373,60 +1970,116 @@ def _resolve_lsl_inlet(
                     all_streams = list(resolve_streams())
         elif resolve_byprop is not None:
             all_streams = list(resolve_byprop("name", name, timeout=query_wait))
-        last_seen = all_streams
-
-        candidates: list[Any] = []
+        candidate_rows: list[dict[str, Any]] = []
         for stream in all_streams:
             try:
-                if name and str(stream.name()) != str(name):
-                    continue
-                if type_ and str(stream.type()) != str(type_):
-                    continue
+                signature = dict(stream_signature(stream))
             except Exception:
                 continue
-            candidates.append(stream)
+            signature["_stream"] = stream
+            candidate_rows.append(signature)
+        last_seen = [dict(row) for row in candidate_rows]
 
-        if desired_source_id:
-            exact_source = [s for s in candidates if _stream_source_id(s) == desired_source_id]
-            if exact_source:
-                candidates = exact_source
-            elif not candidates:
-                fallback = []
-                for stream in all_streams:
-                    try:
-                        if type_ and str(stream.type()) != str(type_):
-                            continue
-                    except Exception:
-                        continue
-                    if _stream_source_id(stream) == desired_source_id:
-                        fallback.append(stream)
-                if fallback:
-                    candidates = fallback
+        name_type_candidates = [
+            row for row in candidate_rows if _candidate_match(row, match_name=True)
+        ]
+        selection_scope = "name_type"
+        selection_candidates = list(name_type_candidates)
+        if not selection_candidates and desired_source_id:
+            type_only_candidates = [
+                row for row in candidate_rows if _candidate_match(row, match_name=False)
+            ]
+            if type_only_candidates:
+                selection_candidates = type_only_candidates
+                selection_scope = "type_only_recovery"
 
-        if candidates:
-            candidates = sorted(
-                candidates,
-                key=lambda stream: (
-                    1 if desired_source_id and _stream_source_id(stream) == desired_source_id else 0,
-                    1 if name and _safe_lsl_attr(stream.name) == str(name) else 0,
-                    1 if type_ and _safe_lsl_attr(stream.type) == str(type_) else 0,
-                    float(getattr(stream, "nominal_srate", lambda: 0.0)() or 0.0),
-                    float(getattr(stream, "channel_count", lambda: 0)() or 0),
-                ),
-                reverse=True,
-            )
-            chosen = candidates[0]
-            inlet = StreamInlet(chosen, max_chunklen=64)
+        selection = None
+        if selection_candidates:
             try:
-                sample, ts = inlet.pull_sample(timeout=min(0.25, max(0.05, remaining or 0.25)))
+                selection = select_stream_by_source_id(
+                    selection_candidates,
+                    requested_source_id=desired_source_id,
+                    require_unique_when_unspecified=True,
+                )
+                last_error = None
+            except (
+                NoStreamFoundError,
+                NoStreamMatchedError,
+                MultipleStreamsMatchedError,
+            ) as exc:
+                last_error = str(exc)
+        else:
+            last_error = "No LSL stream candidates matched the requested name/type."
+
+        if selection is not None:
+            if desired_source_id and bool(selection.recovery_used):
+                selected_source_id = str(selection.selected_source_id or "").strip() or "-"
+                last_error = (
+                    f"Requested LSL source_id={desired_source_id} was not found; "
+                    f"refusing single-candidate recovery to source_id={selected_source_id}."
+                )
+                selection = None
+        if selection is not None:
+            chosen_candidate = dict(selection.selected)
+            chosen = chosen_candidate.pop("_stream")
+            inlet = StreamInlet(chosen, max_chunklen=64)
+            resolved_stream = {
+                key: value
+                for key, value in chosen_candidate.items()
+                if not str(key).startswith("_")
+            }
+            resolved_stream["channel_labels"] = _stream_labels(chosen)
+            matched_exact_source = bool(
+                desired_source_id
+                and str(resolved_stream.get("source_id") or "") == desired_source_id
+                and not bool(selection.recovery_used)
+            )
+            try:
+                sample, ts = inlet.pull_sample(
+                    timeout=min(0.25, max(0.05, remaining or 0.25))
+                )
             except Exception:
                 sample, ts = None, None
+            resolution = {
+                "requested_source_id": source_pref.requested_source_id,
+                "selected_source_id": resolved_stream.get("source_id"),
+                "source_id_source": source_pref.source,
+                "source_id_match_mode": (
+                    "exact_match"
+                    if matched_exact_source
+                    else (
+                        "recovered_single_candidate"
+                        if bool(selection.recovery_used)
+                        else "unspecified"
+                    )
+                ),
+                "selection_matched_by_source_id": bool(matched_exact_source),
+                "recovery_used": bool(selection.recovery_used),
+                "selection_scope": selection_scope,
+                "candidate_count": int(len(selection_candidates)),
+                "all_stream_count": int(len(candidate_rows)),
+                "name": str(resolved_stream.get("name") or ""),
+                "type": str(resolved_stream.get("type") or ""),
+                "channel_count": int(resolved_stream.get("channel_count") or 0),
+                "nominal_srate": float(resolved_stream.get("nominal_srate") or 0.0),
+                "source_id": resolved_stream.get("source_id"),
+                "uid": resolved_stream.get("uid"),
+                "channel_labels": list(resolved_stream.get("channel_labels") or []),
+            }
             if sample is not None and ts is not None:
-                logger.info("Resolved LSL stream: %s", _format_lsl_stream(chosen))
-                return inlet
+                logger.info(
+                    "Resolved LSL stream: %s source_match=%s recovery=%s scope=%s candidates=%s",
+                    _format_lsl_stream(chosen),
+                    resolution["source_id_match_mode"],
+                    bool(selection.recovery_used),
+                    selection_scope,
+                    len(selection_candidates),
+                )
+                return LSLResolutionResult(inlet=inlet, resolution=resolution)
             logger.info(
-                "LSL stream resolved but not yet producing samples; retrying: %s",
+                "LSL stream resolved but not yet producing samples; retrying: %s source_match=%s",
                 _format_lsl_stream(chosen),
+                resolution["source_id_match_mode"],
             )
 
         if remaining <= 0.0:
@@ -1435,8 +2088,24 @@ def _resolve_lsl_inlet(
 
     suffix = ""
     if last_seen:
-        rendered = "; ".join(_format_lsl_stream(stream) for stream in last_seen[:8])
+        rendered = "; ".join(
+            ", ".join(
+                part
+                for part in [
+                    f"name={row.get('name')}",
+                    f"type={row.get('type')}",
+                    f"ch={row.get('channel_count')}",
+                    f"rate={row.get('nominal_srate')}",
+                    f"source_id={row.get('source_id')}" if row.get("source_id") else "",
+                    f"uid={row.get('uid')}" if row.get("uid") else "",
+                ]
+                if part
+            )
+            for row in last_seen[:8]
+        )
         suffix = f" Available streams: {rendered}"
+    if last_error:
+        suffix += f" Last selection error: {last_error}"
     raise RuntimeError(
         f"No LSL streams found for name={name} type={type_} "
         f"source_id={desired_source_id or '-'} within {timeout_s:.1f}s.{suffix}"
@@ -1593,8 +2262,20 @@ def _predict_window(
                 model_window_f32,
                 normalized=model_window_is_normalized,
             )
-            finger_probs_t, action_probs_t, applicability_prob_t = (
-                direct_engine.forward_probabilities(x)
+            (
+                finger_logits_t,
+                action_logits_t,
+                applicability_logits_t,
+                finger_probs_t,
+                action_probs_t,
+                applicability_prob_t,
+            ) = direct_engine.forward_trace(x)
+            action_logits_t = action_logits_t.squeeze(0)
+            finger_logits_t = finger_logits_t.squeeze(0)
+            applicability_logits_t = (
+                applicability_logits_t.squeeze(0)
+                if applicability_logits_t is not None
+                else None
             )
             action_probs_t = action_probs_t.squeeze(0)
             finger_probs_t = finger_probs_t.squeeze(0)
@@ -1638,12 +2319,26 @@ def _predict_window(
                     if applicability_logits is not None
                     else None
                 )
+                finger_logits_t = finger_logits.squeeze(0)
+                action_logits_t = action_logits.squeeze(0)
+                applicability_logits_t = (
+                    applicability_logits.squeeze(0)
+                    if applicability_logits is not None
+                    else None
+                )
                 if emit_viz:
                     live_viz_payload, hidden_mag = _build_live_viz_payload(model, x)
         return {
             "backend": "direct",
             "action_probs": action_probs_t.detach().cpu().numpy(),
             "finger_probs": finger_probs_t.detach().cpu().numpy(),
+            "action_logits": action_logits_t.detach().cpu().numpy(),
+            "finger_logits": finger_logits_t.detach().cpu().numpy(),
+            "applicability_logit": (
+                float(applicability_logits_t.detach().cpu().reshape(-1)[0].item())
+                if applicability_logits_t is not None
+                else None
+            ),
             "finger_applicable_prob": (
                 float(applicability_prob_t.detach().cpu().item())
                 if applicability_prob_t is not None
@@ -1691,6 +2386,9 @@ def _predict_window(
         "backend": "inference_engine",
         "action_probs": action_probs,
         "finger_probs": finger_probs,
+        "action_logits": diagnostics.get("action_logits"),
+        "finger_logits": diagnostics.get("finger_logits"),
+        "applicability_logit": diagnostics.get("applicability_logit"),
         "finger_applicable_prob": diagnostics.get("finger_applicable_prob"),
         "action_uncertainty": float(action_uncertainty),
         "finger_uncertainty": float(finger_uncertainty),
@@ -2030,30 +2728,121 @@ def _build_live_prediction_summary(
     dropped_nonfinite_samples: int,
     dropped_nonfinite_windows: int,
     segment_break_count: int,
+    candidate_window_count: Optional[int] = None,
+    accepted_window_count: Optional[int] = None,
+    dropped_window_reason_counts: Optional[collections.Counter[Any]] = None,
+    segment_break_reason_counts: Optional[collections.Counter[Any]] = None,
+    window_audit_path: Optional[Path] = None,
+    segment_break_path: Optional[Path] = None,
+    runtime_manifest_path: Optional[Path] = None,
 ) -> None:
     from tools.analyze_live_predictions import summarize_records
 
     records = _load_prediction_records(pred_log_path)
+    window_audit_rows = (
+        _load_jsonl_records(window_audit_path)
+        if window_audit_path is not None and window_audit_path.exists()
+        else []
+    )
+    segment_break_rows = (
+        _load_jsonl_records(segment_break_path)
+        if segment_break_path is not None and segment_break_path.exists()
+        else []
+    )
+    runtime_manifest = (
+        load_json(str(runtime_manifest_path))
+        if runtime_manifest_path is not None and runtime_manifest_path.exists()
+        else {}
+    )
+    dropped_window_reason_counter = _counter_with_max(
+        collections.Counter(
+            str(row.get("drop_reason") or "none")
+            for row in window_audit_rows
+            if str(row.get("status") or "") == "dropped"
+        ),
+        dropped_window_reason_counts,
+    )
+    segment_break_reason_counter = _counter_with_max(
+        collections.Counter(str(row.get("reason") or "none") for row in segment_break_rows),
+        segment_break_reason_counts,
+    )
+    window_audit_candidate_count = int(len(window_audit_rows))
+    window_audit_accepted_count = int(
+        sum(str(row.get("status") or "") == "accepted" for row in window_audit_rows)
+    )
+    window_audit_dropped_count = int(
+        sum(str(row.get("status") or "") == "dropped" for row in window_audit_rows)
+    )
+    candidate_window_count_value = max(
+        int(candidate_window_count) if candidate_window_count is not None else 0,
+        window_audit_candidate_count,
+    )
+    accepted_window_count_value = max(
+        int(accepted_window_count) if accepted_window_count is not None else 0,
+        window_audit_accepted_count,
+    )
+    segment_break_count_value = max(int(segment_break_count), int(len(segment_break_rows)))
+    summary_valid_window_count = 0
+    reconciliation = {
+        "window_audit_candidate_count": int(window_audit_candidate_count),
+        "window_audit_accepted_count": int(window_audit_accepted_count),
+        "window_audit_dropped_count": int(window_audit_dropped_count),
+        "passed_candidate_window_count": (
+            int(candidate_window_count) if candidate_window_count is not None else None
+        ),
+        "passed_accepted_window_count": (
+            int(accepted_window_count) if accepted_window_count is not None else None
+        ),
+        "passed_segment_break_count": int(segment_break_count),
+        "segment_break_log_count": int(len(segment_break_rows)),
+        "mismatches": [],
+    }
+    if candidate_window_count is not None and int(candidate_window_count) != window_audit_candidate_count:
+        reconciliation["mismatches"].append("candidate_window_count_vs_window_audit")
+    if accepted_window_count is not None and int(accepted_window_count) != window_audit_accepted_count:
+        reconciliation["mismatches"].append("accepted_window_count_vs_window_audit")
+    if int(segment_break_count) != int(len(segment_break_rows)):
+        reconciliation["mismatches"].append("segment_break_count_vs_segment_break_log")
     if not records:
-        summary_path.write_text(
-            json.dumps(
-                {
-                    "record_count": 0,
-                    "dropped_windows": int(dropped_windows),
-                    "dropped_nonfinite_samples": int(dropped_nonfinite_samples),
-                    "dropped_nonfinite_windows": int(dropped_nonfinite_windows),
-                    "segment_break_count": int(segment_break_count),
-                    "raw_channel_stats": _compute_raw_channel_stats(raw_dir),
-                },
-                indent=2,
-                sort_keys=True,
-            )
-        )
+        payload = {
+            "record_count": 0,
+            "candidate_window_count": candidate_window_count_value,
+            "accepted_window_count": accepted_window_count_value,
+            "dropped_window_reason_counts": _stringify_counter(
+                dropped_window_reason_counter
+            ),
+            "dropped_windows": int(dropped_windows),
+            "dropped_nonfinite_samples": int(dropped_nonfinite_samples),
+            "dropped_nonfinite_windows": int(dropped_nonfinite_windows),
+            "segment_break_count": int(segment_break_count_value),
+            "segment_break_reason_counts": _stringify_counter(
+                segment_break_reason_counter
+            ),
+            "raw_channel_stats": _compute_raw_channel_stats(raw_dir),
+            "runtime_manifest_path": (
+                str(runtime_manifest_path) if runtime_manifest_path is not None else None
+            ),
+            "reconciliation": reconciliation,
+        }
+        if isinstance(runtime_manifest, dict) and runtime_manifest:
+            payload["stream_resolution"] = runtime_manifest.get("stream_resolution")
+            payload["artifact_provenance"] = runtime_manifest.get("artifacts")
+            payload["stream_contract"] = runtime_manifest.get("stream_contract")
+            payload["runtime_manifest_finalization"] = runtime_manifest.get("finalization")
+        write_json(summary_path, payload)
         return
 
     summary_bundle = summarize_records(records)
     summary = dict(summary_bundle.get("summary", {}))
     segment_rows = list(summary_bundle.get("segments", []))
+    summary_valid_window_count = int(summary.get("valid_window_count", 0) or 0)
+    accepted_window_count_value = max(accepted_window_count_value, summary_valid_window_count)
+    if window_audit_rows and (window_audit_candidate_count != (window_audit_accepted_count + window_audit_dropped_count)):
+        reconciliation["mismatches"].append("window_audit_candidate_count_non_reconciling")
+    if accepted_window_count is not None and int(accepted_window_count) != summary_valid_window_count:
+        reconciliation["mismatches"].append("accepted_window_count_vs_predictions")
+    if window_audit_rows and window_audit_accepted_count != summary_valid_window_count:
+        reconciliation["mismatches"].append("window_audit_accepted_vs_predictions")
 
     committed_pairs = [
         (
@@ -2139,13 +2928,30 @@ def _build_live_prediction_summary(
             sent_transitions / max(1, len(sent_pairs) - 1)
         ),
         "longest_committed_non_rest_segments": segments[:10],
+        "candidate_window_count": int(candidate_window_count_value),
+        "accepted_window_count": int(accepted_window_count_value),
+        "dropped_window_reason_counts": _stringify_counter(
+            dropped_window_reason_counter
+        ),
         "dropped_windows": int(dropped_windows),
         "dropped_nonfinite_samples": int(dropped_nonfinite_samples),
         "dropped_nonfinite_windows": int(dropped_nonfinite_windows),
-        "segment_break_count": int(segment_break_count),
+        "segment_break_count": int(segment_break_count_value),
+        "segment_break_reason_counts": _stringify_counter(
+            segment_break_reason_counter
+        ),
         "raw_channel_stats": _compute_raw_channel_stats(raw_dir),
+        "runtime_manifest_path": (
+            str(runtime_manifest_path) if runtime_manifest_path is not None else None
+        ),
+        "reconciliation": reconciliation,
         }
     )
+    if isinstance(runtime_manifest, dict) and runtime_manifest:
+        summary["stream_resolution"] = runtime_manifest.get("stream_resolution")
+        summary["artifact_provenance"] = runtime_manifest.get("artifacts")
+        summary["stream_contract"] = runtime_manifest.get("stream_contract")
+        summary["runtime_manifest_finalization"] = runtime_manifest.get("finalization")
     # Backward-compatible alias for consumers that still read the shortened key.
     if (
         "actuation_suppressed_reason_counts" in summary
@@ -2154,7 +2960,7 @@ def _build_live_prediction_summary(
         summary["actuation_suppressed_counts"] = dict(
             summary["actuation_suppressed_reason_counts"]
         )
-    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True))
+    write_json(summary_path, summary)
 
 
 # -------------------- Main --------------------
@@ -2162,6 +2968,7 @@ def _build_live_prediction_summary(
 def main() -> int:
     parser, defaults = _build_arg_parser()
     args = parser.parse_args()
+    cli_lsl_source_id = getattr(args, "lsl_source_id", None)
     config_path = Path(args.config).expanduser().resolve()
     config_payload, config_settings = _load_config_file(config_path)
     _apply_config_to_args(args, config_settings, defaults)
@@ -2179,178 +2986,68 @@ def main() -> int:
         or config_settings.get("stream_type")
         or "EEG"
     )
-    lsl_source_id = (
-        config_settings.get("lsl_source_id")
-        or config_settings.get("LSL_SOURCE_ID")
-        or os.environ.get("LSL_SOURCE_ID")
+    config_lsl_source_id = (
+        config_settings.get("lsl_source_id") or config_settings.get("LSL_SOURCE_ID")
     )
+    env_lsl_source_id = os.environ.get("LSL_SOURCE_ID")
+    lsl_source_pref = resolve_source_id_preference(
+        cli_source_id=cli_lsl_source_id,
+        env_source_id=env_lsl_source_id,
+        config_source_id=config_lsl_source_id,
+    )
+    lsl_source_id = lsl_source_pref.requested_source_id
     try:
         lsl_resolve_timeout_s = float(config_settings.get("LSL_RESOLVE_TIMEOUT", 25.0))
     except Exception:
         lsl_resolve_timeout_s = 25.0
-    session_dir_value = args.session_dir or config_settings.get("session_dir")
-    repo_root = _resolve_repo_root(config_path)
-    project_name, subject_id = _derive_project_subject(
-        config_payload, config_path, args.project_name, args.subject_id, config_settings
-    )
-    session_dir_inferred = False
-    if not session_dir_value and project_name and subject_id:
-        sessions_root = (
-            repo_root
-            / "Projects"
-            / project_name
-            / "subjects"
-            / subject_id
-            / "sessions"
+    try:
+        launch_plan = resolve_live_launch_plan(
+            config_path=config_path,
+            config_payload=config_payload,
+            config_settings=config_settings,
+            session_dir_override=args.session_dir,
+            project_name_override=args.project_name,
+            subject_id_override=args.subject_id,
+            model_path_override=args.model_path,
+            scaler_path_override=args.scaler_path,
+            out_dir_override=args.out_dir,
+            allow_outside_base=bool(args.allow_outside_base),
+            no_file_io_override=(True if bool(args.no_file_io) else None),
         )
-        latest_session = _latest_dir_by_mtime(sessions_root)
-        if latest_session is not None:
-            session_dir_value = str(latest_session)
-            session_dir_inferred = True
-    model_path = args.model_path or config_settings.get("model_path")
-    scaler_path = args.scaler_path or config_settings.get("scaler_path")
-    out_dir = args.out_dir or config_settings.get("out_dir")
-
-    def _resolve_path(path_str: str, base_dir: Optional[Path]) -> str:
-        candidate = Path(path_str).expanduser()
-        if not candidate.is_absolute():
-            base = base_dir if base_dir is not None else Path.cwd()
-            candidate = (base / candidate).resolve()
-        return str(candidate)
-
-    def _is_relative_to(path: Path, base: Path) -> bool:
-        try:
-            path.relative_to(base)
-            return True
-        except ValueError:
-            return False
-
-    selection_source = "legacy_explicit"
-    base_dir: Optional[Path] = None
-    # Prefer session-dir resolution so model/scaler/output paths come from a
-    # single run context, matching the training/evaluation layout.
-    if session_dir_value:
-        session_dir_path = resolve_session_dir(str(session_dir_value))
-        if not session_dir_path.exists():
-            print("Session selection source: session_dir")
-            print(f"Session dir not found: {session_dir_path}")
-            return 2
-        base_dir = session_dir_path
-        resolved_model_override = None
-        resolved_scaler_override = None
-        explicit_overrides = []
-        if model_path:
-            resolved_candidate = _resolve_path(str(model_path), config_path.parent)
-            if Path(resolved_candidate).exists():
-                resolved_model_override = resolved_candidate
-                explicit_overrides.append("model_path")
-            elif args.model_path:
-                print("Session selection source: session_dir")
-                print(f"Model path not found: {resolved_candidate}")
-                return 2
-            elif not _is_default_infer_artifact_path(str(model_path), "finger_action_model.pt"):
-                print(
-                    f"⚠️ Config model_path not found; falling back to latest session model: {resolved_candidate}"
-                )
-        if scaler_path:
-            resolved_candidate = _resolve_path(str(scaler_path), config_path.parent)
-            if Path(resolved_candidate).exists():
-                resolved_scaler_override = resolved_candidate
-                explicit_overrides.append("scaler_path")
-            elif args.scaler_path:
-                print("Session selection source: session_dir")
-                print(f"Scaler path not found: {resolved_candidate}")
-                return 2
-            elif not _is_default_infer_artifact_path(str(scaler_path), "scaler.npz"):
-                print(
-                    f"⚠️ Config scaler_path not found; falling back to latest session scaler: {resolved_candidate}"
-                )
-        if out_dir:
-            explicit_overrides.append("out_dir")
-        if explicit_overrides:
-            print(
-                f"⚠️ Explicit paths provided with --session-dir; using overrides: {explicit_overrides}"
-            )
-            selection_source = "legacy_explicit"
-        else:
-            selection_source = "subject_latest" if session_dir_inferred else "session_dir"
-
-        run_dir = None
-        if resolved_model_override is None or resolved_scaler_override is None:
-            run_dir = resolve_latest_run_dir(session_dir_path)
-            if (run_dir is None or not run_dir.exists()) and (project_name and subject_id):
-                fallback_pair = _resolve_latest_run_dir_across_subject_sessions(
-                    _resolve_repo_root(config_path),
-                    project_name,
-                    subject_id,
-                    exclude_session_dir=session_dir_path,
-                )
-                if fallback_pair is not None:
-                    fallback_session_dir, fallback_run_dir = fallback_pair
-                    print(
-                        "⚠️ Selected session has no model run; "
-                        f"using latest trained session for artifacts: {fallback_session_dir}"
-                    )
-                    run_dir = fallback_run_dir
-        if (resolved_model_override is None or resolved_scaler_override is None) and (
-            run_dir is None or not run_dir.exists()
-        ):
-            print("Session selection source: session_dir")
-            print(
-                "No model run directory found. Train a model first (Step 2), or pass explicit model_path/scaler_path."
-            )
-            return 2
-        base_dir = session_dir_path
-        if resolved_model_override is not None:
-            model_path = resolved_model_override
-        else:
-            assert run_dir is not None
-            model_path = str(run_dir / "finger_action_model.pt")
-        if resolved_scaler_override is not None:
-            scaler_path = resolved_scaler_override
-        else:
-            assert run_dir is not None
-            scaler_path = str(run_dir / "scaler.npz")
-        if not out_dir:
-            out_dir = str(SessionLayout(session_dir_path).processed_dir / "live_infer")
-        else:
-            out_dir = _resolve_path(str(out_dir), config_path.parent)
-    else:
-        config_dir = Path(args.config).expanduser().resolve().parent
-        if not model_path or not scaler_path or not out_dir:
-            print("Session selection source: legacy_explicit")
-            print(
-                "Missing --session-dir. Config must include model_path, scaler_path, and out_dir."
-            )
-            return 2
-        base_dir = config_dir
-        model_path = _resolve_path(str(model_path), config_dir)
-        scaler_path = _resolve_path(str(scaler_path), config_dir)
-        out_dir = _resolve_path(str(out_dir), config_dir)
-
-    base_dir = base_dir if base_dir is not None else Path.cwd()
-    out_dir_path = Path(out_dir).expanduser().resolve()
-    if not args.allow_outside_base:
-        if not _is_relative_to(out_dir_path, base_dir):
-            raise ValueError(
-                f"out_dir must be within {base_dir} (got {out_dir_path}). "
-                "Pass --allow_outside_base to override."
-            )
+    except Exception as exc:
+        print(f"Live launch planning failed: {exc}")
+        return 2
+    project_name = launch_plan.project_name
+    subject_id = launch_plan.subject_id
+    session_dir_inferred = bool(launch_plan.session_dir_inferred)
+    selected_session_dir = launch_plan.selected_session_dir
+    selection_source = str(launch_plan.selection_source)
+    explicit_overrides = list(launch_plan.explicit_overrides)
+    chosen_run_dir = launch_plan.chosen_run_dir
+    model_path = str(launch_plan.model_path)
+    scaler_path = str(launch_plan.scaler_path)
+    out_dir_path = launch_plan.out_dir
     out_dir = str(out_dir_path)
+    temperature_path = launch_plan.temperature_path
+    no_file_io = bool(launch_plan.no_file_io)
+    record_raw = bool(launch_plan.record_raw)
 
-    config_no_file_io = config_settings.get("no_file_io")
-    if config_no_file_io is None and "record_raw" in config_settings:
-        config_no_file_io = not bool(config_settings.get("record_raw"))
-    no_file_io = bool(args.no_file_io or config_no_file_io)
-    record_raw = not no_file_io
-    if record_raw:
-        unique_dir = _ensure_unique_output_dir(out_dir_path)
-        if unique_dir != out_dir_path:
-            out_dir_path = unique_dir
-            out_dir = str(out_dir_path)
-            print(f"Output dir exists; using: {out_dir}")
+    if bool(args.parity_capture_enabled) and no_file_io:
+        print(
+            "Parity capture cannot be enabled when no_file_io is true. "
+            "Disable no_file_io or disable parity capture."
+        )
+        return 2
+    if int(args.parity_capture_max_windows) < 1:
+        print("parity_capture_max_windows must be >= 1.")
+        return 2
+    if int(args.parity_capture_flush_every) < 1:
+        print("parity_capture_flush_every must be >= 1.")
+        return 2
 
     print(f"Session selection source: {selection_source}")
+    if explicit_overrides:
+        print(f"Explicit path overrides: {explicit_overrides}")
     print(f"Using model file: {model_path}")
     print(f"Using scaler file: {scaler_path}")
     if no_file_io:
@@ -2408,32 +3105,253 @@ def main() -> int:
     pred_log_path = None
     pred_log_flush_every = 50
     pred_log_count = 0
+    runtime_manifest_path: Optional[Path] = None
+    runtime_manifest: dict[str, Any] = {}
+    window_audit_path: Optional[Path] = None
+    window_audit_log = None
+    window_audit_flush_every = 50
+    window_audit_count = 0
+    segment_break_path: Optional[Path] = None
+    segment_break_log = None
+    segment_break_flush_every = 10
+    segment_break_log_count = 0
+    parity_capture: Optional[LiveParityCapture] = None
+    summary_path: Optional[Path] = None
+    summary_write_error: Optional[str] = None
+    post_run_exit_code = 0
+    source_pref_payload = {
+        "cli_source_id": lsl_source_pref.cli_source_id,
+        "env_source_id": lsl_source_pref.env_source_id,
+        "config_source_id": lsl_source_pref.config_source_id,
+        "requested_source_id": lsl_source_pref.requested_source_id,
+        "source": lsl_source_pref.source,
+    }
     if not no_file_io:
         pred_log_path = args.pred_log or str(Path(out_dir) / "predictions.jsonl")
-        try:
-            pred_log = Path(pred_log_path).open("a")
-            logger.info("Prediction log: %s", pred_log_path)
-        except Exception as exc:
-            logger.warning("Failed to open prediction log %s: %s", pred_log_path, exc)
+        runtime_manifest_path = Path(out_dir) / "live_runtime_manifest.json"
+        window_audit_path = Path(out_dir) / "window_audit.jsonl"
+        segment_break_path = Path(out_dir) / "segment_breaks.jsonl"
+        summary_path = Path(out_dir) / "live_prediction_summary.json"
 
     device = _select_device(args.device)
     logger.info("Using device=%s", device)
-
-    model, scaler = load_model_and_scaler(model_path, scaler_path, device=device)
-    model.eval()
-    temperature_state = load_temperature_scaling(
-        _resolve_temperature_path(Path(model_path).resolve().parent)
+    resolved_model_path = Path(model_path).expanduser().resolve()
+    resolved_scaler_path = Path(scaler_path).expanduser().resolve()
+    deployment_run_dir = resolved_model_path.parent
+    train_config = _load_train_config(deployment_run_dir)
+    effective_target_fs, target_fs_info = _resolve_effective_target_fs(
+        train_config=train_config,
+        window_sec=float(args.window_sec),
+        requested_target_fs=float(args.target_fs),
     )
-    if temperature_state is not None:
+    if abs(float(args.target_fs) - float(effective_target_fs)) > 1e-9:
+        logger.warning(
+            "Canonicalizing target_fs from %.6f Hz to %.6f Hz to preserve the trained "
+            "model time axis over %.3f s windows.",
+            float(args.target_fs),
+            float(effective_target_fs),
+            float(args.window_sec),
+        )
+        args.target_fs = float(effective_target_fs)
+    expected_channel_labels, expected_channel_labels_source = (
+        _resolve_expected_channel_labels(config_settings, deployment_run_dir)
+    )
+    if expected_channel_labels:
         logger.info(
-            "Temperature scaling loaded: action=%.4f finger=%.4f applicability=%.4f source=%s",
-            float(temperature_state.action_temperature),
-            float(temperature_state.finger_temperature),
-            float(temperature_state.applicability_temperature),
-            str(temperature_state.source),
+            "Expected live channel order=%s source=%s",
+            expected_channel_labels,
+            expected_channel_labels_source,
         )
     else:
-        logger.info("Temperature scaling: not found; using identity.")
+        logger.warning(
+            "No expected channel labels could be derived from config or training artifacts. "
+            "Live channel-order correctness cannot be proven."
+        )
+    live_viz_enabled = bool(getattr(args, "LIVE_VIZ_ENABLED", False))
+    live_viz_fps = float(getattr(args, "LIVE_VIZ_FPS", 0.0) or 0.0)
+    if live_viz_fps <= 0.0:
+        live_viz_enabled = False
+    live_viz_interval = (1.0 / live_viz_fps) if live_viz_enabled else 0.0
+    last_live_viz_emit = 0.0
+    train_config_path = deployment_run_dir / "train_config.json"
+    runtime_manifest = {
+        "created_at": now_utc_iso(),
+        "argv": list(sys.argv),
+        "config_path": str(config_path),
+        "config_sha256": sha256_file(config_path),
+        "config_created_at": config_payload.get("created_at"),
+        "config_snapshot": dict(config_payload),
+        "effective_args": {key: getattr(args, key) for key in sorted(vars(args))},
+        "selection_source": str(selection_source),
+        "session_dir": str(selected_session_dir) if selected_session_dir is not None else None,
+        "session_dir_inferred": bool(session_dir_inferred),
+        "explicit_overrides": list(explicit_overrides),
+        "project_name": project_name,
+        "subject_id": subject_id,
+        "session_id": config_payload.get("session_id"),
+        "out_dir": str(out_dir),
+        "stream_resolution": None,
+        "stream_contract": None,
+        "stream_selection": {
+            "stream_name": str(lsl_name),
+            "stream_type": str(lsl_type),
+            "resolve_timeout_s": float(lsl_resolve_timeout_s),
+            "source_id_preference": source_pref_payload,
+            "expected_channel_labels": list(expected_channel_labels),
+            "expected_channel_labels_source": expected_channel_labels_source,
+        },
+        "artifacts": {
+            "run_dir": (
+                str(chosen_run_dir.resolve())
+                if chosen_run_dir is not None
+                else str(deployment_run_dir)
+            ),
+            "model_path": str(resolved_model_path),
+            "model_sha256": sha256_file(resolved_model_path),
+            "scaler_path": str(resolved_scaler_path),
+            "scaler_sha256": sha256_file(resolved_scaler_path),
+            "temperature_path": str(Path(temperature_path).expanduser().resolve()),
+            "temperature_sha256": sha256_file(temperature_path),
+            "train_config_path": (
+                str(train_config_path.resolve()) if train_config_path.exists() else None
+            ),
+            "train_config_sha256": sha256_file(train_config_path),
+            "model_input_time_samples": target_fs_info.get("model_input_time_samples"),
+        },
+        "runtime": {
+            "device": str(device),
+            "inference_backend": None,
+            "no_file_io": bool(no_file_io),
+            "record_raw": bool(record_raw),
+            "allow_drop": bool(args.allow_drop),
+            "log_every_s": float(args.log_every),
+            "mc_passes": int(args.mc_passes),
+            "uncertainty_base_threshold": float(args.uncertainty_base_threshold),
+            "uncertainty_weight": float(args.uncertainty_weight),
+            "postprocess_enabled": bool(postprocess_enabled),
+            "postprocess_settings": asdict(post_settings),
+            "latency_policy": str(args.latency_policy),
+            "latency_threshold_ms": float(args.latency_threshold_ms),
+            "window_sec": float(args.window_sec),
+            "hop_sec": float(args.hop_sec),
+            "target_fs": float(args.target_fs),
+            "target_fs_requested": float(target_fs_info.get("requested_target_fs")),
+            "target_fs_canonical": target_fs_info.get("canonical_target_fs"),
+            "target_fs_adjusted": bool(target_fs_info.get("adjusted")),
+            "target_fs_adjust_reason": target_fs_info.get("reason"),
+            "alignment_internal_max_gap_s": max(
+                float(args.alignment_internal_max_gap_s),
+                (1.0 / float(args.target_fs) * 4.0),
+            ),
+            "alignment_edge_max_gap_s": (1.0 / float(args.target_fs) * 4.0),
+            "live_quality_enabled": bool(args.live_quality_enabled),
+            "quality_thresholds": {
+                "input_clip_abs_z": float(args.input_clip_abs_z),
+                "bad_channel_rms_z": float(args.bad_channel_rms_z),
+                "bad_channel_abs_p95_z": float(args.bad_channel_abs_p95_z),
+                "bad_channel_clipped_frac": float(args.bad_channel_clipped_frac),
+                "bad_window_clipped_frac": float(args.bad_window_clipped_frac),
+                "bad_window_max_masked_channels": int(
+                    args.bad_window_max_masked_channels
+                ),
+            },
+            "rest_bias": {
+                "enabled": bool(args.rest_bias_correction_enabled),
+                "strength": float(args.rest_bias_strength),
+                "min_rest_windows": int(args.rest_bias_min_windows),
+            },
+            "actuation": {
+                "enabled": bool(args.enable_actuation),
+                "actuation_min_prob": float(args.actuation_min_prob),
+                "actuation_stability": int(args.actuation_stability),
+                "actuation_cooldown_ms": int(args.actuation_cooldown_ms),
+                "actuation_repeat_ms": int(args.actuation_repeat_ms),
+                "actuation_min_speed": float(args.actuation_min_speed),
+                "modulate_actuation_speed": bool(args.modulate_actuation_speed),
+                "actuation_speed_gamma": float(args.actuation_speed_gamma),
+            },
+            "parity_capture": {
+                "enabled": bool(args.parity_capture_enabled and not no_file_io),
+                "max_windows": int(args.parity_capture_max_windows),
+                "flush_every": int(args.parity_capture_flush_every),
+            },
+        },
+        "outputs": {
+            "log_path": None if no_file_io else str(Path(out_dir) / "live_infer.log"),
+            "prediction_log_path": str(pred_log_path) if pred_log_path is not None else None,
+            "window_audit_path": (
+                str(window_audit_path) if window_audit_path is not None else None
+            ),
+            "segment_break_path": (
+                str(segment_break_path) if segment_break_path is not None else None
+            ),
+            "parity_capture_dir": (
+                str(Path(out_dir) / "parity_capture") if not no_file_io else None
+            ),
+            "summary_path": str(summary_path) if summary_path is not None else None,
+        },
+    }
+
+    def _write_runtime_manifest() -> None:
+        if runtime_manifest_path is None:
+            return
+        write_json(runtime_manifest_path, runtime_manifest)
+
+    if runtime_manifest_path is not None:
+        _write_runtime_manifest()
+        logger.info("Runtime manifest: %s", runtime_manifest_path)
+
+    def _persist_manifest_error(reason: str, exc: Exception) -> None:
+        if runtime_manifest_path is None or not runtime_manifest:
+            return
+        runtime_manifest["finalization"] = {
+            "finalized_at": now_utc_iso(),
+            "termination_reason": str(reason),
+            "error": str(exc),
+        }
+        _write_runtime_manifest()
+
+    def _open_required_text_output(path: Path, label: str):
+        try:
+            handle = path.open("a", encoding="utf-8")
+        except Exception as exc:
+            _persist_manifest_error(f"{label}_open_error", exc)
+            raise RuntimeError(f"Failed to open {label} {path}: {exc}") from exc
+        logger.info("%s: %s", label.replace("_", " ").capitalize(), path)
+        return handle
+
+    if not no_file_io:
+        assert pred_log_path is not None
+        assert window_audit_path is not None
+        assert segment_break_path is not None
+        pred_log = _open_required_text_output(Path(pred_log_path), "prediction_log")
+        window_audit_log = _open_required_text_output(window_audit_path, "window_audit_log")
+        segment_break_log = _open_required_text_output(
+            segment_break_path, "segment_break_log"
+        )
+
+    try:
+        model, scaler = load_model_and_scaler(model_path, scaler_path, device=device)
+    except Exception as exc:
+        _persist_manifest_error("artifact_load_error", exc)
+        raise
+    model.eval()
+    if not temperature_path.exists():
+        exc = FileNotFoundError(f"Temperature scaling file not found: {temperature_path}")
+        _persist_manifest_error("temperature_artifact_missing", exc)
+        raise exc
+    temperature_state = load_temperature_scaling(temperature_path)
+    if temperature_state is None:
+        exc = RuntimeError(f"Failed to load temperature scaling from {temperature_path}")
+        _persist_manifest_error("temperature_artifact_load_error", exc)
+        raise exc
+    logger.info(
+        "Temperature scaling loaded: action=%.4f finger=%.4f applicability=%.4f source=%s",
+        float(temperature_state.action_temperature),
+        float(temperature_state.finger_temperature),
+        float(temperature_state.applicability_temperature),
+        str(temperature_state.source),
+    )
     inference_engine = _build_inference_engine(
         model, scaler, device, args, temperature_state
     )
@@ -2442,6 +3360,10 @@ def main() -> int:
         if inference_engine is not None
         else _build_direct_inference_engine(model, scaler, device, temperature_state)
     )
+    runtime_manifest["runtime"]["inference_backend"] = (
+        "inference_engine" if inference_engine is not None else "direct"
+    )
+    runtime_manifest["artifacts"]["temperature_source"] = str(temperature_state.source)
     actuation_speed_mapper = _build_actuation_speed_mapper(args)
     if inference_engine is not None:
         logger.info(
@@ -2459,8 +3381,12 @@ def main() -> int:
     )
     deploy_info = None
     if args.enable_actuation:
-        deployment_run_dir = Path(model_path).expanduser().resolve().parent
-        deploy_info = _require_deployable_run(deployment_run_dir)
+        try:
+            deploy_info = _require_deployable_run(deployment_run_dir)
+        except Exception as exc:
+            _persist_manifest_error("deployable_run_validation_error", exc)
+            raise
+        runtime_manifest["deployment"] = dict(deploy_info)
         logger.info(
             "Deployment model validated run_dir=%s active_finger_head=%s finger_applicability_head=%s n_fingers=%s n_actions=%s",
             deployment_run_dir,
@@ -2469,24 +3395,93 @@ def main() -> int:
             deploy_info.get("n_fingers"),
             deploy_info.get("n_actions"),
         )
+    _write_runtime_manifest()
 
-    live_viz_enabled = bool(getattr(args, "LIVE_VIZ_ENABLED", False))
-    live_viz_fps = float(getattr(args, "LIVE_VIZ_FPS", 0.0) or 0.0)
-    if live_viz_fps <= 0.0:
-        live_viz_enabled = False
-    live_viz_interval = (1.0 / live_viz_fps) if live_viz_enabled else 0.0
-    last_live_viz_emit = 0.0
-
-    inlet = _resolve_lsl_inlet(
-        lsl_name,
-        lsl_type,
-        timeout_s=lsl_resolve_timeout_s,
-        source_id=str(lsl_source_id) if lsl_source_id else None,
-    )
+    try:
+        lsl_result = _resolve_lsl_inlet(
+            lsl_name,
+            lsl_type,
+            timeout_s=lsl_resolve_timeout_s,
+            cli_source_id=cli_lsl_source_id,
+            env_source_id=env_lsl_source_id,
+            config_source_id=config_lsl_source_id,
+        )
+    except Exception as exc:
+        _persist_manifest_error("lsl_resolution_error", exc)
+        raise
+    inlet = lsl_result.inlet
     info = inlet.info()
     sfreq = float(info.nominal_srate())
     ch = int(info.channel_count())
-    logger.info("Connected LSL stream name=%s type=%s sfreq=%s ch=%s", lsl_name, lsl_type, sfreq, ch)
+    logger.info(
+        "Connected LSL stream name=%s type=%s sfreq=%s ch=%s",
+        lsl_name,
+        lsl_type,
+        sfreq,
+        ch,
+    )
+    stream_contract = _stream_contract_summary(
+        config_settings=config_settings,
+        expected_name=str(lsl_name),
+        expected_type=str(lsl_type),
+        source_id_preference=source_pref_payload,
+        resolved_stream=lsl_result.resolution,
+        expected_labels=expected_channel_labels,
+        expected_rate=float(args.target_fs),
+        expected_labels_source=expected_channel_labels_source,
+    )
+    channel_reorder = _build_channel_reorder(
+        expected_channel_labels,
+        lsl_result.resolution.get("channel_labels", []) or [],
+    )
+    channel_reorder_applied = bool(
+        channel_reorder is not None
+        and list(channel_reorder) != list(range(len(channel_reorder)))
+    )
+    stream_contract["resolved"]["channel_reorder_to_model_order"] = (
+        list(channel_reorder) if channel_reorder is not None else None
+    )
+    stream_contract["resolved"]["channel_reorder_applied"] = bool(channel_reorder_applied)
+    if channel_reorder_applied:
+        logger.warning(
+            "Reordering live stream channels into training order. expected=%s found=%s reorder=%s",
+            expected_channel_labels,
+            lsl_result.resolution.get("channel_labels", []) or [],
+            list(channel_reorder or ()),
+        )
+    runtime_manifest["stream_resolution"] = lsl_result.resolution
+    runtime_manifest["stream_contract"] = stream_contract
+    if runtime_manifest_path is not None:
+        _write_runtime_manifest()
+    try:
+        _require_stream_contract_ok(stream_contract)
+    except Exception as exc:
+        _persist_manifest_error("stream_contract_mismatch", exc)
+        raise
+    if expected_channel_labels and (lsl_result.resolution.get("channel_labels") or []) and channel_reorder is None:
+        exc = RuntimeError(
+            "Resolved stream labels passed the set check but could not be mapped into a "
+            "deterministic model channel order."
+        )
+        _persist_manifest_error("stream_channel_reorder_error", exc)
+        raise exc
+    parity_capture = LiveParityCapture(
+        root_dir=Path(out_dir),
+        settings=ParityCaptureSettings(
+            enabled=bool(args.parity_capture_enabled and not no_file_io),
+            max_windows=int(args.parity_capture_max_windows),
+            flush_every=int(args.parity_capture_flush_every),
+        ),
+        manifest_seed={
+            "runtime_manifest_path": str(runtime_manifest_path)
+            if runtime_manifest_path is not None
+            else None,
+            "config_sha256": runtime_manifest.get("config_sha256"),
+            "stream_resolution": lsl_result.resolution,
+            "stream_contract": stream_contract,
+            "artifacts": runtime_manifest.get("artifacts"),
+        },
+    )
 
     # Session writer (raw shards, optional)
     session_writer = None
@@ -2494,25 +3489,33 @@ def main() -> int:
     raw_flush_size = int(config_settings.get("raw_flush_size", 256))
     if record_raw:
         raw_shard_samples = int(config_settings.get("raw_shard_samples", 2048))
-        session_writer = SessionWriter(
-            out_dir=str(out_dir),
-            channel_count=ch,
-            shard_size_samples=raw_shard_samples,
-        )
+        try:
+            session_writer = SessionWriter(
+                out_dir=str(out_dir),
+                channel_count=ch,
+                shard_size_samples=raw_shard_samples,
+            )
+        except Exception as exc:
+            _persist_manifest_error("session_writer_init_error", exc)
+            raise
     else:
         logger.info("Raw recording disabled (no_file_io).")
 
     # Serial actuator
     actuator: Optional[SerialHandActuator] = None
     if args.enable_actuation:
-        serial_port = args.serial_port or config_settings.get("serial_port")
-        if not serial_port:
-            serial_port = _autodetect_serial_port()
-            logger.info("Actuation serial port auto-detected: %s", serial_port)
-        actuator = SerialHandActuator(str(serial_port), baud=args.serial_baud)
-        actuator.open()
-        logger.info("Actuation enabled via serial port %s @ %s baud", serial_port, args.serial_baud)
-        _warmup_actuation(actuator)
+        try:
+            serial_port = args.serial_port or config_settings.get("serial_port")
+            if not serial_port:
+                serial_port = _autodetect_serial_port()
+                logger.info("Actuation serial port auto-detected: %s", serial_port)
+            actuator = SerialHandActuator(str(serial_port), baud=args.serial_baud)
+            actuator.open()
+            logger.info("Actuation enabled via serial port %s @ %s baud", serial_port, args.serial_baud)
+            _warmup_actuation(actuator)
+        except Exception as exc:
+            _persist_manifest_error("actuator_init_error", exc)
+            raise
 
     # Live buffers
     from collections import deque
@@ -2531,13 +3534,22 @@ def main() -> int:
     dropped_nonfinite_windows = 0
     quality_bad_windows = 0
     quality_masked_windows = 0
+    alignment_interpolated_windows = 0
     segment_break_count = 0
+    candidate_window_count = 0
+    accepted_window_count = 0
     segment_id = 0
+    dropped_window_reason_counts: collections.Counter[str] = collections.Counter()
+    segment_break_reason_counts: collections.Counter[str] = collections.Counter()
     masked_channel_counts: collections.Counter[int] = collections.Counter()
     last_masked_channel_warning: Optional[Tuple[int, int]] = None
     last_log = time.monotonic()
 
     next_window_start_s = 0.0
+    strict_alignment_gap_s = 1.0 / float(args.target_fs) * 4.0
+    alignment_internal_max_gap_s = max(
+        float(strict_alignment_gap_s), float(args.alignment_internal_max_gap_s)
+    )
 
     # Debounce state
     last_sent: Optional[Tuple[int, int]] = None
@@ -2549,6 +3561,35 @@ def main() -> int:
     actuation_command_shaper = _build_actuation_command_shaper(args)
 
     termination_reason = "ok"
+
+    def _audit_window(
+        *,
+        candidate_index: int,
+        segment_id_value: int,
+        window_start_value: float,
+        window_end_value: float,
+        status: str,
+        drop_reason: Optional[str] = None,
+        **extra: Any,
+    ) -> None:
+        nonlocal window_audit_count
+        if window_audit_log is None:
+            return
+        payload = {
+            "ts_utc": time.time(),
+            "candidate_index": int(candidate_index),
+            "segment_id": int(segment_id_value),
+            "window_start_s": float(window_start_value),
+            "window_end_s": float(window_end_value),
+            "status": str(status),
+            "drop_reason": str(drop_reason) if drop_reason is not None else None,
+        }
+        payload.update(extra)
+        write_jsonl_row(window_audit_log, payload)
+        window_audit_count += 1
+        if window_audit_count % window_audit_flush_every == 0:
+            window_audit_log.flush()
+
     try:
         while True:
             # Pull a chunk from LSL
@@ -2574,6 +3615,7 @@ def main() -> int:
                         prev_lsl_mono=prev_lsl_mono,
                     )
                     segment_break_reason: Optional[str] = None
+                    segment_break_delta_s: Optional[float] = None
                     raw_lsl_ts = float(lsl_ts)
                     if (
                         np.isfinite(raw_lsl_ts)
@@ -2587,6 +3629,7 @@ def main() -> int:
                             hard_backwards=backwards_delta_s >= 0.200,
                         ):
                             segment_break_reason = "backwards_lsl"
+                            segment_break_delta_s = float(backwards_delta_s)
                             time_s = float(last_stream_time_before_sample)
                             stream_origin_lsl = float(raw_lsl_ts) - float(time_s)
                             stream_origin_mono = float(sample_mono) - float(time_s)
@@ -2602,9 +3645,36 @@ def main() -> int:
                         )
                     ):
                         segment_break_reason = "stream_gap"
+                        segment_break_delta_s = float(time_s) - float(last_buffer_time_s)
                     if segment_break_reason is not None:
+                        segment_break_reason_counts[str(segment_break_reason)] += 1
+                        buffer_len_before = int(len(buffer))
+                        actuation_history_len_before = int(len(actuation_history))
+                        post_state_frames_before = int(post_state.frames_in_state)
+                        post_action_len_before = int(len(post_state.action_ids))
                         segment_id += 1
                         segment_break_count += 1
+                        if segment_break_log is not None:
+                            write_jsonl_row(
+                                segment_break_log,
+                                {
+                                    "ts_utc": time.time(),
+                                    "reason": str(segment_break_reason),
+                                    "delta_s": segment_break_delta_s,
+                                    "new_segment_id": int(segment_id),
+                                    "stream_time_s": float(time_s),
+                                    "raw_lsl_ts": raw_lsl_ts,
+                                    "prev_lsl_ts": prev_lsl_before,
+                                    "buffer_len_before": buffer_len_before,
+                                    "actuation_history_len_before": actuation_history_len_before,
+                                    "post_state_frames_before": post_state_frames_before,
+                                    "post_state_action_len_before": post_action_len_before,
+                                    "next_window_start_s_before": float(next_window_start_s),
+                                },
+                            )
+                            segment_break_log_count += 1
+                            if segment_break_log_count % segment_break_flush_every == 0:
+                                segment_break_log.flush()
                         buffer.clear()
                         latency_window.clear()
                         actuation_history.clear()
@@ -2625,6 +3695,8 @@ def main() -> int:
                         )
                     latest_stream_time_s = max(float(latest_stream_time_s), float(time_s))
                     vec = np.asarray(sample, dtype=np.float32)
+                    if channel_reorder is not None and vec.ndim == 1:
+                        vec = vec[np.asarray(channel_reorder, dtype=np.int64)]
                     sample_flags = 0
                     if not np.all(np.isfinite(vec)):
                         sample_flags |= RAW_FLAG_NONFINITE
@@ -2672,6 +3744,8 @@ def main() -> int:
             # Infer over available windows
             time_s = float(latest_stream_time_s)
             while (next_window_start_s + args.window_sec) <= time_s:
+                candidate_window_count += 1
+                candidate_index = int(candidate_window_count)
                 window_start = next_window_start_s
                 window_end = window_start + args.window_sec
 
@@ -2680,6 +3754,16 @@ def main() -> int:
 
                 if times.size < 2:
                     dropped_windows += 1
+                    dropped_window_reason_counts["insufficient_times"] += 1
+                    _audit_window(
+                        candidate_index=candidate_index,
+                        segment_id_value=segment_id,
+                        window_start_value=window_start,
+                        window_end_value=window_end,
+                        status="dropped",
+                        drop_reason="insufficient_times",
+                        buffer_sample_count=int(times.size),
+                    )
                     next_window_start_s += args.hop_sec
                     continue
 
@@ -2692,6 +3776,18 @@ def main() -> int:
                 )
                 if (right_idx - left_idx) < 2:
                     dropped_windows += 1
+                    dropped_window_reason_counts["insufficient_window_samples"] += 1
+                    _audit_window(
+                        candidate_index=candidate_index,
+                        segment_id_value=segment_id,
+                        window_start_value=window_start,
+                        window_end_value=window_end,
+                        status="dropped",
+                        drop_reason="insufficient_window_samples",
+                        buffer_sample_count=int(times.size),
+                        left_idx=int(left_idx),
+                        right_idx=int(right_idx),
+                    )
                     next_window_start_s += args.hop_sec
                     continue
 
@@ -2700,6 +3796,16 @@ def main() -> int:
                 if not np.all(np.isfinite(window_values)):
                     dropped_windows += 1
                     dropped_nonfinite_windows += 1
+                    dropped_window_reason_counts["nonfinite_window_values"] += 1
+                    _audit_window(
+                        candidate_index=candidate_index,
+                        segment_id_value=segment_id,
+                        window_start_value=window_start,
+                        window_end_value=window_end,
+                        status="dropped",
+                        drop_reason="nonfinite_window_values",
+                        raw_window_sample_count=int(window_times.size),
+                    )
                     next_window_start_s += args.hop_sec
                     continue
 
@@ -2708,18 +3814,43 @@ def main() -> int:
                     start_s=window_start,
                     end_s=window_end,
                     target_fs=args.target_fs,
-                    max_gap_s=1.0 / float(args.target_fs) * 4.0,
+                    max_gap_s=float(alignment_internal_max_gap_s),
+                    max_edge_gap_s=float(strict_alignment_gap_s),
                 )
                 if not alignment.ok:
                     dropped_windows += 1
+                    dropped_window_reason_counts[str(alignment.reason or "alignment_fail")] += 1
+                    _audit_window(
+                        candidate_index=candidate_index,
+                        segment_id_value=segment_id,
+                        window_start_value=window_start,
+                        window_end_value=window_end,
+                        status="dropped",
+                        drop_reason=str(alignment.reason or "alignment_fail"),
+                        raw_window_sample_count=int(window_times.size),
+                        alignment_ok=False,
+                        alignment_reason=alignment.reason,
+                        alignment_window_size=int(alignment.window_size),
+                        alignment_max_gap_s=alignment.max_gap_s,
+                        alignment_start_gap_s=alignment.start_gap_s,
+                        alignment_end_gap_s=alignment.end_gap_s,
+                        alignment_monotonic=bool(alignment.monotonic),
+                    )
                     if pred_log is not None:
                         payload = {
                             "ts_utc": time.time(),
+                            "candidate_index": int(candidate_index),
+                            "segment_id": int(segment_id),
                             "window_start_s": float(window_start),
                             "window_end_s": float(window_end),
                             "latency_ms": None,
                             "alignment_ok": False,
                             "alignment_reason": alignment.reason,
+                            "alignment_window_size": int(alignment.window_size),
+                            "alignment_max_gap_s": alignment.max_gap_s,
+                            "alignment_start_gap_s": alignment.start_gap_s,
+                            "alignment_end_gap_s": alignment.end_gap_s,
+                            "alignment_monotonic": bool(alignment.monotonic),
                             "decision_reason": "alignment_fail",
                             "committed_action_id": 0,
                             "committed_finger_id": 0,
@@ -2742,8 +3873,32 @@ def main() -> int:
                 )
                 if window is None:
                     dropped_windows += 1
+                    dropped_window_reason_counts["resample_failed"] += 1
+                    _audit_window(
+                        candidate_index=candidate_index,
+                        segment_id_value=segment_id,
+                        window_start_value=window_start,
+                        window_end_value=window_end,
+                        status="dropped",
+                        drop_reason="resample_failed",
+                        raw_window_sample_count=int(window_times.size),
+                        alignment_ok=True,
+                        alignment_reason=None,
+                        alignment_window_size=int(alignment.window_size),
+                        alignment_max_gap_s=alignment.max_gap_s,
+                        alignment_start_gap_s=alignment.start_gap_s,
+                        alignment_end_gap_s=alignment.end_gap_s,
+                        alignment_monotonic=bool(alignment.monotonic),
+                    )
                     next_window_start_s += args.hop_sec
                     continue
+
+                alignment_interpolated = bool(
+                    alignment.max_gap_s is not None
+                    and float(alignment.max_gap_s) > float(strict_alignment_gap_s)
+                )
+                if alignment_interpolated:
+                    alignment_interpolated_windows += 1
 
                 emit_viz = False
                 viz_ts = None
@@ -2771,6 +3926,28 @@ def main() -> int:
                     quality_masked_windows += 1
                     for channel_id in quality.masked_channel_ids:
                         masked_channel_counts[int(channel_id)] += 1
+                accepted_window_count += 1
+                _audit_window(
+                    candidate_index=candidate_index,
+                    segment_id_value=segment_id,
+                    window_start_value=window_start,
+                    window_end_value=window_end,
+                    status="accepted",
+                    raw_window_sample_count=int(window_times.size),
+                    resampled_shape=list(window.shape),
+                    alignment_ok=True,
+                    alignment_reason=None,
+                    alignment_window_size=int(alignment.window_size),
+                    alignment_max_gap_s=alignment.max_gap_s,
+                    alignment_start_gap_s=alignment.start_gap_s,
+                    alignment_end_gap_s=alignment.end_gap_s,
+                    alignment_monotonic=bool(alignment.monotonic),
+                    alignment_interpolated=bool(alignment_interpolated),
+                    window_quality_bad=bool(quality.window_quality_bad),
+                    quality_bad_reason=quality.quality_bad_reason,
+                    masked_channel_count=int(len(quality.masked_channel_ids)),
+                    masked_channel_ids=list(quality.masked_channel_ids),
+                )
 
                 inference_result = _predict_window(
                     window,
@@ -2784,10 +3961,21 @@ def main() -> int:
                     prepared_window=quality.prepared_window,
                 )
                 action_probs = np.asarray(inference_result["action_probs"], dtype=float)
+                action_logits_arr = (
+                    np.asarray(inference_result["action_logits"], dtype=float)
+                    if inference_result.get("action_logits") is not None
+                    else None
+                )
                 model_raw_finger_probs = np.asarray(
                     inference_result["finger_probs"], dtype=float
                 )
+                finger_logits_arr = (
+                    np.asarray(inference_result["finger_logits"], dtype=float)
+                    if inference_result.get("finger_logits") is not None
+                    else None
+                )
                 finger_applicable_prob = inference_result.get("finger_applicable_prob")
+                applicability_logit = inference_result.get("applicability_logit")
                 hidden_mag = inference_result.get("hidden_mag")
                 action_uncertainty = float(
                     inference_result.get("action_uncertainty", 0.0) or 0.0
@@ -3067,14 +4255,33 @@ def main() -> int:
                 if pred_log is not None:
                     payload = {
                         "ts_utc": time.time(),
+                        "candidate_index": int(candidate_index),
+                        "segment_id": int(segment_id),
                         "window_start_s": float(window_start),
                         "window_end_s": float(window_end),
                         "latency_ms": float(latency_ms),
                         "prediction_latency_ms": float(latency_ms),
                         "alignment_ok": True,
+                        "alignment_window_size": int(alignment.window_size),
+                        "alignment_max_gap_s": alignment.max_gap_s,
+                        "alignment_start_gap_s": alignment.start_gap_s,
+                        "alignment_end_gap_s": alignment.end_gap_s,
+                        "alignment_monotonic": bool(alignment.monotonic),
+                        "alignment_interpolated": bool(alignment_interpolated),
                         "action_probs": action_probs.tolist(),
+                        "action_logits": (
+                            action_logits_arr.tolist()
+                            if action_logits_arr is not None
+                            else None
+                        ),
                         "model_raw_finger_probs": model_raw_finger_probs.tolist(),
+                        "finger_logits": (
+                            finger_logits_arr.tolist()
+                            if finger_logits_arr is not None
+                            else None
+                        ),
                         "finger_probs": finger_probs.tolist(),
+                        "applicability_logit": applicability_logit,
                         "raw_top_action_id": int(decision_info.get("raw_top_action_id", 0)),
                         "raw_top_finger_id": int(decision_info.get("raw_top_finger_id", 0)),
                         "model_raw_top_finger_id": int(model_raw_top_finger_id),
@@ -3104,6 +4311,7 @@ def main() -> int:
                         "window_quality_bad": bool(quality.window_quality_bad),
                         "quality_bad_reason": quality.quality_bad_reason,
                         "masked_channel_ids": list(quality.masked_channel_ids),
+                        "masked_channel_count": int(len(quality.masked_channel_ids)),
                         "quality_bad_channel_ids": list(quality.bad_channel_ids),
                         "channel_rms_z": quality.channel_rms_z.tolist(),
                         "channel_abs_p95_z": quality.channel_abs_p95_z.tolist(),
@@ -3151,6 +4359,115 @@ def main() -> int:
                     pred_log_count += 1
                     if pred_log_count % pred_log_flush_every == 0:
                         pred_log.flush()
+                parity_capture.add(
+                    {
+                        "captured_at": now_utc_iso(),
+                        "candidate_index": int(candidate_index),
+                        "segment_id": int(segment_id),
+                        "window_start_s": float(window_start),
+                        "window_end_s": float(window_end),
+                        "raw_window_times": window_times.tolist(),
+                        "raw_window_values": window_values.tolist(),
+                        "resampled_window": window.tolist(),
+                        "prepared_window": quality.prepared_window.tolist(),
+                        "latency_ms": float(latency_ms),
+                        "prediction_latency_ms": float(latency_ms),
+                        "alignment": {
+                            "ok": True,
+                            "reason": None,
+                            "window_size": int(alignment.window_size),
+                            "max_gap_s": alignment.max_gap_s,
+                            "start_gap_s": alignment.start_gap_s,
+                            "end_gap_s": alignment.end_gap_s,
+                            "monotonic": bool(alignment.monotonic),
+                            "interpolated": bool(alignment_interpolated),
+                        },
+                        "quality": {
+                            "window_quality_bad": bool(quality.window_quality_bad),
+                            "quality_bad_reason": quality.quality_bad_reason,
+                            "masked_channel_ids": list(quality.masked_channel_ids),
+                            "bad_channel_ids": list(quality.bad_channel_ids),
+                            "masked_channel_count": int(len(quality.masked_channel_ids)),
+                            "channel_rms_z": quality.channel_rms_z.tolist(),
+                            "channel_abs_p95_z": quality.channel_abs_p95_z.tolist(),
+                            "channel_clipped_frac": quality.channel_clipped_frac.tolist(),
+                            "total_clipped_frac": float(quality.total_clipped_frac),
+                        },
+                        "inference": {
+                            "backend": str(inference_result.get("backend", "direct")),
+                            "action_logits": (
+                                action_logits_arr.tolist()
+                                if action_logits_arr is not None
+                                else None
+                            ),
+                            "finger_logits": (
+                                finger_logits_arr.tolist()
+                                if finger_logits_arr is not None
+                                else None
+                            ),
+                            "applicability_logit": applicability_logit,
+                            "action_probs": action_probs.tolist(),
+                            "model_raw_finger_probs": model_raw_finger_probs.tolist(),
+                            "finger_probs": finger_probs.tolist(),
+                            "finger_applicable_prob": finger_applicable_prob,
+                            "action_uncertainty": float(action_uncertainty),
+                            "finger_uncertainty": float(finger_uncertainty),
+                            "applicability_uncertainty": applicability_uncertainty,
+                            "adaptive_threshold": inference_result.get(
+                                "adaptive_threshold"
+                            ),
+                        },
+                        "decision": {
+                            "raw_top_action_id": int(
+                                decision_info.get("raw_top_action_id", 0)
+                            ),
+                            "raw_top_finger_id": int(
+                                decision_info.get("raw_top_finger_id", 0)
+                            ),
+                            "model_raw_top_finger_id": int(model_raw_top_finger_id),
+                            "smoothed_action_id": int(
+                                decision_info.get("smoothed_action_id", 0)
+                            ),
+                            "smoothed_finger_id": int(
+                                decision_info.get("smoothed_finger_id", 0)
+                            ),
+                            "committed_action_id": int(
+                                decision_info.get("committed_action_id", 0)
+                            ),
+                            "committed_finger_id": int(
+                                decision_info.get("committed_finger_id", 0)
+                            ),
+                            "action_conf": float(decision_info.get("action_conf", 0.0)),
+                            "finger_conf": float(decision_info.get("finger_conf", 0.0)),
+                            "decision_reason": str(
+                                decision_info.get("decision_reason", "")
+                            ),
+                            "finger_gate_ok": bool(
+                                decision_info.get("finger_gate_ok", True)
+                            ),
+                            "applicability_gate_ok": bool(
+                                decision_info.get("applicability_gate_ok", True)
+                            ),
+                            "committed_pair_valid": bool(
+                                decision_info.get("committed_pair_valid", True)
+                            ),
+                            "joint_conf": float(decision.prob),
+                            "uncertainty_gate_ok": bool(uncertainty_gate_ok),
+                        },
+                        "actuation": {
+                            "latency_gate_ok": bool(actuation_latency_gate_ok),
+                            "vote_reason": str(actuation_vote.get("reason", "")),
+                            "vote_finger_counts": actuation_vote.get("finger_votes", {}),
+                            "vote_action_counts": actuation_vote.get("action_votes", {}),
+                            "vote_pair_counts": actuation_vote.get("pair_votes", {}),
+                            "target_action_id": int(actuation_target_action_id),
+                            "target_finger_id": int(actuation_target_finger_id),
+                            "speed_scalar": float(actuation_speed_scalar),
+                            "suppressed_reason": actuation_suppressed_reason,
+                            "sent": bool(actuation_sent),
+                        },
+                    }
+                )
 
                 next_window_start_s += args.hop_sec
 
@@ -3183,11 +4500,12 @@ def main() -> int:
             if now - last_log >= args.log_every:
                 masked_snapshot = _top_counter_snapshot(masked_channel_counts, top_k=2)
                 logger.info(
-                    "buffer=%s dropped_windows=%s dropped_nonfinite_samples=%s dropped_nonfinite_windows=%s quality_bad_windows=%s quality_masked_windows=%s segment_breaks=%s masked_channels=%s rest_bias_ready=%s rest_bias_windows=%s",
+                    "buffer=%s dropped_windows=%s dropped_nonfinite_samples=%s dropped_nonfinite_windows=%s alignment_interpolated_windows=%s quality_bad_windows=%s quality_masked_windows=%s segment_breaks=%s masked_channels=%s rest_bias_ready=%s rest_bias_windows=%s",
                     len(buffer),
                     dropped_windows,
                     dropped_nonfinite_samples,
                     dropped_nonfinite_windows,
+                    alignment_interpolated_windows,
                     quality_bad_windows,
                     quality_masked_windows,
                     int(segment_break_count),
@@ -3214,63 +4532,166 @@ def main() -> int:
                 last_log = now
 
     except KeyboardInterrupt:
+        termination_reason = "interrupted"
         logger.info("Stopping live inference.")
     except Exception as exc:
         termination_reason = "error"
         logger.error("Live inference error: %s", exc)
         raise
     finally:
-        try:
-            if record_raw and session_writer is not None:
+        cleanup_errors: list[str] = []
+        if record_raw and session_writer is not None:
+            try:
                 if raw_buffer:
                     session_writer.append_packets(raw_buffer)
                 session_writer.close()
-        finally:
-            if pred_log is not None:
-                try:
-                    pred_log.flush()
-                    pred_log.close()
-                except Exception:
-                    pass
-            if (
-                not no_file_io
-                and pred_log_path is not None
-                and Path(pred_log_path).exists()
-            ):
-                summary_path = Path(out_dir) / "live_prediction_summary.json"
-                try:
-                    _build_live_prediction_summary(
-                        pred_log_path=Path(pred_log_path),
-                        summary_path=summary_path,
-                        raw_dir=(Path(out_dir) / "raw") if record_raw else None,
-                        dropped_windows=dropped_windows,
-                        dropped_nonfinite_samples=dropped_nonfinite_samples,
-                        dropped_nonfinite_windows=dropped_nonfinite_windows,
-                        segment_break_count=segment_break_count,
-                    )
-                    logger.info("Prediction summary written: %s", summary_path)
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to write prediction summary %s: %s",
-                        summary_path,
-                        exc,
-                    )
-            if actuator is not None:
+            except Exception as exc:
+                cleanup_errors.append(f"session_writer_close_error: {exc}")
+        if parity_capture is not None:
+            try:
+                parity_capture.close()
+            except Exception as exc:
+                cleanup_errors.append(f"parity_capture_close_error: {exc}")
+        if pred_log is not None:
+            try:
+                pred_log.flush()
+                pred_log.close()
+            except Exception as exc:
+                cleanup_errors.append(f"prediction_log_close_error: {exc}")
+        if window_audit_log is not None:
+            try:
+                window_audit_log.flush()
+                window_audit_log.close()
+            except Exception as exc:
+                cleanup_errors.append(f"window_audit_log_close_error: {exc}")
+        if segment_break_log is not None:
+            try:
+                segment_break_log.flush()
+                segment_break_log.close()
+            except Exception as exc:
+                cleanup_errors.append(f"segment_break_log_close_error: {exc}")
+        if not no_file_io:
+            summary_path = Path(out_dir) / "live_prediction_summary.json"
+        replay_cmd = (
+            f"{sys.executable} tools/replay_live_capture.py --capture-dir "
+            f"{Path(out_dir) / 'parity_capture'}"
+        )
+        audit_cmd = (
+            f"{sys.executable} tools/audit_live_parity.py --live-dir {out_dir} "
+            f"--parity-report {Path(out_dir) / 'parity_report.json'} "
+            "--write-json --write-md"
+        )
+        if (
+            not no_file_io
+            and pred_log_path is not None
+            and Path(pred_log_path).exists()
+            and summary_path is not None
+        ):
+            try:
+                _build_live_prediction_summary(
+                    pred_log_path=Path(pred_log_path),
+                    summary_path=summary_path,
+                    raw_dir=(Path(out_dir) / "raw") if record_raw else None,
+                    dropped_windows=dropped_windows,
+                    dropped_nonfinite_samples=dropped_nonfinite_samples,
+                    dropped_nonfinite_windows=dropped_nonfinite_windows,
+                    segment_break_count=segment_break_count,
+                    candidate_window_count=candidate_window_count,
+                    accepted_window_count=accepted_window_count,
+                    window_audit_path=window_audit_path,
+                    segment_break_path=segment_break_path,
+                    runtime_manifest_path=runtime_manifest_path,
+                )
+                logger.info("Prediction summary written: %s", summary_path)
+            except Exception as exc:
+                summary_write_error = str(exc)
+                logger.error(
+                    "Failed to write required prediction summary %s: %s",
+                    summary_path,
+                    exc,
+                )
+        if actuator is not None:
+            try:
                 actuator.close()
-            logger.info(
-                "Shutdown complete (reason=%s, dropped_nonfinite_samples=%s, dropped_nonfinite_windows=%s, quality_bad_windows=%s, quality_masked_windows=%s, segment_breaks=%s, masked_channels=%s, rest_bias_ready=%s, rest_bias_windows=%s).",
-                termination_reason,
-                dropped_nonfinite_samples,
-                dropped_nonfinite_windows,
-                quality_bad_windows,
-                quality_masked_windows,
-                int(segment_break_count),
-                _top_counter_snapshot(masked_channel_counts, top_k=4) or None,
-                bool(rest_bias.ready),
-                int(rest_bias.rest_count),
-            )
+            except Exception as exc:
+                cleanup_errors.append(f"actuator_close_error: {exc}")
+        if cleanup_errors:
+            logger.error("Cleanup errors: %s", cleanup_errors)
+        if not no_file_io:
+            logger.info("Live outputs: manifest=%s summary=%s", runtime_manifest_path, summary_path)
+            logger.info("Post-run replay: %s", replay_cmd)
+            logger.info("Post-run audit: %s", audit_cmd)
+        logger.info(
+            "Shutdown complete (reason=%s, dropped_nonfinite_samples=%s, dropped_nonfinite_windows=%s, alignment_interpolated_windows=%s, quality_bad_windows=%s, quality_masked_windows=%s, segment_breaks=%s, masked_channels=%s, rest_bias_ready=%s, rest_bias_windows=%s).",
+            termination_reason,
+            dropped_nonfinite_samples,
+            dropped_nonfinite_windows,
+            alignment_interpolated_windows,
+            quality_bad_windows,
+            quality_masked_windows,
+            int(segment_break_count),
+            _top_counter_snapshot(masked_channel_counts, top_k=4) or None,
+            bool(rest_bias.ready),
+            int(rest_bias.rest_count),
+        )
+        logging.shutdown()
+        output_hashes, required_output_errors = _collect_required_output_status(
+            no_file_io=bool(no_file_io),
+            out_dir=Path(out_dir),
+            pred_log_path=(Path(pred_log_path) if pred_log_path is not None else None),
+            window_audit_path=window_audit_path,
+            segment_break_path=segment_break_path,
+            summary_path=summary_path,
+            parity_capture=parity_capture,
+            parity_capture_required=bool(args.parity_capture_enabled and not no_file_io),
+            cleanup_errors=cleanup_errors,
+            summary_write_error=summary_write_error,
+        )
+        final_termination_reason = str(termination_reason)
+        if required_output_errors and final_termination_reason == "ok":
+            final_termination_reason = "required_output_error"
+            post_run_exit_code = 2
+        elif required_output_errors:
+            post_run_exit_code = 2
+        if runtime_manifest_path is not None and runtime_manifest:
+            runtime_manifest["finalization"] = {
+                "finalized_at": now_utc_iso(),
+                "termination_reason": final_termination_reason,
+                "counters": {
+                    "candidate_window_count": int(candidate_window_count),
+                    "accepted_window_count": int(accepted_window_count),
+                    "dropped_windows": int(dropped_windows),
+                    "dropped_nonfinite_samples": int(dropped_nonfinite_samples),
+                    "dropped_nonfinite_windows": int(dropped_nonfinite_windows),
+                    "alignment_interpolated_windows": int(
+                        alignment_interpolated_windows
+                    ),
+                    "quality_bad_windows": int(quality_bad_windows),
+                    "quality_masked_windows": int(quality_masked_windows),
+                    "segment_break_count": int(segment_break_count),
+                    "masked_channel_counts": _top_counter_snapshot(
+                        masked_channel_counts, top_k=8
+                    )
+                    or None,
+                    "rest_bias_ready": bool(rest_bias.ready),
+                    "rest_bias_window_count": int(rest_bias.rest_count),
+                },
+                "summary_path": str(summary_path) if summary_path is not None else None,
+                "summary_write_error": (
+                    str(summary_write_error) if summary_write_error is not None else None
+                ),
+                "cleanup_errors": cleanup_errors or None,
+                "required_outputs_ok": bool(not required_output_errors),
+                "required_output_errors": required_output_errors or None,
+                "output_hashes": output_hashes,
+                "post_run_commands": {
+                    "replay": replay_cmd,
+                    "audit": audit_cmd,
+                },
+            }
+            write_json(runtime_manifest_path, runtime_manifest)
 
-    return 0
+    return int(post_run_exit_code)
 
 
 if __name__ == "__main__":
