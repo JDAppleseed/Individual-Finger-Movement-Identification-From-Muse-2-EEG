@@ -156,7 +156,7 @@ class MuseLslStreamer:
 
         # Instrumentation
         self._packets_seen_total = 0
-        self._packets_flushed_partial = 0
+        self._packets_dropped_partial = 0
         self._chunks_pushed_total = 0
         self._monotonic_clamps_total = 0
         self._last_push_wallclock: Optional[float] = None
@@ -638,6 +638,39 @@ class MuseLslStreamer:
         self._flush_packet(packet_index, slot, partial=False)
         self._flush_stale_packets()
 
+    def _release_packet(self, packet_index: int) -> None:
+        n = 12
+        self._packet_buffer.pop(packet_index, None)
+        self._packet_first_seen.pop(packet_index, None)
+        if self._packet_arrival_order:
+            if self._packet_arrival_order[0] == packet_index:
+                self._packet_arrival_order.popleft()
+            while (
+                self._packet_arrival_order
+                and self._packet_arrival_order[0] not in self._packet_buffer
+            ):
+                self._packet_arrival_order.popleft()
+        self._last_packet_index = packet_index
+
+    def _drop_partial_packet(
+        self, packet_index: int, slot: Dict[str, np.ndarray], missing: List[str]
+    ) -> None:
+        n = 12
+        if slot:
+            n = int(next(iter(slot.values())).shape[0])
+        # Preserve stream timing even when a packet is discarded.
+        self._build_timestamps(n)
+        self._packets_dropped_partial += 1
+        self._log_throttled(
+            "partial_packet",
+            (
+                "⚠️ [streamer] partial packet dropped "
+                f"index={packet_index} missing={missing}"
+            ),
+            interval_s=self._log_throttle_interval_s,
+        )
+        self._release_packet(packet_index)
+
     def _flush_packet(
         self, packet_index: int, slot: Dict[str, np.ndarray], partial: bool
     ) -> None:
@@ -649,10 +682,9 @@ class MuseLslStreamer:
             n = int(next(iter(slot.values())).shape[0])
 
         missing = [lab for lab in self.config.labels if lab not in slot]
-        if missing:
-            fill = np.full((n,), np.nan, dtype=np.float32)
-            for lab in missing:
-                slot[lab] = fill
+        if partial or missing:
+            self._drop_partial_packet(packet_index, slot, missing)
+            return
 
         ordered = []
         for i in range(n):
@@ -667,29 +699,7 @@ class MuseLslStreamer:
         self._last_push_monotonic = time.monotonic()
         self._last_push_ts = ts[-1] if ts else self._last_push_ts
         self._record_dt_stats(ts, prev_last_ts)
-
-        if partial or missing:
-            self._packets_flushed_partial += 1
-            self._log_throttled(
-                "partial_packet",
-                (
-                    "⚠️ [streamer] partial packet flushed "
-                    f"index={packet_index} missing={missing}"
-                ),
-                interval_s=self._log_throttle_interval_s,
-            )
-
-        self._packet_buffer.pop(packet_index, None)
-        self._packet_first_seen.pop(packet_index, None)
-        if self._packet_arrival_order:
-            if self._packet_arrival_order[0] == packet_index:
-                self._packet_arrival_order.popleft()
-            while (
-                self._packet_arrival_order
-                and self._packet_arrival_order[0] not in self._packet_buffer
-            ):
-                self._packet_arrival_order.popleft()
-        self._last_packet_index = packet_index
+        self._release_packet(packet_index)
 
     def _flush_stale_packets(self, now_time: Optional[float] = None) -> None:
         if not self._packet_first_seen:
@@ -963,7 +973,7 @@ class MuseLslStreamer:
             "[streamer] heartbeat: "
             f"chunks={self._chunks_pushed_total} "
             f"packets={self._packets_seen_total} "
-            f"partial={self._packets_flushed_partial} "
+            f"partial_dropped={self._packets_dropped_partial} "
             f"clamps={self._monotonic_clamps_total} "
             f"dropped={self._packets_dropped_overflow} "
             f"last_ts={last_ts if last_ts is not None else 'n/a'} "

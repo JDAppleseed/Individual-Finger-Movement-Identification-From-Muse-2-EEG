@@ -995,6 +995,12 @@ class MainWindow(QMainWindow):
         self._auto_scan_active = False
         self._auto_scan_wants_healthcheck = False
         self._healthcheck_pending = False
+        self._live_ready_gate_active = False
+        self._live_ready_gate_attempts = 0
+        self._live_ready_gate_max_attempts = 6
+        self._live_ready_gate_interval_ms = 1500
+        self._live_ready_gate_script_key: Optional[str] = None
+        self._last_healthcheck_result: Dict[str, Any] = {}
         self._auto_scan_timer = QTimer(self)
         self._auto_scan_timer.setInterval(1500)
         self._auto_scan_timer.timeout.connect(self._auto_scan_lsl_streams)
@@ -7190,7 +7196,9 @@ class MainWindow(QMainWindow):
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
-    def _run_step(self, step_id: str, script_key: str) -> None:
+    def _run_step(
+        self, step_id: str, script_key: str, *, bypass_ready_gate: bool = False
+    ) -> None:
         if self.hard_stop_locked:
             self._show_blocking_notice(
                 "HARD STOP — Acknowledgement Required",
@@ -7213,6 +7221,18 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self, "Missing Script", f"Script for {step_id} not found."
             )
+            return
+        if (
+            step_id == "infer"
+            and script_key == "live_infer"
+            and not bypass_ready_gate
+            and not (
+                getattr(self, "dry_run_checkbox", None)
+                and self.dry_run_checkbox.isChecked()
+            )
+            and self.input_source.currentText() != "CSV Offline"
+        ):
+            self._begin_live_ready_gate(script_key)
             return
 
         infer_subject_override = None
@@ -8065,6 +8085,11 @@ class MainWindow(QMainWindow):
             f"Stop requested: runner={runner_pid or '-'} connector={connector_pid or '-'} step={self.active_step or '-'}"
         )
         stopping_any = False
+        if self._live_ready_gate_active:
+            stopping_any = True
+            self._append_log("Cancelling Step 7 ready gate...")
+            self._cancel_live_ready_gate()
+            self._update_live_status("Live status: Step 7 ready gate cancelled")
         if self.active_step:
             self._set_step_status(self.active_step, "Stopping...")
         self._set_stream_status("Stopping...")
@@ -8200,11 +8225,131 @@ class MainWindow(QMainWindow):
 
     def _run_scheduled_healthcheck(self) -> None:
         self._healthcheck_pending = False
-        self._run_stream_healthcheck()
+        self._run_stream_healthcheck(interactive=False)
 
-    def _run_stream_healthcheck(self) -> None:
-        if self.hard_stop_locked:
+    def _begin_live_ready_gate(self, script_key: str) -> None:
+        if self._live_ready_gate_active:
+            self._append_log("Step 7 ready gate already running.")
             return
+        self._live_ready_gate_active = True
+        self._live_ready_gate_attempts = 0
+        self._live_ready_gate_script_key = script_key
+        self.live_stream_ready = False
+        self._append_log(
+            "⏳ Step 7 ready gate: waiting for the stream to stabilize before launch."
+        )
+        self._update_live_status("Live status: stabilizing before Step 7")
+        self._set_live_buttons_state()
+        QTimer.singleShot(0, self._run_live_ready_gate_attempt)
+
+    def _cancel_live_ready_gate(self, reason: Optional[str] = None) -> None:
+        was_active = self._live_ready_gate_active
+        self._live_ready_gate_active = False
+        self._live_ready_gate_attempts = 0
+        self._live_ready_gate_script_key = None
+        if reason and was_active:
+            self._append_log(reason)
+        self._set_live_buttons_state()
+
+    def _launch_live_infer_after_ready_gate(self) -> None:
+        script_key = self._live_ready_gate_script_key or "live_infer"
+        self._live_ready_gate_active = False
+        self._live_ready_gate_attempts = 0
+        self._live_ready_gate_script_key = None
+        self._update_live_status("Live status: ready for Step 7")
+        self._append_log("✅ Step 7 ready gate passed; launching live inference.")
+        self._set_live_buttons_state()
+        QTimer.singleShot(
+            0, lambda: self._run_step("infer", script_key, bypass_ready_gate=True)
+        )
+
+    def _run_live_ready_gate_attempt(self) -> None:
+        if not self._live_ready_gate_active:
+            return
+        if self.hard_stop_locked or self.runner.is_running():
+            self._cancel_live_ready_gate()
+            return
+
+        self._live_ready_gate_attempts += 1
+        attempt = self._live_ready_gate_attempts
+        max_attempts = self._live_ready_gate_max_attempts
+        self._append_log(f"[step7-ready] attempt {attempt}/{max_attempts}")
+        result = self._run_stream_healthcheck(interactive=False, timeout_s=1.0)
+
+        if result is not None and (
+            result.ok
+            or (
+                result.reason in {"label_mismatch", "channel_count_mismatch"}
+                and self.live_stream_ready
+            )
+        ):
+            self._launch_live_infer_after_ready_gate()
+            return
+
+        if (
+            result is not None
+            and result.reason in {"label_mismatch", "channel_count_mismatch"}
+            and not self.live_label_acknowledged
+        ):
+            labels, _rate, require_exact = self._current_live_config()
+            message = (
+                f"Expected labels: {labels} ({'exact' if require_exact else 'min'}).\n"
+                f"Found: channels={result.channel_count}, labels={result.labels}.\n"
+                "Proceeding may cause incorrect labeling."
+            )
+            acknowledged = self._show_blocking_ack(
+                "Label/Channel Mismatch", message, result.to_dict()
+            )
+            if acknowledged:
+                self.live_stream_ready = True
+                self.live_label_acknowledged = True
+                self.live_label_details = result.to_dict()
+                self._update_live_status("Live status: acknowledged mismatch")
+                self._launch_live_infer_after_ready_gate()
+            else:
+                self.live_stream_ready = False
+                self._update_live_status("Live status: mismatch not acknowledged")
+                self._cancel_live_ready_gate(
+                    "Step 7 ready gate cancelled; label mismatch not acknowledged."
+                )
+            return
+
+        if attempt < max_attempts:
+            reason = result.reason if result is not None else "healthcheck_error"
+            self._append_log(
+                f"[step7-ready] not ready yet ({reason}); retrying in "
+                f"{self._live_ready_gate_interval_ms / 1000.0:.1f}s."
+            )
+            self._update_live_status(
+                f"Live status: stabilizing ({attempt}/{max_attempts})"
+            )
+            QTimer.singleShot(
+                self._live_ready_gate_interval_ms, self._run_live_ready_gate_attempt
+            )
+            return
+
+        self._live_ready_gate_active = False
+        self._live_ready_gate_attempts = 0
+        self._live_ready_gate_script_key = None
+        self._set_live_buttons_state()
+        detail = (
+            "Unable to run the LSL healthcheck."
+            if result is None
+            else result.summary
+        )
+        self._update_live_status("Live status: Step 7 ready check timed out")
+        self._show_blocking_notice(
+            "Stream Not Ready",
+            "Step 7 waited for the stream to stabilize, but it did not become ready.\n\n"
+            f"{detail}\n\n"
+            "Check electrode contact, wait for the stream to settle, and try again.",
+        )
+
+    def _run_stream_healthcheck(
+        self, *, interactive: bool = True, timeout_s: float = 3.0
+    ):
+        if self.hard_stop_locked:
+            return None
         labels, _rate, require_exact = self._current_live_config()
         stream_name = self._selected_stream_name() or self.live_stream_name
         stream_type = self._selected_stream_type() or self.live_stream_type
@@ -8212,30 +8357,41 @@ class MainWindow(QMainWindow):
             self.live_stream_name = stream_name
         if stream_type:
             self.live_stream_type = stream_type
+        previous_ready = self.live_stream_ready
         try:
             result = run_healthcheck(
                 stream_name=stream_name,
                 stype=stream_type,
                 required_labels=labels,
                 require_exact_channels=require_exact,
+                timeout_s=timeout_s,
             )
         except Exception as exc:
-            self._append_log(f"⚠️ Healthcheck failed: {exc}")
-            self._show_blocking_notice(
-                "Healthcheck Failed",
-                f"Unable to run LSL healthcheck: {exc}",
-            )
+            self.live_stream_ready = False
+            self._last_healthcheck_result = {}
+            if interactive or self._live_ready_gate_active:
+                self._append_log(f"⚠️ Healthcheck failed: {exc}")
+            if interactive:
+                self._show_blocking_notice(
+                    "Healthcheck Failed",
+                    f"Unable to run LSL healthcheck: {exc}",
+                )
             self._update_live_status("Live status: healthcheck failed")
             self._set_live_buttons_state()
-            return
+            return None
+
+        self._last_healthcheck_result = result.to_dict()
+        self.live_label_details = result.to_dict()
 
         if result.ok:
             self.live_stream_ready = True
-            self.live_label_details = result.to_dict()
-            self._append_log("✅ LSL healthcheck passed.")
+            if interactive or not previous_ready:
+                self._append_log("✅ LSL healthcheck passed.")
             self._update_live_status("Live status: healthy")
             self._set_live_buttons_state()
-            return
+            return result
+
+        self.live_stream_ready = False
 
         if result.reason in {"label_mismatch", "channel_count_mismatch"}:
             message = (
@@ -8243,6 +8399,14 @@ class MainWindow(QMainWindow):
                 f"Found: channels={result.channel_count}, labels={result.labels}.\n"
                 "Proceeding may cause incorrect labeling."
             )
+            if not interactive:
+                if self.live_label_acknowledged:
+                    self.live_stream_ready = True
+                    self._update_live_status("Live status: acknowledged mismatch")
+                else:
+                    self._update_live_status("Live status: label mismatch")
+                self._set_live_buttons_state()
+                return result
             acknowledged = self._show_blocking_ack(
                 "Label/Channel Mismatch", message, result.to_dict()
             )
@@ -8257,16 +8421,21 @@ class MainWindow(QMainWindow):
             else:
                 self._update_live_status("Live status: mismatch not acknowledged")
             self._set_live_buttons_state()
-            return
+            return result
 
-        self._append_log(f"⚠️ Healthcheck failed: {result.reason}")
-        self._show_blocking_notice(
-            "Healthcheck Failed",
-            f"No valid samples received ({result.reason}). "
-            "Fix the stream before starting recording.",
-        )
-        self._update_live_status("Live status: unhealthy")
+        if interactive or self._live_ready_gate_active:
+            self._append_log(f"⚠️ Healthcheck failed: {result.reason}")
+        if interactive:
+            self._show_blocking_notice(
+                "Healthcheck Failed",
+                f"No valid samples received ({result.reason}). "
+                "Fix the stream before starting recording.",
+            )
+            self._update_live_status("Live status: unhealthy")
+        else:
+            self._update_live_status(f"Live status: waiting on {result.reason}")
         self._set_live_buttons_state()
+        return result
 
     def _start_live_recording(self) -> None:
         if self.hard_stop_locked:
@@ -8275,13 +8444,7 @@ class MainWindow(QMainWindow):
                 "You must acknowledge the last hard stop report before restarting live steps.",
             )
             return
-        if not self.live_stream_ready:
-            self._show_blocking_notice(
-                "Stream Not Ready",
-                "Connect to Muse 2 and complete the healthcheck first.",
-            )
-            return
-        self._run_step("infer", "step1")
+        self._run_step("infer", "live_infer")
 
     def _on_connector_finished(self, exit_code: int) -> None:
         self._append_log(f"[connector] process finished with code {exit_code}")
@@ -8301,9 +8464,12 @@ class MainWindow(QMainWindow):
         connect_enabled = not self.hard_stop_locked and not connector_running and LSL_AVAILABLE
         disconnect_enabled = connector_running
         start_enabled = (
-            not self.hard_stop_locked and self.live_stream_ready and not self.runner.is_running()
+            not self.hard_stop_locked
+            and self.live_stream_ready
+            and not self.runner.is_running()
+            and not self._live_ready_gate_active
         )
-        stop_enabled = self.runner.is_running()
+        stop_enabled = self.runner.is_running() or self._live_ready_gate_active
         for btn in (
             getattr(self, "live_connect_btn", None),
             getattr(self, "live_connect_btn_page", None),
