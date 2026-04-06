@@ -8,11 +8,12 @@ import shutil
 import signal
 import subprocess
 import sys
+import importlib.util
 if sys.version_info[:2] != (3, 11):
     raise RuntimeError(f"Wrong Python. Expected 3.11, got {sys.version.split()[0]} at {sys.executable}")
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as dataclass_fields
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -110,7 +111,18 @@ from app.ui_config_validation import validate_step_settings
 from muse_streaming.config import DEFAULT_STREAM_NAME, DEFAULT_STREAM_TYPE
 from muse_streaming.healthcheck import run_healthcheck
 from utils.eeglab_export import default_eeglab_export_path, export_session_to_eeglab
-from utils.label_schema import ACTION_NAMES, FINGER_NAMES
+from utils.label_schema import (
+    ACTION_NAMES,
+    FINGER_NAMES,
+    FINGER_NONE,
+    decode_finger_prediction,
+    decode_finger_prediction_for_action,
+    decode_prediction_pair,
+    finger_confidence_for_id,
+    model_index_to_finger_id,
+    uses_active_finger_head,
+)
+from utils.postprocess import PostprocessSettings
 from utils.session_event_io import resolve_raw_shard_paths
 from utils.session_layout import SessionLayout, resolve_latest_run_dir
 from visualization.live_viz import parse_viz_line
@@ -123,6 +135,315 @@ try:
 except Exception:
     pylsl = None
     LSL_AVAILABLE = False
+
+
+def _finger_label_map_for_probs(finger_probs: Optional[np.ndarray]) -> Dict[int, str]:
+    if finger_probs is None:
+        return dict(FINGER_NAMES)
+    arr = np.asarray(finger_probs)
+    if arr.ndim != 2 or arr.shape[1] <= 0:
+        return dict(FINGER_NAMES)
+    n_fingers = int(arr.shape[1])
+    if uses_active_finger_head(n_fingers):
+        return {
+            idx: FINGER_NAMES.get(
+                model_index_to_finger_id(idx, n_fingers), f"finger_{idx}"
+            )
+            for idx in range(n_fingers)
+        }
+    return {idx: FINGER_NAMES.get(idx, f"finger_{idx}") for idx in range(n_fingers)}
+
+
+def _format_prediction_text(
+    finger_probs: Optional[np.ndarray],
+    action_probs: Optional[np.ndarray],
+) -> tuple[str, str]:
+    finger_text = "-"
+    action_text = "-"
+    action_id: Optional[int] = None
+    if action_probs is not None and np.asarray(action_probs).size:
+        action_last = np.asarray(action_probs)[-1]
+        action_id = int(np.argmax(action_last))
+        action_prob = float(action_last[action_id])
+        action_name = ACTION_NAMES.get(action_id, f"action_{action_id}")
+        action_text = f"{action_name} ({action_prob:.2f})"
+    if finger_probs is not None and np.asarray(finger_probs).size:
+        finger_last = np.asarray(finger_probs)[-1]
+        if action_id is None:
+            finger_id = int(decode_finger_prediction(finger_last))
+        else:
+            finger_id = int(decode_finger_prediction_for_action(action_id, finger_last))
+        finger_name = FINGER_NAMES.get(finger_id, f"finger_{finger_id}")
+        if finger_id == int(FINGER_NONE):
+            finger_text = finger_name
+        else:
+            finger_prob = float(finger_confidence_for_id(finger_last, finger_id))
+            finger_text = f"{finger_name} ({finger_prob:.2f})"
+    return finger_text, action_text
+
+
+def _decode_prediction_pair_from_probs(
+    finger_probs: Optional[np.ndarray],
+    action_probs: Optional[np.ndarray],
+) -> tuple[int, int] | None:
+    if (
+        finger_probs is None
+        or action_probs is None
+        or not np.asarray(finger_probs).size
+        or not np.asarray(action_probs).size
+    ):
+        return None
+    finger_last = np.asarray(finger_probs)[-1]
+    action_last = np.asarray(action_probs)[-1]
+    return tuple(int(v) for v in decode_prediction_pair(action_last, finger_last))
+
+
+def _prediction_correctness(
+    predicted_pair: tuple[int, int] | None,
+    *,
+    truth_action_id: Optional[int],
+    truth_finger_id: Optional[int],
+) -> Optional[bool]:
+    if predicted_pair is None or truth_action_id is None or truth_finger_id is None:
+        return None
+    return bool(
+        int(predicted_pair[0]) == int(truth_action_id)
+        and int(predicted_pair[1]) == int(truth_finger_id)
+    )
+
+
+def _prediction_label_style(is_correct: Optional[bool]) -> str:
+    if is_correct is True:
+        return "color: rgb(130, 255, 130); font-weight: 800;"
+    if is_correct is False:
+        return "color: rgb(255, 120, 120); font-weight: 800;"
+    return ""
+
+
+def _prediction_label_payload(
+    finger_probs: Optional[np.ndarray],
+    action_probs: Optional[np.ndarray],
+    *,
+    truth_action_id: Optional[int] = None,
+    truth_finger_id: Optional[int] = None,
+) -> tuple[str, str]:
+    finger_text, action_text = _format_prediction_text(finger_probs, action_probs)
+    text = f"Current prediction: Finger {finger_text}, Action {action_text}"
+    predicted_pair = _decode_prediction_pair_from_probs(finger_probs, action_probs)
+    is_correct = _prediction_correctness(
+        predicted_pair,
+        truth_action_id=truth_action_id,
+        truth_finger_id=truth_finger_id,
+    )
+    if truth_action_id is not None and truth_finger_id is not None:
+        truth_finger_name = FINGER_NAMES.get(int(truth_finger_id), f"finger_{truth_finger_id}")
+        truth_action_name = ACTION_NAMES.get(int(truth_action_id), f"action_{truth_action_id}")
+        text += f" | Truth: Finger {truth_finger_name}, Action {truth_action_name}"
+    return text, _prediction_label_style(is_correct)
+
+
+def _replay_preview_actuation_from_record(
+    record: dict[str, Any],
+) -> tuple[int, int, Optional[float]] | None:
+    finger_id = int(record.get("actuation_target_finger_id", 0) or 0)
+    action_id = int(record.get("actuation_target_action_id", 0) or 0)
+    if finger_id <= 0 or action_id <= 0:
+        return None
+    speed_scalar = record.get("actuation_speed_scalar")
+    if speed_scalar is None:
+        return finger_id, action_id, None
+    return finger_id, action_id, float(speed_scalar)
+
+
+def _scale_replay_preview_speed(speed_scalar: Optional[float]) -> Optional[float]:
+    if speed_scalar is None:
+        return None
+    return float(max(0.0, min(1.0, float(speed_scalar) * 0.50)))
+
+
+def _replay_rest_preview_commands() -> list[tuple[int, int, Optional[float]]]:
+    return [(finger_id, 0, None) for finger_id in range(1, 6)]
+
+
+def _estimate_replay_auto_interval_ms(
+    window_start_s: Optional[np.ndarray],
+    *,
+    fallback_hop_sec: Optional[float] = None,
+) -> int:
+    interval_ms: Optional[float] = None
+    if window_start_s is not None:
+        starts = np.asarray(window_start_s, dtype=float).reshape(-1)
+        if starts.size >= 2:
+            diffs = np.diff(starts)
+            positive = diffs[np.isfinite(diffs) & (diffs > 0.0)]
+            if positive.size:
+                interval_ms = float(np.median(positive) * 1000.0)
+    if interval_ms is None and fallback_hop_sec is not None:
+        interval_ms = float(fallback_hop_sec) * 1000.0
+    if interval_ms is None or not np.isfinite(interval_ms):
+        interval_ms = 500.0
+    return int(max(50, min(5000, round(interval_ms))))
+
+
+def _build_scrambled_replay_order(
+    window_count: int,
+    *,
+    event_ids: Optional[np.ndarray] = None,
+    trial_ids: Optional[np.ndarray] = None,
+    session_ids: Optional[np.ndarray] = None,
+    anchor_idx: Optional[int] = None,
+    rng: Optional[np.random.Generator] = None,
+) -> list[int]:
+    n = int(max(0, window_count))
+    if n <= 0:
+        return []
+    rng = rng or np.random.default_rng()
+    groups: list[list[int]] = []
+    if event_ids is not None and len(event_ids) == n:
+        event_arr = np.asarray(event_ids)
+        trial_arr = (
+            np.asarray(trial_ids) if trial_ids is not None and len(trial_ids) == n else None
+        )
+        session_arr = (
+            np.asarray(session_ids)
+            if session_ids is not None and len(session_ids) == n
+            else None
+        )
+        current_group = [0]
+        current_key = (
+            event_arr[0],
+            trial_arr[0] if trial_arr is not None else None,
+            session_arr[0] if session_arr is not None else None,
+        )
+        for idx in range(1, n):
+            key = (
+                event_arr[idx],
+                trial_arr[idx] if trial_arr is not None else None,
+                session_arr[idx] if session_arr is not None else None,
+            )
+            if key == current_key:
+                current_group.append(idx)
+                continue
+            groups.append(current_group)
+            current_group = [idx]
+            current_key = key
+        groups.append(current_group)
+    else:
+        groups = [[idx] for idx in range(n)]
+    if len(groups) <= 1:
+        return list(range(n))
+    anchor_group_idx = None
+    if anchor_idx is not None:
+        for group_idx, group in enumerate(groups):
+            if int(anchor_idx) in group:
+                anchor_group_idx = group_idx
+                break
+    remaining = list(range(len(groups)))
+    if anchor_group_idx is not None:
+        remaining.remove(anchor_group_idx)
+    shuffled = list(rng.permutation(remaining)) if remaining else []
+    ordered_group_ids = (
+        ([anchor_group_idx] if anchor_group_idx is not None else []) + shuffled
+    )
+    return [idx for group_idx in ordered_group_ids for idx in groups[int(group_idx)]]
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _build_replay_postprocess_settings(
+    infer_settings: dict[str, Any],
+) -> PostprocessSettings:
+    defaults = PostprocessSettings()
+    kwargs = {
+        field.name: infer_settings.get(field.name, getattr(defaults, field.name))
+        for field in dataclass_fields(PostprocessSettings)
+    }
+    return PostprocessSettings(**kwargs)
+
+
+def _build_replay_runtime_config(infer_settings: dict[str, Any]) -> Any:
+    from utils.live_infer_common import ReplayRuntimeConfig
+
+    defaults = ReplayRuntimeConfig()
+    kwargs = {
+        field.name: infer_settings.get(field.name, getattr(defaults, field.name))
+        for field in dataclass_fields(ReplayRuntimeConfig)
+    }
+    latency_policy = str(infer_settings.get("latency_policy", "warn")).strip().lower()
+    kwargs["latency_mode"] = "ignore" if latency_policy == "warn" else str(kwargs["latency_mode"])
+    if str(kwargs["latency_mode"]).strip().lower() != "fixed":
+        kwargs["fixed_latency_ms"] = None
+    kwargs["reset_on_trial_change"] = _coerce_bool(kwargs["reset_on_trial_change"], True)
+    kwargs["deterministic"] = _coerce_bool(kwargs["deterministic"], True)
+    kwargs["modulate_actuation_speed"] = _coerce_bool(
+        kwargs["modulate_actuation_speed"], True
+    )
+    kwargs["use_inference_engine"] = _coerce_bool(
+        kwargs["use_inference_engine"], False
+    )
+    kwargs["live_quality_enabled"] = _coerce_bool(
+        kwargs["live_quality_enabled"], True
+    )
+    return ReplayRuntimeConfig(
+        window_sec=float(kwargs["window_sec"]),
+        hop_sec=float(kwargs["hop_sec"]),
+        latency_threshold_ms=float(kwargs["latency_threshold_ms"]),
+        actuation_min_prob=float(kwargs["actuation_min_prob"]),
+        actuation_stability=int(kwargs["actuation_stability"]),
+        actuation_cooldown_ms=int(kwargs["actuation_cooldown_ms"]),
+        actuation_repeat_ms=int(kwargs["actuation_repeat_ms"]),
+        actuation_min_speed=float(kwargs["actuation_min_speed"]),
+        modulate_actuation_speed=bool(kwargs["modulate_actuation_speed"]),
+        actuation_speed_gamma=float(kwargs["actuation_speed_gamma"]),
+        use_inference_engine=bool(kwargs["use_inference_engine"]),
+        mc_passes=int(kwargs["mc_passes"]),
+        uncertainty_base_threshold=float(kwargs["uncertainty_base_threshold"]),
+        uncertainty_weight=float(kwargs["uncertainty_weight"]),
+        live_quality_enabled=bool(kwargs["live_quality_enabled"]),
+        input_clip_abs_z=float(kwargs["input_clip_abs_z"]),
+        bad_channel_rms_z=float(kwargs["bad_channel_rms_z"]),
+        bad_channel_abs_p95_z=float(kwargs["bad_channel_abs_p95_z"]),
+        bad_channel_clipped_frac=float(kwargs["bad_channel_clipped_frac"]),
+        bad_window_clipped_frac=float(kwargs["bad_window_clipped_frac"]),
+        bad_window_max_masked_channels=int(kwargs["bad_window_max_masked_channels"]),
+        latency_mode=str(kwargs["latency_mode"]),
+        fixed_latency_ms=(
+            float(kwargs["fixed_latency_ms"])
+            if kwargs["fixed_latency_ms"] is not None
+            else None
+        ),
+        reset_on_trial_change=bool(kwargs["reset_on_trial_change"]),
+        deterministic=bool(kwargs["deterministic"]),
+    )
+
+
+_LIVE_INFER_UI_MODULE: Optional[Any] = None
+
+
+def _load_live_infer_ui_module(repo_root: Path) -> Any:
+    global _LIVE_INFER_UI_MODULE
+    if _LIVE_INFER_UI_MODULE is not None:
+        return _LIVE_INFER_UI_MODULE
+    module_path = repo_root / "7_live_infer_and_actuate.py"
+    spec = importlib.util.spec_from_file_location("live_infer_ui_bridge", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load live inference module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    _LIVE_INFER_UI_MODULE = module
+    return module
 
 try:
     import pyqtgraph as pg
@@ -1064,7 +1385,16 @@ class MainWindow(QMainWindow):
         self.replay_pred_action_plot = None
         self.replay_auto_checkbox: Optional[QCheckBox] = None
         self.replay_auto_interval: Optional[QSpinBox] = None
+        self.replay_hand_preview_checkbox: Optional[QCheckBox] = None
+        self.replay_scramble_checkbox: Optional[QCheckBox] = None
         self.replay_pred_label: Optional[QLabel] = None
+        self._replay_hand_actuator = None
+        self._replay_runtime_records: Optional[list[dict[str, Any]]] = None
+        self._replay_runtime_signature: Optional[tuple[Any, ...]] = None
+        self._last_replay_preview_index: Optional[int] = None
+        self._replay_last_active_command: Optional[tuple[int, int]] = None
+        self._replay_scramble_order: Optional[list[int]] = None
+        self._replay_scramble_position: int = 0
         self._replay_auto_timer = QTimer(self)
         self._replay_auto_timer.setInterval(500)
         self._replay_auto_timer.timeout.connect(self._advance_replay_window)
@@ -2006,6 +2336,30 @@ class MainWindow(QMainWindow):
         replay_auto_row.addWidget(self.replay_auto_interval)
         replay_auto_row.addStretch(1)
         replay_layout.addLayout(replay_auto_row)
+        replay_scramble_row = QHBoxLayout()
+        self.replay_scramble_checkbox = QCheckBox("Scrambled event order")
+        self.replay_scramble_checkbox.setToolTip(
+            "Replay-only visualization mode. Preserves each event's internal window "
+            "order but shuffles event blocks so the robot hand shows more varied motion."
+        )
+        self.replay_scramble_checkbox.toggled.connect(self._toggle_replay_scramble)
+        replay_scramble_row.addWidget(self.replay_scramble_checkbox)
+        replay_scramble_row.addStretch(1)
+        replay_layout.addLayout(replay_scramble_row)
+        replay_preview_row = QHBoxLayout()
+        self.replay_hand_preview_checkbox = QCheckBox(
+            "Robot hand preview (replay only)"
+        )
+        self.replay_hand_preview_checkbox.setToolTip(
+            "Uses Step 7 serial settings and the shared Step 7-equivalent replay "
+            "actuation logic. Correctness coloring appears only when replay labels exist."
+        )
+        self.replay_hand_preview_checkbox.toggled.connect(
+            self._toggle_replay_hand_preview
+        )
+        replay_preview_row.addWidget(self.replay_hand_preview_checkbox)
+        replay_preview_row.addStretch(1)
+        replay_layout.addLayout(replay_preview_row)
         self.replay_pred_label = QLabel("Current prediction: -")
         replay_layout.addWidget(self.replay_pred_label)
         replay_btn_row = QHBoxLayout()
@@ -2168,6 +2522,8 @@ class MainWindow(QMainWindow):
 
     def _on_model_views_window_closed(self, *_args) -> None:
         self._replay_auto_timer.stop()
+        self._close_replay_hand_actuator()
+        self._last_replay_preview_index = None
         self.model_views_window = None
         self._model_views_root = None
 
@@ -2190,6 +2546,268 @@ class MainWindow(QMainWindow):
         if not live_enabled and self.model_view_tabs.currentIndex() == self.live_viz_tab_index:
             self.model_view_tabs.setCurrentIndex(0)
 
+    def _disable_replay_hand_preview(self) -> None:
+        self._close_replay_hand_actuator()
+        self._last_replay_preview_index = None
+        self._replay_last_active_command = None
+        if self.replay_hand_preview_checkbox is None:
+            return
+        was_blocked = self.replay_hand_preview_checkbox.blockSignals(True)
+        self.replay_hand_preview_checkbox.setChecked(False)
+        self.replay_hand_preview_checkbox.blockSignals(was_blocked)
+        if self.replay_auto_checkbox is not None:
+            self.replay_auto_checkbox.setEnabled(True)
+
+    def _close_replay_hand_actuator(self) -> None:
+        actuator = self._replay_hand_actuator
+        self._replay_hand_actuator = None
+        if actuator is None:
+            return
+        try:
+            self._send_replay_rest_pose(actuator)
+        except Exception:
+            pass
+        try:
+            actuator.close()
+        except Exception:
+            pass
+
+    def _invalidate_replay_runtime_cache(self) -> None:
+        self._replay_runtime_records = None
+        self._replay_runtime_signature = None
+        self._last_replay_preview_index = None
+        self._replay_last_active_command = None
+        self._replay_scramble_order = None
+        self._replay_scramble_position = 0
+
+    def _send_replay_rest_pose(self, actuator: Optional[Any] = None) -> bool:
+        target = actuator if actuator is not None else self._replay_hand_actuator
+        if target is None:
+            self._replay_last_active_command = None
+            return False
+        try:
+            for finger_id, action_id, speed_scalar in _replay_rest_preview_commands():
+                target.send(
+                    int(finger_id),
+                    int(action_id),
+                    speed_scalar=speed_scalar,
+                )
+        finally:
+            self._replay_last_active_command = None
+        return True
+
+    def _default_replay_auto_interval_ms(self) -> int:
+        fallback_hop_sec = None
+        try:
+            infer_settings = self._collect_settings("infer")
+        except Exception:
+            infer_settings = {}
+        hop_value = infer_settings.get("hop_sec")
+        if hop_value is not None:
+            try:
+                fallback_hop_sec = float(hop_value)
+            except Exception:
+                fallback_hop_sec = None
+        starts = self.replay_viz.window_start if self.replay_viz is not None else None
+        return _estimate_replay_auto_interval_ms(
+            starts,
+            fallback_hop_sec=fallback_hop_sec,
+        )
+
+    def _set_replay_auto_enabled(
+        self,
+        enabled: bool,
+        *,
+        advance_immediately: bool = True,
+    ) -> None:
+        if enabled:
+            self._replay_auto_timer.start()
+            if advance_immediately:
+                self._advance_replay_window()
+            return
+        self._replay_auto_timer.stop()
+
+    def _autofill_replay_auto_interval(self) -> None:
+        if self.replay_auto_interval is None:
+            return
+        interval_ms = self._default_replay_auto_interval_ms()
+        was_blocked = self.replay_auto_interval.blockSignals(True)
+        self.replay_auto_interval.setValue(int(interval_ms))
+        self.replay_auto_interval.blockSignals(was_blocked)
+        self._set_replay_auto_interval(int(interval_ms))
+
+    def _reset_replay_scramble_order(
+        self, *, anchor_idx: Optional[int] = None
+    ) -> None:
+        self._replay_scramble_order = None
+        self._replay_scramble_position = 0
+        if self.replay_viz is None:
+            return
+        if self.replay_scramble_checkbox is None or not self.replay_scramble_checkbox.isChecked():
+            return
+        order = _build_scrambled_replay_order(
+            self.replay_viz.window_count,
+            event_ids=self.replay_viz.event_ids,
+            trial_ids=self.replay_viz.trial_ids,
+            session_ids=self.replay_viz.session_ids,
+            anchor_idx=anchor_idx,
+        )
+        self._replay_scramble_order = order
+        if anchor_idx is not None and anchor_idx in order:
+            self._replay_scramble_position = order.index(anchor_idx)
+
+    def _toggle_replay_scramble(self, enabled: bool) -> None:
+        anchor_idx = (
+            int(self.replay_window_index.value())
+            if getattr(self, "replay_window_index", None) is not None
+            else None
+        )
+        self._reset_replay_scramble_order(anchor_idx=anchor_idx)
+        if enabled:
+            self._append_log(
+                "Replay scrambled mode enabled; auto-advance now shuffles event blocks for visualization."
+            )
+
+    def _ensure_replay_runtime_records(self) -> list[dict[str, Any]]:
+        if self.replay_viz is None:
+            raise RuntimeError("Load replay data before enabling replay hand preview.")
+        infer_settings = self._collect_settings("infer")
+        postprocess_enabled = bool(infer_settings.get("postprocess"))
+        postprocess_settings = _build_replay_postprocess_settings(infer_settings)
+        runtime_config = _build_replay_runtime_config(infer_settings)
+        signature = (
+            str(self.replay_npz_path.text().strip()),
+            str(self.replay_model_path.text().strip()),
+            str(self.replay_scaler_path.text().strip()),
+            bool(postprocess_enabled),
+            tuple(
+                (field.name, getattr(postprocess_settings, field.name))
+                for field in dataclass_fields(PostprocessSettings)
+            ),
+            tuple(
+                (field.name, getattr(runtime_config, field.name))
+                for field in dataclass_fields(type(runtime_config))
+            ),
+        )
+        if (
+            self._replay_runtime_records is not None
+            and self._replay_runtime_signature == signature
+        ):
+            return self._replay_runtime_records
+        from utils.live_infer_common import replay_ordered_windows
+
+        self._append_log(
+            "Preparing replay hand preview with Step 7-equivalent postprocess and actuation settings."
+        )
+        replay_inputs = self.replay_viz.replay_runtime_inputs()
+        replay_bundle = replay_ordered_windows(
+            X=replay_inputs["X"],
+            window_start_s=replay_inputs["window_start_s"],
+            window_end_s=replay_inputs["window_end_s"],
+            y_action_true=replay_inputs["y_action_true"],
+            y_finger_true=replay_inputs["y_finger_true"],
+            trial_ids=replay_inputs["trial_ids"],
+            session_ids=replay_inputs["session_ids"],
+            event_ids=replay_inputs["event_ids"],
+            event_onset_s=replay_inputs["event_onset_s"],
+            scaler=replay_inputs["scaler"],
+            model=replay_inputs["model"],
+            device=replay_inputs["device"],
+            postprocess_enabled=bool(postprocess_enabled),
+            postprocess_settings=postprocess_settings,
+            runtime_config=runtime_config,
+            temperature_state=replay_inputs["temperature_state"],
+        )
+        self._replay_runtime_records = list(replay_bundle["records"])
+        self._replay_runtime_signature = signature
+        self._last_replay_preview_index = None
+        return self._replay_runtime_records
+
+    def _ensure_replay_hand_actuator(self) -> Any:
+        if self._replay_hand_actuator is not None:
+            return self._replay_hand_actuator
+        live_mod = _load_live_infer_ui_module(self.repo_root)
+        infer_settings = self._collect_settings("infer")
+        serial_port = str(infer_settings.get("serial_port") or "").strip()
+        serial_baud = int(infer_settings.get("serial_baud") or 9600)
+        if not serial_port:
+            serial_port = str(live_mod._autodetect_serial_port())
+            self._append_log(
+                f"Replay hand preview auto-detected serial port: {serial_port}"
+            )
+        actuator = live_mod.SerialHandActuator(str(serial_port), baud=serial_baud)
+        actuator.open()
+        live_mod._warmup_actuation(actuator)
+        self._replay_hand_actuator = actuator
+        self._append_log(
+            f"Replay hand preview connected on {serial_port} @ {serial_baud} baud."
+        )
+        return actuator
+
+    def _toggle_replay_hand_preview(self, enabled: bool) -> None:
+        self._last_replay_preview_index = None
+        if self.replay_auto_checkbox is not None:
+            self.replay_auto_checkbox.setEnabled(not enabled)
+        if not enabled:
+            self._close_replay_hand_actuator()
+            return
+        self._autofill_replay_auto_interval()
+        self._append_log(
+            "Replay hand preview enabled; using Step 7 serial settings and Step 7-equivalent replay actuation."
+        )
+        self._refresh_replay_views()
+        if self.replay_auto_checkbox is not None:
+            was_blocked = self.replay_auto_checkbox.blockSignals(True)
+            self.replay_auto_checkbox.setChecked(True)
+            self.replay_auto_checkbox.blockSignals(was_blocked)
+        self._set_replay_auto_enabled(True, advance_immediately=False)
+
+    def _maybe_send_replay_preview(self, idx: int) -> None:
+        if (
+            self.replay_hand_preview_checkbox is None
+            or not self.replay_hand_preview_checkbox.isChecked()
+        ):
+            return
+        if self.replay_viz is None:
+            return
+        if self._last_replay_preview_index == idx:
+            return
+        try:
+            records = self._ensure_replay_runtime_records()
+        except Exception as exc:
+            self._append_log(f"⚠️ Replay hand preview unavailable: {exc}")
+            self._disable_replay_hand_preview()
+            return
+        if idx < 0 or idx >= len(records):
+            return
+        preview = _replay_preview_actuation_from_record(records[idx])
+        self._last_replay_preview_index = idx
+        if preview is not None:
+            finger_id, action_id, speed_scalar = preview
+            preview_key = (int(finger_id), int(action_id))
+            if self._replay_last_active_command == preview_key:
+                return
+        try:
+            actuator = self._ensure_replay_hand_actuator()
+            if preview is None:
+                if self._replay_last_active_command is not None:
+                    self._send_replay_rest_pose(actuator)
+                return
+            if (
+                self._replay_last_active_command is not None
+                and self._replay_last_active_command != preview_key
+            ):
+                self._send_replay_rest_pose(actuator)
+            actuator.send(
+                int(finger_id),
+                int(action_id),
+                speed_scalar=_scale_replay_preview_speed(speed_scalar),
+            )
+            self._replay_last_active_command = preview_key
+        except Exception as exc:
+            self._append_log(f"⚠️ Replay hand preview send failed: {exc}")
+            self._disable_replay_hand_preview()
+
     def _render_model_visualization(
         self,
         *,
@@ -2204,6 +2822,8 @@ class MainWindow(QMainWindow):
         finger_probs: Optional[np.ndarray],
         action_probs: Optional[np.ndarray],
         saliency: Optional[np.ndarray],
+        truth_action_id: Optional[int] = None,
+        truth_finger_id: Optional[int] = None,
     ) -> None:
         if not PYQTGRAPH_AVAILABLE:
             return
@@ -2220,27 +2840,18 @@ class MainWindow(QMainWindow):
             if hidden_mag is not None and hidden_mag.size:
                 hidden_plot.plot(hidden_mag)
         if pred_label is not None:
-            finger_text = "-"
-            action_text = "-"
-            if finger_probs is not None and finger_probs.size:
-                finger_last = finger_probs[-1]
-                finger_idx = int(np.argmax(finger_last))
-                finger_prob = float(finger_last[finger_idx])
-                finger_name = FINGER_NAMES.get(finger_idx, f"finger_{finger_idx}")
-                finger_text = f"{finger_name} ({finger_prob:.2f})"
-            if action_probs is not None and action_probs.size:
-                action_last = action_probs[-1]
-                action_idx = int(np.argmax(action_last))
-                action_prob = float(action_last[action_idx])
-                action_name = ACTION_NAMES.get(action_idx, f"action_{action_idx}")
-                action_text = f"{action_name} ({action_prob:.2f})"
-            pred_label.setText(
-                f"Current prediction: Finger {finger_text}, Action {action_text}"
+            label_text, label_style = _prediction_label_payload(
+                finger_probs,
+                action_probs,
+                truth_action_id=truth_action_id,
+                truth_finger_id=truth_finger_id,
             )
+            pred_label.setText(label_text)
+            pred_label.setStyleSheet(label_style)
         self._plot_prediction_timeline(
             pred_finger_plot,
             finger_probs if finger_probs is not None else np.array([]),
-            FINGER_NAMES,
+            _finger_label_map_for_probs(finger_probs),
             title="Finger Prob",
         )
         self._plot_prediction_timeline(
@@ -2280,6 +2891,8 @@ class MainWindow(QMainWindow):
                 "⚠️ Replay views require pyqtgraph in the active Python environment."
             )
             return
+        self._close_replay_hand_actuator()
+        self._invalidate_replay_runtime_cache()
         session_dir = self._resolve_effective_session_dir(step_id=None)
         sessions_root = None
         if self.current_project and self.current_subject:
@@ -2315,6 +2928,10 @@ class MainWindow(QMainWindow):
                 scaler_path=str(scaler_path),
             )
             self.replay_window_index.setMaximum(max(0, self.replay_viz.window_count - 1))
+            self._autofill_replay_auto_interval()
+            self._reset_replay_scramble_order(
+                anchor_idx=int(self.replay_window_index.value())
+            )
             self._refresh_replay_views()
             self._append_log("✅ Replay data loaded for model views.")
         except Exception as exc:
@@ -2326,6 +2943,7 @@ class MainWindow(QMainWindow):
         idx = int(self.replay_window_index.value())
         layer_idx = int(self.replay_layer_index.value())
         try:
+            truth_action_id, truth_finger_id = self.replay_viz.ground_truth_pair(idx)
             feature_map = self.replay_viz.feature_map(idx, layer_idx)
             hidden_mag = self.replay_viz.hidden_magnitude(idx)
             saliency = self.replay_viz.saliency(idx)
@@ -2344,7 +2962,10 @@ class MainWindow(QMainWindow):
                 finger_probs=finger_probs,
                 action_probs=action_probs,
                 saliency=saliency,
+                truth_action_id=truth_action_id,
+                truth_finger_id=truth_finger_id,
             )
+            self._maybe_send_replay_preview(idx)
         except Exception as exc:
             self._append_log(f"⚠️ Replay view refresh failed: {exc}")
 
@@ -2380,14 +3001,26 @@ class MainWindow(QMainWindow):
             finger_probs=_as_array("finger_probs"),
             action_probs=_as_array("action_probs"),
             saliency=_as_array("saliency"),
+            truth_action_id=None,
+            truth_finger_id=None,
         )
 
     def _toggle_replay_auto(self, enabled: bool) -> None:
-        if enabled:
-            self._replay_auto_timer.start()
-            self._advance_replay_window()
-        else:
-            self._replay_auto_timer.stop()
+        if (
+            not enabled
+            and self.replay_hand_preview_checkbox is not None
+            and self.replay_hand_preview_checkbox.isChecked()
+        ):
+            if self.replay_auto_checkbox is not None:
+                was_blocked = self.replay_auto_checkbox.blockSignals(True)
+                self.replay_auto_checkbox.setChecked(True)
+                self.replay_auto_checkbox.blockSignals(was_blocked)
+            self._append_log(
+                "Replay hand preview requires auto-advance; keeping replay auto enabled."
+            )
+            self._set_replay_auto_enabled(True, advance_immediately=False)
+            return
+        self._set_replay_auto_enabled(enabled, advance_immediately=True)
 
     def _set_replay_auto_interval(self, value: int) -> None:
         self._replay_auto_timer.setInterval(int(value))
@@ -2404,6 +3037,22 @@ class MainWindow(QMainWindow):
         if maximum <= 0:
             return
         next_idx = 0 if current >= maximum else current + 1
+        if self.replay_scramble_checkbox is not None and self.replay_scramble_checkbox.isChecked():
+            if (
+                self._replay_scramble_order is None
+                or len(self._replay_scramble_order) != int(maximum + 1)
+            ):
+                self._reset_replay_scramble_order(anchor_idx=current)
+            order = self._replay_scramble_order or list(range(int(maximum + 1)))
+            if current in order:
+                self._replay_scramble_position = order.index(current)
+            next_pos = int(self._replay_scramble_position) + 1
+            if next_pos >= len(order):
+                self._reset_replay_scramble_order(anchor_idx=current)
+                order = self._replay_scramble_order or order
+                next_pos = 1 if len(order) > 1 else 0
+            self._replay_scramble_position = next_pos
+            next_idx = int(order[next_pos])
         self.replay_window_index.setValue(next_idx)
         self._refresh_replay_views()
 

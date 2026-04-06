@@ -54,6 +54,194 @@ def test_infer_step_arg_specs_do_not_expose_project_name_override(window):
     assert all(spec.name != "project_name" for spec in infer_specs)
 
 
+def test_format_prediction_text_decodes_active_finger_head_with_action_conditioning():
+    finger_probs = np.asarray(
+        [
+            [0.91, 0.03, 0.02, 0.02, 0.02],
+        ],
+        dtype=float,
+    )
+    action_probs = np.asarray(
+        [
+            [0.02, 0.90, 0.08],
+        ],
+        dtype=float,
+    )
+
+    finger_text, action_text = ui_mod._format_prediction_text(
+        finger_probs, action_probs
+    )
+
+    assert finger_text.startswith("THUMB")
+    assert "NONE" not in finger_text
+    assert action_text.startswith("OPEN")
+
+
+def test_finger_label_map_for_active_finger_head_skips_none_label():
+    finger_probs = np.zeros((4, 5), dtype=float)
+
+    label_map = ui_mod._finger_label_map_for_probs(finger_probs)
+
+    assert label_map[0] == "THUMB"
+    assert "NONE" not in set(label_map.values())
+
+
+def test_prediction_label_payload_marks_correct_replay_predictions_green():
+    finger_probs = np.asarray([[0.91, 0.03, 0.02, 0.02, 0.02]], dtype=float)
+    action_probs = np.asarray([[0.02, 0.90, 0.08]], dtype=float)
+
+    label_text, label_style = ui_mod._prediction_label_payload(
+        finger_probs,
+        action_probs,
+        truth_action_id=1,
+        truth_finger_id=1,
+    )
+
+    assert "Truth: Finger THUMB, Action OPEN" in label_text
+    assert "130, 255, 130" in label_style
+
+
+def test_prediction_label_payload_marks_incorrect_replay_predictions_red():
+    finger_probs = np.asarray([[0.91, 0.03, 0.02, 0.02, 0.02]], dtype=float)
+    action_probs = np.asarray([[0.02, 0.90, 0.08]], dtype=float)
+
+    label_text, label_style = ui_mod._prediction_label_payload(
+        finger_probs,
+        action_probs,
+        truth_action_id=2,
+        truth_finger_id=2,
+    )
+
+    assert "Truth: Finger INDEX, Action CLOSE" in label_text
+    assert "255, 120, 120" in label_style
+
+
+def test_replay_preview_actuation_from_record_uses_step7_target_state():
+    assert ui_mod._replay_preview_actuation_from_record(
+        {
+            "actuation_sent": False,
+            "actuation_target_finger_id": 1,
+            "actuation_target_action_id": 2,
+            "actuation_speed_scalar": 0.75,
+        }
+    ) == (1, 2, 0.75)
+
+    assert ui_mod._replay_preview_actuation_from_record(
+        {
+            "actuation_target_finger_id": 0,
+            "actuation_target_action_id": 0,
+            "actuation_speed_scalar": 0.75,
+        }
+    ) is None
+
+
+def test_scale_replay_preview_speed_halves_step7_speed_for_replay_only():
+    assert ui_mod._scale_replay_preview_speed(0.8) == pytest.approx(0.4)
+
+
+def test_build_replay_runtime_config_maps_warn_latency_policy_to_ignore():
+    runtime_config = ui_mod._build_replay_runtime_config(
+        {
+            "window_sec": 0.25,
+            "hop_sec": 0.05,
+            "latency_threshold_ms": 750.0,
+            "latency_policy": "warn",
+            "actuation_min_prob": 0.2,
+            "actuation_stability": 2,
+            "actuation_cooldown_ms": 0,
+            "actuation_repeat_ms": 100,
+            "actuation_min_speed": 0.5,
+            "modulate_actuation_speed": False,
+            "actuation_speed_gamma": 1.0,
+            "use_inference_engine": False,
+            "mc_passes": 10,
+            "uncertainty_base_threshold": 0.75,
+            "uncertainty_weight": 0.5,
+            "live_quality_enabled": True,
+            "input_clip_abs_z": 6.0,
+            "bad_channel_rms_z": 4.0,
+            "bad_channel_abs_p95_z": 6.0,
+            "bad_channel_clipped_frac": 0.05,
+            "bad_window_clipped_frac": 0.10,
+            "bad_window_max_masked_channels": 1,
+        }
+    )
+
+    assert runtime_config.latency_mode == "ignore"
+
+
+def test_estimate_replay_auto_interval_ms_uses_window_hop():
+    interval_ms = ui_mod._estimate_replay_auto_interval_ms(
+        np.asarray([0.00, 0.05, 0.10, 0.15], dtype=float)
+    )
+
+    assert interval_ms == 50
+
+
+def test_build_scrambled_replay_order_preserves_event_blocks_and_anchor():
+    order = ui_mod._build_scrambled_replay_order(
+        6,
+        event_ids=np.asarray([10, 10, 11, 11, 12, 12], dtype=np.int64),
+        trial_ids=np.asarray([1, 1, 2, 2, 3, 3], dtype=np.int64),
+        anchor_idx=2,
+        rng=np.random.default_rng(0),
+    )
+
+    assert order[:2] == [2, 3]
+    assert sorted(order) == [0, 1, 2, 3, 4, 5]
+    assert order[2:4] in ([0, 1], [4, 5])
+    assert order[4:6] in ([0, 1], [4, 5])
+
+
+def test_robot_hand_preview_enforces_auto_advance_and_realistic_default(window):
+    model_views = window._build_model_views_widget()
+    window.replay_viz = SimpleNamespace(window_start=np.asarray([0.0, 0.05, 0.10]))
+    window._refresh_replay_views = lambda: None
+
+    window._toggle_replay_hand_preview(True)
+
+    assert window.replay_auto_checkbox.isChecked()
+    assert not window.replay_auto_checkbox.isEnabled()
+    assert window.replay_auto_interval.value() == 50
+    assert model_views is not None
+
+
+def test_replay_preview_does_not_resend_same_active_target(window):
+    model_views = window._build_model_views_widget()
+    window.replay_viz = SimpleNamespace(window_start=np.asarray([0.0, 0.05, 0.10]))
+    window._refresh_replay_views = lambda: None
+    window._toggle_replay_hand_preview(True)
+    window.replay_hand_preview_checkbox.setChecked(True)
+
+    class _FakeActuator:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def send(self, finger_id, action_id, speed_scalar=None):
+            self.calls.append((finger_id, action_id, speed_scalar))
+
+    actuator = _FakeActuator()
+    window._ensure_replay_hand_actuator = lambda: actuator
+    window._ensure_replay_runtime_records = lambda: [
+        {
+            "actuation_target_finger_id": 2,
+            "actuation_target_action_id": 1,
+            "actuation_speed_scalar": 0.8,
+        },
+        {
+            "actuation_target_finger_id": 2,
+            "actuation_target_action_id": 1,
+            "actuation_speed_scalar": 0.8,
+        },
+    ]
+
+    window._maybe_send_replay_preview(0)
+    window._maybe_send_replay_preview(1)
+
+    assert actuator.calls == [(2, 1, pytest.approx(0.4))]
+    assert model_views is not None
+
+
 def test_prepare_live_infer_launch_freezes_source_and_session_artifacts(
     window, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
