@@ -67,7 +67,7 @@ def _validate_label_list(
     if key not in settings:
         return
     value = settings.get(key)
-    if value in (None, ""):
+    if value in (None, "", [], ()):
         return
     if isinstance(value, str):
         labels = [part.strip() for part in value.split(",") if part.strip()]
@@ -211,7 +211,7 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         )
     if not settings.get("REQUIRED_LSL_LABELS"):
         warnings.append(
-            "REQUIRED_LSL_LABELS is blank; wrong-stream detection will rely on name/type/rate/channel-count only."
+            "REQUIRED_LSL_LABELS is blank; Step 7 must derive expected labels from the selected deployment training_npz.channel_names or it will fail closed at preflight/runtime."
         )
     if settings.get("REQUIRE_EXACTLY_4_CHANNELS") is False:
         warnings.append(

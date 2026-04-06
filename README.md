@@ -58,6 +58,11 @@ Connection model:
 The UI writes per-step configs under `Projects/<ProjectName>/subjects/<subject_id>/config/`
 and snapshots each step to `Projects/<ProjectName>/subjects/<subject_id>/sessions/<session_id>/session_config.json`.
 Checked-in configs under `Projects/2-M16/.../config/` are subject-specific reproducibility snapshots, not the source of repo-wide generic defaults.
+For the next decisive `2-M16` Step 7 live run, the canonical CLI config is
+`Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json`; the checked-in
+`Projects/2-M16/subjects/2-M16/config/infer.json` file is the UI working mirror of that same
+deployment contract. Legacy Step 7 artifacts that should not drive the next live run are archived
+under `Projects/2-M16/subjects/2-M16/archive/step7/`.
 
 ## Session Directory (Core Concept)
 
@@ -79,7 +84,7 @@ Notes:
 - Step 1b: Extract Windows → reads `<session_dir>/raw/` + `<session_dir>/events/`, writes `<session_dir>/processed/`.
 - Step 2: Train Model → reads `<session_dir>/processed/eeg_windows.npz`, writes `<session_dir>/processed/models/<run_id>/` including `temperature_scaling.json`.
 - Step 3+: Evaluate / Figures / Reports → read from the same session directory and the latest model run, and report action/finger/joint metrics, applicability diagnostics, and committed deployment-pair invariants.
-- Step 7: Live Infer + Actuate → uses the latest model/scaler unless explicitly overridden.
+- Step 7: Live Infer + Actuate → use `docs/ops/STEP7_LIVE_RUNBOOK.md` for the decisive `2-M16` live workflow, including the pinned config, deployment session, preflight, replay, and audit commands.
 - Step 7b: Review Live Predictions → reads `processed/live_infer*/predictions.jsonl`, summarizes runtime behavior, and exports segment CSVs for video-aligned validation.
 
 ## CLI Run (Session-Directory Flow)
@@ -201,16 +206,26 @@ Labeling constraint:
 
 ## Live Inference (Step 7)
 
+For the next decisive `2-M16` live run, use `docs/ops/STEP7_LIVE_RUNBOOK.md`.
+The canonical config there is
+`Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json`, and decisive runs should write
+to a fresh `processed/live_infer_<run_tag>` directory instead of reusing the runtime default
+`processed/live_infer`.
+
 Preferred (auto-resolve latest model/scaler from the session directory):
 
 ```bash
 python tools/live_preflight.py \
-  --config Projects/<project>/subjects/<subject>/config/infer.json \
-  --session-dir <session_dir>
+  --config Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json \
+  --session-dir Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2 \
+  --out-dir Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/live_infer_<run_tag> \
+  --probe-stream \
+  --probe-distribution
 
 python 7_live_infer_and_actuate.py \
-  --config Projects/<project>/subjects/<subject>/config/infer.json \
-  --session-dir <session_dir>
+  --config Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json \
+  --session-dir Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2 \
+  --out-dir Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/live_infer_<run_tag>
 ```
 
 Explicit override (no session directory):
@@ -220,6 +235,8 @@ python 7_live_infer_and_actuate.py --config <infer_config.json>
 ```
 
 When `--session-dir` is omitted, `model_path`, `scaler_path`, and `out_dir` must be present in the config JSON.
+Legacy compare/tuning sessions and superseded live outputs for `2-M16` are archived under
+`Projects/2-M16/subjects/2-M16/archive/step7/` and should not be used for the decisive run.
 
 Step 7 connection note:
 
@@ -276,6 +293,7 @@ python tools/analyze_live_predictions.py \
 Notes:
 
 - If `--pred-log` is omitted, the tool auto-resolves the latest `processed/live_infer*/predictions.jsonl` under `--session-dir`.
+- Fresh decisive runs are expected to use `processed/live_infer_<run_tag>`; archived legacy outputs are not part of this auto-resolve path.
 - The summary JSON reports latency, transition rate, actuation counts, uncertainty-gate failures, applicability-gate failures, and committed/sent deployment-pair invariants.
 - `predicted_segments.csv` converts per-window predictions into contiguous predicted command intervals.
 - `predicted_segments_review.csv` adds blank reviewer columns so you can compare predicted intervals against recorded video or robot-hand motion.

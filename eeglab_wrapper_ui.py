@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -136,6 +137,18 @@ except Exception:
 class StreamInfo:
     name: str
     stype: str
+
+
+@dataclass
+class PreparedLiveInferLaunch:
+    args: list[str]
+    cwd: str
+    env: Dict[str, Optional[str]]
+    config_path: Path
+    config_payload: Dict[str, Any]
+    settings: Dict[str, Any]
+    subject_dir: Path
+    session_dir: Optional[Path]
 
 
 @dataclass
@@ -485,6 +498,9 @@ TOOLTIPS: Dict[str, str] = {
     "out": "Single-figure output path.",
     "stream_name": "LSL stream name for live inference.",
     "stream_type": "LSL stream type for live inference.",
+    "lsl_source_id": "Explicit LSL source-id to pin the exact live stream identity. Required for a decisive Step 7 run.",
+    "LSL_RESOLVE_TIMEOUT": "Seconds Step 7 will wait while resolving the live LSL stream.",
+    "alignment_internal_max_gap_s": "Maximum internal sample gap tolerated inside a live window before alignment drops it.",
     "hop_sec": "Window hop length in seconds.",
     "target_fs": "Target sampling rate for live inference.",
     "allow_drop": "Allow dropping windows in live inference.",
@@ -520,6 +536,20 @@ TOOLTIPS: Dict[str, str] = {
     "mc_passes": "Monte Carlo dropout passes for live inference when the inference engine backend is enabled.",
     "uncertainty_base_threshold": "Base action confidence threshold before uncertainty adjustment.",
     "uncertainty_weight": "Additional adaptive threshold weight applied to action uncertainty.",
+    "rest_bias_correction_enabled": "Enable live REST-bias correction so finger probabilities are debiased using live REST windows.",
+    "rest_bias_strength": "Strength of the live REST-bias correction.",
+    "rest_bias_min_windows": "Minimum number of live REST windows required before REST-bias correction activates.",
+    "live_quality_enabled": "Enable live-only clipping, channel masking, and signal-quality gating.",
+    "input_clip_abs_z": "Clip normalized live inputs to +/- this absolute z-score before inference.",
+    "bad_channel_rms_z": "Mask a channel when its normalized RMS exceeds this threshold.",
+    "bad_channel_abs_p95_z": "Mask a channel when its normalized absolute p95 exceeds this threshold.",
+    "bad_channel_clipped_frac": "Mask a channel when its clipped-sample fraction exceeds this threshold.",
+    "bad_window_clipped_frac": "Quality-gate a window when the total clipped fraction exceeds this threshold.",
+    "bad_window_max_masked_channels": "Maximum bad-channel count that can be masked instead of dropping the live window.",
+    "parity_capture_enabled": "Persist accepted live windows for replay parity checks. Disable only for non-decisive debug runs.",
+    "parity_capture_max_windows": "Maximum number of accepted windows retained for parity replay.",
+    "parity_capture_flush_every": "Flush parity capture files after this many accepted windows.",
+    "deployment_session_dir": "Optional offline session directory used only by the decisive preflight smoke/distribution checks.",
     "infer_subject_override": "Subject override for Step 7 (defaults to current subject).",
     "project_name": "Project name for auto-resolving latest session.",
     "subject_id": "Subject ID for auto-resolving latest session.",
@@ -973,6 +1003,11 @@ class MainWindow(QMainWindow):
         self.runner.finished.connect(self._on_process_finished)
         self.runner.failed.connect(self._append_log)
         self.active_step: Optional[str] = None
+        self.live_preflight_runner = ProcessRunner(self)
+        self.live_preflight_runner.line_ready.connect(self._on_live_preflight_line)
+        self.live_preflight_runner.started.connect(self._on_live_preflight_started)
+        self.live_preflight_runner.finished.connect(self._on_live_preflight_finished)
+        self.live_preflight_runner.failed.connect(self._on_live_preflight_failed)
 
         self.muse_connector = MuseConnectorController(self)
         self.muse_connector.log_line.connect(self._on_connector_log)
@@ -1001,6 +1036,11 @@ class MainWindow(QMainWindow):
         self._live_ready_gate_interval_ms = 1500
         self._live_ready_gate_script_key: Optional[str] = None
         self._last_healthcheck_result: Dict[str, Any] = {}
+        self._live_preflight_lines: list[str] = []
+        self._live_preflight_cancelled = False
+        self._last_live_preflight_report: Dict[str, Any] = {}
+        self._pending_live_launch: Optional[PreparedLiveInferLaunch] = None
+        self._last_live_infer_out_dir: Optional[Path] = None
         self._auto_scan_timer = QTimer(self)
         self._auto_scan_timer.setInterval(1500)
         self._auto_scan_timer.timeout.connect(self._auto_scan_lsl_streams)
@@ -1297,7 +1337,6 @@ class MainWindow(QMainWindow):
                 ArgSpec("finger_mode", "--finger-mode", "text", "Finger confidence mode."),
                 ArgSpec("no_file_io", "--no_file_io", "bool", "Disable file outputs."),
                 ArgSpec("subject_id", "--subject-id", "text", "Subject ID (auto-resolve latest session)."),
-                ArgSpec("project_name", "--project-name", "text", "Project name (auto-resolve latest session)."),
             ],
             "live_review": [
                 ArgSpec(
@@ -3592,17 +3631,36 @@ class MainWindow(QMainWindow):
             "runner and session-dir path used from the terminal. "
             "When a session (or subject/project) is selected, the latest trained run "
             "is auto-resolved unless you provide explicit model/scaler overrides. "
-            "Outputs default to processed/live_infer and auto-version if the folder exists. "
-            "Disable file outputs to run inference-only for max performance. "
+            "The runtime default output is processed/live_infer, but decisive runs should pin a "
+            "fresh out_dir such as processed/live_infer_<run_tag>; the decisive preflight refuses "
+            "reused live output folders. "
+            "Disable file outputs only for non-decisive debug runs; decisive preflight blocks "
+            "no_file_io because it suppresses required evidence. "
             "Saved subject Step 7 settings are reloaded into this form when you change subjects. "
             "Use the inference subject dropdown to target a different subject for Step 7. "
             "Actuation is opt-in and requires confirmation before running. "
             "Saved run-specific temperature scaling is auto-loaded and applied before softmax. "
             "The Stream Setup page remains the source of truth for a selected live LSL stream; "
-            "the Step 7 stream fields stay synced for manual overrides."
+            "the Step 7 stream fields stay synced for manual overrides. "
+            "Launching from the UI now runs the hardened decisive preflight first and freezes "
+            "the exact launch contract before the process starts."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
+
+        self.live_status_label = QLabel(
+            "Live status: stream health not checked; decisive preflight not yet run"
+        )
+        self.live_status_label.setWordWrap(True)
+        layout.addWidget(self.live_status_label)
+
+        self.live_launch_summary = QPlainTextEdit()
+        self.live_launch_summary.setReadOnly(True)
+        self.live_launch_summary.setPlaceholderText(
+            "Step 7 effective config, decisive preflight verdict, and post-run evidence status appear here."
+        )
+        self.live_launch_summary.setMaximumHeight(220)
+        layout.addWidget(self.live_launch_summary)
         return box
 
     def _build_live_review_controls(self) -> QWidget:
@@ -3612,7 +3670,8 @@ class MainWindow(QMainWindow):
             "Use this step after a Step 7 session to summarize predictions.jsonl, "
             "export predicted state segments, and generate a review CSV for video alignment. "
             "If you leave the prediction log blank, the tool auto-resolves the latest "
-            "`processed/live_infer*/predictions.jsonl` under the selected session. "
+            "`processed/live_infer*/predictions.jsonl` under the selected session, including "
+            "fresh `live_infer_<run_tag>` outputs. "
             "The review CSV is intended for manual comparison against recorded video "
             "or robot-hand motion during shadow-mode validation."
         )
@@ -4778,6 +4837,48 @@ class MainWindow(QMainWindow):
             self._add_text(step_id, form, "EVENT_KEYMAP", "Event keymap", defaults)
             self._add_checkbox(step_id, form, "init_only", "Init only", defaults)
         elif step_id == "infer":
+            self._add_text(
+                step_id,
+                form,
+                "lsl_source_id",
+                "LSL source-id",
+                defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "LSL_RESOLVE_TIMEOUT",
+                "LSL resolve timeout (s)",
+                defaults,
+                0,
+                120,
+                is_float=True,
+            )
+            self._add_text(
+                step_id,
+                form,
+                "REQUIRED_LSL_LABELS",
+                "Required labels (CSV)",
+                defaults,
+            )
+            self._add_checkbox(
+                step_id,
+                form,
+                "REQUIRE_EXACTLY_4_CHANNELS",
+                "Require exactly 4 channels",
+                defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "alignment_internal_max_gap_s",
+                "Alignment internal max gap (s)",
+                defaults,
+                0,
+                1,
+                is_float=True,
+                decimals=3,
+            )
             self._add_spin(
                 step_id,
                 form,
@@ -4871,6 +4972,13 @@ class MainWindow(QMainWindow):
             )
             self._add_text(step_id, form, "subject_id", "Subject ID", defaults)
             self._add_text(step_id, form, "session_id", "Session ID", defaults)
+            self._add_dir_picker(
+                step_id,
+                form,
+                "deployment_session_dir",
+                "Deployment session dir",
+                defaults,
+            )
             self._add_checkbox(step_id, form, "postprocess", "Enable postprocess", defaults)
             self._add_checkbox(step_id, form, "smoothing_enabled", "Smoothing enabled", defaults)
             self._add_choice_dropdown(
@@ -4978,6 +5086,127 @@ class MainWindow(QMainWindow):
                 0,
                 2,
                 decimals=2,
+            )
+            self._add_checkbox(
+                step_id,
+                form,
+                "rest_bias_correction_enabled",
+                "REST-bias correction",
+                defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "rest_bias_strength",
+                "REST-bias strength",
+                defaults,
+                0,
+                10,
+                is_float=True,
+                decimals=2,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "rest_bias_min_windows",
+                "REST-bias min windows",
+                defaults,
+                1,
+                1000,
+            )
+            self._add_checkbox(
+                step_id,
+                form,
+                "live_quality_enabled",
+                "Live quality enabled",
+                defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "input_clip_abs_z",
+                "Input clip abs z",
+                defaults,
+                0,
+                20,
+                is_float=True,
+                decimals=2,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "bad_channel_rms_z",
+                "Bad channel RMS z",
+                defaults,
+                0,
+                20,
+                is_float=True,
+                decimals=2,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "bad_channel_abs_p95_z",
+                "Bad channel abs p95 z",
+                defaults,
+                0,
+                20,
+                is_float=True,
+                decimals=2,
+            )
+            self._add_slider(
+                step_id,
+                form,
+                "bad_channel_clipped_frac",
+                "Bad channel clipped frac",
+                defaults,
+                0,
+                1,
+                decimals=2,
+            )
+            self._add_slider(
+                step_id,
+                form,
+                "bad_window_clipped_frac",
+                "Bad window clipped frac",
+                defaults,
+                0,
+                1,
+                decimals=2,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "bad_window_max_masked_channels",
+                "Bad window max masked channels",
+                defaults,
+                0,
+                8,
+            )
+            self._add_checkbox(
+                step_id,
+                form,
+                "parity_capture_enabled",
+                "Parity capture enabled",
+                defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "parity_capture_max_windows",
+                "Parity capture max windows",
+                defaults,
+                1,
+                1024,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "parity_capture_flush_every",
+                "Parity capture flush every",
+                defaults,
+                1,
+                128,
             )
             self._add_file_picker(
                 step_id,
@@ -5537,15 +5766,27 @@ class MainWindow(QMainWindow):
                 "out_dir": "Output directory",
                 "stream_name": "Stream name",
                 "stream_type": "Stream type",
+                "lsl_source_id": "LSL source-id",
+                "LSL_RESOLVE_TIMEOUT": "LSL resolve timeout (s)",
+                "REQUIRED_LSL_LABELS": "Required labels (CSV)",
+                "REQUIRE_EXACTLY_4_CHANNELS": "Require exactly 4 channels",
                 "window_sec": "Window sec",
                 "hop_sec": "Hop sec",
                 "target_fs": "Target FS",
+                "alignment_internal_max_gap_s": "Alignment internal max gap (s)",
                 "device": "Device",
                 "use_inference_engine": "Use MC-dropout inference engine",
                 "mc_passes": "MC passes",
                 "uncertainty_base_threshold": "Uncertainty base threshold",
                 "uncertainty_weight": "Uncertainty weight",
                 "allow_drop": "Allow drop",
+                "live_quality_enabled": "Live quality enabled",
+                "input_clip_abs_z": "Input clip abs z",
+                "bad_channel_rms_z": "Bad channel RMS z",
+                "bad_channel_abs_p95_z": "Bad channel abs p95 z",
+                "bad_channel_clipped_frac": "Bad channel clipped frac",
+                "bad_window_clipped_frac": "Bad window clipped frac",
+                "bad_window_max_masked_channels": "Bad window max masked channels",
                 "LIVE_VIZ_ENABLED": "Emit Step 7 live model views",
                 "LIVE_VIZ_FPS": "Step 7 live viz FPS",
                 "latency_threshold_ms": "Latency threshold (ms)",
@@ -5578,6 +5819,13 @@ class MainWindow(QMainWindow):
                 "hysteresis_margin": "Hysteresis margin",
                 "finger_delta": "Finger delta",
                 "finger_mode": "Finger mode",
+                "rest_bias_correction_enabled": "REST-bias correction",
+                "rest_bias_strength": "REST-bias strength",
+                "rest_bias_min_windows": "REST-bias min windows",
+                "parity_capture_enabled": "Parity capture enabled",
+                "parity_capture_max_windows": "Parity capture max windows",
+                "parity_capture_flush_every": "Parity capture flush every",
+                "deployment_session_dir": "Deployment session dir",
                 "pred_log": "Prediction log (JSONL)",
             }
             return labels.get(key, key)
@@ -6147,9 +6395,15 @@ class MainWindow(QMainWindow):
             self._sync_infer_actuation_controls()
 
     def _clear_live_lsl_source_id(self, *, reason: Optional[str] = None) -> None:
-        had_cached = bool(getattr(self, "live_lsl_source_id", None))
+        previous_source_id = getattr(self, "live_lsl_source_id", None)
+        had_cached = bool(previous_source_id)
         had_env = bool(os.environ.get("LSL_SOURCE_ID"))
         self.live_lsl_source_id = None
+        infer_source_widget = self.fields.get("infer", {}).get("lsl_source_id")
+        if isinstance(infer_source_widget, QLineEdit):
+            current = infer_source_widget.text().strip()
+            if not current or current == str(previous_source_id or "").strip():
+                infer_source_widget.setText("")
         try:
             os.environ.pop("LSL_SOURCE_ID", None)
         except Exception:
@@ -6454,6 +6708,7 @@ class MainWindow(QMainWindow):
 
         infer_model_widget = self.fields.get("infer", {}).get("model_path")
         infer_scaler_widget = self.fields.get("infer", {}).get("scaler_path")
+        infer_out_dir_widget = self.fields.get("infer", {}).get("out_dir")
 
         run_dir = resolve_latest_run_dir(global_session)
         if run_dir:
@@ -6471,8 +6726,20 @@ class MainWindow(QMainWindow):
                 key="infer.scaler_path",
                 legacy_values={"scaler.npz"},
             )
+        default_live_out_dir = self._default_live_infer_out_dir(global_session)
+        self._maybe_autofill_text(
+            infer_out_dir_widget,
+            str(default_live_out_dir),
+            key="infer.out_dir",
+            legacy_values={"", "live_infer", "processed/live_infer"},
+        )
         self._autofill_live_review_paths(global_session)
         self._autofill_replay_paths(session_dir_override=global_session)
+
+    def _default_live_infer_out_dir(self, session_dir: Path) -> Path:
+        processed_dir = SessionLayout(session_dir).processed_dir
+        candidate = processed_dir / f"live_infer_{session_backend_id()}"
+        return next_available_path(candidate)
 
     def _autofill_topomap_paths(self, session_dir: Path) -> None:
         fields = self.fields.get("topomaps", {})
@@ -6763,7 +7030,12 @@ class MainWindow(QMainWindow):
         candidates = [
             p
             for p in processed_dir.iterdir()
-            if p.is_dir() and (p.name == "live_infer" or p.name.startswith("live_infer_v"))
+            if p.is_dir()
+            and (
+                p.name == "live_infer"
+                or p.name.startswith("live_infer_")
+                or p.name.startswith("live_infer_v")
+            )
         ]
         if not candidates:
             return None
@@ -7199,6 +7471,9 @@ class MainWindow(QMainWindow):
     def _run_step(
         self, step_id: str, script_key: str, *, bypass_ready_gate: bool = False
     ) -> None:
+        if step_id == "infer" and script_key == "live_infer":
+            self._run_live_infer_step(bypass_ready_gate=bypass_ready_gate)
+            return
         if self.hard_stop_locked:
             self._show_blocking_notice(
                 "HARD STOP — Acknowledgement Required",
@@ -7213,8 +7488,12 @@ class MainWindow(QMainWindow):
                 self, "Project/Subject Required", "Select a project and subject first."
             )
             return
-        if self.runner.is_running():
-            QMessageBox.warning(self, "Busy", "Another step is still running.")
+        if self.runner.is_running() or self.live_preflight_runner.is_running():
+            QMessageBox.warning(
+                self,
+                "Busy",
+                "Another step or Step 7 decisive preflight is still running.",
+            )
             return
         script_info = self.scripts.get(script_key)
         if not script_info:
@@ -7580,6 +7859,500 @@ class MainWindow(QMainWindow):
 
         self.runner.start(sys.executable, args, cwd=cwd, env=launch_env)
 
+    def _run_live_infer_step(self, *, bypass_ready_gate: bool = False) -> None:
+        if self.hard_stop_locked:
+            self._show_blocking_notice(
+                "HARD STOP — Acknowledgement Required",
+                "You must acknowledge the last hard stop report before restarting steps.",
+            )
+            return
+        if self._eval_queue_active:
+            self._eval_queue_active = False
+            self._eval_queue = []
+        if not self.current_project or not self.current_subject:
+            QMessageBox.warning(
+                self, "Project/Subject Required", "Select a project and subject first."
+            )
+            return
+        if self.runner.is_running() or self.live_preflight_runner.is_running():
+            QMessageBox.warning(
+                self, "Busy", "Another step or Step 7 decisive preflight is still running."
+            )
+            return
+        script_info = self.scripts.get("live_infer")
+        if not script_info:
+            QMessageBox.warning(self, "Missing Script", "Script for infer not found.")
+            return
+
+        launch = self._prepare_live_infer_launch(script_info)
+        if launch is None:
+            return
+        self._pending_live_launch = launch
+        self._set_step_status("infer", "Preflight")
+        self.live_launch_summary.setPlainText(
+            self._format_live_launch_preview(launch)
+        )
+
+        if getattr(self, "dry_run_checkbox", None) and self.dry_run_checkbox.isChecked():
+            self._execute_prepared_live_infer_launch(launch)
+            self._pending_live_launch = None
+            self._update_live_status("Live status: Step 7 dry run only")
+            return
+
+        if self.input_source.currentText() == "CSV Offline" or bypass_ready_gate:
+            self._append_log(
+                "[step7] skipping live stream preflight because CSV Offline is selected."
+            )
+            self._execute_prepared_live_infer_launch(launch)
+            self._pending_live_launch = None
+            return
+
+        self._begin_live_ready_gate(launch)
+
+    def _prepare_live_infer_launch(
+        self, script_info: Any
+    ) -> Optional[PreparedLiveInferLaunch]:
+        infer_subject_override = self._infer_subject_override()
+        subject_for_step = infer_subject_override or self.current_subject
+        assert self.current_project is not None
+        assert subject_for_step is not None
+        subject_dir = subject_root(self.current_project, subject_for_step)
+        ensure_subject_dirs(subject_dir)
+
+        settings = self._collect_settings("infer")
+        settings["TIMEBASE_VERSION"] = TIMEBASE_VERSION
+        settings.pop("infer_subject_override", None)
+
+        connector_source_id = str(getattr(self, "live_lsl_source_id", "") or "").strip() or None
+        stream_name = self._selected_stream_name() or self.live_stream_name
+        stream_type = self._selected_stream_type() or self.live_stream_type
+        if stream_name:
+            self.live_stream_name = stream_name
+        if stream_type:
+            self.live_stream_type = stream_type
+        settings["stream_name"] = self.live_stream_name
+        settings["stream_type"] = self.live_stream_type
+        if connector_source_id:
+            settings["lsl_source_id"] = connector_source_id
+        settings["LABEL_CHECK_ACKNOWLEDGED"] = False
+        settings["LABEL_CHECK_FOUND_LABELS"] = self.live_label_details.get("labels")
+        if (
+            not settings.get("session_id")
+            and self.current_session_backend
+            and not infer_subject_override
+        ):
+            settings["session_id"] = self.current_session_backend
+
+        infer_session_dir: Optional[Path]
+        if infer_subject_override and infer_subject_override != self.current_subject:
+            infer_session_dir = self._latest_session_for_subject(subject_for_step)
+        else:
+            infer_session_dir = self._resolve_effective_session_dir(step_id=None)
+            if infer_session_dir is None:
+                infer_session_dir = self._latest_session_for_subject(subject_for_step)
+        if infer_session_dir:
+            settings["session_dir"] = str(infer_session_dir)
+        else:
+            QMessageBox.warning(
+                self,
+                "Session Dir Required",
+                "Missing session dir. Select the session folder under subjects/<id>/sessions/<session_id> "
+                "or ensure the subject has at least one session.",
+            )
+            return None
+
+        raw_out_dir = str(settings.get("out_dir") or "").strip()
+        if not raw_out_dir:
+            default_out_dir = self._default_live_infer_out_dir(infer_session_dir)
+            settings["out_dir"] = str(default_out_dir)
+            out_dir_widget = self.fields.get("infer", {}).get("out_dir")
+            if isinstance(out_dir_widget, QLineEdit):
+                self._maybe_autofill_text(
+                    out_dir_widget,
+                    str(default_out_dir),
+                    key="infer.out_dir",
+                    legacy_values={"", "live_infer", "processed/live_infer"},
+                )
+
+        settings["subject_id"] = subject_for_step
+        backend_session = None if infer_subject_override else self._prepare_session_id("infer", settings)
+
+        if backend_session:
+            self.current_session_backend = backend_session
+            self.current_session_ui = ui_session_id(
+                self.current_subject, backend_session
+            )
+            self._set_session_label(f"Session: {self.current_session_ui}")
+            session_dir = session_root(subject_dir, self.current_session_ui)
+            ensure_session_dirs(session_dir)
+            self.session_dir_input.setText(str(session_dir))
+            settings["session_dir"] = str(session_dir)
+
+        def _uses_placeholder_path(value: Optional[str], filename: str) -> bool:
+            if not value:
+                return True
+            normalized = str(value).strip().replace("\\", "/")
+            return normalized in {
+                filename,
+                f"models/{filename}",
+                f"./{filename}",
+                f"./models/{filename}",
+            }
+
+        _exp_hash, model_path, scaler_path = self._resolve_latest_model_artifacts(
+            subject_dir,
+            session_dir_override=infer_session_dir,
+            subject_id_override=subject_for_step,
+        )
+        if model_path and _uses_placeholder_path(
+            settings.get("model_path"), "finger_action_model.pt"
+        ):
+            settings["model_path"] = str(model_path)
+        if scaler_path and _uses_placeholder_path(
+            settings.get("scaler_path"), "scaler.npz"
+        ):
+            settings["scaler_path"] = str(scaler_path)
+        expected_labels, expected_labels_source = self._resolve_live_expected_labels(
+            settings
+        )
+        if not expected_labels:
+            QMessageBox.warning(
+                self,
+                "Expected Channel Labels Missing",
+                "Step 7 cannot prove model-order channel mapping for this launch.\n\n"
+                "Provide REQUIRED_LSL_LABELS or ensure the selected deployment session "
+                "contains training_npz.channel_names in processed/eeg_windows.npz.",
+            )
+            return None
+        settings["LABEL_CHECK_EXPECTED_LABELS"] = list(expected_labels)
+        settings["LABEL_CHECK_EXPECTED_LABELS_SOURCE"] = expected_labels_source
+        validation = validate_step_settings("infer", settings)
+        if not validation.ok:
+            QMessageBox.warning(
+                self,
+                "Invalid Settings",
+                "\n".join(validation.errors),
+            )
+            return None
+        for warning in validation.warnings:
+            self._append_log(f"⚠️ {warning}")
+
+        if settings.get("enable_actuation") and not self._confirm_actuation():
+            self._append_log("Actuation confirmation cancelled; run aborted.")
+            return None
+
+        config_path = subject_dir / "config" / "infer.json"
+        session_id_value = self.current_session_ui or "UNKNOWN"
+        if infer_session_dir is not None:
+            session_id_value = infer_session_dir.name
+        config = build_config(
+            project_name=self.current_project,
+            subject_id=subject_for_step,
+            session_id=session_id_value,
+            settings=settings,
+            timebase_version=TIMEBASE_VERSION,
+        )
+        config_payload = config.to_dict()
+        write_json(config_path, config_payload)
+
+        args = [str(script_info.path), "--config", str(config_path)]
+        args.extend(["--session-dir", str(infer_session_dir)])
+        args.extend(self._collect_step_args("infer"))
+
+        launch_env: Dict[str, Optional[str]] = {
+            "LSL_SOURCE_ID": connector_source_id,
+            "LSL_STREAM_NAME": str(self.live_stream_name).strip() or None,
+            "LSL_STREAM_TYPE": str(self.live_stream_type).strip() or None,
+        }
+        return PreparedLiveInferLaunch(
+            args=args,
+            cwd=str(self.repo_root),
+            env=launch_env,
+            config_path=config_path,
+            config_payload=config_payload,
+            settings=dict(settings),
+            subject_dir=subject_dir,
+            session_dir=infer_session_dir,
+        )
+
+    def _execute_prepared_live_infer_launch(
+        self, launch: PreparedLiveInferLaunch
+    ) -> None:
+        self.active_step = "infer"
+        self.active_settings = dict(launch.settings)
+        self._set_step_status("infer", "Running")
+        self._append_log(
+            f"Running: {launch.args} (cwd={launch.cwd})"
+        )
+        self.live_launch_summary.setPlainText(self._format_live_launch_preview(launch))
+        if getattr(self, "dry_run_checkbox", None) and self.dry_run_checkbox.isChecked():
+            self._append_log("Dry run enabled; command not executed.")
+            return
+
+        self._write_session_snapshot(launch.subject_dir, launch.config_payload, "infer")
+        for env_key, env_val in launch.env.items():
+            try:
+                if env_val is None:
+                    os.environ.pop(env_key, None)
+                else:
+                    os.environ[env_key] = env_val
+            except Exception:
+                pass
+        self.runner.start(sys.executable, launch.args, cwd=launch.cwd, env=launch.env)
+
+    def _format_live_launch_preview(self, launch: PreparedLiveInferLaunch) -> str:
+        expected_labels, expected_labels_source = self._resolve_live_expected_labels(
+            launch.settings
+        )
+        requested_source_id = (
+            str(launch.settings.get("lsl_source_id") or "").strip()
+            or str(launch.env.get("LSL_SOURCE_ID") or "").strip()
+            or "-"
+        )
+        command = " ".join(
+            shlex.quote(part) for part in [sys.executable, *launch.args] if str(part)
+        )
+        lines = [
+            f"Config: {launch.config_path}",
+            f"Session dir: {launch.session_dir or '-'}",
+            f"Deployment session dir: {launch.settings.get('deployment_session_dir') or '-'}",
+            f"Model: {launch.settings.get('model_path') or '-'}",
+            f"Scaler: {launch.settings.get('scaler_path') or '-'}",
+            f"Out dir: {launch.settings.get('out_dir') or '(runtime default under <session_dir>/processed/live_infer; decisive runs should pin a fresh live_infer_<run_tag>)'}",
+            f"Stream: {launch.settings.get('stream_name') or '-'} ({launch.settings.get('stream_type') or '-'})",
+            f"Source-id: {requested_source_id}",
+            f"Configured REQUIRED_LSL_LABELS: {self._parse_label_field(launch.settings.get('REQUIRED_LSL_LABELS'))}",
+            f"Effective expected labels: {expected_labels or []} ({expected_labels_source or 'unresolved'})",
+            f"Require exactly 4 channels: {bool(launch.settings.get('REQUIRE_EXACTLY_4_CHANNELS', True))}",
+            f"Alignment internal max gap (s): {launch.settings.get('alignment_internal_max_gap_s')}",
+            f"Latency policy: {launch.settings.get('latency_policy')} @ {launch.settings.get('latency_threshold_ms')} ms",
+            f"Parity capture: enabled={bool(launch.settings.get('parity_capture_enabled'))} max_windows={launch.settings.get('parity_capture_max_windows')} flush_every={launch.settings.get('parity_capture_flush_every')}",
+            f"no_file_io: {bool(launch.settings.get('no_file_io'))}",
+            f"Actuation: {bool(launch.settings.get('enable_actuation'))}",
+            "",
+            "Actual launch command:",
+            command,
+            "",
+            "The decisive preflight uses this frozen config. Any UI edits made after preflight starts apply only to the next launch attempt.",
+        ]
+        return "\n".join(lines)
+
+    def _build_live_preflight_args(self, launch: PreparedLiveInferLaunch) -> list[str]:
+        return [
+            str(self.repo_root / "tools" / "live_preflight.py"),
+            "--config",
+            str(launch.config_path),
+            "--probe-stream",
+            "--probe-distribution",
+            "--json",
+        ]
+
+    def _on_live_preflight_started(self) -> None:
+        self._append_log("[step7-preflight] decisive preflight started.")
+        self._update_live_status(
+            "Live status: running decisive Step 7 preflight"
+        )
+        self._set_live_buttons_state()
+
+    def _on_live_preflight_line(self, line: str) -> None:
+        text = str(line or "").strip()
+        if not text:
+            return
+        self._live_preflight_lines.append(text)
+
+    def _on_live_preflight_failed(self, message: str) -> None:
+        self._pending_live_launch = None
+        self._live_preflight_lines = []
+        self._append_log(f"[step7-preflight] failed to start: {message}")
+        self._set_step_status("infer", "Preflight Failed")
+        self._update_live_status("Live status: decisive preflight failed to start")
+        self._set_live_buttons_state()
+
+    def _on_live_preflight_finished(self, exit_code: int, exit_status: int) -> None:
+        raw = "\n".join(self._live_preflight_lines).strip()
+        self._live_preflight_lines = []
+        if self._live_preflight_cancelled:
+            self._live_preflight_cancelled = False
+            self._pending_live_launch = None
+            self._set_step_status("infer", "Idle")
+            self._update_live_status("Live status: Step 7 preflight cancelled")
+            self._set_live_buttons_state()
+            return
+
+        report: Dict[str, Any] = {}
+        if raw:
+            try:
+                report = json.loads(raw)
+            except Exception as exc:
+                self._append_log(
+                    f"[step7-preflight] failed to parse JSON report: {exc}"
+                )
+        self._last_live_preflight_report = report
+        if report:
+            self.live_launch_summary.setPlainText(
+                self._format_live_preflight_report(report)
+            )
+
+        if exit_status != 0 or not report:
+            self._pending_live_launch = None
+            self._set_step_status("infer", "Preflight Failed")
+            self._update_live_status("Live status: decisive preflight failed")
+            self._show_blocking_notice(
+                "Step 7 Preflight Failed",
+                "The decisive Step 7 preflight did not return a valid structured report. "
+                "Check the log console and re-run preflight.",
+            )
+            self._set_live_buttons_state()
+            return
+
+        launch_plan = report.get("launch_plan") or {}
+        out_dir_text = launch_plan.get("out_dir")
+        self._last_live_infer_out_dir = (
+            Path(out_dir_text) if isinstance(out_dir_text, str) and out_dir_text else None
+        )
+
+        for warning in report.get("warnings") or []:
+            self._append_log(f"[step7-preflight] warning: {warning}")
+
+        if exit_code != 0 or not bool(report.get("ready")):
+            self._pending_live_launch = None
+            self._append_log("[step7-preflight] decisive preflight blocked launch.")
+            for error in report.get("errors") or []:
+                self._append_log(f"[step7-preflight] error: {error}")
+            self._set_step_status("infer", "Blocked")
+            self._update_live_status("Live status: decisive preflight blocked launch")
+            self._show_blocking_notice(
+                "Step 7 Not Ready",
+                self._summarize_live_preflight_failure(report),
+            )
+            self._update_checklist("infer")
+            self._set_live_buttons_state()
+            return
+
+        self._append_log("[step7-preflight] decisive preflight passed.")
+        self._set_step_status("infer", "Ready")
+        self._update_live_status("Live status: decisive preflight passed")
+        if not self._confirm_live_launch_after_preflight(report):
+            self._pending_live_launch = None
+            self._set_step_status("infer", "Cancelled")
+            self._update_live_status("Live status: launch cancelled after preflight")
+            self._set_live_buttons_state()
+            return
+
+        launch = self._pending_live_launch
+        self._pending_live_launch = None
+        if launch is None:
+            self._set_step_status("infer", "Preflight Failed")
+            self._update_live_status("Live status: frozen launch request missing")
+            self._set_live_buttons_state()
+            return
+        self._execute_prepared_live_infer_launch(launch)
+        self._set_live_buttons_state()
+
+    def _format_live_preflight_report(self, report: Dict[str, Any]) -> str:
+        launch_plan = report.get("launch_plan") or {}
+        contract = report.get("effective_contract") or {}
+        stream_probe = report.get("stream_probe") or {}
+        stream_contract = stream_probe.get("contract") or {}
+        stream_expected = stream_contract.get("expected") or {}
+        distribution_probe = report.get("distribution_probe") or {}
+        recommended = report.get("recommended_commands") or {}
+        expected_labels = (
+            contract.get("expected_channel_labels")
+            or stream_expected.get("required_labels")
+            or []
+        )
+        expected_labels_source = (
+            contract.get("expected_channel_labels_source")
+            or stream_expected.get("required_labels_source")
+            or "-"
+        )
+        lines = [
+            f"Preflight ready: {bool(report.get('ready'))}",
+            f"Config: {report.get('config_path') or '-'}",
+            f"Selection source: {launch_plan.get('selection_source') or '-'}",
+            f"Session dir: {launch_plan.get('selected_session_dir') or '-'}",
+            f"Deployment session dir: {contract.get('smoke_session_dir') or '-'}",
+            f"Model: {launch_plan.get('model_path') or '-'}",
+            f"Scaler: {launch_plan.get('scaler_path') or '-'}",
+            f"Temperature: {launch_plan.get('temperature_path') or '-'}",
+            f"Output dir: {launch_plan.get('out_dir') or '-'}",
+            f"Source-id: {contract.get('requested_source_id') or '-'} ({contract.get('source_id_source') or 'unset'})",
+            f"Configured REQUIRED_LSL_LABELS: {contract.get('config_required_lsl_labels') or []}",
+            f"Effective expected labels: {expected_labels} ({expected_labels_source})",
+            f"Require exactly 4 channels: {bool(contract.get('require_exactly_4_channels', True))}",
+            f"Alignment internal max gap (s): {contract.get('alignment_internal_max_gap_s')}",
+            f"Latency policy: {contract.get('latency_policy')} @ {contract.get('latency_threshold_ms')} ms",
+            f"Parity capture enabled: {bool(contract.get('parity_capture_enabled'))}",
+            f"no_file_io: {bool(contract.get('no_file_io'))}",
+            f"Stream contract ok: {stream_contract.get('contract_ok')}",
+            f"Stream contract mismatches: {stream_contract.get('mismatches') or []}",
+        ]
+        if distribution_probe:
+            lines.extend(
+                [
+                    f"Distribution verdict: {distribution_probe.get('verdict')}",
+                    f"Distribution decisive: {distribution_probe.get('decisive')}",
+                    f"Distribution accepted windows: {distribution_probe.get('accepted_count')}",
+                ]
+            )
+        if recommended.get("replay") or recommended.get("audit"):
+            lines.extend(
+                [
+                    "",
+                    "Post-run commands:",
+                    recommended.get("replay") or "",
+                    recommended.get("audit") or "",
+                ]
+            )
+        if report.get("warnings"):
+            lines.extend(["", "Warnings:"])
+            lines.extend(f"- {warning}" for warning in report.get("warnings") or [])
+        if report.get("errors"):
+            lines.extend(["", "Errors:"])
+            lines.extend(f"- {error}" for error in report.get("errors") or [])
+        return "\n".join(lines)
+
+    def _summarize_live_preflight_failure(self, report: Dict[str, Any]) -> str:
+        errors = report.get("errors") or []
+        warnings = report.get("warnings") or []
+        lines = [
+            "The UI launch contract does not currently satisfy the hardened Step 7 decisive-run checks.",
+            "",
+        ]
+        if errors:
+            lines.append("Blocking errors:")
+            lines.extend(f"- {error}" for error in errors[:12])
+        if warnings:
+            lines.append("")
+            lines.append("Warnings:")
+            lines.extend(f"- {warning}" for warning in warnings[:12])
+        return "\n".join(lines)
+
+    def _confirm_live_launch_after_preflight(self, report: Dict[str, Any]) -> bool:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Confirm Step 7 Launch")
+        layout = QVBoxLayout(dialog)
+        summary = QLabel(
+            "Decisive Step 7 preflight passed. Launch exactly this frozen runtime contract?"
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        detail_view = QTextEdit()
+        detail_view.setReadOnly(True)
+        detail_view.setPlainText(self._format_live_preflight_report(report))
+        layout.addWidget(detail_view)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        launch_btn = QPushButton("Launch")
+        launch_btn.clicked.connect(dialog.accept)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(launch_btn)
+        layout.addLayout(btn_row)
+        return dialog.exec() == QDialog.Accepted
+
     def _write_session_snapshot(
         self, subject_dir: Path, step_payload: Dict[str, Any], step_id: str
     ) -> None:
@@ -7722,7 +8495,7 @@ class MainWindow(QMainWindow):
         self.session_summary_labels["events"].setText(str(event_count))
 
     def _run_validate_session(self) -> None:
-        if self.runner.is_running():
+        if self.runner.is_running() or self.live_preflight_runner.is_running():
             self._append_log("Another process is running; stop it before validation.")
             return
         session_dir_value = self.session_dir_input.text().strip()
@@ -7764,7 +8537,7 @@ class MainWindow(QMainWindow):
             self._eval_queue = []
 
     def _run_eval_script(self, script_key: str, *, from_queue: bool = False) -> bool:
-        if self.runner.is_running():
+        if self.runner.is_running() or self.live_preflight_runner.is_running():
             self._append_log("Another process is running; stop it before evaluation.")
             return False
         if not from_queue and self._eval_queue_active:
@@ -8080,9 +8853,14 @@ class MainWindow(QMainWindow):
 
     def _stop_process(self) -> None:
         runner_pid = self.runner.process_id() if self.runner.is_running() else 0
+        preflight_pid = (
+            self.live_preflight_runner.process_id()
+            if self.live_preflight_runner.is_running()
+            else 0
+        )
         connector_pid = self.muse_connector.process_id() if self.muse_connector.is_running() else 0
         self._append_log(
-            f"Stop requested: runner={runner_pid or '-'} connector={connector_pid or '-'} step={self.active_step or '-'}"
+            f"Stop requested: runner={runner_pid or '-'} preflight={preflight_pid or '-'} connector={connector_pid or '-'} step={self.active_step or '-'}"
         )
         stopping_any = False
         if self._live_ready_gate_active:
@@ -8090,6 +8868,14 @@ class MainWindow(QMainWindow):
             self._append_log("Cancelling Step 7 ready gate...")
             self._cancel_live_ready_gate()
             self._update_live_status("Live status: Step 7 ready gate cancelled")
+        if self.live_preflight_runner.is_running():
+            stopping_any = True
+            self._append_log("Stopping Step 7 decisive preflight...")
+            self._live_preflight_cancelled = True
+            self._pending_live_launch = None
+            self.live_preflight_runner.stop_staged()
+            self._set_step_status("infer", "Stopping...")
+            self._update_live_status("Live status: stopping decisive preflight")
         if self.active_step:
             self._set_step_status(self.active_step, "Stopping...")
         self._set_stream_status("Stopping...")
@@ -8115,6 +8901,11 @@ class MainWindow(QMainWindow):
             self._set_live_buttons_state()
 
     def _stop_live_hard(self) -> None:
+        if self.live_preflight_runner.is_running():
+            self._append_log("⚠️ Hard stop requested for Step 7 decisive preflight...")
+            self._live_preflight_cancelled = True
+            self._pending_live_launch = None
+            self.live_preflight_runner.stop_staged()
         if self.runner.is_running():
             self._append_log("⚠️ Hard stop requested for live recording...")
             self.runner.stop_staged()
@@ -8135,7 +8926,7 @@ class MainWindow(QMainWindow):
         self.live_label_details = {}
         self._clear_live_lsl_source_id(reason="starting connector")
         self._set_connector_status("scanning")
-        labels, rate, _ = self._current_live_config()
+        labels, rate, _, _ = self._current_live_config()
         stream_name = self._effective_stream_name()
         self.live_stream_name = stream_name
         if getattr(self, "stream_name_input", None) and not self.stream_name_input.text().strip():
@@ -8177,6 +8968,9 @@ class MainWindow(QMainWindow):
         m = re.search(r"LSL_SOURCE_ID=([A-Za-z0-9_.:-]+)", line)
         if m:
             self.live_lsl_source_id = m.group(1)
+            infer_source_widget = self.fields.get("infer", {}).get("lsl_source_id")
+            if isinstance(infer_source_widget, QLineEdit):
+                infer_source_widget.setText(self.live_lsl_source_id)
             try:
                 os.environ["LSL_SOURCE_ID"] = self.live_lsl_source_id
             except Exception:
@@ -8227,13 +9021,14 @@ class MainWindow(QMainWindow):
         self._healthcheck_pending = False
         self._run_stream_healthcheck(interactive=False)
 
-    def _begin_live_ready_gate(self, script_key: str) -> None:
+    def _begin_live_ready_gate(self, launch: PreparedLiveInferLaunch) -> None:
         if self._live_ready_gate_active:
             self._append_log("Step 7 ready gate already running.")
             return
         self._live_ready_gate_active = True
         self._live_ready_gate_attempts = 0
-        self._live_ready_gate_script_key = script_key
+        self._live_ready_gate_script_key = "live_infer"
+        self._pending_live_launch = launch
         self.live_stream_ready = False
         self._append_log(
             "⏳ Step 7 ready gate: waiting for the stream to stabilize before launch."
@@ -8247,26 +9042,41 @@ class MainWindow(QMainWindow):
         self._live_ready_gate_active = False
         self._live_ready_gate_attempts = 0
         self._live_ready_gate_script_key = None
+        if was_active:
+            self._pending_live_launch = None
         if reason and was_active:
             self._append_log(reason)
         self._set_live_buttons_state()
 
     def _launch_live_infer_after_ready_gate(self) -> None:
-        script_key = self._live_ready_gate_script_key or "live_infer"
         self._live_ready_gate_active = False
         self._live_ready_gate_attempts = 0
         self._live_ready_gate_script_key = None
-        self._update_live_status("Live status: ready for Step 7")
-        self._append_log("✅ Step 7 ready gate passed; launching live inference.")
+        self._update_live_status("Live status: stream healthy; starting decisive preflight")
+        self._append_log("✅ Step 7 ready gate passed; running decisive preflight.")
         self._set_live_buttons_state()
-        QTimer.singleShot(
-            0, lambda: self._run_step("infer", script_key, bypass_ready_gate=True)
+        launch = self._pending_live_launch
+        if launch is None:
+            self._set_step_status("infer", "Preflight Failed")
+            self._update_live_status("Live status: frozen launch request missing")
+            return
+        self._live_preflight_cancelled = False
+        self._live_preflight_lines = []
+        self.live_preflight_runner.start(
+            sys.executable,
+            self._build_live_preflight_args(launch),
+            cwd=str(self.repo_root),
+            env=launch.env,
         )
 
     def _run_live_ready_gate_attempt(self) -> None:
         if not self._live_ready_gate_active:
             return
-        if self.hard_stop_locked or self.runner.is_running():
+        if (
+            self.hard_stop_locked
+            or self.runner.is_running()
+            or self.live_preflight_runner.is_running()
+        ):
             self._cancel_live_ready_gate()
             return
 
@@ -8274,44 +9084,15 @@ class MainWindow(QMainWindow):
         attempt = self._live_ready_gate_attempts
         max_attempts = self._live_ready_gate_max_attempts
         self._append_log(f"[step7-ready] attempt {attempt}/{max_attempts}")
-        result = self._run_stream_healthcheck(interactive=False, timeout_s=1.0)
+        launch = self._pending_live_launch
+        result = self._run_stream_healthcheck(
+            interactive=False,
+            timeout_s=1.0,
+            settings_override=(launch.settings if launch is not None else None),
+        )
 
-        if result is not None and (
-            result.ok
-            or (
-                result.reason in {"label_mismatch", "channel_count_mismatch"}
-                and self.live_stream_ready
-            )
-        ):
+        if result is not None and result.ok:
             self._launch_live_infer_after_ready_gate()
-            return
-
-        if (
-            result is not None
-            and result.reason in {"label_mismatch", "channel_count_mismatch"}
-            and not self.live_label_acknowledged
-        ):
-            labels, _rate, require_exact = self._current_live_config()
-            message = (
-                f"Expected labels: {labels} ({'exact' if require_exact else 'min'}).\n"
-                f"Found: channels={result.channel_count}, labels={result.labels}.\n"
-                "Proceeding may cause incorrect labeling."
-            )
-            acknowledged = self._show_blocking_ack(
-                "Label/Channel Mismatch", message, result.to_dict()
-            )
-            if acknowledged:
-                self.live_stream_ready = True
-                self.live_label_acknowledged = True
-                self.live_label_details = result.to_dict()
-                self._update_live_status("Live status: acknowledged mismatch")
-                self._launch_live_infer_after_ready_gate()
-            else:
-                self.live_stream_ready = False
-                self._update_live_status("Live status: mismatch not acknowledged")
-                self._cancel_live_ready_gate(
-                    "Step 7 ready gate cancelled; label mismatch not acknowledged."
-                )
             return
 
         if attempt < max_attempts:
@@ -8346,13 +9127,53 @@ class MainWindow(QMainWindow):
         )
 
     def _run_stream_healthcheck(
-        self, *, interactive: bool = True, timeout_s: float = 3.0
+        self,
+        *,
+        interactive: bool = True,
+        timeout_s: float = 3.0,
+        settings_override: Optional[Dict[str, Any]] = None,
     ):
         if self.hard_stop_locked:
             return None
-        labels, _rate, require_exact = self._current_live_config()
-        stream_name = self._selected_stream_name() or self.live_stream_name
-        stream_type = self._selected_stream_type() or self.live_stream_type
+        settings = dict(settings_override or self._collect_settings("infer"))
+        labels, _rate, require_exact, labels_source = self._current_live_config(
+            settings
+        )
+        if not labels:
+            self.live_stream_ready = False
+            failure_payload = {
+                "ok": False,
+                "reason": "expected_channel_labels_missing",
+                "labels": [],
+                "channel_count": None,
+                "expected_labels_source": labels_source,
+            }
+            self._last_healthcheck_result = failure_payload
+            self.live_label_details = failure_payload
+            if interactive or self._live_ready_gate_active:
+                self._append_log(
+                    "⚠️ Healthcheck blocked: expected live channel labels are unavailable."
+                )
+            if interactive:
+                self._show_blocking_notice(
+                    "Expected Channel Labels Missing",
+                    "Step 7 cannot prove model-order channel mapping for this launch.\n\n"
+                    "Provide REQUIRED_LSL_LABELS or ensure the selected deployment session "
+                    "contains training_npz.channel_names in processed/eeg_windows.npz.",
+                )
+            self._update_live_status("Live status: expected channel labels missing")
+            self._set_live_buttons_state()
+            return None
+        if settings_override is None:
+            stream_name = self._selected_stream_name() or self.live_stream_name
+            stream_type = self._selected_stream_type() or self.live_stream_type
+        else:
+            stream_name = (
+                str(settings.get("stream_name") or "").strip() or self.live_stream_name
+            )
+            stream_type = (
+                str(settings.get("stream_type") or "").strip() or self.live_stream_type
+            )
         if stream_name:
             self.live_stream_name = stream_name
         if stream_type:
@@ -8387,7 +9208,9 @@ class MainWindow(QMainWindow):
             self.live_stream_ready = True
             if interactive or not previous_ready:
                 self._append_log("✅ LSL healthcheck passed.")
-            self._update_live_status("Live status: healthy")
+            self._update_live_status(
+                "Live status: stream healthy; decisive preflight runs before launch"
+            )
             self._set_live_buttons_state()
             return result
 
@@ -8397,29 +9220,17 @@ class MainWindow(QMainWindow):
             message = (
                 f"Expected labels: {labels} ({'exact' if require_exact else 'min'}).\n"
                 f"Found: channels={result.channel_count}, labels={result.labels}.\n"
-                "Proceeding may cause incorrect labeling."
+                "Step 7 runtime now fails closed on stream-contract mismatch, so the UI will not launch until this matches."
             )
             if not interactive:
-                if self.live_label_acknowledged:
-                    self.live_stream_ready = True
-                    self._update_live_status("Live status: acknowledged mismatch")
-                else:
-                    self._update_live_status("Live status: label mismatch")
+                self._update_live_status("Live status: stream contract mismatch")
                 self._set_live_buttons_state()
                 return result
-            acknowledged = self._show_blocking_ack(
-                "Label/Channel Mismatch", message, result.to_dict()
+            self._show_blocking_notice(
+                "Stream Contract Mismatch",
+                f"{message}\n\nDetails:\n{json.dumps(result.to_dict(), indent=2)}",
             )
-            if acknowledged:
-                self.live_stream_ready = True
-                self.live_label_acknowledged = True
-                self.live_label_details = result.to_dict()
-                self._append_log(
-                    "⚠️ Label mismatch acknowledged; enabling Start Recording."
-                )
-                self._update_live_status("Live status: acknowledged mismatch")
-            else:
-                self._update_live_status("Live status: mismatch not acknowledged")
+            self._update_live_status("Live status: stream contract mismatch")
             self._set_live_buttons_state()
             return result
 
@@ -8461,15 +9272,21 @@ class MainWindow(QMainWindow):
 
     def _set_live_buttons_state(self) -> None:
         connector_running = self.muse_connector.is_running()
+        preflight_running = self.live_preflight_runner.is_running()
         connect_enabled = not self.hard_stop_locked and not connector_running and LSL_AVAILABLE
         disconnect_enabled = connector_running
         start_enabled = (
             not self.hard_stop_locked
             and self.live_stream_ready
             and not self.runner.is_running()
+            and not preflight_running
             and not self._live_ready_gate_active
         )
-        stop_enabled = self.runner.is_running() or self._live_ready_gate_active
+        stop_enabled = (
+            self.runner.is_running()
+            or preflight_running
+            or self._live_ready_gate_active
+        )
         for btn in (
             getattr(self, "live_connect_btn", None),
             getattr(self, "live_connect_btn_page", None),
@@ -8495,12 +9312,48 @@ class MainWindow(QMainWindow):
             if isinstance(btn, QPushButton):
                 btn.setEnabled(stop_enabled)
 
-    def _current_live_config(self) -> tuple[list[str], int, bool]:
-        settings = self._collect_settings("infer")
+    def _load_npz_channel_labels(self, npz_path: Path) -> list[str]:
+        if not npz_path.exists():
+            return []
+        try:
+            with np.load(npz_path, allow_pickle=False) as npz:
+                if "channel_names" not in npz:
+                    return []
+                raw = np.asarray(npz["channel_names"]).reshape(-1)
+        except Exception:
+            return []
+        return [str(item).strip() for item in raw if str(item).strip()]
+
+    def _resolve_live_expected_labels(
+        self, settings: Optional[Dict[str, Any]] = None
+    ) -> tuple[list[str], Optional[str]]:
+        settings = dict(settings or self._collect_settings("infer"))
         labels = self._parse_label_field(settings.get("REQUIRED_LSL_LABELS"))
+        if labels:
+            return labels, "config.REQUIRED_LSL_LABELS"
+        labels = self._parse_label_field(settings.get("LABEL_CHECK_EXPECTED_LABELS"))
+        if labels:
+            return labels, (
+                str(settings.get("LABEL_CHECK_EXPECTED_LABELS_SOURCE") or "").strip()
+                or "config.LABEL_CHECK_EXPECTED_LABELS"
+            )
+        model_path = self._existing_file_path(str(settings.get("model_path") or ""))
+        if model_path is not None:
+            npz_labels = self._load_npz_channel_labels(
+                model_path.parent.parent.parent / "eeg_windows.npz"
+            )
+            if npz_labels:
+                return npz_labels, "training_npz.channel_names"
+        return [], None
+
+    def _current_live_config(
+        self, settings_override: Optional[Dict[str, Any]] = None
+    ) -> tuple[list[str], int, bool, Optional[str]]:
+        settings = dict(settings_override or self._collect_settings("infer"))
+        labels, labels_source = self._resolve_live_expected_labels(settings)
         rate = int(settings.get("SAMPLING_RATE") or 256)
         require_exact = bool(settings.get("REQUIRE_EXACTLY_4_CHANNELS", True))
-        return labels, rate, require_exact
+        return labels, rate, require_exact, labels_source
 
     def _update_live_status(self, text: str) -> None:
         if hasattr(self, "live_status_label") and self.live_status_label is not None:
@@ -8608,6 +9461,7 @@ class MainWindow(QMainWindow):
         if self.active_step == "infer":
             self._latest_live_viz_payload = None
             self._last_live_viz_mono = 0.0
+            self._update_live_status("Live status: Step 7 running")
         self._update_live_viz_status()
         self._set_live_buttons_state()
 
@@ -8633,8 +9487,21 @@ class MainWindow(QMainWindow):
             self._append_log(f"Process finished with code {exit_code}")
         if exit_code == 73:
             self._handle_hard_stop_detected()
-        if exit_code == 0:
+        if step == "infer":
+            self._sync_infer_outputs()
+        elif exit_code == 0:
             self._sync_outputs(step)
+        if step == "infer":
+            if exit_status != 0:
+                self._update_live_status("Live status: Step 7 crashed")
+            elif exit_code == 0:
+                self._update_live_status(
+                    "Live status: Step 7 completed; verify replay/audit evidence"
+                )
+            else:
+                self._update_live_status(
+                    f"Live status: Step 7 finished with code {exit_code}"
+                )
         self._update_checklist(step)
         if step == "step1":
             self._update_resume_ui()
@@ -8865,6 +9732,8 @@ class MainWindow(QMainWindow):
     def _sync_outputs(self, step_id: str) -> None:
         if step_id == "step1":
             self._sync_step1_outputs()
+        elif step_id == "infer":
+            self._sync_infer_outputs()
         elif step_id == "step1b":
             self._sync_step1b_outputs()
         elif step_id == "train":
@@ -9065,6 +9934,115 @@ class MainWindow(QMainWindow):
         dest_dir = subject_dir / "models" / latest.name
         self._safe_copy_dir(latest, dest_dir, allow_overwrite=False)
 
+    def _sync_infer_outputs(self) -> None:
+        live_dir = self._last_live_infer_out_dir
+        if live_dir is None:
+            live_dir = self._resolve_latest_live_infer_dir(
+                self._resolve_effective_session_dir(step_id=None)
+            )
+        if live_dir is None or not live_dir.exists():
+            self._append_log(
+                "Step 7 output directory was not resolved; inspect the runtime log for the exact launch path."
+            )
+            return
+
+        manifest_path = live_dir / "live_runtime_manifest.json"
+        summary_path = live_dir / "live_prediction_summary.json"
+        distribution_path = live_dir / "live_input_distribution_report.json"
+        parity_dir = live_dir / "parity_capture"
+        self._append_log(f"Step 7 outputs: {live_dir}")
+        self._append_log(f"runtime manifest: {manifest_path}")
+        self._append_log(f"prediction summary: {summary_path}")
+        self._append_log(f"distribution report: {distribution_path}")
+        self._append_log(f"parity capture dir: {parity_dir}")
+        try:
+            from tools.audit_live_parity import audit_live_dir
+
+            audit_report = audit_live_dir(
+                live_dir=live_dir,
+                connector_logs=[],
+                parity_report_path=live_dir / "parity_report.json",
+                distribution_report_path=distribution_path,
+            )
+            evidence = audit_report.get("evidence", {})
+            decisive_complete = bool(evidence.get("decisive_evidence_complete"))
+            finalization = (
+                audit_report.get("metrics", {})
+                .get("runtime_manifest_finalization", {})
+            )
+            executive = audit_report.get("executive_summary", [])
+            self.live_launch_summary.setPlainText(
+                self._format_live_postrun_summary(live_dir, audit_report)
+            )
+            self._append_log(
+                f"Step 7 evidence completeness: {evidence.get('completeness', 'unknown')}"
+            )
+            self._append_log(
+                f"Step 7 decisive evidence complete: {decisive_complete}"
+            )
+            self._append_log(
+                f"Step 7 accepted-window parity evidence: {evidence.get('accepted_window_parity_evidence', 'unknown')}"
+            )
+            self._append_log(
+                f"Step 7 distribution evidence: {evidence.get('distribution_evidence', 'unknown')}"
+            )
+            if finalization:
+                self._append_log(
+                    f"Step 7 runtime finalization: termination_reason={finalization.get('termination_reason')} required_outputs_ok={finalization.get('required_outputs_ok')}"
+                )
+            for failure in (evidence.get("decisive_failures") or [])[:4]:
+                self._append_log(f"[step7-audit] decisive evidence blocker: {failure}")
+            if not decisive_complete:
+                self._append_log(
+                    "[step7-audit] This run remains non-decisive; do not treat runtime completion as success."
+                )
+            for line in executive[:4]:
+                self._append_log(f"[step7-audit] {line}")
+        except Exception as exc:
+            self._append_log(
+                f"Step 7 post-run audit summary could not be loaded: {exc}"
+            )
+
+    def _format_live_postrun_summary(
+        self, live_dir: Path, audit_report: Dict[str, Any]
+    ) -> str:
+        evidence = audit_report.get("evidence", {})
+        finalization = (
+            audit_report.get("metrics", {})
+            .get("runtime_manifest_finalization", {})
+        )
+        executive = audit_report.get("executive_summary", [])
+        lines = [
+            f"Live dir: {live_dir}",
+            f"Evidence completeness: {evidence.get('completeness', 'unknown')}",
+            f"Decisive evidence complete: {bool(evidence.get('decisive_evidence_complete'))}",
+            f"Accepted-window parity evidence: {evidence.get('accepted_window_parity_evidence', 'unknown')}",
+            f"Accepted-window parity result: {evidence.get('accepted_window_parity_result', 'unknown')}",
+            f"Distribution evidence: {evidence.get('distribution_evidence', 'unknown')}",
+            f"Runtime termination reason: {finalization.get('termination_reason', '-')}",
+            f"Required outputs ok: {finalization.get('required_outputs_ok', '-')}",
+            f"Runtime manifest: {live_dir / 'live_runtime_manifest.json'}",
+            f"Prediction summary: {live_dir / 'live_prediction_summary.json'}",
+            f"Distribution report: {live_dir / 'live_input_distribution_report.json'}",
+            f"Parity capture dir: {live_dir / 'parity_capture'}",
+            "Trust verdict: runtime completion alone is not decisive; require required_outputs_ok=true plus confirmed replay/audit evidence.",
+            "Legacy replay evidence is non-decisive if the audit reports legacy_partial or partial parity coverage.",
+            f"Replay command: {sys.executable} tools/replay_live_capture.py --capture-dir {live_dir / 'parity_capture'}",
+            f"Audit command: {sys.executable} tools/audit_live_parity.py --live-dir {live_dir} --parity-report {live_dir / 'parity_report.json'} --distribution-report {live_dir / 'live_input_distribution_report.json'} --write-json --write-md",
+        ]
+        decisive_failures = evidence.get("decisive_failures") or []
+        if decisive_failures:
+            lines.extend(["", "Decisive evidence blockers:"])
+            lines.extend(f"- {item}" for item in decisive_failures[:8])
+        limitations = evidence.get("limitations") or []
+        if limitations:
+            lines.extend(["", "Evidence limitations:"])
+            lines.extend(f"- {item}" for item in limitations[:8])
+        if executive:
+            lines.extend(["", "Executive summary:"])
+            lines.extend(f"- {line}" for line in executive[:8])
+        return "\n".join(lines)
+
     def _sync_event_outputs(self) -> None:
         if not self.current_project or not self.current_subject:
             return
@@ -9178,8 +10156,10 @@ class MainWindow(QMainWindow):
             return
         checklist.clear()
         items = []
-        if step_id in {"step1", "infer"}:
+        if step_id == "step1":
             items = self._expected_step1_outputs()
+        elif step_id == "infer":
+            items = self._expected_infer_outputs()
         elif step_id == "step1b":
             items = self._expected_step1b_outputs()
         elif step_id == "topomaps":
@@ -9224,6 +10204,50 @@ class MainWindow(QMainWindow):
             )
             outputs.append(("Raw shards", str(session_dir / "raw")))
             outputs.append(("Events JSONL", str(session_dir / "events" / "events.jsonl")))
+        return outputs
+
+    def _expected_infer_outputs(self) -> list[tuple[str, str]]:
+        outputs: list[tuple[str, str]] = []
+        live_dir = self._last_live_infer_out_dir
+        if live_dir is None:
+            out_dir_widget = self.fields.get("infer", {}).get("out_dir")
+            if isinstance(out_dir_widget, QLineEdit) and out_dir_widget.text().strip():
+                live_dir = Path(out_dir_widget.text().strip()).expanduser()
+            else:
+                session_dir = self._resolve_effective_session_dir(step_id=None)
+                if session_dir is not None:
+                    live_dir = self._default_live_infer_out_dir(session_dir)
+        if live_dir is None:
+            return outputs
+
+        outputs.append(("Live dir", str(live_dir)))
+        outputs.append(("Runtime manifest", str(live_dir / "live_runtime_manifest.json")))
+        outputs.append(("Prediction log", str(live_dir / "predictions.jsonl")))
+        outputs.append(("Window audit", str(live_dir / "window_audit.jsonl")))
+        outputs.append(("Segment breaks", str(live_dir / "segment_breaks.jsonl")))
+        outputs.append(("Prediction summary", str(live_dir / "live_prediction_summary.json")))
+        outputs.append(
+            (
+                "Distribution report",
+                str(live_dir / "live_input_distribution_report.json"),
+            )
+        )
+        outputs.append(("Parity capture", str(live_dir / "parity_capture")))
+        outputs.append(
+            ("Replay output: parity report", str(live_dir / "parity_report.json"))
+        )
+        outputs.append(
+            (
+                "Audit output: parity audit JSON",
+                str(live_dir / "live_parity_audit.json"),
+            )
+        )
+        outputs.append(
+            (
+                "Audit output: parity audit Markdown",
+                str(live_dir / "live_parity_audit.md"),
+            )
+        )
         return outputs
 
     def _expected_step1b_outputs(self) -> list[tuple[str, str]]:
@@ -9345,7 +10369,7 @@ class MainWindow(QMainWindow):
         return outputs
 
     def _run_event_review(self) -> None:
-        if self.runner.is_running():
+        if self.runner.is_running() or self.live_preflight_runner.is_running():
             self._append_log(
                 "Another process is running; stop it before launching event review."
             )
@@ -9385,7 +10409,7 @@ class MainWindow(QMainWindow):
         self.runner.start(sys.executable, args, cwd=str(self.repo_root))
 
     def _run_event_validate(self) -> None:
-        if self.runner.is_running():
+        if self.runner.is_running() or self.live_preflight_runner.is_running():
             self._append_log(
                 "Another process is running; stop it before validating events."
             )
@@ -9436,7 +10460,7 @@ class MainWindow(QMainWindow):
         )
 
     def _run_alignment_check(self) -> None:
-        if self.runner.is_running():
+        if self.runner.is_running() or self.live_preflight_runner.is_running():
             self._append_log("Another process is running; stop it before diagnostics.")
             return
         script_info = self.scripts.get("diagnostics")

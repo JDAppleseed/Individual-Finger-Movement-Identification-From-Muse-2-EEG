@@ -299,10 +299,22 @@ def test_live_prediction_summary_includes_full_runtime_metrics(tmp_path: Path):
                     "selected_source_id": "fresh-id",
                     "source_id_source": "env",
                     "selection_matched_by_source_id": True,
+                    "channel_labels": ["AF7", "TP9", "AF8", "TP10"],
+                },
+                "stream_selection": {
+                    "expected_channel_labels": ["TP9", "AF7", "AF8", "TP10"],
                 },
                 "stream_contract": {
-                    "expected_name": "Muse2-EEG",
-                    "expected_type": "EEG",
+                    "expected": {
+                        "required_labels": ["TP9", "AF7", "AF8", "TP10"],
+                    },
+                    "resolved": {
+                        "channel_labels": ["AF7", "TP9", "AF8", "TP10"],
+                        "channel_reorder_to_model_order": [1, 0, 2, 3],
+                        "channel_reorder_applied": True,
+                    },
+                    "contract_ok": True,
+                    "mismatches": [],
                 },
                 "artifacts": {
                     "run_dir": str(tmp_path),
@@ -356,6 +368,434 @@ def test_live_prediction_summary_includes_full_runtime_metrics(tmp_path: Path):
     assert summary["runtime_manifest_path"] == str(runtime_manifest_path)
     assert "segment_break_count_vs_segment_break_log" in summary["reconciliation"]["mismatches"]
     assert summary["raw_channel_stats"]["flagged_nonfinite_rows"] == 1
+    assert summary["raw_channel_stats"]["raw_stream_order"]["channel_labels"] == [
+        "AF7",
+        "TP9",
+        "AF8",
+        "TP10",
+    ]
+    assert summary["raw_channel_stats"]["model_order"]["channel_labels"] == [
+        "TP9",
+        "AF7",
+        "AF8",
+        "TP10",
+    ]
+    assert summary["raw_channel_stats"]["model_order"]["channels"][0]["mean"] == pytest.approx(2.0)
+    assert summary["raw_top_non_rest_count"] == 1
+    assert summary["committed_valid_non_rest_count"] == 1
+    assert summary["non_rest_sent_count"] == 1
+
+
+def test_live_prediction_summary_finalization_sync_persists_runtime_manifest_state(
+    tmp_path: Path,
+):
+    mod = _load_module("7_live_infer_and_actuate.py", "live_summary_sync_test")
+
+    summary_path = tmp_path / "live_prediction_summary.json"
+    summary_path.write_text(json.dumps({"record_count": 1}))
+    mod._sync_summary_finalization(
+        summary_path=summary_path,
+        runtime_manifest_finalization={
+            "finalized_at": "2026-04-05T00:00:00Z",
+            "termination_reason": "required_output_error",
+            "summary_path": str(summary_path),
+            "summary_write_error": None,
+            "distribution_report_path": str(
+                tmp_path / "live_input_distribution_report.json"
+            ),
+            "distribution_report_write_error": None,
+            "cleanup_errors": ["window_audit_log_close_error"],
+            "required_outputs_ok": False,
+            "required_output_errors": ["missing parity report"],
+            "post_run_commands": {
+                "replay": "python replay.py",
+                "audit": "python audit.py",
+            },
+            "output_hashes": {"summary_sha256": "ignored"},
+        },
+    )
+
+    payload = json.loads(summary_path.read_text())
+    assert payload["runtime_manifest_finalization"] == {
+        "finalized_at": "2026-04-05T00:00:00Z",
+        "termination_reason": "required_output_error",
+        "summary_path": str(summary_path),
+        "summary_write_error": None,
+        "distribution_report_path": str(
+            tmp_path / "live_input_distribution_report.json"
+        ),
+        "distribution_report_write_error": None,
+        "cleanup_errors": ["window_audit_log_close_error"],
+        "required_outputs_ok": False,
+        "required_output_errors": ["missing parity report"],
+        "post_run_commands": {
+            "replay": "python replay.py",
+            "audit": "python audit.py",
+        },
+    }
+
+
+def test_live_preflight_distribution_probe_assessment_nominal():
+    mod = _load_module("tools/live_preflight.py", "live_preflight_assess_nominal")
+
+    errors, warnings, compact = mod._assess_distribution_probe(
+        {
+            "distribution_claim_decisive": True,
+            "distribution_match": {
+                "decisive": True,
+                "verdict": "nominal",
+                "catastrophic": False,
+                "median_rms_ratio": 0.98,
+                "recovered_vs_strict_count": 1,
+            },
+            "alignment": {
+                "relaxed": {
+                    "accepted_count": 18,
+                    "candidate_count": 20,
+                    "quality_bad_rate": 0.05,
+                }
+            },
+        }
+    )
+
+    assert errors == []
+    assert warnings == []
+    assert compact["verdict"] == "nominal"
+
+
+def test_live_preflight_distribution_probe_assessment_non_decisive_is_blocking():
+    mod = _load_module("tools/live_preflight.py", "live_preflight_assess_nondecisive")
+
+    errors, warnings, compact = mod._assess_distribution_probe(
+        {
+            "distribution_claim_decisive": False,
+            "distribution_match": {
+                "decisive": False,
+                "verdict": "nominal",
+                "catastrophic": False,
+                "reason": "missing reorder proof",
+            },
+            "alignment": {
+                "relaxed": {
+                    "accepted_count": 18,
+                    "candidate_count": 18,
+                    "quality_bad_rate": 0.0,
+                }
+            },
+        }
+    )
+
+    assert any("non-decisive" in error for error in errors)
+    assert warnings == []
+    assert compact["decisive"] is False
+
+
+def test_live_preflight_distribution_probe_assessment_shifted_low_amplitude():
+    mod = _load_module("tools/live_preflight.py", "live_preflight_assess_quiet")
+
+    errors, warnings, compact = mod._assess_distribution_probe(
+        {
+            "distribution_claim_decisive": True,
+            "distribution_match": {
+                "decisive": True,
+                "verdict": "shifted_low_amplitude",
+                "catastrophic": False,
+                "reason": "quiet capture",
+                "median_rms_ratio": 0.58,
+                "recovered_vs_strict_count": 2,
+            },
+            "alignment": {
+                "relaxed": {
+                    "accepted_count": 16,
+                    "candidate_count": 20,
+                    "quality_bad_rate": 0.10,
+                }
+            },
+        }
+    )
+
+    assert errors == []
+    assert any("shifted_low_amplitude" in warning for warning in warnings)
+    assert compact["verdict"] == "shifted_low_amplitude"
+
+
+def test_live_preflight_distribution_probe_assessment_catastrophic():
+    mod = _load_module("tools/live_preflight.py", "live_preflight_assess_noisy")
+
+    errors, warnings, compact = mod._assess_distribution_probe(
+        {
+            "distribution_claim_decisive": True,
+            "distribution_match": {
+                "decisive": True,
+                "verdict": "catastrophic",
+                "catastrophic": True,
+                "reason": "gross multi-channel deviation",
+                "median_rms_ratio": 2.8,
+                "recovered_vs_strict_count": 0,
+            },
+            "alignment": {
+                "relaxed": {
+                    "accepted_count": 2,
+                    "candidate_count": 20,
+                    "quality_bad_rate": 0.85,
+                }
+            },
+        }
+    )
+
+    assert any("catastrophic" in error for error in errors)
+    assert any("quality rejection is overwhelming" in error for error in errors)
+    assert compact["verdict"] == "catastrophic"
+
+
+def test_live_preflight_probe_stream_records_step7_channel_reorder(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    preflight_mod = _load_module("tools/live_preflight.py", "live_preflight_reorder_test")
+    live_mod = _load_module("7_live_infer_and_actuate.py", "live_preflight_reorder_live_mod")
+
+    resolved = SimpleNamespace(
+        resolution={
+            "name": "Muse2-EEG",
+            "type": "EEG",
+            "nominal_srate": 256.0,
+            "channel_count": 4,
+            "channel_labels": ["AF7", "TP9", "AF8", "TP10"],
+            "requested_source_id": "fresh-id",
+            "selected_source_id": "fresh-id",
+            "selection_matched_by_source_id": True,
+            "source_id_source": "env",
+        },
+        inlet=object(),
+    )
+    monkeypatch.setattr(live_mod, "_resolve_lsl_inlet", lambda *args, **kwargs: resolved)
+    monkeypatch.setattr(
+        live_mod,
+        "_resolve_expected_channel_labels",
+        lambda settings, deployment_run_dir: (
+            ["TP9", "AF7", "AF8", "TP10"],
+            "test.expected_labels",
+        ),
+    )
+    monkeypatch.setattr(live_mod, "_load_train_config", lambda deployment_run_dir: {})
+    monkeypatch.setattr(
+        live_mod,
+        "_resolve_effective_target_fs",
+        lambda train_config, window_sec, requested_target_fs: (256.0, {}),
+    )
+
+    _, _, stream_contract = preflight_mod._probe_stream(
+        live_mod=live_mod,
+        settings={
+            "stream_name": "Muse2-EEG",
+            "stream_type": "EEG",
+            "window_sec": 0.25,
+            "target_fs": 256.0,
+        },
+        deployment_run_dir=Path("/tmp/fake_run"),
+        cli_source_id=None,
+        env_source_id="fresh-id",
+        config_source_id=None,
+    )
+
+    assert stream_contract["resolved"]["channel_reorder_to_model_order"] == [1, 0, 2, 3]
+    assert stream_contract["resolved"]["channel_reorder_applied"] is True
+
+
+def test_live_preflight_probe_stream_requires_expected_channel_labels(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    preflight_mod = _load_module("tools/live_preflight.py", "live_preflight_require_labels")
+    live_mod = _load_module("7_live_infer_and_actuate.py", "live_preflight_require_labels_mod")
+
+    resolved = SimpleNamespace(
+        resolution={
+            "name": "Muse2-EEG",
+            "type": "EEG",
+            "nominal_srate": 256.0,
+            "channel_count": 4,
+            "channel_labels": ["AF7", "TP9", "AF8", "TP10"],
+            "requested_source_id": "fresh-id",
+            "selected_source_id": "fresh-id",
+            "selection_matched_by_source_id": True,
+            "source_id_source": "env",
+        },
+        inlet=object(),
+    )
+    monkeypatch.setattr(live_mod, "_resolve_lsl_inlet", lambda *args, **kwargs: resolved)
+    monkeypatch.setattr(
+        live_mod,
+        "_resolve_expected_channel_labels",
+        lambda settings, deployment_run_dir: ([], None),
+    )
+
+    with pytest.raises(RuntimeError, match="cannot prove model-order channel mapping"):
+        preflight_mod._probe_stream(
+            live_mod=live_mod,
+            settings={
+                "stream_name": "Muse2-EEG",
+                "stream_type": "EEG",
+                "window_sec": 0.25,
+                "target_fs": 256.0,
+            },
+            deployment_run_dir=Path("/tmp/fake_run"),
+            cli_source_id=None,
+            env_source_id="fresh-id",
+            config_source_id=None,
+        )
+
+
+def test_run_live_preflight_fails_without_source_id_or_parity_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    mod = _load_module("tools/live_preflight.py", "live_preflight_report_failclosed")
+
+    session_dir = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "sessions" / "sessA"
+    run_dir = session_dir / "processed" / "models" / "run_001"
+    out_dir = session_dir / "processed" / "live_infer"
+    run_dir.mkdir(parents=True)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    model_path = run_dir / "finger_action_model.pt"
+    scaler_path = run_dir / "scaler.npz"
+    temperature_path = run_dir / "temperature_scaling.json"
+    model_path.write_text("model")
+    scaler_path.write_text("scaler")
+    temperature_path.write_text("{}")
+
+    config_path = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "config" / "infer.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "project_name": "Demo",
+                "subject_id": "S01",
+                "settings": {
+                    "session_dir": str(session_dir),
+                    "parity_capture_enabled": False,
+                    "lsl_source_id": None,
+                    "stream_name": "Muse2-EEG",
+                    "stream_type": "EEG",
+                    "REQUIRED_LSL_LABELS": ["TP9", "AF7", "AF8", "TP10"],
+                    "REQUIRE_EXACTLY_4_CHANNELS": True,
+                    "alignment_internal_max_gap_s": 0.06,
+                    "latency_policy": "drop",
+                    "latency_threshold_ms": 150.0,
+                },
+            }
+        )
+    )
+
+    fake_live_mod = SimpleNamespace(
+        _build_arg_parser=lambda: (None, {"parity_capture_enabled": False}),
+        _resolve_expected_channel_labels=lambda settings, deployment_run_dir: (
+            ["TP9", "AF7", "AF8", "TP10"],
+            "config.REQUIRED_LSL_LABELS",
+        ),
+        _require_expected_channel_labels=lambda labels, source: list(labels),
+        resolve_live_launch_plan=lambda **kwargs: SimpleNamespace(
+            project_name="Demo",
+            subject_id="S01",
+            selection_source="config",
+            session_dir_inferred=False,
+            selected_session_dir=session_dir,
+            explicit_overrides=[],
+            chosen_run_dir=run_dir,
+            model_path=model_path,
+            scaler_path=scaler_path,
+            temperature_path=temperature_path,
+            out_dir=out_dir,
+            no_file_io=False,
+            record_raw=False,
+        ),
+    )
+    monkeypatch.setattr(mod, "_load_live_module", lambda: fake_live_mod)
+
+    report = mod.run_live_preflight(config_path=config_path, skip_smoke=True)
+
+    assert report["ready"] is False
+    assert any("No explicit live LSL source_id is pinned" in err for err in report["errors"])
+    assert any("parity_capture_enabled is not enabled" in err for err in report["errors"])
+    assert report["effective_contract"]["requested_source_id"] is None
+    assert report["effective_contract"]["parity_capture_enabled"] is False
+    assert report["launch_plan"]["model_path"] == str(model_path)
+
+
+def test_run_live_preflight_accepts_env_source_id_and_emits_recommended_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    mod = _load_module("tools/live_preflight.py", "live_preflight_report_ready")
+
+    session_dir = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "sessions" / "sessB"
+    run_dir = session_dir / "processed" / "models" / "run_002"
+    out_dir = session_dir / "processed" / "live_infer"
+    run_dir.mkdir(parents=True)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    model_path = run_dir / "finger_action_model.pt"
+    scaler_path = run_dir / "scaler.npz"
+    temperature_path = run_dir / "temperature_scaling.json"
+    model_path.write_text("model")
+    scaler_path.write_text("scaler")
+    temperature_path.write_text("{}")
+
+    config_path = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "config" / "infer.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "project_name": "Demo",
+                "subject_id": "S01",
+                "settings": {
+                    "session_dir": str(session_dir),
+                    "parity_capture_enabled": True,
+                    "lsl_source_id": None,
+                    "stream_name": "Muse2-EEG",
+                    "stream_type": "EEG",
+                    "REQUIRED_LSL_LABELS": ["TP9", "AF7", "AF8", "TP10"],
+                    "REQUIRE_EXACTLY_4_CHANNELS": True,
+                    "alignment_internal_max_gap_s": 0.06,
+                    "latency_policy": "drop",
+                    "latency_threshold_ms": 150.0,
+                },
+            }
+        )
+    )
+
+    fake_live_mod = SimpleNamespace(
+        _build_arg_parser=lambda: (None, {"parity_capture_enabled": True}),
+        _resolve_expected_channel_labels=lambda settings, deployment_run_dir: (
+            ["TP9", "AF7", "AF8", "TP10"],
+            "config.REQUIRED_LSL_LABELS",
+        ),
+        _require_expected_channel_labels=lambda labels, source: list(labels),
+        resolve_live_launch_plan=lambda **kwargs: SimpleNamespace(
+            project_name="Demo",
+            subject_id="S01",
+            selection_source="config",
+            session_dir_inferred=False,
+            selected_session_dir=session_dir,
+            explicit_overrides=[],
+            chosen_run_dir=run_dir,
+            model_path=model_path,
+            scaler_path=scaler_path,
+            temperature_path=temperature_path,
+            out_dir=out_dir,
+            no_file_io=False,
+            record_raw=False,
+        ),
+    )
+    monkeypatch.setattr(mod, "_load_live_module", lambda: fake_live_mod)
+    monkeypatch.setenv("LSL_SOURCE_ID", "env-source-123")
+
+    report = mod.run_live_preflight(config_path=config_path, skip_smoke=True)
+
+    assert report["ready"] is True
+    assert report["errors"] == []
+    assert report["effective_contract"]["requested_source_id"] == "env-source-123"
+    assert report["effective_contract"]["source_id_source"] == "env"
+    assert report["effective_contract"]["parity_capture_enabled"] is True
+    assert "--lsl-source-id env-source-123" in report["recommended_commands"]["live"]
+    assert "--parity-capture-enabled" in report["recommended_commands"]["live"]
+    assert not any("lsl_source_id is blank in config" in warning for warning in report["warnings"])
 
 
 class _FakeDesc:
@@ -702,6 +1142,7 @@ def test_collect_required_output_status_flags_missing_required_files(tmp_path: P
         window_audit_path=window_audit,
         segment_break_path=segment_breaks,
         summary_path=out_dir / "live_prediction_summary.json",
+        distribution_report_path=out_dir / "live_input_distribution_report.json",
         parity_capture=SimpleNamespace(
             manifest_path=parity_dir / "capture_manifest.json",
             records_path=parity_dir / "captured_windows.json",
@@ -709,10 +1150,13 @@ def test_collect_required_output_status_flags_missing_required_files(tmp_path: P
         parity_capture_required=True,
         cleanup_errors=["prediction_log_close_error: broken pipe"],
         summary_write_error="summary build failed",
+        distribution_report_write_error="distribution report failed",
     )
 
     assert output_hashes["live_log_sha256"] is not None
     assert any("summary_write_error" in err for err in errors)
     assert any("summary_missing_or_unreadable" in err for err in errors)
+    assert any("distribution_report_write_error" in err for err in errors)
+    assert any("distribution_report_missing_or_unreadable" in err for err in errors)
     assert any("parity_capture_records_missing_or_unreadable" in err for err in errors)
     assert any("prediction_log_close_error" in err for err in errors)

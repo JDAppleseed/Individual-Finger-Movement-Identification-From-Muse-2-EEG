@@ -318,6 +318,29 @@ def _resolve_expected_channel_labels(
     return [], None
 
 
+def _require_expected_channel_labels(
+    expected_labels: Sequence[str],
+    expected_labels_source: Optional[str],
+) -> list[str]:
+    labels = [
+        str(label).strip()
+        for label in expected_labels
+        if str(label).strip()
+    ]
+    if labels:
+        return labels
+    source_hint = (
+        str(expected_labels_source)
+        if expected_labels_source
+        else "config.REQUIRED_LSL_LABELS or training_npz.channel_names"
+    )
+    raise RuntimeError(
+        "No expected live channel labels could be derived from "
+        f"{source_hint}. Step 7 cannot prove model-order channel mapping without "
+        "REQUIRED_LSL_LABELS or training_npz.channel_names."
+    )
+
+
 def _build_channel_reorder(
     expected_labels: Sequence[str],
     resolved_labels: Sequence[str],
@@ -1412,10 +1435,12 @@ def _collect_required_output_status(
     window_audit_path: Optional[Path],
     segment_break_path: Optional[Path],
     summary_path: Optional[Path],
+    distribution_report_path: Optional[Path],
     parity_capture: Optional[LiveParityCapture],
     parity_capture_required: bool,
     cleanup_errors: Optional[list[str]] = None,
     summary_write_error: Optional[str] = None,
+    distribution_report_write_error: Optional[str] = None,
 ) -> tuple[dict[str, Optional[str]], list[str]]:
     output_hashes = {
         "live_log_sha256": None if no_file_io else sha256_file(Path(out_dir) / "live_infer.log"),
@@ -1423,6 +1448,7 @@ def _collect_required_output_status(
         "window_audit_sha256": sha256_file(window_audit_path),
         "segment_break_sha256": sha256_file(segment_break_path),
         "summary_sha256": sha256_file(summary_path),
+        "distribution_report_sha256": sha256_file(distribution_report_path),
         "parity_capture_manifest_sha256": (
             sha256_file(parity_capture.manifest_path) if parity_capture is not None else None
         ),
@@ -1433,6 +1459,8 @@ def _collect_required_output_status(
     errors = list(cleanup_errors or [])
     if summary_write_error:
         errors.append(f"summary_write_error: {summary_write_error}")
+    if distribution_report_write_error:
+        errors.append(f"distribution_report_write_error: {distribution_report_write_error}")
     if no_file_io:
         return output_hashes, errors
 
@@ -1442,6 +1470,11 @@ def _collect_required_output_status(
         ("window_audit", window_audit_path, output_hashes["window_audit_sha256"]),
         ("segment_break", segment_break_path, output_hashes["segment_break_sha256"]),
         ("summary", summary_path, output_hashes["summary_sha256"]),
+        (
+            "distribution_report",
+            distribution_report_path,
+            output_hashes["distribution_report_sha256"],
+        ),
     ]
     for label, path, sha_value in required_outputs:
         if path is None:
@@ -2656,66 +2689,75 @@ def _load_prediction_records(pred_log_path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _compute_raw_channel_stats(raw_dir: Optional[Path]) -> Optional[dict[str, Any]]:
+def _compute_raw_channel_stats(
+    raw_dir: Optional[Path],
+    *,
+    runtime_manifest_path: Optional[Path] = None,
+) -> Optional[dict[str, Any]]:
     if raw_dir is None or not raw_dir.exists():
         return None
-    per_channel_values: list[list[np.ndarray]] = []
-    rows = 0
-    nonfinite_rows = 0
-    nonfinite_values = 0
-    flagged_nonfinite_rows = 0
-    shard_count = 0
-    for path in sorted(raw_dir.glob("*.npy")):
-        shard = np.load(path, allow_pickle=False)
-        samples = np.asarray(shard["sample"], dtype=float)
-        if samples.ndim != 2:
-            continue
-        if not per_channel_values:
-            per_channel_values = [[] for _ in range(samples.shape[1])]
-        shard_count += 1
-        rows += int(samples.shape[0])
-        finite_rows = np.all(np.isfinite(samples), axis=1)
-        nonfinite_rows += int((~finite_rows).sum())
-        nonfinite_values += int(np.size(samples) - np.isfinite(samples).sum())
-        if shard.dtype.names is not None and "flags" in shard.dtype.names:
-            flagged_nonfinite_rows += int(((np.asarray(shard["flags"], dtype=int) & RAW_FLAG_NONFINITE) != 0).sum())
-        for ch_idx in range(samples.shape[1]):
-            values = samples[:, ch_idx]
-            finite = values[np.isfinite(values)]
-            if finite.size:
-                per_channel_values[ch_idx].append(finite.astype(float, copy=False))
+    from tools.analyze_live_raw_inputs import build_raw_channel_stats
 
-    channel_stats: list[dict[str, Any]] = []
-    for channel_id, chunks in enumerate(per_channel_values):
-        if not chunks:
-            channel_stats.append(
-                {
-                    "channel_id": int(channel_id),
-                    "count": 0,
-                    "mean": None,
-                    "std": None,
-                    "abs_p95": None,
-                }
-            )
-            continue
-        values = np.concatenate(chunks)
-        channel_stats.append(
-            {
-                "channel_id": int(channel_id),
-                "count": int(values.size),
-                "mean": float(np.mean(values)),
-                "std": float(np.std(values)),
-                "abs_p95": float(np.percentile(np.abs(values), 95)),
-            }
+    try:
+        return build_raw_channel_stats(
+            raw_dir=raw_dir,
+            runtime_manifest_path=runtime_manifest_path,
         )
+    except Exception as exc:
+        return {
+            "error": str(exc),
+            "shard_count": int(len(sorted(raw_dir.glob("*.npy")))),
+        }
 
+
+def _is_non_rest_pair(action_id: Any, finger_id: Any) -> bool:
+    try:
+        return int(action_id) > 0 and int(finger_id) > 0
+    except Exception:
+        return False
+
+
+def _build_non_rest_flow_summary(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    raw_top_non_rest_count = 0
+    committed_valid_non_rest_count = 0
+    non_rest_sent_count = 0
+    suppressed_counts: collections.Counter[str] = collections.Counter()
+    suppressed_reason_counts: collections.Counter[str] = collections.Counter()
+    for row in records:
+        if _is_non_rest_pair(row.get("raw_top_action_id"), row.get("raw_top_finger_id")):
+            raw_top_non_rest_count += 1
+        committed_valid_non_rest = bool(row.get("committed_pair_valid", True)) and _is_non_rest_pair(
+            row.get("committed_action_id"),
+            row.get("committed_finger_id"),
+        )
+        if not committed_valid_non_rest:
+            continue
+        committed_valid_non_rest_count += 1
+        sent_non_rest = bool(row.get("actuation_sent")) and _is_non_rest_pair(
+            row.get("actuation_target_action_id"),
+            row.get("actuation_target_finger_id"),
+        )
+        if sent_non_rest:
+            non_rest_sent_count += 1
+            continue
+        suppressed_reason = str(row.get("actuation_suppressed_reason") or "none")
+        suppressed_reason_counts[suppressed_reason] += 1
+        if suppressed_reason == "pair_stability":
+            suppressed_counts["pair_stability"] += 1
+        elif suppressed_reason == "quality_gate":
+            suppressed_counts["quality"] += 1
+        elif suppressed_reason == "latency_gate":
+            suppressed_counts["latency"] += 1
+        else:
+            suppressed_counts["other"] += 1
     return {
-        "shard_count": int(shard_count),
-        "rows": int(rows),
-        "nonfinite_rows": int(nonfinite_rows),
-        "nonfinite_values": int(nonfinite_values),
-        "flagged_nonfinite_rows": int(flagged_nonfinite_rows),
-        "channels": channel_stats,
+        "raw_top_non_rest_count": int(raw_top_non_rest_count),
+        "committed_valid_non_rest_count": int(committed_valid_non_rest_count),
+        "non_rest_sent_count": int(non_rest_sent_count),
+        "non_rest_suppressed_counts": _stringify_counter(suppressed_counts),
+        "non_rest_suppressed_reason_counts": _stringify_counter(
+            suppressed_reason_counts
+        ),
     }
 
 
@@ -2818,7 +2860,10 @@ def _build_live_prediction_summary(
             "segment_break_reason_counts": _stringify_counter(
                 segment_break_reason_counter
             ),
-            "raw_channel_stats": _compute_raw_channel_stats(raw_dir),
+            "raw_channel_stats": _compute_raw_channel_stats(
+                raw_dir,
+                runtime_manifest_path=runtime_manifest_path,
+            ),
             "runtime_manifest_path": (
                 str(runtime_manifest_path) if runtime_manifest_path is not None else None
             ),
@@ -2940,13 +2985,17 @@ def _build_live_prediction_summary(
         "segment_break_reason_counts": _stringify_counter(
             segment_break_reason_counter
         ),
-        "raw_channel_stats": _compute_raw_channel_stats(raw_dir),
+        "raw_channel_stats": _compute_raw_channel_stats(
+            raw_dir,
+            runtime_manifest_path=runtime_manifest_path,
+        ),
         "runtime_manifest_path": (
             str(runtime_manifest_path) if runtime_manifest_path is not None else None
         ),
         "reconciliation": reconciliation,
         }
     )
+    summary.update(_build_non_rest_flow_summary(records))
     if isinstance(runtime_manifest, dict) and runtime_manifest:
         summary["stream_resolution"] = runtime_manifest.get("stream_resolution")
         summary["artifact_provenance"] = runtime_manifest.get("artifacts")
@@ -2961,6 +3010,43 @@ def _build_live_prediction_summary(
             summary["actuation_suppressed_reason_counts"]
         )
     write_json(summary_path, summary)
+
+
+def _summary_safe_finalization(finalization: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(finalization, dict):
+        return {}
+    return {
+        "finalized_at": finalization.get("finalized_at"),
+        "termination_reason": finalization.get("termination_reason"),
+        "summary_path": finalization.get("summary_path"),
+        "summary_write_error": finalization.get("summary_write_error"),
+        "distribution_report_path": finalization.get("distribution_report_path"),
+        "distribution_report_write_error": finalization.get(
+            "distribution_report_write_error"
+        ),
+        "cleanup_errors": finalization.get("cleanup_errors"),
+        "required_outputs_ok": finalization.get("required_outputs_ok"),
+        "required_output_errors": finalization.get("required_output_errors"),
+        "post_run_commands": finalization.get("post_run_commands"),
+    }
+
+
+def _sync_summary_finalization(
+    *,
+    summary_path: Optional[Path],
+    runtime_manifest_finalization: dict[str, Any],
+) -> None:
+    if summary_path is None or not summary_path.exists():
+        return
+    payload = load_json(str(summary_path))
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            f"Prediction summary is not a JSON object: {summary_path}"
+        )
+    payload["runtime_manifest_finalization"] = _summary_safe_finalization(
+        runtime_manifest_finalization
+    )
+    write_json(summary_path, payload)
 
 
 # -------------------- Main --------------------
@@ -3118,6 +3204,8 @@ def main() -> int:
     parity_capture: Optional[LiveParityCapture] = None
     summary_path: Optional[Path] = None
     summary_write_error: Optional[str] = None
+    distribution_report_path: Optional[Path] = None
+    distribution_report_write_error: Optional[str] = None
     post_run_exit_code = 0
     source_pref_payload = {
         "cli_source_id": lsl_source_pref.cli_source_id,
@@ -3132,6 +3220,7 @@ def main() -> int:
         window_audit_path = Path(out_dir) / "window_audit.jsonl"
         segment_break_path = Path(out_dir) / "segment_breaks.jsonl"
         summary_path = Path(out_dir) / "live_prediction_summary.json"
+        distribution_report_path = Path(out_dir) / "live_input_distribution_report.json"
 
     device = _select_device(args.device)
     logger.info("Using device=%s", device)
@@ -3156,16 +3245,19 @@ def main() -> int:
     expected_channel_labels, expected_channel_labels_source = (
         _resolve_expected_channel_labels(config_settings, deployment_run_dir)
     )
+    try:
+        expected_channel_labels = _require_expected_channel_labels(
+            expected_channel_labels,
+            expected_channel_labels_source,
+        )
+    except Exception as exc:
+        _persist_manifest_error("expected_channel_labels_missing", exc)
+        raise
     if expected_channel_labels:
         logger.info(
             "Expected live channel order=%s source=%s",
             expected_channel_labels,
             expected_channel_labels_source,
-        )
-    else:
-        logger.warning(
-            "No expected channel labels could be derived from config or training artifacts. "
-            "Live channel-order correctness cannot be proven."
         )
     live_viz_enabled = bool(getattr(args, "LIVE_VIZ_ENABLED", False))
     live_viz_fps = float(getattr(args, "LIVE_VIZ_FPS", 0.0) or 0.0)
@@ -3289,6 +3381,11 @@ def main() -> int:
                 str(Path(out_dir) / "parity_capture") if not no_file_io else None
             ),
             "summary_path": str(summary_path) if summary_path is not None else None,
+            "distribution_report_path": (
+                str(distribution_report_path)
+                if distribution_report_path is not None
+                else None
+            ),
         },
     }
 
@@ -4579,6 +4676,7 @@ def main() -> int:
         audit_cmd = (
             f"{sys.executable} tools/audit_live_parity.py --live-dir {out_dir} "
             f"--parity-report {Path(out_dir) / 'parity_report.json'} "
+            f"--distribution-report {Path(out_dir) / 'live_input_distribution_report.json'} "
             "--write-json --write-md"
         )
         if (
@@ -4610,6 +4708,60 @@ def main() -> int:
                     summary_path,
                     exc,
                 )
+        if (
+            not no_file_io
+            and record_raw
+            and distribution_report_path is not None
+            and runtime_manifest_path is not None
+        ):
+            raw_dir = Path(out_dir) / "raw"
+            offline_npz_candidates = []
+            if selected_session_dir is not None:
+                offline_npz_candidates.append(SessionLayout(selected_session_dir).windows_npz)
+            offline_npz_candidates.append(deployment_run_dir.parent.parent / "eeg_windows.npz")
+            offline_npz = next(
+                (path for path in offline_npz_candidates if path is not None and path.exists()),
+                None,
+            )
+            if raw_dir.exists() and offline_npz is not None:
+                try:
+                    from tools.analyze_live_raw_inputs import build_distribution_report
+
+                    distribution_report = build_distribution_report(
+                        raw_source=raw_dir,
+                        run_dir=deployment_run_dir,
+                        offline_npz=offline_npz,
+                        runtime_manifest_path=runtime_manifest_path,
+                        window_sec=float(args.window_sec),
+                        hop_sec=float(args.hop_sec),
+                        target_fs=float(args.target_fs),
+                        relaxed_gap_s=max(
+                            float(args.alignment_internal_max_gap_s),
+                            (1.0 / float(args.target_fs) * 4.0),
+                        ),
+                        predictions_path=(
+                            Path(pred_log_path)
+                            if pred_log_path is not None and Path(pred_log_path).exists()
+                            else None
+                        ),
+                    )
+                    write_json(distribution_report_path, distribution_report)
+                    logger.info(
+                        "Live input distribution report written: %s",
+                        distribution_report_path,
+                    )
+                except Exception as exc:
+                    distribution_report_write_error = str(exc)
+                    logger.error(
+                        "Failed to write live input distribution report %s: %s",
+                        distribution_report_path,
+                        exc,
+                    )
+            else:
+                distribution_report_write_error = (
+                    f"offline_windows_npz_missing_for_distribution_report: raw_dir={raw_dir} offline_npz={offline_npz}"
+                )
+                logger.warning("%s", distribution_report_write_error)
         if actuator is not None:
             try:
                 actuator.close()
@@ -4618,7 +4770,12 @@ def main() -> int:
         if cleanup_errors:
             logger.error("Cleanup errors: %s", cleanup_errors)
         if not no_file_io:
-            logger.info("Live outputs: manifest=%s summary=%s", runtime_manifest_path, summary_path)
+            logger.info(
+                "Live outputs: manifest=%s summary=%s distribution_report=%s",
+                runtime_manifest_path,
+                summary_path,
+                distribution_report_path,
+            )
             logger.info("Post-run replay: %s", replay_cmd)
             logger.info("Post-run audit: %s", audit_cmd)
         logger.info(
@@ -4646,6 +4803,8 @@ def main() -> int:
             parity_capture_required=bool(args.parity_capture_enabled and not no_file_io),
             cleanup_errors=cleanup_errors,
             summary_write_error=summary_write_error,
+            distribution_report_path=distribution_report_path,
+            distribution_report_write_error=distribution_report_write_error,
         )
         final_termination_reason = str(termination_reason)
         if required_output_errors and final_termination_reason == "ok":
@@ -4654,7 +4813,7 @@ def main() -> int:
         elif required_output_errors:
             post_run_exit_code = 2
         if runtime_manifest_path is not None and runtime_manifest:
-            runtime_manifest["finalization"] = {
+            finalization_payload = {
                 "finalized_at": now_utc_iso(),
                 "termination_reason": final_termination_reason,
                 "counters": {
@@ -4680,6 +4839,16 @@ def main() -> int:
                 "summary_write_error": (
                     str(summary_write_error) if summary_write_error is not None else None
                 ),
+                "distribution_report_path": (
+                    str(distribution_report_path)
+                    if distribution_report_path is not None
+                    else None
+                ),
+                "distribution_report_write_error": (
+                    str(distribution_report_write_error)
+                    if distribution_report_write_error is not None
+                    else None
+                ),
                 "cleanup_errors": cleanup_errors or None,
                 "required_outputs_ok": bool(not required_output_errors),
                 "required_output_errors": required_output_errors or None,
@@ -4689,6 +4858,25 @@ def main() -> int:
                     "audit": audit_cmd,
                 },
             }
+            try:
+                _sync_summary_finalization(
+                    summary_path=summary_path,
+                    runtime_manifest_finalization=finalization_payload,
+                )
+            except Exception as exc:
+                required_output_errors.append(
+                    f"summary_finalization_sync_error: {exc}"
+                )
+                output_hashes["summary_sha256"] = sha256_file(summary_path)
+                final_termination_reason = "required_output_error"
+                post_run_exit_code = 2
+                finalization_payload["termination_reason"] = final_termination_reason
+                finalization_payload["required_outputs_ok"] = False
+                finalization_payload["required_output_errors"] = required_output_errors
+            else:
+                output_hashes["summary_sha256"] = sha256_file(summary_path)
+                finalization_payload["output_hashes"] = output_hashes
+            runtime_manifest["finalization"] = finalization_payload
             write_json(runtime_manifest_path, runtime_manifest)
 
     return int(post_run_exit_code)

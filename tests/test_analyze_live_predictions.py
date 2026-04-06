@@ -168,7 +168,7 @@ def test_resolve_prediction_log_from_latest_live_dir(tmp_path: Path):
     session_dir = tmp_path / "session"
     processed = session_dir / "processed"
     older = processed / "live_infer"
-    newer = processed / "live_infer_v2"
+    newer = processed / "live_infer_20260405_010203"
     older.mkdir(parents=True)
     newer.mkdir(parents=True)
     (older / "predictions.jsonl").write_text('{"committed_action_id":0}\n')

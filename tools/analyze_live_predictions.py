@@ -101,7 +101,12 @@ def resolve_latest_live_infer_dir(session_dir: str | Path) -> Path | None:
     candidates = [
         p
         for p in processed_dir.iterdir()
-        if p.is_dir() and (p.name == "live_infer" or p.name.startswith("live_infer_v"))
+        if p.is_dir()
+        and (
+            p.name == "live_infer"
+            or p.name.startswith("live_infer_")
+            or p.name.startswith("live_infer_v")
+        )
     ]
     if not candidates:
         return None
@@ -126,7 +131,7 @@ def resolve_prediction_log_path(
     live_dir = resolve_latest_live_infer_dir(session_dir)
     if live_dir is None:
         raise FileNotFoundError(
-            f"No live_infer output directory found under session: {Path(session_dir).expanduser()}"
+            f"No Step 7 live_infer* output directory found under session: {Path(session_dir).expanduser()}"
         )
     candidate = live_dir / "predictions.jsonl"
     if not candidate.exists():
@@ -630,7 +635,7 @@ def main() -> int:
         "--session-dir",
         type=str,
         default=None,
-        help="Optional session directory used to auto-resolve the latest processed/live_infer*/predictions.jsonl.",
+        help="Optional session directory used to auto-resolve the latest processed/live_infer*/predictions.jsonl, including fresh live_infer_<run_tag> directories.",
     )
     parser.add_argument("--pred-log", type=str, default=None, help="Path to predictions.jsonl.")
     parser.add_argument("--out-json", type=str, default=None, help="Optional JSON summary output.")

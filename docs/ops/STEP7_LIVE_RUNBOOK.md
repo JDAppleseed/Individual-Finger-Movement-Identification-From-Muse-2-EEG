@@ -4,6 +4,10 @@
 
 Use this runbook for the next real Step 7 live inference run. The goal is an explicit, fail-closed, auditable run that can settle accepted-window inference parity on captured live data.
 
+Legacy compare/tuning sessions and superseded Step 7 live outputs for `2-M16` were archived under
+`Projects/2-M16/subjects/2-M16/archive/step7/`. They remain available for historical reference but
+are not part of the active live workflow.
+
 ## Pin These Inputs
 
 - Config: `Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json`
@@ -28,7 +32,9 @@ python3 tools/live_preflight.py \
   --session-dir "$SESSION_DIR" \
   --out-dir "$OUT_DIR" \
   --lsl-source-id "$LSL_SOURCE_ID" \
-  --probe-stream
+  --probe-stream \
+  --probe-distribution \
+  --distribution-probe-seconds 15
 ```
 
 Preflight must show all of the following before launch:
@@ -36,6 +42,7 @@ Preflight must show all of the following before launch:
 - `requested_source_id` is the value you expect for this headset
 - `selected_source_id` matches `requested_source_id`
 - `stream_contract_ok` is `True`
+- `Distribution probe verdict` is not `catastrophic`
 - `out_dir` does not already exist with files in it
 - no errors about missing model, scaler, temperature scaling, or deployable run invariants
 
@@ -62,6 +69,7 @@ These files must exist after the run when `no_file_io=false`:
 - `$OUT_DIR/window_audit.jsonl`
 - `$OUT_DIR/segment_breaks.jsonl`
 - `$OUT_DIR/live_prediction_summary.json`
+- `$OUT_DIR/live_input_distribution_report.json`
 - `$OUT_DIR/parity_capture/capture_manifest.json`
 - `$OUT_DIR/parity_capture/captured_windows.json`
 
@@ -81,6 +89,8 @@ payload = {
     "selected_source_id": manifest.get("stream_resolution", {}).get("selected_source_id"),
     "replay_cmd": manifest.get("finalization", {}).get("post_run_commands", {}).get("replay"),
     "audit_cmd": manifest.get("finalization", {}).get("post_run_commands", {}).get("audit"),
+    "distribution_report_path": manifest.get("finalization", {}).get("distribution_report_path"),
+    "distribution_report_write_error": manifest.get("finalization", {}).get("distribution_report_write_error"),
 }
 print(json.dumps(payload, indent=2, sort_keys=True))
 PY
@@ -93,6 +103,7 @@ Healthy output looks like:
 - `required_output_errors` is `null`
 - `selected_source_id` matches the pinned headset id
 - `termination_reason` is `ok` or `interrupted`
+- `distribution_report_write_error` is `null`
 
 ## Replay
 
@@ -109,6 +120,7 @@ This must write `$OUT_DIR/parity_report.json`. The command returns nonzero if th
 python3 tools/audit_live_parity.py \
   --live-dir "$OUT_DIR" \
   --parity-report "$OUT_DIR/parity_report.json" \
+  --distribution-report "$OUT_DIR/live_input_distribution_report.json" \
   --write-json \
   --write-md
 ```
@@ -117,7 +129,9 @@ Healthy audit output after replay looks like:
 
 - `evidence.completeness` is `complete`
 - `evidence.accepted_window_parity_evidence` is `confirmed`
+- `evidence.distribution_evidence` is `confirmed`
 - `blocking_errors` is empty
+- `dominant_limiter` is present and consistent with the run evidence
 
 The audit may still confirm pre-inference window/alignment loss. That does not invalidate parity capture if replay evidence is complete.
 

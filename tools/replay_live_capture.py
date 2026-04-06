@@ -29,6 +29,21 @@ from utils.live_parity import load_capture_records, load_json, sha256_file, writ
 from utils.postprocess import PostprocessSettings, PostprocessState
 from utils.runtime_utils import resolve_device
 
+POSTPROCESS_SETTING_KEYS = [
+    "smoothing_enabled",
+    "smoothing_method",
+    "smoothing_window",
+    "hysteresis_enabled",
+    "hysteresis_frames",
+    "threshold_action",
+    "threshold_finger",
+    "threshold_applicability",
+    "adjacency_enabled",
+    "hysteresis_margin",
+    "finger_delta",
+    "finger_mode",
+]
+
 
 def _load_live_module():
     module_path = REPO_ROOT / "7_live_infer_and_actuate.py"
@@ -233,12 +248,78 @@ def _require_record_fields(record: dict[str, Any], *, index: int) -> None:
             )
 
 
-def _build_runtime_args(runtime_manifest: dict[str, Any]) -> SimpleNamespace:
+def _missing_modern_runtime_fields(runtime_manifest: dict[str, Any]) -> list[str]:
     runtime = runtime_manifest.get("runtime", {}) if isinstance(runtime_manifest, dict) else {}
     post_settings = runtime.get("postprocess_settings", {})
     quality = runtime.get("quality_thresholds", {})
     rest_bias = runtime.get("rest_bias", {})
     actuation = runtime.get("actuation", {})
+    artifacts = (
+        runtime_manifest.get("artifacts", {})
+        if isinstance(runtime_manifest.get("artifacts"), dict)
+        else {}
+    )
+    missing: list[str] = []
+
+    def _require(value: Any, path: str) -> None:
+        if value is None:
+            missing.append(path)
+
+    for key in ("window_sec", "hop_sec", "target_fs", "alignment_internal_max_gap_s", "alignment_edge_max_gap_s", "live_quality_enabled", "postprocess_enabled"):
+        _require(runtime.get(key), f"runtime.{key}")
+    for key in (
+        "input_clip_abs_z",
+        "bad_channel_rms_z",
+        "bad_channel_abs_p95_z",
+        "bad_channel_clipped_frac",
+        "bad_window_clipped_frac",
+        "bad_window_max_masked_channels",
+    ):
+        _require(quality.get(key), f"runtime.quality_thresholds.{key}")
+    for key in POSTPROCESS_SETTING_KEYS:
+        _require(post_settings.get(key), f"runtime.postprocess_settings.{key}")
+    for key in ("enabled", "strength", "min_rest_windows"):
+        _require(rest_bias.get(key), f"runtime.rest_bias.{key}")
+    for key in (
+        "enabled",
+        "actuation_min_prob",
+        "actuation_stability",
+        "actuation_cooldown_ms",
+        "actuation_repeat_ms",
+        "actuation_min_speed",
+        "modulate_actuation_speed",
+        "actuation_speed_gamma",
+    ):
+        _require(actuation.get(key), f"runtime.actuation.{key}")
+    for key in ("model_sha256", "scaler_sha256"):
+        _require(artifacts.get(key), f"artifacts.{key}")
+    if artifacts.get("temperature_path") is not None:
+        _require(artifacts.get("temperature_sha256"), "artifacts.temperature_sha256")
+    return missing
+
+
+def _build_runtime_args(
+    runtime_manifest: dict[str, Any],
+    *,
+    allow_legacy_runtime_defaults: bool,
+) -> tuple[SimpleNamespace, str, list[str]]:
+    runtime = runtime_manifest.get("runtime", {}) if isinstance(runtime_manifest, dict) else {}
+    post_settings = runtime.get("postprocess_settings", {})
+    quality = runtime.get("quality_thresholds", {})
+    rest_bias = runtime.get("rest_bias", {})
+    actuation = runtime.get("actuation", {})
+    missing_fields = _missing_modern_runtime_fields(runtime_manifest)
+    evidence_mode = "decisive"
+    if missing_fields:
+        if not allow_legacy_runtime_defaults:
+            raise RuntimeError(
+                "Modern runtime manifest fields are required for decisive replay evidence. "
+                "Missing field(s): "
+                + ", ".join(sorted(missing_fields))
+                + ". Re-run Step 7 with the current runtime manifest format or pass "
+                "--allow-legacy-runtime-defaults to replay older captures as partial evidence."
+            )
+        evidence_mode = "legacy_partial"
     return SimpleNamespace(
         window_sec=float(runtime.get("window_sec", 0.25)),
         hop_sec=float(runtime.get("hop_sec", 0.05)),
@@ -278,7 +359,7 @@ def _build_runtime_args(runtime_manifest: dict[str, Any]) -> SimpleNamespace:
             actuation.get("modulate_actuation_speed", False)
         ),
         actuation_speed_gamma=float(actuation.get("actuation_speed_gamma", 1.0)),
-    )
+    ), evidence_mode, missing_fields
 
 
 def _compare_dict_fields(
@@ -299,6 +380,7 @@ def replay_capture(
     capture_dir: Path,
     device_name: str,
     tolerance: float,
+    allow_legacy_runtime_defaults: bool = False,
 ) -> dict[str, Any]:
     capture_manifest, records = load_capture_records(capture_dir)
     _validate_capture_manifest(capture_dir, capture_manifest, records)
@@ -334,7 +416,10 @@ def replay_capture(
         )
 
     live_mod = _load_live_module()
-    runtime_args = _build_runtime_args(runtime_manifest)
+    runtime_args, evidence_mode, missing_runtime_fields = _build_runtime_args(
+        runtime_manifest,
+        allow_legacy_runtime_defaults=bool(allow_legacy_runtime_defaults),
+    )
     device = resolve_device(device_name or str(runtime_manifest.get("runtime", {}).get("device", "auto")))
 
     first_values = np.asarray(records[0].get("raw_window_values"), dtype=np.float32)
@@ -794,6 +879,9 @@ def replay_capture(
         "status": "ok",
         "capture_dir": str(capture_dir),
         "runtime_manifest_path": str(runtime_manifest_path),
+        "evidence_mode": str(evidence_mode),
+        "legacy_runtime_defaults_used": bool(evidence_mode != "decisive"),
+        "missing_modern_runtime_fields": missing_runtime_fields,
         "record_count": int(len(records)),
         "tolerance": float(tolerance),
         "inference_backend": str(
@@ -807,6 +895,10 @@ def replay_capture(
         "parity": parity,
         "per_window": per_window,
     }
+    if evidence_mode != "decisive":
+        report["notes"].append(
+            "Legacy runtime defaults were allowed for this replay, so parity evidence is partial rather than decisive."
+        )
     parity_checks = [
         bool(value.get("ok"))
         for value in parity.values()
@@ -825,7 +917,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--capture-dir",
         required=True,
         type=str,
-        help="Path to processed/live_infer/parity_capture.",
+        help="Path to a Step 7 live output directory's parity_capture folder.",
     )
     parser.add_argument(
         "--report-out",
@@ -845,6 +937,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=1e-5,
         help="Numeric max-abs-diff tolerance for parity checks.",
     )
+    parser.add_argument(
+        "--allow-legacy-runtime-defaults",
+        action="store_true",
+        help="Allow replay when the runtime manifest is missing modern decisive-evidence fields. This downgrades evidence_mode to legacy_partial.",
+    )
     return parser
 
 
@@ -862,6 +959,7 @@ def main() -> int:
             capture_dir=capture_dir,
             device_name=str(args.device),
             tolerance=float(args.tolerance),
+            allow_legacy_runtime_defaults=bool(args.allow_legacy_runtime_defaults),
         )
     except Exception as exc:
         failure_report = {
