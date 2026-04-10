@@ -1539,18 +1539,30 @@ def resolve_live_launch_plan(
 
     config_dir = config_path.parent
 
-    def _resolve_path(path_str: str, base_dir: Optional[Path]) -> Path:
+    def _resolve_path(
+        path_str: str,
+        base_dir: Optional[Path],
+        *,
+        prefer_config_dir: bool,
+    ) -> Path:
         candidate = Path(path_str).expanduser()
         if candidate.is_absolute():
             return candidate.resolve()
 
         search_roots: list[Path] = []
-        if base_dir is not None:
-            search_roots.append(base_dir.expanduser().resolve())
-        search_roots.append(Path.cwd().resolve())
+        base_dir_resolved = base_dir.expanduser().resolve() if base_dir is not None else None
+        cwd_resolved = Path.cwd().resolve()
         repo_root_resolved = repo_root.expanduser().resolve()
-        if repo_root_resolved not in search_roots:
-            search_roots.append(repo_root_resolved)
+
+        ordered_roots = (
+            [base_dir_resolved, cwd_resolved, repo_root_resolved]
+            if prefer_config_dir
+            else [cwd_resolved, repo_root_resolved, base_dir_resolved]
+        )
+        for root in ordered_roots:
+            if root is None or root in search_roots:
+                continue
+            search_roots.append(root)
 
         for root in search_roots:
             resolved = (root / candidate).resolve()
@@ -1617,20 +1629,32 @@ def resolve_live_launch_plan(
 
         if model_explicit:
             assert raw_model_path
-            model_path = _resolve_path(str(raw_model_path), config_dir)
+            model_path = _resolve_path(
+                str(raw_model_path),
+                config_dir,
+                prefer_config_dir=not bool(model_path_override),
+            )
         else:
             assert chosen_run_dir is not None
             model_path = chosen_run_dir / "finger_action_model.pt"
 
         if scaler_explicit:
             assert raw_scaler_path
-            scaler_path = _resolve_path(str(raw_scaler_path), config_dir)
+            scaler_path = _resolve_path(
+                str(raw_scaler_path),
+                config_dir,
+                prefer_config_dir=not bool(scaler_path_override),
+            )
         else:
             assert chosen_run_dir is not None
             scaler_path = chosen_run_dir / "scaler.npz"
 
         if raw_out_dir:
-            out_dir = _resolve_path(str(raw_out_dir), config_dir)
+            out_dir = _resolve_path(
+                str(raw_out_dir),
+                config_dir,
+                prefer_config_dir=not bool(out_dir_override),
+            )
         else:
             out_dir = SessionLayout(session_dir_path).processed_dir / "live_infer"
 
@@ -1644,9 +1668,21 @@ def resolve_live_launch_plan(
                 "Missing session_dir. Pin model_path, scaler_path, and out_dir explicitly."
             )
         base_dir = config_dir
-        model_path = _resolve_path(str(raw_model_path), config_dir)
-        scaler_path = _resolve_path(str(raw_scaler_path), config_dir)
-        out_dir = _resolve_path(str(raw_out_dir), config_dir)
+        model_path = _resolve_path(
+            str(raw_model_path),
+            config_dir,
+            prefer_config_dir=not bool(model_path_override),
+        )
+        scaler_path = _resolve_path(
+            str(raw_scaler_path),
+            config_dir,
+            prefer_config_dir=not bool(scaler_path_override),
+        )
+        out_dir = _resolve_path(
+            str(raw_out_dir),
+            config_dir,
+            prefer_config_dir=not bool(out_dir_override),
+        )
 
     out_dir = out_dir.expanduser().resolve()
     base_dir = base_dir.expanduser().resolve()

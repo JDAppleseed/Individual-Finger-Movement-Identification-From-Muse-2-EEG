@@ -110,6 +110,13 @@ def resolve_latest_live_infer_dir(session_dir: str | Path) -> Path | None:
     ]
     if not candidates:
         return None
+    preferred = [
+        p
+        for p in candidates
+        if p.name.startswith("live_infer_") and not p.name.startswith("live_infer_v")
+    ]
+    if preferred:
+        candidates = preferred
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
@@ -635,7 +642,7 @@ def main() -> int:
         "--session-dir",
         type=str,
         default=None,
-        help="Optional session directory used to auto-resolve the latest processed/live_infer*/predictions.jsonl, including fresh live_infer_<run_tag> directories.",
+        help="Optional session directory used to auto-resolve the latest processed/live_infer*/predictions.jsonl. Fresh live_infer_<run_tag> directories are preferred over bare or legacy live_infer names.",
     )
     parser.add_argument("--pred-log", type=str, default=None, help="Path to predictions.jsonl.")
     parser.add_argument("--out-json", type=str, default=None, help="Optional JSON summary output.")

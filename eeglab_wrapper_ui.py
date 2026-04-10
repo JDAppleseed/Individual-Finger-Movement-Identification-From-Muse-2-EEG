@@ -813,7 +813,7 @@ TOOLTIPS: Dict[str, str] = {
     "LABEL_CHECK_ACKNOWLEDGED": "Operator acknowledged label mismatch.",
     "model_path": "Model path for live inference.",
     "scaler_path": "Scaler path for live inference.",
-    "session_dir": "Session directory under subjects/<id>/sessions/<session_id>.",
+    "session_dir": "Session directory under subjects/<id>/sessions/<session_id>. For Step 7, this is the launch/preflight anchor and should be the canonical deployment session.",
     "npz": "Window dataset NPZ. Leave blank to auto-resolve from the selected session when supported.",
     "out_dir": "Output directory override for the current step.",
     "out": "Single-figure output path.",
@@ -870,7 +870,7 @@ TOOLTIPS: Dict[str, str] = {
     "parity_capture_enabled": "Persist accepted live windows for replay parity checks. Disable only for non-decisive debug runs.",
     "parity_capture_max_windows": "Maximum number of accepted windows retained for parity replay.",
     "parity_capture_flush_every": "Flush parity capture files after this many accepted windows.",
-    "deployment_session_dir": "Optional offline session directory used only by the decisive preflight smoke/distribution checks.",
+    "deployment_session_dir": "Optional offline session directory used only by the decisive preflight smoke/distribution checks. Leave it equal to Step 7 session_dir unless you have a deliberate reason to test against a different offline reference.",
     "infer_subject_override": "Subject override for Step 7 (defaults to current subject).",
     "project_name": "Project name for auto-resolving latest session.",
     "subject_id": "Subject ID for auto-resolving latest session.",
@@ -4278,6 +4278,8 @@ class MainWindow(QMainWindow):
             "Live inference runs in 7_live_infer_and_actuate.py. "
             "The UI writes the selected subject's Step 7 config, then launches the same "
             "runner and session-dir path used from the terminal. "
+            "The Step 7 Session dir field is the authoritative launch/preflight session; "
+            "the main session selector only seeds it when that field is blank. "
             "When a session (or subject/project) is selected, the latest trained run "
             "is auto-resolved unless you provide explicit model/scaler overrides. "
             "The runtime default output is processed/live_infer, but decisive runs should pin a "
@@ -4319,8 +4321,8 @@ class MainWindow(QMainWindow):
             "Use this step after a Step 7 session to summarize predictions.jsonl, "
             "export predicted state segments, and generate a review CSV for video alignment. "
             "If you leave the prediction log blank, the tool auto-resolves the latest "
-            "`processed/live_infer*/predictions.jsonl` under the selected session, including "
-            "fresh `live_infer_<run_tag>` outputs. "
+            "`processed/live_infer*/predictions.jsonl` under the selected Step 7 session, "
+            "preferring fresh `live_infer_<run_tag>` outputs over bare or legacy names. "
             "The review CSV is intended for manual comparison against recorded video "
             "or robot-hand motion during shadow-mode validation."
         )
@@ -6929,7 +6931,9 @@ class MainWindow(QMainWindow):
             return
         subject_dir = subject_root(self.current_project, subject_id)
         self._load_saved_step_settings(subject_dir, "infer")
-        session_dir = self._latest_session_for_subject(subject_id)
+        session_dir = self._resolve_infer_contract_session_dir(
+            subject_id_override=subject_id
+        )
         run_dir = resolve_latest_run_dir(session_dir) if session_dir else None
         if not run_dir:
             return
@@ -7208,6 +7212,60 @@ class MainWindow(QMainWindow):
                 return p
         return p
 
+    def _resolve_step_dir_field(self, step_id: str, field_name: str) -> Optional[Path]:
+        widget = self.fields.get(step_id, {}).get(field_name)
+        if not isinstance(widget, QLineEdit):
+            return None
+        value = widget.text().strip()
+        if not value:
+            return None
+        path = Path(value).expanduser()
+        if path.exists():
+            try:
+                return path.resolve()
+            except Exception:
+                return path
+        return path
+
+    def _resolve_infer_contract_session_dir(
+        self, *, subject_id_override: Optional[str] = None
+    ) -> Optional[Path]:
+        subject_for_step = subject_id_override or self._infer_subject_override() or self.current_subject
+        step_session_dir = self._resolve_step_dir_field("infer", "session_dir")
+        if step_session_dir is not None:
+            return step_session_dir
+
+        deployment_session_dir = self._resolve_step_dir_field("infer", "deployment_session_dir")
+        if deployment_session_dir is not None:
+            return deployment_session_dir
+
+        global_session_dir = self._resolve_effective_session_dir(step_id=None)
+        if global_session_dir is not None:
+            return global_session_dir
+
+        if subject_for_step:
+            return self._latest_session_for_subject(subject_for_step)
+        return None
+
+    def _resolve_live_review_session_dir(self) -> Optional[Path]:
+        infer_session_dir = self._resolve_infer_contract_session_dir()
+        review_widget = self.fields.get("live_review", {}).get("session_dir")
+        review_session_dir = self._resolve_step_dir_field("live_review", "session_dir")
+        if review_session_dir is None:
+            return infer_session_dir
+        if not isinstance(review_widget, QLineEdit) or infer_session_dir is None:
+            return review_session_dir
+
+        current = review_widget.text().strip()
+        previous_auto = self._auto_field_values.get("live_review.session_dir")
+        global_session_dir = self._resolve_effective_session_dir(step_id=None)
+        review_matches_global = (
+            global_session_dir is not None and str(review_session_dir) == str(global_session_dir)
+        )
+        if current == previous_auto or review_matches_global:
+            return infer_session_dir
+        return review_session_dir
+
     def _existing_file_path(self, value: str) -> Optional[Path]:
         text = str(value or "").strip()
         if not text:
@@ -7332,6 +7390,8 @@ class MainWindow(QMainWindow):
     def _autofill_dependent_paths_from_session_dir(self) -> None:
         global_session = self._resolve_effective_session_dir(step_id=None)
         train_session = self._resolve_effective_session_dir(step_id="train")
+        infer_session = self._resolve_infer_contract_session_dir()
+        live_review_session = self._resolve_live_review_session_dir()
 
         train_source = None
         if train_session and train_session.exists():
@@ -7351,7 +7411,7 @@ class MainWindow(QMainWindow):
             )
             self._autofill_topomap_paths(train_source)
 
-        if not global_session or not global_session.exists():
+        if not infer_session or not infer_session.exists():
             self._autofill_replay_paths()
             return
 
@@ -7359,7 +7419,7 @@ class MainWindow(QMainWindow):
         infer_scaler_widget = self.fields.get("infer", {}).get("scaler_path")
         infer_out_dir_widget = self.fields.get("infer", {}).get("out_dir")
 
-        run_dir = resolve_latest_run_dir(global_session)
+        run_dir = resolve_latest_run_dir(infer_session)
         if run_dir:
             model_path = str(run_dir / "finger_action_model.pt")
             scaler_path = str(run_dir / "scaler.npz")
@@ -7375,15 +7435,15 @@ class MainWindow(QMainWindow):
                 key="infer.scaler_path",
                 legacy_values={"scaler.npz"},
             )
-        default_live_out_dir = self._default_live_infer_out_dir(global_session)
+        default_live_out_dir = self._default_live_infer_out_dir(infer_session)
         self._maybe_autofill_text(
             infer_out_dir_widget,
             str(default_live_out_dir),
             key="infer.out_dir",
             legacy_values={"", "live_infer", "processed/live_infer"},
         )
-        self._autofill_live_review_paths(global_session)
-        self._autofill_replay_paths(session_dir_override=global_session)
+        self._autofill_live_review_paths(live_review_session or infer_session)
+        self._autofill_replay_paths(session_dir_override=infer_session)
 
     def _default_live_infer_out_dir(self, session_dir: Path) -> Path:
         processed_dir = SessionLayout(session_dir).processed_dir
@@ -7688,6 +7748,13 @@ class MainWindow(QMainWindow):
         ]
         if not candidates:
             return None
+        preferred = [
+            p
+            for p in candidates
+            if p.name.startswith("live_infer_") and not p.name.startswith("live_infer_v")
+        ]
+        if preferred:
+            candidates = preferred
         return max(candidates, key=lambda p: p.stat().st_mtime)
 
     def _infer_session_dir_from_run_dir(self, run_dir: str) -> Optional[Path]:
@@ -8585,22 +8652,15 @@ class MainWindow(QMainWindow):
             settings["lsl_source_id"] = connector_source_id
         settings["LABEL_CHECK_ACKNOWLEDGED"] = False
         settings["LABEL_CHECK_FOUND_LABELS"] = self.live_label_details.get("labels")
-        if (
-            not settings.get("session_id")
-            and self.current_session_backend
-            and not infer_subject_override
-        ):
-            settings["session_id"] = self.current_session_backend
-
         infer_session_dir: Optional[Path]
-        if infer_subject_override and infer_subject_override != self.current_subject:
-            infer_session_dir = self._latest_session_for_subject(subject_for_step)
-        else:
-            infer_session_dir = self._resolve_effective_session_dir(step_id=None)
-            if infer_session_dir is None:
-                infer_session_dir = self._latest_session_for_subject(subject_for_step)
+        infer_session_dir = self._resolve_infer_contract_session_dir(
+            subject_id_override=subject_for_step
+        )
         if infer_session_dir:
             settings["session_dir"] = str(infer_session_dir)
+            settings["session_id"] = infer_session_dir.name
+            if not str(settings.get("deployment_session_dir") or "").strip():
+                settings["deployment_session_dir"] = str(infer_session_dir)
         else:
             QMessageBox.warning(
                 self,
@@ -8624,18 +8684,6 @@ class MainWindow(QMainWindow):
                 )
 
         settings["subject_id"] = subject_for_step
-        backend_session = None if infer_subject_override else self._prepare_session_id("infer", settings)
-
-        if backend_session:
-            self.current_session_backend = backend_session
-            self.current_session_ui = ui_session_id(
-                self.current_subject, backend_session
-            )
-            self._set_session_label(f"Session: {self.current_session_ui}")
-            session_dir = session_root(subject_dir, self.current_session_ui)
-            ensure_session_dirs(session_dir)
-            self.session_dir_input.setText(str(session_dir))
-            settings["session_dir"] = str(session_dir)
 
         def _uses_placeholder_path(value: Optional[str], filename: str) -> bool:
             if not value:
@@ -8738,7 +8786,12 @@ class MainWindow(QMainWindow):
             self._append_log("Dry run enabled; command not executed.")
             return
 
-        self._write_session_snapshot(launch.subject_dir, launch.config_payload, "infer")
+        self._write_session_snapshot(
+            launch.subject_dir,
+            launch.config_payload,
+            "infer",
+            session_dir=launch.session_dir,
+        )
         for env_key, env_val in launch.env.items():
             try:
                 if env_val is None:
@@ -9003,13 +9056,20 @@ class MainWindow(QMainWindow):
         return dialog.exec() == QDialog.Accepted
 
     def _write_session_snapshot(
-        self, subject_dir: Path, step_payload: Dict[str, Any], step_id: str
+        self,
+        subject_dir: Path,
+        step_payload: Dict[str, Any],
+        step_id: str,
+        *,
+        session_dir: Optional[Path] = None,
     ) -> None:
-        if not self.current_session_ui:
-            return
-        session_dir = session_root(subject_dir, self.current_session_ui)
-        ensure_session_dirs(session_dir)
-        snapshot_path = session_dir / "session_config.json"
+        resolved_session_dir = session_dir
+        if resolved_session_dir is None:
+            if not self.current_session_ui:
+                return
+            resolved_session_dir = session_root(subject_dir, self.current_session_ui)
+        ensure_session_dirs(resolved_session_dir)
+        snapshot_path = resolved_session_dir / "session_config.json"
         if snapshot_path.exists():
             existing = json.loads(snapshot_path.read_text())
         else:
@@ -10587,7 +10647,7 @@ class MainWindow(QMainWindow):
         live_dir = self._last_live_infer_out_dir
         if live_dir is None:
             live_dir = self._resolve_latest_live_infer_dir(
-                self._resolve_effective_session_dir(step_id=None)
+                self._resolve_infer_contract_session_dir()
             )
         if live_dir is None or not live_dir.exists():
             self._append_log(
@@ -10863,7 +10923,7 @@ class MainWindow(QMainWindow):
             if isinstance(out_dir_widget, QLineEdit) and out_dir_widget.text().strip():
                 live_dir = Path(out_dir_widget.text().strip()).expanduser()
             else:
-                session_dir = self._resolve_effective_session_dir(step_id=None)
+                session_dir = self._resolve_infer_contract_session_dir()
                 if session_dir is not None:
                     live_dir = self._default_live_infer_out_dir(session_dir)
         if live_dir is None:

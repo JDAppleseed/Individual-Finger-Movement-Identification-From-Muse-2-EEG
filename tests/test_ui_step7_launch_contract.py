@@ -318,6 +318,97 @@ def test_autofill_dependent_paths_sets_timestamped_step7_out_dir(
     assert out_dir_widget.text().endswith("processed/live_infer_20250101_000011")
 
 
+def test_prepare_live_infer_launch_prefers_step7_session_field_over_global_session(
+    window, monkeypatch: pytest.MonkeyPatch
+):
+    project = "Demo"
+    subject = "S01"
+    deployment_ui_session = f"{subject}_20250101_000000"
+    global_ui_session = f"{subject}_20250102_000000"
+    subject_dir = Path("Projects") / project / "subjects" / subject
+    deployment_session_dir = subject_dir / "sessions" / deployment_ui_session
+    global_session_dir = subject_dir / "sessions" / global_ui_session
+    deployment_run_dir = deployment_session_dir / "processed" / "models" / "run_001"
+    deployment_run_dir.mkdir(parents=True, exist_ok=True)
+    (deployment_run_dir / "finger_action_model.pt").write_text("model")
+    (deployment_run_dir / "scaler.npz").write_text("scaler")
+    (deployment_run_dir / "temperature_scaling.json").write_text("{}")
+    global_session_dir.mkdir(parents=True, exist_ok=True)
+
+    window.current_project = project
+    window.current_subject = subject
+    window.current_session_ui = global_ui_session
+    window.session_dir_input.setText(str(global_session_dir))
+    window.live_stream_name = "Muse2-EEG"
+    window.live_stream_type = "EEG"
+    window.live_lsl_source_id = "captured-source-123"
+
+    infer_fields = window.fields["infer"]
+    infer_fields["session_dir"].setText(str(deployment_session_dir))
+    infer_fields["deployment_session_dir"].setText(str(deployment_session_dir))
+    infer_fields["out_dir"].setText("")
+
+    monkeypatch.setattr(ui_mod, "session_backend_id", lambda timestamp=None: "20250103_000000")
+
+    launch = window._prepare_live_infer_launch(window.scripts["live_infer"])
+
+    assert launch is not None
+    assert launch.session_dir == deployment_session_dir.resolve()
+    assert Path(launch.settings["session_dir"]).resolve() == deployment_session_dir.resolve()
+    assert Path(launch.settings["deployment_session_dir"]).resolve() == deployment_session_dir.resolve()
+    assert launch.settings["model_path"].endswith("run_001/finger_action_model.pt")
+    assert launch.settings["scaler_path"].endswith("run_001/scaler.npz")
+    assert launch.settings["out_dir"].endswith("processed/live_infer_20250103_000000")
+    assert str(deployment_session_dir.resolve()) in launch.args
+    assert str(global_session_dir.resolve()) not in launch.args
+
+
+def test_autofill_step7_artifacts_uses_step7_session_not_global_session(
+    window, monkeypatch: pytest.MonkeyPatch
+):
+    project = "Demo"
+    subject = "S01"
+    deployment_ui_session = f"{subject}_20250101_000000"
+    global_ui_session = f"{subject}_20250102_000000"
+    subject_dir = Path("Projects") / project / "subjects" / subject
+    deployment_session_dir = subject_dir / "sessions" / deployment_ui_session
+    global_session_dir = subject_dir / "sessions" / global_ui_session
+    deployment_run_dir = deployment_session_dir / "processed" / "models" / "run_001"
+    deployment_run_dir.mkdir(parents=True, exist_ok=True)
+    (deployment_run_dir / "finger_action_model.pt").write_text("model")
+    (deployment_run_dir / "scaler.npz").write_text("scaler")
+    global_session_dir.mkdir(parents=True, exist_ok=True)
+    live_dir = deployment_session_dir / "processed" / "live_infer_20250101_101010"
+    legacy_live_dir = deployment_session_dir / "processed" / "live_infer_v9"
+    live_dir.mkdir(parents=True, exist_ok=True)
+    legacy_live_dir.mkdir(parents=True, exist_ok=True)
+    (live_dir / "predictions.jsonl").write_text('{"committed_action_id":1}\n')
+    (legacy_live_dir / "predictions.jsonl").write_text('{"committed_action_id":0}\n')
+
+    window.current_project = project
+    window.current_subject = subject
+    window.current_session_ui = global_ui_session
+    window.session_dir_input.setText(str(global_session_dir))
+    infer_fields = window.fields["infer"]
+    infer_fields["session_dir"].setText(str(deployment_session_dir))
+    infer_fields["deployment_session_dir"].setText(str(deployment_session_dir))
+
+    monkeypatch.setattr(ui_mod, "session_backend_id", lambda timestamp=None: "20250103_000001")
+
+    window._autofill_dependent_paths_from_session_dir()
+
+    assert window.fields["infer"]["model_path"].text().endswith(
+        "run_001/finger_action_model.pt"
+    )
+    assert window.fields["infer"]["scaler_path"].text().endswith("run_001/scaler.npz")
+    assert window.fields["infer"]["out_dir"].text().endswith(
+        "processed/live_infer_20250103_000001"
+    )
+    assert window.fields["live_review"]["pred_log"].text().endswith(
+        "processed/live_infer_20250101_101010/predictions.jsonl"
+    )
+
+
 def test_live_ready_gate_uses_frozen_launch_settings(window, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     captured: dict[str, object] = {}
 

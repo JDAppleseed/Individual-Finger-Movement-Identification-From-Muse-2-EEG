@@ -183,3 +183,21 @@ def test_resolve_prediction_log_from_latest_live_dir(tmp_path: Path):
         config_dir=None,
     )
     assert pred_log == (newer / "predictions.jsonl").resolve()
+
+
+def test_resolve_latest_live_infer_dir_prefers_timestamped_run_over_legacy_name(
+    tmp_path: Path,
+):
+    session_dir = tmp_path / "session"
+    processed = session_dir / "processed"
+    preferred = processed / "live_infer_20260405_010203"
+    legacy = processed / "live_infer_v9"
+    preferred.mkdir(parents=True)
+    legacy.mkdir(parents=True)
+    (preferred / "predictions.jsonl").write_text('{"committed_action_id":1}\n')
+    (legacy / "predictions.jsonl").write_text('{"committed_action_id":0}\n')
+    legacy.touch()
+
+    latest = resolve_latest_live_infer_dir(session_dir)
+
+    assert latest == preferred

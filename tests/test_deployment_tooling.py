@@ -1118,6 +1118,41 @@ def test_resolve_live_launch_plan_accepts_repo_root_relative_artifact_paths(tmp_
     assert plan.scaler_path == scaler_path.resolve()
 
 
+def test_resolve_live_launch_plan_accepts_repo_root_relative_out_dir_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    mod = _load_module("7_live_infer_and_actuate.py", "live_launch_plan_repo_relative_outdir")
+
+    monkeypatch.chdir(tmp_path)
+    session_dir = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "sessions" / "sessE"
+    run_dir = session_dir / "processed" / "models" / "run_001"
+    run_dir.mkdir(parents=True)
+    (run_dir / "finger_action_model.pt").write_text("model")
+    (run_dir / "scaler.npz").write_text("scaler")
+    config_path = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "config" / "infer.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps({"project_name": "Demo", "subject_id": "S01"}))
+    out_dir_text = "Projects/Demo/subjects/S01/sessions/sessE/processed/live_infer_repo_relative_new"
+
+    plan = mod.resolve_live_launch_plan(
+        config_path=config_path,
+        config_payload={"project_name": "Demo", "subject_id": "S01"},
+        config_settings={
+            "session_dir": str(session_dir),
+            "out_dir": out_dir_text,
+        },
+        session_dir_override=str(session_dir),
+        project_name_override=None,
+        subject_id_override=None,
+        model_path_override=None,
+        scaler_path_override=None,
+        out_dir_override=out_dir_text,
+        allow_outside_base=False,
+    )
+
+    assert plan.out_dir == (tmp_path / out_dir_text).resolve()
+
+
 def test_collect_required_output_status_flags_missing_required_files(tmp_path: Path):
     mod = _load_module("7_live_infer_and_actuate.py", "live_required_output_status")
 

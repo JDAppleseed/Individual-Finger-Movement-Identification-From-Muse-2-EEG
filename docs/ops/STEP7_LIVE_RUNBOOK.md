@@ -18,6 +18,11 @@ are not part of the active live workflow.
 - Live stream identity: set `LSL_SOURCE_ID` for the actual headset before launch
 - Output dir: use a fresh per-run directory every time
 
+UI note:
+- On the Step 7 page, the Step 7 `Session dir` field is the authoritative launch/preflight session.
+- Do not assume the main session selector should override a pinned Step 7 deployment session.
+- Step 7b auto-resolves the latest live output under that Step 7 session and prefers fresh `live_infer_<run_tag>` directories over bare or legacy names.
+
 ## Preflight
 
 ```bash

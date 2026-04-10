@@ -85,7 +85,7 @@ Notes:
 - Step 2: Train Model → reads `<session_dir>/processed/eeg_windows.npz`, writes `<session_dir>/processed/models/<run_id>/` including `temperature_scaling.json`.
 - Step 3+: Evaluate / Figures / Reports → read from the same session directory and the latest model run, and report action/finger/joint metrics, applicability diagnostics, and committed deployment-pair invariants.
 - Step 7: Live Infer + Actuate → use `docs/ops/STEP7_LIVE_RUNBOOK.md` for the decisive `2-M16` live workflow, including the pinned config, deployment session, preflight, replay, and audit commands.
-- Step 7b: Review Live Predictions → reads `processed/live_infer*/predictions.jsonl`, summarizes runtime behavior, and exports segment CSVs for video-aligned validation.
+- Step 7b: Review Live Predictions → reads `processed/live_infer*/predictions.jsonl`, prefers fresh `live_infer_<run_tag>` outputs over bare or legacy names, summarizes runtime behavior, and exports segment CSVs for video-aligned validation.
 
 ## CLI Run (Session-Directory Flow)
 
@@ -211,6 +211,8 @@ The canonical config there is
 `Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json`, and decisive runs should write
 to a fresh `processed/live_infer_<run_tag>` directory instead of reusing the runtime default
 `processed/live_infer`.
+In the UI, the Step 7 `Session dir` field is the authoritative launch/preflight session; do not
+assume the main session selector overrides a pinned Step 7 deployment session.
 
 Preferred (auto-resolve latest model/scaler from the session directory):
 
@@ -292,7 +294,7 @@ python tools/analyze_live_predictions.py \
 
 Notes:
 
-- If `--pred-log` is omitted, the tool auto-resolves the latest `processed/live_infer*/predictions.jsonl` under `--session-dir`.
+- If `--pred-log` is omitted, the tool auto-resolves the latest `processed/live_infer*/predictions.jsonl` under `--session-dir`, preferring fresh `live_infer_<run_tag>` directories over bare or legacy names.
 - Fresh decisive runs are expected to use `processed/live_infer_<run_tag>`; archived legacy outputs are not part of this auto-resolve path.
 - The summary JSON reports latency, transition rate, actuation counts, uncertainty-gate failures, applicability-gate failures, and committed/sent deployment-pair invariants.
 - `predicted_segments.csv` converts per-window predictions into contiguous predicted command intervals.
