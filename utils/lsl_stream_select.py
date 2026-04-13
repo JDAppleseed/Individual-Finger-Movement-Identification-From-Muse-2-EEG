@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from utils.channel_labels import extract_lsl_channel_labels, normalize_channel_labels
+
 AUTO_SOURCE_ID_TOKENS = frozenset({"auto", "muse2_internal", "internal"})
 
 
@@ -88,20 +90,7 @@ def stream_signature(info: StreamInfo) -> Dict[str, Any]:
 
 
 def extract_channel_labels(info: StreamInfo) -> List[str]:
-    labels: List[str] = []
-    try:
-        ch = info.desc().child("channels").child("channel")
-    except Exception:
-        ch = None
-    if ch is None:
-        return labels
-    for _ in range(info.channel_count()):
-        try:
-            labels.append(ch.child_value("label"))
-            ch = ch.next_sibling()
-        except Exception:
-            break
-    return [label for label in labels if label]
+    return normalize_channel_labels(extract_lsl_channel_labels(info), dedupe=False)
 
 
 def normalize_source_id(value: Any) -> Optional[str]:

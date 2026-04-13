@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Optional
 
+from utils.channel_labels import parse_channel_label_list
+
 DEFAULT_STREAM_NAME = "Muse2-EEG"
 DEFAULT_STREAM_TYPE = "EEG"
 DEFAULT_NOMINAL_SRATE = 256.0
@@ -50,7 +52,7 @@ class PipelineSettings:
 
 
 def parse_labels(label_csv: str) -> List[str]:
-    return [label.strip() for label in label_csv.split(",") if label.strip()]
+    return parse_channel_label_list(label_csv, dedupe=False)
 
 
 class SessionLoggerAdapter(logging.LoggerAdapter):

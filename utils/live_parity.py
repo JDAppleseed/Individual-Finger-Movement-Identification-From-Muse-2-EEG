@@ -10,6 +10,7 @@ from typing import Any, Iterable, Optional
 
 import numpy as np
 
+from utils.channel_labels import parse_channel_label_list
 from utils.runtime_utils import now_utc_iso
 
 
@@ -33,13 +34,7 @@ def sha256_file(path: Path | str | None) -> Optional[str]:
 
 
 def parse_required_labels(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple)):
-        labels = [str(item).strip() for item in value]
-    else:
-        labels = [part.strip() for part in str(value).split(",")]
-    return [label for label in labels if label]
+    return parse_channel_label_list(value, dedupe=False)
 
 
 def json_ready(value: Any) -> Any:

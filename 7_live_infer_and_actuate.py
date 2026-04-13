@@ -58,6 +58,10 @@ except Exception:  # pragma: no cover - optional dependency
 # They exist in the user's original file; we preserve names/structure.
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
 from muse_streaming.resample import resample_window, verify_alignment
+from utils.channel_labels import (
+    describe_lsl_channel_labels,
+    normalize_channel_labels,
+)
 from utils.command_shaper import CommandShaper, CommandShaperConfig
 from utils.default_recipe import LIVE_INFER_RECIPE_DEFAULTS
 from utils.inference import InferenceConfig, InferenceEngine
@@ -291,7 +295,7 @@ def _load_channel_labels_from_npz(npz_path: Path) -> list[str]:
             if "channel_names" not in npz:
                 return []
             raw = np.asarray(npz["channel_names"]).reshape(-1)
-            return [str(item).strip() for item in raw if str(item).strip()]
+            return normalize_channel_labels(raw, dedupe=False)
     except Exception:
         return []
 
@@ -320,11 +324,7 @@ def _require_expected_channel_labels(
     expected_labels: Sequence[str],
     expected_labels_source: Optional[str],
 ) -> list[str]:
-    labels = [
-        str(label).strip()
-        for label in expected_labels
-        if str(label).strip()
-    ]
+    labels = normalize_channel_labels(expected_labels, dedupe=False)
     if labels:
         return labels
     source_hint = (
@@ -343,8 +343,8 @@ def _build_channel_reorder(
     expected_labels: Sequence[str],
     resolved_labels: Sequence[str],
 ) -> Optional[tuple[int, ...]]:
-    expected = [str(label).strip().lower() for label in expected_labels if str(label).strip()]
-    found = [str(label).strip().lower() for label in resolved_labels if str(label).strip()]
+    expected = normalize_channel_labels(expected_labels, dedupe=False)
+    found = normalize_channel_labels(resolved_labels, dedupe=False)
     if not expected or not found:
         return None
     index_by_label: dict[str, int] = {}
@@ -1716,11 +1716,25 @@ def _format_lsl_stream(info: Any) -> str:
 
 def _stream_labels(info: Any) -> list[str]:
     try:
-        signature = stream_signature(info)
+        report = describe_lsl_channel_labels(info)
     except Exception:
         return []
-    labels = signature.get("labels") or signature.get("channel_labels") or []
-    return [str(label).strip() for label in labels if str(label).strip()]
+    return list(report.get("normalized_labels") or [])
+
+
+def _hydrate_lsl_info(inlet: Any, fallback_info: Any) -> Any:
+    info_getter = getattr(inlet, "info", None)
+    if not callable(info_getter):
+        return fallback_info
+    try:
+        return info_getter(timeout=0.5)
+    except TypeError:
+        try:
+            return info_getter()
+        except Exception:
+            return fallback_info
+    except Exception:
+        return fallback_info
 
 
 def _stream_contract_summary(
@@ -1735,7 +1749,7 @@ def _stream_contract_summary(
     expected_labels_source: Optional[str] = None,
 ) -> dict[str, Any]:
     expected_labels_list = (
-        [str(label).strip() for label in expected_labels if str(label).strip()]
+        normalize_channel_labels(expected_labels, dedupe=False)
         if expected_labels is not None
         else parse_required_labels(config_settings.get("REQUIRED_LSL_LABELS"))
     )
@@ -1743,23 +1757,39 @@ def _stream_contract_summary(
         float(expected_rate) if expected_rate is not None else config_settings.get("SAMPLING_RATE")
     )
     require_exactly_4 = bool(config_settings.get("REQUIRE_EXACTLY_4_CHANNELS", True))
-    resolved_labels = [
-        str(label).strip()
-        for label in resolved_stream.get("channel_labels", []) or []
-        if str(label).strip()
-    ]
+    resolved_labels = normalize_channel_labels(
+        resolved_stream.get("channel_labels", []) or [],
+        dedupe=False,
+    )
     mismatches: list[str] = []
     if expected_name and str(resolved_stream.get("name") or "") != str(expected_name):
         mismatches.append("stream_name")
     if expected_type and str(resolved_stream.get("type") or "") != str(expected_type):
         mismatches.append("stream_type")
+    requested_source_id = (
+        (source_id_preference or {}).get("requested_source_id")
+        if isinstance(source_id_preference, dict)
+        else None
+    )
+    resolved_source_id = (
+        str(
+            resolved_stream.get("source_id")
+            or resolved_stream.get("selected_source_id")
+            or ""
+        ).strip()
+        or None
+    )
+    if requested_source_id and resolved_source_id != str(requested_source_id):
+        mismatches.append("stream_found_source_id_mismatch")
     if expected_labels_list:
-        found_norm = {label.lower() for label in resolved_labels}
-        required_norm = {label.lower() for label in expected_labels_list}
-        if not required_norm.issubset(found_norm):
-            mismatches.append("labels")
+        found_norm = set(resolved_labels)
+        required_norm = set(expected_labels_list)
+        if not resolved_labels:
+            mismatches.append("stream_found_labels_missing")
+        elif not required_norm.issubset(found_norm):
+            mismatches.append("stream_found_label_mismatch")
     if require_exactly_4 and int(resolved_stream.get("channel_count") or 0) != 4:
-        mismatches.append("channel_count")
+        mismatches.append("stream_found_channel_count_mismatch")
     if expected_rate_value is not None:
         try:
             expected_rate_f = float(expected_rate_value)
@@ -2016,12 +2046,32 @@ def _resolve_lsl_inlet(
             chosen_candidate = dict(selection.selected)
             chosen = chosen_candidate.pop("_stream")
             inlet = StreamInlet(chosen, max_chunklen=64)
+            hydrated_info = _hydrate_lsl_info(inlet, chosen)
+            label_report = describe_lsl_channel_labels(hydrated_info)
             resolved_stream = {
                 key: value
                 for key, value in chosen_candidate.items()
                 if not str(key).startswith("_")
             }
-            resolved_stream["channel_labels"] = _stream_labels(chosen)
+            resolved_stream["channel_count"] = int(
+                getattr(hydrated_info, "channel_count", chosen.channel_count)()
+            )
+            resolved_stream["nominal_srate"] = float(
+                getattr(hydrated_info, "nominal_srate", chosen.nominal_srate)() or 0.0
+            )
+            resolved_stream["channel_labels_raw"] = list(label_report.get("raw_labels") or [])
+            resolved_stream["channel_labels"] = list(
+                label_report.get("normalized_labels") or []
+            )
+            resolved_stream["channel_labels_metadata_present"] = bool(
+                label_report.get("metadata_present")
+            )
+            logger.info(
+                "Resolved LSL metadata labels raw=%s normalized=%s metadata_present=%s",
+                resolved_stream["channel_labels_raw"],
+                resolved_stream["channel_labels"],
+                resolved_stream["channel_labels_metadata_present"],
+            )
             matched_exact_source = bool(
                 desired_source_id
                 and str(resolved_stream.get("source_id") or "") == desired_source_id
@@ -2057,7 +2107,11 @@ def _resolve_lsl_inlet(
                 "nominal_srate": float(resolved_stream.get("nominal_srate") or 0.0),
                 "source_id": resolved_stream.get("source_id"),
                 "uid": resolved_stream.get("uid"),
+                "channel_labels_raw": list(resolved_stream.get("channel_labels_raw") or []),
                 "channel_labels": list(resolved_stream.get("channel_labels") or []),
+                "channel_labels_metadata_present": bool(
+                    resolved_stream.get("channel_labels_metadata_present")
+                ),
             }
             if sample is not None and ts is not None:
                 logger.info(

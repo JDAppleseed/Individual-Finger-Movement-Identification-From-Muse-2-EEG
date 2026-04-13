@@ -4,7 +4,7 @@ import json
 import statistics
 import time
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, List, Optional
 
 from muse_streaming.config import (
@@ -15,6 +15,18 @@ from muse_streaming.config import (
     StreamSettings,
 )
 from muse_streaming.timebase import check_timebase_invariants
+from utils.channel_labels import (
+    describe_lsl_channel_labels,
+    parse_channel_label_list,
+)
+from utils.lsl_stream_select import (
+    MultipleStreamsMatchedError,
+    NoStreamFoundError,
+    NoStreamMatchedError,
+    normalize_source_id,
+    select_stream_by_source_id,
+    stream_signature,
+)
 
 try:
     from pylsl import StreamInfo, StreamInlet, local_clock, resolve_streams
@@ -45,6 +57,11 @@ class HealthcheckResult:
     nominal_srate: float
     timebase_ok: bool
     timebase_warnings: List[str]
+    source_id: Optional[str] = None
+    requested_source_id: Optional[str] = None
+    raw_metadata_labels: List[str] = field(default_factory=list)
+    normalized_metadata_labels: List[str] = field(default_factory=list)
+    label_metadata_present: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -63,29 +80,17 @@ class HealthcheckResult:
             "nominal_srate": self.nominal_srate,
             "timebase_ok": self.timebase_ok,
             "timebase_warnings": self.timebase_warnings,
+            "source_id": self.source_id,
+            "requested_source_id": self.requested_source_id,
+            "raw_metadata_labels": list(self.raw_metadata_labels),
+            "normalized_metadata_labels": list(self.normalized_metadata_labels),
+            "label_metadata_present": bool(self.label_metadata_present),
         }
 
 
-def _extract_channel_labels(info: StreamInfo) -> List[str]:
-    labels: List[str] = []
-    try:
-        ch = info.desc().child("channels").child("channel")
-    except Exception:
-        ch = None
-    if ch is None:
-        return labels
-    for _ in range(info.channel_count()):
-        try:
-            labels.append(ch.child_value("label"))
-            ch = ch.next_sibling()
-        except Exception:
-            break
-    return [label for label in labels if label]
-
-
 def _match_labels(found: Iterable[str], required: Iterable[str]) -> bool:
-    found_norm = {label.strip().lower() for label in found if label}
-    required_norm = {label.strip().lower() for label in required if label}
+    found_norm = {label for label in parse_channel_label_list(list(found), dedupe=False)}
+    required_norm = {label for label in parse_channel_label_list(list(required), dedupe=False)}
     return required_norm.issubset(found_norm)
 
 
@@ -96,6 +101,32 @@ def _resolve_streams_with_timeout(timeout_s: float) -> List[StreamInfo]:
         return list(resolve_streams(timeout=timeout_s))
     except TypeError:
         return list(resolve_streams())
+
+
+def _source_id_of(info: StreamInfo) -> Optional[str]:
+    getter = getattr(info, "source_id", None)
+    if not callable(getter):
+        return None
+    try:
+        value = getter()
+    except Exception:
+        return None
+    return normalize_source_id(value)
+
+
+def _hydrate_stream_info(inlet: StreamInlet, fallback_info: StreamInfo) -> StreamInfo:
+    info_getter = getattr(inlet, "info", None)
+    if not callable(info_getter):
+        return fallback_info
+    try:
+        return info_getter(timeout=0.5)
+    except TypeError:
+        try:
+            return info_getter()
+        except Exception:
+            return fallback_info
+    except Exception:
+        return fallback_info
 
 
 def run_healthcheck(
@@ -111,6 +142,7 @@ def run_healthcheck(
     timeout_s: float = 3.0,
     check_timebase: bool = True,
     nominal_srate_tolerance: float = 1.0,
+    source_id: Optional[str] = None,
     stream: Optional[StreamSettings] = None,
     **kwargs,
 ) -> HealthcheckResult:
@@ -137,6 +169,11 @@ def run_healthcheck(
             stype = kwargs.pop("type")
         else:
             kwargs.pop("type")
+    if "lsl_source_id" in kwargs:
+        if source_id is None:
+            source_id = kwargs.pop("lsl_source_id")
+        else:
+            kwargs.pop("lsl_source_id")
     if kwargs:
         unexpected = ", ".join(sorted(kwargs))
         raise TypeError(f"run_healthcheck() got unexpected keyword argument(s): {unexpected}")
@@ -173,16 +210,18 @@ def run_healthcheck(
     if not LSL_AVAILABLE or resolve_streams is None:
         raise RuntimeError("pylsl is required for health checks.")
 
+    required_labels = parse_channel_label_list(stream.labels, dedupe=False)
+    requested_source_id = normalize_source_id(source_id)
     resolve_timeout_s = max(0.1, float(timeout_s))
     streams = _resolve_streams_with_timeout(resolve_timeout_s)
     match: Optional[StreamInfo] = None
+    matching_candidates = []
     for candidate in streams:
         if stream.name and candidate.name() != stream.name:
             continue
         if stream.stype and candidate.type() != stream.stype:
             continue
-        match = candidate
-        break
+        matching_candidates.append(candidate)
 
     expected_sps = float(
         stream.nominal_srate
@@ -192,7 +231,7 @@ def run_healthcheck(
     expected_name = stream.name or "auto"
     expected_type = stream.stype or DEFAULT_STREAM_TYPE
 
-    if match is None:
+    if not matching_candidates:
         summary = (
             f"Stream '{expected_name}' (type {expected_type}) not found within "
             f"{resolve_timeout_s:.1f}s. Start the streamer and confirm the LSL name/type."
@@ -213,22 +252,79 @@ def run_healthcheck(
             nominal_srate=0.0,
             timebase_ok=False,
             timebase_warnings=[],
+            source_id=None,
+            requested_source_id=requested_source_id,
         )
 
-    channel_count = int(match.channel_count())
-    labels = _extract_channel_labels(match)
-    nominal_srate = float(match.nominal_srate() or 0.0)
-    expected_sps = float(stream.nominal_srate or nominal_srate or DEFAULT_NOMINAL_SRATE)
+    if requested_source_id:
+        try:
+            selection = select_stream_by_source_id(
+                [dict(stream_signature(candidate), _stream=candidate) for candidate in matching_candidates],
+                requested_source_id=requested_source_id,
+                require_unique_when_unspecified=True,
+            )
+            if bool(selection.recovery_used):
+                raise NoStreamMatchedError(
+                    f"Requested source_id={requested_source_id} was not found exactly; "
+                    f"single-candidate recovery selected source_id={selection.selected_source_id}."
+                )
+            match = selection.selected.get("_stream")
+        except (NoStreamFoundError, NoStreamMatchedError, MultipleStreamsMatchedError) as exc:
+            match = None
+            discovered_source_ids = sorted(
+                {
+                    source
+                    for source in (_source_id_of(candidate) for candidate in matching_candidates)
+                    if source
+                }
+            )
+            summary = (
+                f"Stream '{expected_name}' ({expected_type}) was found, but the requested "
+                f"source_id={requested_source_id} did not match the live candidate set. "
+                f"Discovered source_ids={discovered_source_ids or []}. {exc}"
+            )
+            return HealthcheckResult(
+                ok=False,
+                reason="stream_found_source_id_mismatch",
+                summary=summary,
+                name=expected_name if expected_name != "auto" else "",
+                stype=expected_type,
+                channel_count=0,
+                labels=[],
+                samples_received=0,
+                measured_sps=None,
+                expected_sps=expected_sps,
+                jitter_s=None,
+                latency_s=None,
+                nominal_srate=0.0,
+                timebase_ok=False,
+                timebase_warnings=[],
+                source_id=None,
+                requested_source_id=requested_source_id,
+            )
+    else:
+        match = matching_candidates[0]
 
-    if require_exact_channels and channel_count != len(list(stream.labels)):
+    inlet = StreamInlet(match)
+    resolved_info = _hydrate_stream_info(inlet, match)
+    channel_count = int(resolved_info.channel_count())
+    label_report = describe_lsl_channel_labels(resolved_info)
+    labels = list(label_report["normalized_labels"])
+    raw_metadata_labels = list(label_report["raw_labels"])
+    label_metadata_present = bool(label_report["metadata_present"])
+    nominal_srate = float(resolved_info.nominal_srate() or 0.0)
+    expected_sps = float(stream.nominal_srate or nominal_srate or DEFAULT_NOMINAL_SRATE)
+    resolved_source_id = _source_id_of(resolved_info)
+
+    if require_exact_channels and channel_count != len(required_labels):
         summary = (
             f"Stream '{match.name()}' ({match.type()}) channel count "
-            f"{channel_count} != expected {len(list(stream.labels))}. "
-            f"Expected labels: {list(stream.labels)}."
+            f"{channel_count} != expected {len(required_labels)}. "
+            f"Expected labels: {required_labels}."
         )
         return HealthcheckResult(
             ok=False,
-            reason="channel_count_mismatch",
+            reason="stream_found_channel_count_mismatch",
             summary=summary,
             name=match.name(),
             stype=match.type(),
@@ -242,16 +338,22 @@ def run_healthcheck(
             nominal_srate=float(match.nominal_srate() or 0.0),
             timebase_ok=False,
             timebase_warnings=[],
+            source_id=resolved_source_id,
+            requested_source_id=requested_source_id,
+            raw_metadata_labels=raw_metadata_labels,
+            normalized_metadata_labels=labels,
+            label_metadata_present=label_metadata_present,
         )
 
-    if not _match_labels(labels, stream.labels):
+    if not label_metadata_present:
         summary = (
-            f"Stream '{match.name()}' ({match.type()}) label mismatch. "
-            f"Expected subset: {list(stream.labels)}; found: {labels}."
+            f"Stream '{match.name()}' ({match.type()}) is present, but channel labels are "
+            "absent from the published LSL metadata. "
+            f"Expected labels: {required_labels}."
         )
         return HealthcheckResult(
             ok=False,
-            reason="label_mismatch",
+            reason="stream_found_labels_missing",
             summary=summary,
             name=match.name(),
             stype=match.type(),
@@ -265,6 +367,40 @@ def run_healthcheck(
             nominal_srate=float(match.nominal_srate() or 0.0),
             timebase_ok=False,
             timebase_warnings=[],
+            source_id=resolved_source_id,
+            requested_source_id=requested_source_id,
+            raw_metadata_labels=raw_metadata_labels,
+            normalized_metadata_labels=labels,
+            label_metadata_present=label_metadata_present,
+        )
+
+    if not _match_labels(labels, required_labels):
+        summary = (
+            f"Stream '{match.name()}' ({match.type()}) label mismatch. "
+            f"Expected subset: {required_labels}; "
+            f"found normalized labels: {labels}; raw metadata labels: {raw_metadata_labels}."
+        )
+        return HealthcheckResult(
+            ok=False,
+            reason="stream_found_label_mismatch",
+            summary=summary,
+            name=match.name(),
+            stype=match.type(),
+            channel_count=channel_count,
+            labels=labels,
+            samples_received=0,
+            measured_sps=None,
+            expected_sps=expected_sps,
+            jitter_s=None,
+            latency_s=None,
+            nominal_srate=float(match.nominal_srate() or 0.0),
+            timebase_ok=False,
+            timebase_warnings=[],
+            source_id=resolved_source_id,
+            requested_source_id=requested_source_id,
+            raw_metadata_labels=raw_metadata_labels,
+            normalized_metadata_labels=labels,
+            label_metadata_present=label_metadata_present,
         )
 
     if expected_sps and nominal_srate:
@@ -290,9 +426,13 @@ def run_healthcheck(
                 nominal_srate=nominal_srate,
                 timebase_ok=False,
                 timebase_warnings=[],
+                source_id=resolved_source_id,
+                requested_source_id=requested_source_id,
+                raw_metadata_labels=raw_metadata_labels,
+                normalized_metadata_labels=labels,
+                label_metadata_present=label_metadata_present,
             )
 
-    inlet = StreamInlet(match)
     start = time.monotonic()
     samples = 0
     target_samples = max(1, int(min_sample_window_s * expected_sps))
@@ -396,6 +536,11 @@ def run_healthcheck(
         nominal_srate=nominal_srate,
         timebase_ok=timebase_ok,
         timebase_warnings=timebase_warnings,
+        source_id=resolved_source_id,
+        requested_source_id=requested_source_id,
+        raw_metadata_labels=raw_metadata_labels,
+        normalized_metadata_labels=labels,
+        label_metadata_present=label_metadata_present,
     )
 
 

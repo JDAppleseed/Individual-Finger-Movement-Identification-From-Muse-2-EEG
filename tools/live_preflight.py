@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.ui_config_validation import validate_live_infer
 from tools.analyze_live_raw_inputs import build_distribution_report
+from utils.channel_labels import parse_channel_label_list
 from utils.live_infer_common import require_deployable_run
 from utils.lsl_stream_select import resolve_source_id_preference
 from utils.session_layout import SessionLayout
@@ -64,16 +65,7 @@ def _shell_join(parts: list[str]) -> str:
 
 
 def _parse_required_labels(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple)):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, str):
-        cleaned = value.strip()
-        if cleaned.startswith("[") and cleaned.endswith("]"):
-            cleaned = cleaned[1:-1]
-        return [part.strip() for part in cleaned.split(",") if part.strip()]
-    return [str(value).strip()] if str(value).strip() else []
+    return parse_channel_label_list(value, dedupe=False)
 
 
 def _resolve_effective_expected_channel_labels(

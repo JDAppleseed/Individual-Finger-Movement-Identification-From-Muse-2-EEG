@@ -28,6 +28,7 @@ class _FakeVersionInfo(tuple):
 sys.version_info = _FakeVersionInfo()
 import eeglab_wrapper_ui as ui_mod
 sys.version_info = _real_version_info
+from utils.step7_config import default_step7_settings
 
 
 @pytest.fixture
@@ -53,6 +54,12 @@ def test_infer_step_arg_specs_do_not_expose_project_name_override(window):
     infer_specs = window._build_step_arg_specs()["infer"]
 
     assert all(spec.name != "project_name" for spec in infer_specs)
+
+
+def test_ui_label_field_parsing_matches_canonical_step7_defaults(window):
+    parsed = window._parse_label_field("['tp9', \"af7\", 'AF8', 'tp10']")
+
+    assert parsed == default_step7_settings()["REQUIRED_LSL_LABELS"]
 
 
 def test_format_prediction_text_decodes_active_finger_head_with_action_conditioning():

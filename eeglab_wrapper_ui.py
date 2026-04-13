@@ -110,6 +110,7 @@ from app.repo_probe import discover_scripts
 from app.ui_config_validation import validate_step_settings
 from muse_streaming.config import DEFAULT_STREAM_NAME, DEFAULT_STREAM_TYPE
 from muse_streaming.healthcheck import run_healthcheck
+from utils.channel_labels import normalize_channel_labels, parse_channel_label_list
 from utils.eeglab_export import default_eeglab_export_path, export_session_to_eeglab
 from utils.label_schema import (
     ACTION_NAMES,
@@ -9509,17 +9510,7 @@ class MainWindow(QMainWindow):
         return None
 
     def _parse_label_field(self, value: Any) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, list):
-            return [str(v).strip() for v in value if str(v).strip()]
-        if isinstance(value, str):
-            cleaned = value.strip()
-            if cleaned.startswith("[") and cleaned.endswith("]"):
-                cleaned = cleaned[1:-1]
-            parts = [p.strip() for p in cleaned.split(",")]
-            return [p for p in parts if p]
-        return [str(value).strip()]
+        return parse_channel_label_list(value, dedupe=False)
 
     def _reset_step(self, step_id: str) -> None:
         defaults = self.defaults.get(step_id, {})
@@ -9857,11 +9848,13 @@ class MainWindow(QMainWindow):
         if stream_type:
             self.live_stream_type = stream_type
         previous_ready = self.live_stream_ready
+        source_id = str(settings.get("lsl_source_id") or "").strip() or None
         try:
             result = run_healthcheck(
                 stream_name=stream_name,
                 stype=stream_type,
                 required_labels=labels,
+                source_id=source_id,
                 require_exact_channels=require_exact,
                 timeout_s=timeout_s,
             )
@@ -9881,6 +9874,11 @@ class MainWindow(QMainWindow):
 
         self._last_healthcheck_result = result.to_dict()
         self.live_label_details = result.to_dict()
+        if interactive or self._live_ready_gate_active:
+            self._append_log(
+                "[healthcheck] raw metadata labels="
+                f"{result.raw_metadata_labels} normalized={result.normalized_metadata_labels}"
+            )
 
         if result.ok:
             self.live_stream_ready = True
@@ -9894,10 +9892,14 @@ class MainWindow(QMainWindow):
 
         self.live_stream_ready = False
 
-        if result.reason in {"label_mismatch", "channel_count_mismatch"}:
+        if result.reason in {
+            "stream_found_label_mismatch",
+            "stream_found_channel_count_mismatch",
+            "stream_found_source_id_mismatch",
+        }:
             message = (
                 f"Expected labels: {labels} ({'exact' if require_exact else 'min'}).\n"
-                f"Found: channels={result.channel_count}, labels={result.labels}.\n"
+                f"Found: channels={result.channel_count}, labels={result.labels}, source_id={result.source_id or '-'}.\n"
                 "Step 7 runtime now fails closed on stream-contract mismatch, so the UI will not launch until this matches."
             )
             if not interactive:
@@ -9909,6 +9911,26 @@ class MainWindow(QMainWindow):
                 f"{message}\n\nDetails:\n{json.dumps(result.to_dict(), indent=2)}",
             )
             self._update_live_status("Live status: stream contract mismatch")
+            self._set_live_buttons_state()
+            return result
+
+        if result.reason == "stream_found_labels_missing":
+            message = (
+                f"Expected labels: {labels} ({'exact' if require_exact else 'min'}).\n"
+                f"Raw metadata labels: {result.raw_metadata_labels}.\n"
+                f"Normalized metadata labels: {result.normalized_metadata_labels}.\n"
+                "The LSL stream exists, but it is not publishing channel labels in metadata "
+                "that Step 7 can verify."
+            )
+            if not interactive:
+                self._update_live_status("Live status: stream metadata missing labels")
+                self._set_live_buttons_state()
+                return result
+            self._show_blocking_notice(
+                "Stream Metadata Missing Labels",
+                f"{message}\n\nDetails:\n{json.dumps(result.to_dict(), indent=2)}",
+            )
+            self._update_live_status("Live status: stream metadata missing labels")
             self._set_live_buttons_state()
             return result
 
@@ -10000,7 +10022,7 @@ class MainWindow(QMainWindow):
                 raw = np.asarray(npz["channel_names"]).reshape(-1)
         except Exception:
             return []
-        return [str(item).strip() for item in raw if str(item).strip()]
+        return normalize_channel_labels(raw, dedupe=False)
 
     def _resolve_live_expected_labels(
         self, settings: Optional[Dict[str, Any]] = None

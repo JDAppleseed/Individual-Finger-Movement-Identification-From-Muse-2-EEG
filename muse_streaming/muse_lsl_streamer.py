@@ -13,6 +13,11 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional
 
 from muse_streaming.config import DEFAULT_LABELS
+from utils.channel_labels import (
+    append_lsl_channel_metadata,
+    normalize_channel_label,
+    normalize_channel_labels,
+)
 
 import numpy as np
 from bitstring import Bits
@@ -48,15 +53,6 @@ HARD_ERR_S = 0.25
 MAX_FORWARD_SNAP_S = 0.05
 MAX_BACKWARD_SNAP_S = 0.05
 FUTURE_TOL_S = 0.05
-
-
-def normalize_label(label: str) -> str:
-    """Normalize labels from UI/config to stable uppercase tokens."""
-    s = (label or "").strip()
-    # Strip multiple layers, e.g. "'TP9'" or "\"TP9\""
-    while len(s) >= 2 and ((s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")):
-        s = s[1:-1].strip()
-    return s.upper()
 
 
 @dataclass
@@ -457,19 +453,12 @@ class MuseLslStreamer:
                 f"⚠️ [streamer] labels empty; using DEFAULT_LABELS: {DEFAULT_LABELS}"
             )
             raw = list(DEFAULT_LABELS)
-        clean = [normalize_label(x) for x in raw]
-        # Preserve order but dedupe.
-        seen = set()
-        deduped: List[str] = []
-        for c in clean:
-            if c and c not in seen:
-                deduped.append(c)
-                seen.add(c)
+        deduped = normalize_channel_labels(raw, dedupe=True)
         if not deduped:
             self._log(
                 f"⚠️ [streamer] normalized labels empty; using DEFAULT_LABELS: {DEFAULT_LABELS}"
             )
-            deduped = [normalize_label(x) for x in DEFAULT_LABELS]
+            deduped = normalize_channel_labels(DEFAULT_LABELS, dedupe=True)
 
         self._labels_clean = deduped
         self._log(f"🧾 Raw labels: {raw}")
@@ -610,7 +599,7 @@ class MuseLslStreamer:
     ) -> None:
         if self._outlet is None:
             return
-        label = normalize_label(label)
+        label = normalize_channel_label(label)
         slot = self._packet_buffer.setdefault(packet_index, {})
         slot[label] = samples
         if packet_index not in self._packet_first_seen:
@@ -1006,12 +995,7 @@ class MuseLslStreamer:
             self._source_id,
         )
         desc = info.desc()
-        channels = desc.append_child("channels")
-        for label in config.labels:
-            ch = channels.append_child("channel")
-            ch.append_child_value("label", label)
-            ch.append_child_value("unit", "microvolts")
-            ch.append_child_value("type", "EEG")
+        append_lsl_channel_metadata(desc, config.labels, unit="microvolts", channel_type="EEG")
         return StreamOutlet(info, chunk_size=12)
 
 

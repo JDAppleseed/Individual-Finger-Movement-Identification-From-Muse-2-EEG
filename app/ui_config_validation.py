@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
+from utils.channel_labels import parse_channel_label_list
+
 
 @dataclass
 class ValidationResult:
@@ -69,17 +71,12 @@ def _validate_label_list(
     value = settings.get(key)
     if value in (None, "", [], ()):
         return
-    if isinstance(value, str):
-        labels = [part.strip() for part in value.split(",") if part.strip()]
-        if not labels:
-            errors.append(f"{key} must contain at least one non-empty label.")
+    if not isinstance(value, (str, list, tuple)):
+        errors.append(f"{key} must be a CSV string or a list of labels.")
         return
-    if isinstance(value, (list, tuple)):
-        labels = [str(item).strip() for item in value if str(item).strip()]
-        if not labels:
-            errors.append(f"{key} must contain at least one non-empty label.")
-        return
-    errors.append(f"{key} must be a CSV string or a list of labels.")
+    labels = parse_channel_label_list(value, dedupe=False)
+    if not labels:
+        errors.append(f"{key} must contain at least one non-empty label.")
 
 
 def validate_train_record(settings: Dict[str, Any]) -> ValidationResult:

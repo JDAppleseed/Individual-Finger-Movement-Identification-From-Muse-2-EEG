@@ -826,10 +826,18 @@ def test_resolve_lsl_inlet_retries_and_prefers_source_id(monkeypatch):
     mod = _load_live_module()
 
     class _FakeStream:
-        def __init__(self, name: str, stream_type: str, source_id: str):
+        def __init__(
+            self,
+            name: str,
+            stream_type: str,
+            source_id: str,
+            *,
+            xml_labels=None,
+        ):
             self._name = name
             self._type = stream_type
             self._source_id = source_id
+            self._xml_labels = list(xml_labels or [])
 
         def name(self):
             return self._name
@@ -849,10 +857,26 @@ def test_resolve_lsl_inlet_retries_and_prefers_source_id(monkeypatch):
         def nominal_srate(self):
             return 256.0
 
+        def as_xml(self):
+            channels = "".join(
+                f"<channel><label>{label}</label></channel>"
+                for label in self._xml_labels
+            )
+            return f"<info><desc><channels>{channels}</channels></desc></info>"
+
     class _FakeInlet:
         def __init__(self, info, max_chunklen=64):
             self.info_obj = info
             self.max_chunklen = max_chunklen
+            self._hydrated = _FakeStream(
+                info.name(),
+                info.type(),
+                info.source_id(),
+                xml_labels=["'TP9'", "'AF7'", "'AF8'", "'TP10'"],
+            )
+
+        def info(self, timeout=0.5):
+            return self._hydrated
 
         def pull_sample(self, timeout=0.0):
             return [0.0, 0.0, 0.0, 0.0], 1.0
@@ -887,7 +911,34 @@ def test_resolve_lsl_inlet_retries_and_prefers_source_id(monkeypatch):
     assert resolved.inlet.info_obj.source_id() == "wanted"
     assert resolved.resolution["source_id_source"] == "cli"
     assert resolved.resolution["selection_matched_by_source_id"] is True
+    assert resolved.resolution["channel_labels_raw"] == ["'TP9'", "'AF7'", "'AF8'", "'TP10'"]
+    assert resolved.resolution["channel_labels"] == ["TP9", "AF7", "AF8", "TP10"]
+    assert resolved.resolution["channel_labels_metadata_present"] is True
     assert calls["count"] >= 3
+
+
+def test_stream_contract_summary_distinguishes_missing_labels():
+    mod = _load_live_module()
+
+    summary = mod._stream_contract_summary(
+        config_settings={"REQUIRE_EXACTLY_4_CHANNELS": True},
+        expected_name="Muse2-EEG",
+        expected_type="EEG",
+        source_id_preference={},
+        resolved_stream={
+            "name": "Muse2-EEG",
+            "type": "EEG",
+            "channel_count": 4,
+            "nominal_srate": 256.0,
+            "channel_labels": [],
+        },
+        expected_labels=["TP9", "AF7", "AF8", "TP10"],
+        expected_rate=256.0,
+        expected_labels_source="config.REQUIRED_LSL_LABELS",
+    )
+
+    assert summary["contract_ok"] is False
+    assert "stream_found_labels_missing" in summary["mismatches"]
 
 
 def test_choose_auto_serial_port_prefers_usb_modem():
