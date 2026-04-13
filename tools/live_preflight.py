@@ -23,6 +23,7 @@ from app.ui_config_validation import validate_live_infer
 from tools.analyze_live_raw_inputs import build_distribution_report
 from utils.channel_labels import parse_channel_label_list
 from utils.live_infer_common import require_deployable_run
+from utils.live_parity import write_json
 from utils.lsl_stream_select import resolve_source_id_preference
 from utils.session_layout import SessionLayout
 
@@ -56,8 +57,8 @@ def _resolve_repo_path(raw: Any) -> Path | None:
     return (REPO_ROOT / path).resolve()
 
 
-def _print_kv(label: str, value: Any) -> None:
-    print(f"{label:24}: {value}")
+def _print_kv(label: str, value: Any, *, stream=None) -> None:
+    print(f"{label:24}: {value}", file=stream or sys.stdout)
 
 
 def _shell_join(parts: list[str]) -> str:
@@ -799,7 +800,8 @@ def run_live_preflight(
     }
 
 
-def _print_live_preflight_report(report: dict[str, Any]) -> None:
+def _print_live_preflight_report(report: dict[str, Any], *, stream=None) -> None:
+    out = stream or sys.stdout
     launch_plan = report.get("launch_plan") or {}
     effective_contract = report.get("effective_contract") or {}
     stream_probe = report.get("stream_probe") or {}
@@ -809,104 +811,115 @@ def _print_live_preflight_report(report: dict[str, Any]) -> None:
     smoke = report.get("smoke") or {}
     recommended_commands = report.get("recommended_commands") or {}
 
-    print("Live preflight")
-    print("-" * 40)
-    _print_kv("config", report.get("config_path"))
-    _print_kv("session_dir", launch_plan.get("selected_session_dir"))
-    _print_kv("out_dir", launch_plan.get("out_dir"))
-    _print_kv("model_path", launch_plan.get("model_path"))
-    _print_kv("scaler_path", launch_plan.get("scaler_path"))
-    _print_kv("temperature_path", launch_plan.get("temperature_path"))
-    _print_kv("selection_source", launch_plan.get("selection_source"))
-    _print_kv("session_dir_inferred", launch_plan.get("session_dir_inferred"))
-    _print_kv("explicit_overrides", launch_plan.get("explicit_overrides"))
-    _print_kv("stream_name", effective_contract.get("stream_name"))
-    _print_kv("stream_type", effective_contract.get("stream_type"))
-    _print_kv("requested_source_id", effective_contract.get("requested_source_id"))
-    _print_kv("source_id_source", effective_contract.get("source_id_source"))
+    print("Live preflight", file=out)
+    print("-" * 40, file=out)
+    _print_kv("config", report.get("config_path"), stream=out)
+    _print_kv("session_dir", launch_plan.get("selected_session_dir"), stream=out)
+    _print_kv("out_dir", launch_plan.get("out_dir"), stream=out)
+    _print_kv("model_path", launch_plan.get("model_path"), stream=out)
+    _print_kv("scaler_path", launch_plan.get("scaler_path"), stream=out)
+    _print_kv("temperature_path", launch_plan.get("temperature_path"), stream=out)
+    _print_kv("selection_source", launch_plan.get("selection_source"), stream=out)
     _print_kv(
-        "parity_capture_enabled", effective_contract.get("parity_capture_enabled")
+        "session_dir_inferred", launch_plan.get("session_dir_inferred"), stream=out
     )
-    _print_kv("no_file_io", effective_contract.get("no_file_io"))
+    _print_kv("explicit_overrides", launch_plan.get("explicit_overrides"), stream=out)
+    _print_kv("stream_name", effective_contract.get("stream_name"), stream=out)
+    _print_kv("stream_type", effective_contract.get("stream_type"), stream=out)
+    _print_kv(
+        "requested_source_id", effective_contract.get("requested_source_id"), stream=out
+    )
+    _print_kv("source_id_source", effective_contract.get("source_id_source"), stream=out)
+    _print_kv(
+        "parity_capture_enabled",
+        effective_contract.get("parity_capture_enabled"),
+        stream=out,
+    )
+    _print_kv("no_file_io", effective_contract.get("no_file_io"), stream=out)
     _print_kv(
         "config_required_labels",
         effective_contract.get("config_required_lsl_labels"),
+        stream=out,
     )
     _print_kv(
         "expected_channel_labels",
         effective_contract.get("expected_channel_labels"),
+        stream=out,
     )
     _print_kv(
         "expected_labels_source",
         effective_contract.get("expected_channel_labels_source"),
+        stream=out,
     )
-    _print_kv("smoke_session_dir", effective_contract.get("smoke_session_dir"))
+    _print_kv("smoke_session_dir", effective_contract.get("smoke_session_dir"), stream=out)
 
     if stream_resolution:
-        print("\nStream probe")
-        print("-" * 40)
-        _print_kv("selected_source_id", stream_resolution.get("selected_source_id"))
-        _print_kv("stream_uid", stream_resolution.get("uid"))
-        _print_kv("channel_labels", stream_resolution.get("channel_labels"))
-        _print_kv("stream_contract_ok", stream_contract.get("contract_ok"))
-        _print_kv("stream_contract_mismatches", stream_contract.get("mismatches"))
+        print("\nStream probe", file=out)
+        print("-" * 40, file=out)
+        _print_kv("selected_source_id", stream_resolution.get("selected_source_id"), stream=out)
+        _print_kv("stream_uid", stream_resolution.get("uid"), stream=out)
+        _print_kv("channel_labels", stream_resolution.get("channel_labels"), stream=out)
+        _print_kv("stream_contract_ok", stream_contract.get("contract_ok"), stream=out)
+        _print_kv("stream_contract_mismatches", stream_contract.get("mismatches"), stream=out)
 
     if distribution_probe:
-        print("\nDistribution probe")
-        print("-" * 40)
-        _print_kv("probe_seconds", distribution_probe.get("probe_seconds"))
-        _print_kv("verdict", distribution_probe.get("verdict"))
-        _print_kv("decisive", distribution_probe.get("decisive"))
-        _print_kv("accepted_count", distribution_probe.get("accepted_count"))
-        _print_kv("candidate_count", distribution_probe.get("candidate_count"))
-        _print_kv("quality_bad_rate", distribution_probe.get("quality_bad_rate"))
-        _print_kv("median_rms_ratio", distribution_probe.get("median_rms_ratio"))
+        print("\nDistribution probe", file=out)
+        print("-" * 40, file=out)
+        _print_kv("probe_seconds", distribution_probe.get("probe_seconds"), stream=out)
+        _print_kv("verdict", distribution_probe.get("verdict"), stream=out)
+        _print_kv("decisive", distribution_probe.get("decisive"), stream=out)
+        _print_kv("accepted_count", distribution_probe.get("accepted_count"), stream=out)
+        _print_kv("candidate_count", distribution_probe.get("candidate_count"), stream=out)
+        _print_kv("quality_bad_rate", distribution_probe.get("quality_bad_rate"), stream=out)
+        _print_kv("median_rms_ratio", distribution_probe.get("median_rms_ratio"), stream=out)
         _print_kv(
             "recovered_vs_strict_count",
             distribution_probe.get("recovered_vs_strict_count"),
+            stream=out,
         )
 
     if report.get("deployment") is not None:
         deployment = report["deployment"]
-        print("\nDeployment")
-        print("-" * 40)
-        _print_kv("deployable_run", deployment.get("deployable"))
-        _print_kv("active_finger_head", deployment.get("active_finger_head"))
+        print("\nDeployment", file=out)
+        print("-" * 40, file=out)
+        _print_kv("deployable_run", deployment.get("deployable"), stream=out)
+        _print_kv("active_finger_head", deployment.get("active_finger_head"), stream=out)
         _print_kv(
             "finger_applicability_head",
             deployment.get("finger_applicability_head"),
+            stream=out,
         )
 
     if smoke.get("cmd"):
-        print("\nSmoke inference")
-        print("-" * 40)
-        print(smoke["cmd"])
+        print("\nSmoke inference", file=out)
+        print("-" * 40, file=out)
+        print(smoke["cmd"], file=out)
         if smoke.get("stdout"):
-            print(smoke["stdout"])
+            print(smoke["stdout"], file=out)
         if smoke.get("stderr"):
-            print(smoke["stderr"])
+            print(smoke["stderr"], file=out)
 
     if report.get("warnings"):
-        print("\nWarnings")
-        print("-" * 40)
+        print("\nWarnings", file=out)
+        print("-" * 40, file=out)
         for warning in report["warnings"]:
-            print(f"- {warning}")
+            print(f"- {warning}", file=out)
 
     if recommended_commands:
-        print("\nRecommended commands")
-        print("-" * 40)
-        print(recommended_commands.get("live"))
-        print(recommended_commands.get("replay"))
-        print(recommended_commands.get("audit"))
+        print("\nRecommended commands", file=out)
+        print("-" * 40, file=out)
+        print(recommended_commands.get("live"), file=out)
+        print(recommended_commands.get("replay"), file=out)
+        print(recommended_commands.get("audit"), file=out)
 
     if report.get("errors"):
-        print("\nErrors")
-        print("-" * 40)
+        print("\nErrors", file=out)
+        print("-" * 40, file=out)
         for error in report["errors"]:
-            print(f"- {error}")
+            print(f"- {error}", file=out)
         return
 
-    print("\nReady for live run.")
+    print("\nReady for live run.", file=out)
 
 
 def main() -> int:
@@ -929,6 +942,12 @@ def main() -> int:
     parser.add_argument("--smoke-device", type=str, default="cpu", help="Device for the optional smoke inference check")
     parser.add_argument("--smoke-index", type=int, default=0, help="Window index for smoke inference")
     parser.add_argument("--skip-smoke", action="store_true", help="Skip the smoke inference command")
+    parser.add_argument(
+        "--report-path",
+        type=str,
+        default=None,
+        help="Optional path to write the structured preflight JSON report artifact.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit a structured JSON report instead of human-readable text.")
     args = parser.parse_args()
     report = run_live_preflight(
@@ -954,10 +973,15 @@ def main() -> int:
         distribution_probe.setdefault(
             "probe_seconds", float(args.distribution_probe_seconds)
         )
+    if args.report_path:
+        write_json(Path(args.report_path).expanduser().resolve(), report)
     if args.json:
         print(json.dumps(report, sort_keys=True))
     else:
-        _print_live_preflight_report(report)
+        _print_live_preflight_report(
+            report,
+            stream=(sys.stderr if args.report_path else sys.stdout),
+        )
     return 0 if bool(report.get("ready")) else 1
 
 

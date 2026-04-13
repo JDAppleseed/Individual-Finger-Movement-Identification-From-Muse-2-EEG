@@ -800,6 +800,44 @@ def test_run_live_preflight_accepts_env_source_id_and_emits_recommended_commands
     assert not any("lsl_source_id is blank in config" in warning for warning in report["warnings"])
 
 
+def test_live_preflight_main_writes_report_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    mod = _load_module("tools/live_preflight.py", "live_preflight_main_report")
+    config_path = tmp_path / "infer.json"
+    config_path.write_text("{}")
+    report_path = tmp_path / "live_preflight_report.json"
+
+    monkeypatch.setattr(
+        mod,
+        "run_live_preflight",
+        lambda **kwargs: {
+            "ready": True,
+            "warnings": [],
+            "errors": [],
+            "launch_plan": {"out_dir": str(tmp_path / "live_infer")},
+            "effective_contract": {},
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "live_preflight.py",
+            "--config",
+            str(config_path),
+            "--report-path",
+            str(report_path),
+        ],
+    )
+
+    exit_code = mod.main()
+
+    assert exit_code == 0
+    assert json.loads(report_path.read_text())["ready"] is True
+    assert capsys.readouterr().out == ""
+
+
 class _FakeDesc:
     def __init__(self, labels: list[str], index: int = 0):
         self._labels = labels

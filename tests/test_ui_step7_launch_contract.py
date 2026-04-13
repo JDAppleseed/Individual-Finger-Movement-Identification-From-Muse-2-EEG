@@ -494,6 +494,123 @@ def test_live_ready_gate_uses_frozen_launch_settings(window, monkeypatch: pytest
     assert captured["settings_override"] == launch.settings
 
 
+def test_build_live_preflight_args_uses_explicit_report_artifact(window, tmp_path: Path):
+    launch = ui_mod.PreparedLiveInferLaunch(
+        args=[],
+        cwd=str(tmp_path),
+        env={},
+        config_path=tmp_path / "infer.json",
+        config_payload={},
+        settings={},
+        subject_dir=tmp_path,
+        session_dir=tmp_path / "session",
+        preflight_report_path=tmp_path / "live_preflight_report.json",
+    )
+
+    args = window._build_live_preflight_args(launch)
+
+    assert "--report-path" in args
+    assert str(launch.preflight_report_path) in args
+    assert "--json" not in args
+
+
+def test_load_live_preflight_report_reports_missing_empty_and_malformed(window, tmp_path: Path):
+    report_path = tmp_path / "live_preflight_report.json"
+
+    report, diagnostics = window._load_live_preflight_report(
+        report_path=report_path,
+        raw_output="[stderr] boom",
+    )
+    assert report == {}
+    assert diagnostics["reason"] == "preflight_report_missing"
+
+    report_path.write_text("")
+    report, diagnostics = window._load_live_preflight_report(
+        report_path=report_path,
+        raw_output="",
+    )
+    assert report == {}
+    assert diagnostics["reason"] == "preflight_report_empty"
+
+    report_path.write_text("{not-json")
+    report, diagnostics = window._load_live_preflight_report(
+        report_path=report_path,
+        raw_output="stdout-noise",
+    )
+    assert report == {}
+    assert diagnostics["reason"] == "preflight_report_malformed"
+    assert "report_preview" in diagnostics
+
+
+def test_live_preflight_finish_prefers_report_file_over_noisy_output(
+    window, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    report_path = tmp_path / "live_preflight_report.json"
+    payload = {
+        "ready": True,
+        "warnings": [],
+        "errors": [],
+        "launch_plan": {"out_dir": str(tmp_path / "live_infer")},
+        "effective_contract": {},
+    }
+    report_path.write_text(json.dumps(payload))
+
+    launch = ui_mod.PreparedLiveInferLaunch(
+        args=[],
+        cwd=str(tmp_path),
+        env={},
+        config_path=tmp_path / "infer.json",
+        config_payload={},
+        settings={},
+        subject_dir=tmp_path,
+        session_dir=tmp_path / "session",
+        preflight_report_path=report_path,
+    )
+    window._pending_live_launch = launch
+    window._live_preflight_lines = ["[stderr] log noise", "not json"]
+
+    monkeypatch.setattr(window, "_confirm_live_launch_after_preflight", lambda report: False)
+    notices = []
+    statuses = []
+    monkeypatch.setattr(window, "_show_blocking_notice", lambda title, message: notices.append((title, message)))
+    monkeypatch.setattr(window, "_set_step_status", lambda step_id, status: statuses.append((step_id, status)))
+
+    window._on_live_preflight_finished(0, 0)
+
+    assert window._last_live_preflight_report["ready"] is True
+    assert notices == []
+    assert ("infer", "Cancelled") in statuses
+
+
+def test_live_preflight_finish_surfaces_specific_contract_failure(
+    window, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    report_path = tmp_path / "live_preflight_report.json"
+    launch = ui_mod.PreparedLiveInferLaunch(
+        args=[],
+        cwd=str(tmp_path),
+        env={},
+        config_path=tmp_path / "infer.json",
+        config_payload={},
+        settings={},
+        subject_dir=tmp_path,
+        session_dir=tmp_path / "session",
+        preflight_report_path=report_path,
+    )
+    window._pending_live_launch = launch
+    window._live_preflight_lines = ["[stderr] traceback line 1"]
+
+    notices = []
+    monkeypatch.setattr(window, "_show_blocking_notice", lambda title, message: notices.append((title, message)))
+
+    window._on_live_preflight_finished(1, 0)
+
+    assert window._last_live_preflight_report == {}
+    assert notices
+    assert "preflight_subprocess_failed" in notices[0][1]
+    assert "report_exists=False" in notices[0][1]
+
+
 def test_prepare_live_infer_launch_derives_effective_expected_labels_from_training_npz(
     window, monkeypatch: pytest.MonkeyPatch
 ):

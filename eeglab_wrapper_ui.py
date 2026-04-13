@@ -409,6 +409,7 @@ class PreparedLiveInferLaunch:
     subject_dir: Path
     session_dir: Optional[Path]
     base_config_path: Optional[Path] = None
+    preflight_report_path: Optional[Path] = None
 
 
 @dataclass
@@ -8723,6 +8724,7 @@ class MainWindow(QMainWindow):
         args = [str(script_info.path), "--config", str(config_path)]
         args.extend(["--session-dir", str(infer_session_dir)])
         args.extend(self._collect_step_args("infer"))
+        preflight_report_path = Path(str(settings["out_dir"])) / "live_preflight_report.json"
 
         launch_env: Dict[str, Optional[str]] = {
             "LSL_SOURCE_ID": connector_source_id,
@@ -8739,6 +8741,7 @@ class MainWindow(QMainWindow):
             subject_dir=subject_dir,
             session_dir=infer_session_dir,
             base_config_path=base_config_path,
+            preflight_report_path=preflight_report_path,
         )
 
     def _execute_prepared_live_infer_launch(
@@ -8810,14 +8813,16 @@ class MainWindow(QMainWindow):
         return "\n".join(lines)
 
     def _build_live_preflight_args(self, launch: PreparedLiveInferLaunch) -> list[str]:
-        return [
+        args = [
             str(self.repo_root / "tools" / "live_preflight.py"),
             "--config",
             str(launch.config_path),
             "--probe-stream",
             "--probe-distribution",
-            "--json",
         ]
+        if launch.preflight_report_path is not None:
+            args.extend(["--report-path", str(launch.preflight_report_path)])
+        return args
 
     def _on_live_preflight_started(self) -> None:
         self._append_log("[step7-preflight] decisive preflight started.")
@@ -8831,6 +8836,93 @@ class MainWindow(QMainWindow):
         if not text:
             return
         self._live_preflight_lines.append(text)
+
+    def _load_live_preflight_report(
+        self,
+        *,
+        report_path: Optional[Path],
+        raw_output: str,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        diagnostics: Dict[str, Any] = {
+            "reason": "ok",
+            "report_path": str(report_path) if report_path is not None else None,
+            "report_exists": False,
+            "report_size_bytes": None,
+            "stdout_stderr_empty": not bool(raw_output.strip()),
+            "stdout_stderr_preview": (
+                raw_output[:200].encode("unicode_escape").decode("ascii")
+                if raw_output
+                else ""
+            ),
+        }
+        if report_path is None:
+            diagnostics["reason"] = "preflight_report_contract_violation"
+            return {}, diagnostics
+        try:
+            resolved = Path(report_path).expanduser().resolve()
+        except Exception as exc:
+            diagnostics["reason"] = "preflight_report_read_error"
+            diagnostics["error"] = str(exc)
+            return {}, diagnostics
+        diagnostics["report_path"] = str(resolved)
+        if not resolved.exists():
+            diagnostics["reason"] = "preflight_report_missing"
+            return {}, diagnostics
+        diagnostics["report_exists"] = True
+        try:
+            diagnostics["report_size_bytes"] = int(resolved.stat().st_size)
+        except Exception:
+            diagnostics["report_size_bytes"] = None
+        try:
+            text = resolved.read_text(encoding="utf-8")
+        except Exception as exc:
+            diagnostics["reason"] = "preflight_report_read_error"
+            diagnostics["error"] = str(exc)
+            return {}, diagnostics
+        if not text.strip():
+            diagnostics["reason"] = "preflight_report_empty"
+            return {}, diagnostics
+        try:
+            payload = json.loads(text)
+        except Exception as exc:
+            diagnostics["reason"] = "preflight_report_malformed"
+            diagnostics["error"] = str(exc)
+            diagnostics["report_preview"] = text[:200].encode("unicode_escape").decode(
+                "ascii"
+            )
+            return {}, diagnostics
+        if not isinstance(payload, dict):
+            diagnostics["reason"] = "preflight_report_contract_violation"
+            diagnostics["report_preview"] = text[:200].encode("unicode_escape").decode(
+                "ascii"
+            )
+            return {}, diagnostics
+        return payload, diagnostics
+
+    def _summarize_live_preflight_contract_failure(
+        self,
+        *,
+        reason: str,
+        exit_code: int,
+        exit_status: int,
+        diagnostics: Dict[str, Any],
+    ) -> str:
+        lines = [
+            f"Decisive preflight failed: {reason}.",
+            f"exit_code={exit_code} exit_status={exit_status}",
+            f"report_path={diagnostics.get('report_path') or '-'}",
+            f"report_exists={bool(diagnostics.get('report_exists'))}",
+            f"report_size_bytes={diagnostics.get('report_size_bytes')}",
+        ]
+        preview = diagnostics.get("report_preview") or diagnostics.get(
+            "stdout_stderr_preview"
+        )
+        if preview:
+            lines.append(f"preview={preview}")
+        error = diagnostics.get("error")
+        if error:
+            lines.append(f"error={error}")
+        return "\n".join(lines)
 
     def _on_live_preflight_failed(self, message: str) -> None:
         self._pending_live_launch = None
@@ -8851,28 +8943,42 @@ class MainWindow(QMainWindow):
             self._set_live_buttons_state()
             return
 
-        report: Dict[str, Any] = {}
-        if raw:
-            try:
-                report = json.loads(raw)
-            except Exception as exc:
-                self._append_log(
-                    f"[step7-preflight] failed to parse JSON report: {exc}"
-                )
+        launch = self._pending_live_launch
+        report, diagnostics = self._load_live_preflight_report(
+            report_path=(launch.preflight_report_path if launch is not None else None),
+            raw_output=raw,
+        )
         self._last_live_preflight_report = report
         if report:
             self.live_launch_summary.setPlainText(
                 self._format_live_preflight_report(report)
             )
 
+        contract_reason = str(diagnostics.get("reason") or "ok")
+        if exit_status != 0 or ((exit_code != 0) and not report):
+            contract_reason = "preflight_subprocess_failed"
         if exit_status != 0 or not report:
             self._pending_live_launch = None
             self._set_step_status("infer", "Preflight Failed")
             self._update_live_status("Live status: decisive preflight failed")
+            self._append_log(
+                "[step7-preflight] "
+                + self._summarize_live_preflight_contract_failure(
+                    reason=contract_reason,
+                    exit_code=int(exit_code),
+                    exit_status=int(exit_status),
+                    diagnostics=diagnostics,
+                )
+            )
             self._show_blocking_notice(
                 "Step 7 Preflight Failed",
-                "The decisive Step 7 preflight did not return a valid structured report. "
-                "Check the log console and re-run preflight.",
+                "The decisive Step 7 preflight did not return a valid structured report.\n\n"
+                + self._summarize_live_preflight_contract_failure(
+                    reason=contract_reason,
+                    exit_code=int(exit_code),
+                    exit_status=int(exit_status),
+                    diagnostics=diagnostics,
+                ),
             )
             self._set_live_buttons_state()
             return
@@ -9729,6 +9835,13 @@ class MainWindow(QMainWindow):
             self._set_step_status("infer", "Preflight Failed")
             self._update_live_status("Live status: frozen launch request missing")
             return
+        if launch.preflight_report_path is not None:
+            try:
+                launch.preflight_report_path.unlink(missing_ok=True)
+            except Exception as exc:
+                self._append_log(
+                    f"[step7-preflight] failed to clear stale report {launch.preflight_report_path}: {exc}"
+                )
         self._live_preflight_cancelled = False
         self._live_preflight_lines = []
         self.live_preflight_runner.start(
