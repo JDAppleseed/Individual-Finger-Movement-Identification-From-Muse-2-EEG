@@ -111,6 +111,7 @@ from utils.runtime_utils import (
     now_utc_iso,
 )
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
+from utils.step7_config import default_step7_settings, load_step7_config
 from utils.stream_timebase import (
     clamp_lsl_timestamp,
     is_gap,
@@ -266,11 +267,8 @@ def load_json(path: str) -> dict:
 
 
 def _load_config_file(path: Path) -> tuple[dict, dict]:
-    payload = load_json(str(path))
-    settings = payload.get("settings")
-    if isinstance(settings, dict):
-        return payload, settings
-    return payload, payload
+    payload, settings = load_step7_config(path)
+    return payload, settings
 
 
 def _load_train_config(run_dir: Path) -> dict:
@@ -777,87 +775,16 @@ def _is_noop_decision(finger_id: int, action_id: int) -> bool:
 
 
 def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
-    pp_defaults = PostprocessSettings()
-    infer_defaults = InferenceConfig()
-    runtime_defaults = ReplayRuntimeConfig()
     defaults = {
+        **default_step7_settings(),
         "device": None,
-        "session_dir": None,
+        "model_path": None,
+        "scaler_path": None,
+        "out_dir": None,
         "stream_name": None,
         "stream_type": None,
-        "lsl_source_id": None,
-        "bluetooth_target": None,
-        "LIVE_VIZ_ENABLED": bool(LIVE_INFER_RECIPE_DEFAULTS["LIVE_VIZ_ENABLED"]),
-        "LIVE_VIZ_FPS": float(LIVE_INFER_RECIPE_DEFAULTS["LIVE_VIZ_FPS"]),
-        "window_sec": float(runtime_defaults.window_sec),
-        "hop_sec": float(runtime_defaults.hop_sec),
-        "target_fs": float(LIVE_INFER_RECIPE_DEFAULTS["target_fs"]),
-        "alignment_internal_max_gap_s": float(
-            LIVE_INFER_RECIPE_DEFAULTS["alignment_internal_max_gap_s"]
-        ),
-        "latency_threshold_ms": float(runtime_defaults.latency_threshold_ms),
-        "latency_policy": str(LIVE_INFER_RECIPE_DEFAULTS["latency_policy"]),
-        "allow_drop": bool(LIVE_INFER_RECIPE_DEFAULTS["allow_drop"]),
-        "log_every": float(LIVE_INFER_RECIPE_DEFAULTS["log_every"]),
-        "enable_actuation": bool(LIVE_INFER_RECIPE_DEFAULTS["enable_actuation"]),
-        "serial_port": None,
-        "serial_baud": int(LIVE_INFER_RECIPE_DEFAULTS["serial_baud"]),
-        "actuation_min_prob": float(runtime_defaults.actuation_min_prob),
-        "actuation_stability": int(runtime_defaults.actuation_stability),
-        "actuation_cooldown_ms": int(runtime_defaults.actuation_cooldown_ms),
-        "actuation_repeat_ms": int(runtime_defaults.actuation_repeat_ms),
-        "actuation_min_speed": float(runtime_defaults.actuation_min_speed),
-        "modulate_actuation_speed": bool(runtime_defaults.modulate_actuation_speed),
-        "actuation_speed_gamma": float(runtime_defaults.actuation_speed_gamma),
-        "allow_outside_base": False,
-        "no_file_io": bool(LIVE_INFER_RECIPE_DEFAULTS["no_file_io"]),
-        "subject_id": None,
         "project_name": None,
-        "postprocess": bool(LIVE_INFER_RECIPE_DEFAULTS["postprocess"]),
-        "smoothing_enabled": bool(pp_defaults.smoothing_enabled),
-        "smoothing_method": str(pp_defaults.smoothing_method),
-        "smoothing_window": int(pp_defaults.smoothing_window),
-        "hysteresis_enabled": bool(pp_defaults.hysteresis_enabled),
-        "hysteresis_frames": int(pp_defaults.hysteresis_frames),
-        "threshold_action": float(pp_defaults.threshold_action),
-        "threshold_finger": float(pp_defaults.threshold_finger),
-        "threshold_applicability": float(pp_defaults.threshold_applicability),
-        "adjacency_enabled": bool(pp_defaults.adjacency_enabled),
-        "hysteresis_margin": float(pp_defaults.hysteresis_margin),
-        "finger_delta": float(pp_defaults.finger_delta),
-        "finger_mode": str(pp_defaults.finger_mode),
-        "rest_bias_correction_enabled": bool(
-            LIVE_INFER_RECIPE_DEFAULTS["rest_bias_correction_enabled"]
-        ),
-        "rest_bias_strength": float(LIVE_INFER_RECIPE_DEFAULTS["rest_bias_strength"]),
-        "rest_bias_min_windows": int(
-            LIVE_INFER_RECIPE_DEFAULTS["rest_bias_min_windows"]
-        ),
-        "live_quality_enabled": bool(LIVE_INFER_RECIPE_DEFAULTS["live_quality_enabled"]),
-        "input_clip_abs_z": float(LIVE_INFER_RECIPE_DEFAULTS["input_clip_abs_z"]),
-        "bad_channel_rms_z": float(LIVE_INFER_RECIPE_DEFAULTS["bad_channel_rms_z"]),
-        "bad_channel_abs_p95_z": float(
-            LIVE_INFER_RECIPE_DEFAULTS["bad_channel_abs_p95_z"]
-        ),
-        "bad_channel_clipped_frac": float(
-            LIVE_INFER_RECIPE_DEFAULTS["bad_channel_clipped_frac"]
-        ),
-        "bad_window_clipped_frac": float(
-            LIVE_INFER_RECIPE_DEFAULTS["bad_window_clipped_frac"]
-        ),
-        "bad_window_max_masked_channels": int(
-            LIVE_INFER_RECIPE_DEFAULTS["bad_window_max_masked_channels"]
-        ),
-        "use_inference_engine": bool(runtime_defaults.use_inference_engine),
-        "mc_passes": int(infer_defaults.mc_passes),
-        "uncertainty_base_threshold": float(infer_defaults.base_threshold),
-        "uncertainty_weight": float(infer_defaults.uncertainty_weight),
-        "pred_log": None,
-        "parity_capture_enabled": bool(
-            LIVE_INFER_RECIPE_DEFAULTS["parity_capture_enabled"]
-        ),
-        "parity_capture_max_windows": 64,
-        "parity_capture_flush_every": 8,
+        "allow_outside_base": False,
     }
     p = argparse.ArgumentParser(
         description=(
@@ -1436,11 +1363,13 @@ def _collect_required_output_status(
     segment_break_path: Optional[Path],
     summary_path: Optional[Path],
     distribution_report_path: Optional[Path],
+    parity_report_path: Optional[Path],
     parity_capture: Optional[LiveParityCapture],
     parity_capture_required: bool,
     cleanup_errors: Optional[list[str]] = None,
     summary_write_error: Optional[str] = None,
     distribution_report_write_error: Optional[str] = None,
+    parity_report_write_error: Optional[str] = None,
 ) -> tuple[dict[str, Optional[str]], list[str]]:
     output_hashes = {
         "live_log_sha256": None if no_file_io else sha256_file(Path(out_dir) / "live_infer.log"),
@@ -1449,6 +1378,7 @@ def _collect_required_output_status(
         "segment_break_sha256": sha256_file(segment_break_path),
         "summary_sha256": sha256_file(summary_path),
         "distribution_report_sha256": sha256_file(distribution_report_path),
+        "parity_report_sha256": sha256_file(parity_report_path),
         "parity_capture_manifest_sha256": (
             sha256_file(parity_capture.manifest_path) if parity_capture is not None else None
         ),
@@ -1461,6 +1391,8 @@ def _collect_required_output_status(
         errors.append(f"summary_write_error: {summary_write_error}")
     if distribution_report_write_error:
         errors.append(f"distribution_report_write_error: {distribution_report_write_error}")
+    if parity_report_write_error:
+        errors.append(f"parity_report_write_error: {parity_report_write_error}")
     if no_file_io:
         return output_hashes, errors
 
@@ -1475,6 +1407,7 @@ def _collect_required_output_status(
             distribution_report_path,
             output_hashes["distribution_report_sha256"],
         ),
+        ("parity_report", parity_report_path, output_hashes["parity_report_sha256"]),
     ]
     for label, path, sha_value in required_outputs:
         if path is None:
@@ -1611,20 +1544,11 @@ def resolve_live_launch_plan(
         if not model_explicit or not scaler_explicit:
             run_dir = resolve_latest_run_dir(session_dir_path)
             if run_dir is None or not run_dir.exists():
-                fallback_pair = _resolve_latest_run_dir_across_subject_sessions(
-                    repo_root,
-                    project_name,
-                    subject_id,
-                    exclude_session_dir=session_dir_path,
+                raise RuntimeError(
+                    "Selected session has no model run directory. "
+                    "Pin model_path/scaler_path explicitly or choose a session with "
+                    "a processed/models run."
                 )
-                if fallback_pair is None:
-                    raise RuntimeError(
-                        "Selected session has no model run directory. "
-                        "Pin model_path/scaler_path explicitly or choose a session with "
-                        "a processed/models run."
-                    )
-                _, run_dir = fallback_pair
-                selection_source = "session_dir_subject_latest_run"
             chosen_run_dir = Path(run_dir).resolve()
 
         if model_explicit:
@@ -1660,7 +1584,7 @@ def resolve_live_launch_plan(
 
         if explicit_overrides:
             selection_source = "legacy_explicit"
-        elif selection_source != "session_dir_subject_latest_run":
+        else:
             selection_source = "subject_latest" if session_dir_inferred else "session_dir"
     else:
         if not raw_model_path or not raw_scaler_path or not raw_out_dir:
@@ -3060,6 +2984,8 @@ def _summary_safe_finalization(finalization: dict[str, Any]) -> dict[str, Any]:
         "distribution_report_write_error": finalization.get(
             "distribution_report_write_error"
         ),
+        "parity_report_path": finalization.get("parity_report_path"),
+        "parity_report_write_error": finalization.get("parity_report_write_error"),
         "cleanup_errors": finalization.get("cleanup_errors"),
         "required_outputs_ok": finalization.get("required_outputs_ok"),
         "required_output_errors": finalization.get("required_output_errors"),
@@ -3085,6 +3011,193 @@ def _sync_summary_finalization(
     write_json(summary_path, payload)
 
 
+def _load_optional_json_dict(path: Optional[Path]) -> dict[str, Any]:
+    if path is None or not Path(path).exists():
+        return {}
+    payload = load_json(str(path))
+    return payload if isinstance(payload, dict) else {}
+
+
+def _int_counter_payload(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    payload: dict[str, int] = {}
+    for key, raw in value.items():
+        try:
+            payload[str(key)] = int(raw)
+        except Exception:
+            continue
+    return payload
+
+
+def _build_live_parity_report_metadata(
+    *,
+    runtime_manifest: dict[str, Any],
+    summary_payload: dict[str, Any],
+) -> dict[str, Any]:
+    runtime = runtime_manifest.get("runtime", {}) if isinstance(runtime_manifest, dict) else {}
+    artifacts = (
+        runtime_manifest.get("artifacts", {})
+        if isinstance(runtime_manifest.get("artifacts"), dict)
+        else {}
+    )
+    stream_contract = (
+        runtime_manifest.get("stream_contract", {})
+        if isinstance(runtime_manifest.get("stream_contract"), dict)
+        else {}
+    )
+    stream_resolution = (
+        runtime_manifest.get("stream_resolution", {})
+        if isinstance(runtime_manifest.get("stream_resolution"), dict)
+        else {}
+    )
+    stream_selection = (
+        runtime_manifest.get("stream_selection", {})
+        if isinstance(runtime_manifest.get("stream_selection"), dict)
+        else {}
+    )
+    finalization = (
+        runtime_manifest.get("finalization", {})
+        if isinstance(runtime_manifest.get("finalization"), dict)
+        else {}
+    )
+    final_counters = (
+        finalization.get("counters", {}) if isinstance(finalization.get("counters"), dict) else {}
+    )
+    rejection_reason_counts = _int_counter_payload(
+        summary_payload.get("dropped_window_reason_counts")
+    )
+    candidate_window_count = int(
+        summary_payload.get(
+            "candidate_window_count",
+            final_counters.get("candidate_window_count", 0),
+        )
+        or 0
+    )
+    accepted_window_count = int(
+        summary_payload.get(
+            "accepted_window_count",
+            final_counters.get("accepted_window_count", 0),
+        )
+        or 0
+    )
+    rejected_window_count = max(0, int(candidate_window_count - accepted_window_count))
+    alignment_fail_count = int(
+        summary_payload.get(
+            "alignment_fail_count",
+            sum(
+                int(count)
+                for reason, count in rejection_reason_counts.items()
+                if str(reason)
+                in {
+                    "alignment_fail",
+                    "gap_exceeds_threshold",
+                    "start_gap_exceeds_threshold",
+                    "end_gap_exceeds_threshold",
+                }
+            ),
+        )
+        or 0
+    )
+    return {
+        "candidate_window_count": int(candidate_window_count),
+        "accepted_window_count": int(accepted_window_count),
+        "rejected_window_count": int(rejected_window_count),
+        "rejection_reason_counts": rejection_reason_counts,
+        "alignment_fail_count": int(alignment_fail_count),
+        "channel_contract_status": {
+            "contract_ok": bool(stream_contract.get("contract_ok")),
+            "mismatches": list(stream_contract.get("mismatches") or []),
+            "channel_reorder_to_model_order": (
+                stream_contract.get("resolved", {}) or {}
+            ).get("channel_reorder_to_model_order"),
+            "channel_reorder_applied": bool(
+                ((stream_contract.get("resolved", {}) or {})).get("channel_reorder_applied")
+            ),
+        },
+        "artifact_pins": {
+            "run_dir": artifacts.get("run_dir"),
+            "model_path": artifacts.get("model_path"),
+            "model_sha256": artifacts.get("model_sha256"),
+            "scaler_path": artifacts.get("scaler_path"),
+            "scaler_sha256": artifacts.get("scaler_sha256"),
+            "temperature_path": artifacts.get("temperature_path"),
+            "temperature_sha256": artifacts.get("temperature_sha256"),
+            "train_config_path": artifacts.get("train_config_path"),
+            "train_config_sha256": artifacts.get("train_config_sha256"),
+            "selected_session_dir": runtime_manifest.get("selected_session_dir"),
+        },
+        "effective_runtime_config": runtime,
+        "stream_identifiers": {
+            "stream_selection": stream_selection,
+            "stream_resolution": stream_resolution,
+        },
+        "window_geometry": {
+            "window_sec": runtime.get("window_sec"),
+            "hop_sec": runtime.get("hop_sec"),
+            "target_fs": runtime.get("target_fs"),
+            "alignment_internal_max_gap_s": runtime.get("alignment_internal_max_gap_s"),
+            "alignment_edge_max_gap_s": runtime.get("alignment_edge_max_gap_s"),
+            "accepted_fraction": (
+                float(accepted_window_count / candidate_window_count)
+                if candidate_window_count > 0
+                else None
+            ),
+        },
+    }
+
+
+def _write_live_parity_report(
+    *,
+    out_dir: Path,
+    device_name: str,
+    runtime_manifest_path: Optional[Path],
+    summary_path: Optional[Path],
+    parity_capture_enabled: bool,
+) -> tuple[Optional[Path], Optional[str]]:
+    report_path = Path(out_dir) / "parity_report.json"
+    runtime_manifest = _load_optional_json_dict(runtime_manifest_path)
+    summary_payload = _load_optional_json_dict(summary_path)
+    metadata = _build_live_parity_report_metadata(
+        runtime_manifest=runtime_manifest,
+        summary_payload=summary_payload,
+    )
+    if not parity_capture_enabled:
+        write_json(
+            report_path,
+            {
+                "status": "parity_unavailable",
+                "evidence_mode": "disabled",
+                "reason": "parity_capture_disabled",
+                **metadata,
+            },
+        )
+        return report_path, None
+    capture_dir = Path(out_dir) / "parity_capture"
+    try:
+        from tools.replay_live_capture import replay_capture
+
+        report = replay_capture(
+            capture_dir=capture_dir,
+            device_name=str(device_name),
+            tolerance=1e-5,
+        )
+        report.update(metadata)
+        write_json(report_path, report)
+        return report_path, None
+    except Exception as exc:
+        write_json(
+            report_path,
+            {
+                "status": "error",
+                "evidence_mode": "decisive" if parity_capture_enabled else "disabled",
+                "error": str(exc),
+                **metadata,
+            },
+        )
+        return report_path, str(exc)
+
+
 # -------------------- Main --------------------
 
 def main() -> int:
@@ -3094,6 +3207,14 @@ def main() -> int:
     config_path = Path(args.config).expanduser().resolve()
     config_payload, config_settings = _load_config_file(config_path)
     _apply_config_to_args(args, config_settings, defaults)
+    effective_settings = dict(config_settings)
+    effective_settings.update(
+        {
+            key: value
+            for key, value in vars(args).items()
+            if value is not None
+        }
+    )
 
     # Required config keys (as in original file)
     lsl_name = (
@@ -3242,6 +3363,8 @@ def main() -> int:
     summary_write_error: Optional[str] = None
     distribution_report_path: Optional[Path] = None
     distribution_report_write_error: Optional[str] = None
+    parity_report_path: Optional[Path] = None
+    parity_report_write_error: Optional[str] = None
     post_run_exit_code = 0
     source_pref_payload = {
         "cli_source_id": lsl_source_pref.cli_source_id,
@@ -3257,6 +3380,7 @@ def main() -> int:
         segment_break_path = Path(out_dir) / "segment_breaks.jsonl"
         summary_path = Path(out_dir) / "live_prediction_summary.json"
         distribution_report_path = Path(out_dir) / "live_input_distribution_report.json"
+        parity_report_path = Path(out_dir) / "parity_report.json"
 
     device = _select_device(args.device)
     logger.info("Using device=%s", device)
@@ -3279,16 +3403,12 @@ def main() -> int:
         )
         args.target_fs = float(effective_target_fs)
     expected_channel_labels, expected_channel_labels_source = (
-        _resolve_expected_channel_labels(config_settings, deployment_run_dir)
+        _resolve_expected_channel_labels(effective_settings, deployment_run_dir)
     )
-    try:
-        expected_channel_labels = _require_expected_channel_labels(
-            expected_channel_labels,
-            expected_channel_labels_source,
-        )
-    except Exception as exc:
-        _persist_manifest_error("expected_channel_labels_missing", exc)
-        raise
+    expected_channel_labels = _require_expected_channel_labels(
+        expected_channel_labels,
+        expected_channel_labels_source,
+    )
     if expected_channel_labels:
         logger.info(
             "Expected live channel order=%s source=%s",
@@ -3415,6 +3535,9 @@ def main() -> int:
             ),
             "parity_capture_dir": (
                 str(Path(out_dir) / "parity_capture") if not no_file_io else None
+            ),
+            "parity_report_path": (
+                str(Path(out_dir) / "parity_report.json") if not no_file_io else None
             ),
             "summary_path": str(summary_path) if summary_path is not None else None,
             "distribution_report_path": (
@@ -3554,7 +3677,7 @@ def main() -> int:
         ch,
     )
     stream_contract = _stream_contract_summary(
-        config_settings=config_settings,
+        config_settings=effective_settings,
         expected_name=str(lsl_name),
         expected_type=str(lsl_type),
         source_id_preference=source_pref_payload,
@@ -4798,6 +4921,30 @@ def main() -> int:
                     f"offline_windows_npz_missing_for_distribution_report: raw_dir={raw_dir} offline_npz={offline_npz}"
                 )
                 logger.warning("%s", distribution_report_write_error)
+        if not no_file_io and parity_report_path is not None:
+            try:
+                written_report_path, parity_report_write_error = _write_live_parity_report(
+                    out_dir=Path(out_dir),
+                    device_name=str(device),
+                    runtime_manifest_path=runtime_manifest_path,
+                    summary_path=summary_path,
+                    parity_capture_enabled=bool(args.parity_capture_enabled),
+                )
+                if written_report_path is not None:
+                    parity_report_path = written_report_path
+                    logger.info("Parity report written: %s", parity_report_path)
+                if parity_report_write_error is not None:
+                    logger.error(
+                        "Accepted-window parity replay reported an error: %s",
+                        parity_report_write_error,
+                    )
+            except Exception as exc:
+                parity_report_write_error = str(exc)
+                logger.error(
+                    "Failed to write parity report %s: %s",
+                    parity_report_path,
+                    exc,
+                )
         if actuator is not None:
             try:
                 actuator.close()
@@ -4807,10 +4954,11 @@ def main() -> int:
             logger.error("Cleanup errors: %s", cleanup_errors)
         if not no_file_io:
             logger.info(
-                "Live outputs: manifest=%s summary=%s distribution_report=%s",
+                "Live outputs: manifest=%s summary=%s distribution_report=%s parity_report=%s",
                 runtime_manifest_path,
                 summary_path,
                 distribution_report_path,
+                parity_report_path,
             )
             logger.info("Post-run replay: %s", replay_cmd)
             logger.info("Post-run audit: %s", audit_cmd)
@@ -4841,6 +4989,8 @@ def main() -> int:
             summary_write_error=summary_write_error,
             distribution_report_path=distribution_report_path,
             distribution_report_write_error=distribution_report_write_error,
+            parity_report_path=parity_report_path,
+            parity_report_write_error=parity_report_write_error,
         )
         final_termination_reason = str(termination_reason)
         if required_output_errors and final_termination_reason == "ok":
@@ -4855,6 +5005,12 @@ def main() -> int:
                 "counters": {
                     "candidate_window_count": int(candidate_window_count),
                     "accepted_window_count": int(accepted_window_count),
+                    "rejected_window_count": int(
+                        max(0, int(candidate_window_count) - int(accepted_window_count))
+                    ),
+                    "dropped_window_reason_counts": _stringify_counter(
+                        dropped_window_reason_counts
+                    ),
                     "dropped_windows": int(dropped_windows),
                     "dropped_nonfinite_samples": int(dropped_nonfinite_samples),
                     "dropped_nonfinite_windows": int(dropped_nonfinite_windows),
@@ -4883,6 +5039,14 @@ def main() -> int:
                 "distribution_report_write_error": (
                     str(distribution_report_write_error)
                     if distribution_report_write_error is not None
+                    else None
+                ),
+                "parity_report_path": (
+                    str(parity_report_path) if parity_report_path is not None else None
+                ),
+                "parity_report_write_error": (
+                    str(parity_report_write_error)
+                    if parity_report_write_error is not None
                     else None
                 ),
                 "cleanup_errors": cleanup_errors or None,

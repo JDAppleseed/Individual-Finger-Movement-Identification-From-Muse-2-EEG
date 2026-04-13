@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from pathlib import Path
@@ -256,6 +257,11 @@ def test_prepare_live_infer_launch_freezes_source_and_session_artifacts(
     (run_dir / "finger_action_model.pt").write_text("model")
     (run_dir / "scaler.npz").write_text("scaler")
     (run_dir / "temperature_scaling.json").write_text("{}")
+    canonical_config_path = subject_dir / "config" / "infer.json"
+    canonical_config_path.parent.mkdir(parents=True, exist_ok=True)
+    canonical_config_path.write_text(
+        json.dumps({"settings": {"actuation_min_prob": 0.2}}, indent=2)
+    )
 
     window.current_project = project
     window.current_subject = subject
@@ -284,12 +290,46 @@ def test_prepare_live_infer_launch_freezes_source_and_session_artifacts(
     assert launch.settings["scaler_path"].endswith("run_001/scaler.npz")
     assert launch.settings["out_dir"].endswith("processed/live_infer_20250101_000010")
     assert launch.config_path.exists()
+    assert launch.config_path == Path(launch.settings["out_dir"]) / "step7_launch_config.json"
+    assert launch.base_config_path == canonical_config_path.resolve()
     assert "--config" in launch.args
     assert "--session-dir" in launch.args
     assert str(session_dir.resolve()) in launch.args
     assert launch.config_payload["settings"]["out_dir"].endswith(
         "processed/live_infer_20250101_000010"
     )
+    persisted = json.loads(canonical_config_path.read_text())
+    assert persisted["settings"]["actuation_min_prob"] == pytest.approx(0.2)
+
+
+def test_select_subject_prefers_canonical_step7_config_over_subject_mirror(
+    window, monkeypatch: pytest.MonkeyPatch
+):
+    project = "Demo"
+    subject = "S01"
+    subject_dir = Path("Projects") / project / "subjects" / subject
+    winning_config = subject_dir / "winning_model" / "configs" / "infer.json"
+    mirror_config = subject_dir / "config" / "infer.json"
+    winning_config.parent.mkdir(parents=True, exist_ok=True)
+    mirror_config.parent.mkdir(parents=True, exist_ok=True)
+    winning_config.write_text(
+        json.dumps({"settings": {"actuation_min_prob": 0.0}}, indent=2)
+    )
+    mirror_config.write_text(
+        json.dumps({"settings": {"actuation_min_prob": 0.9}}, indent=2)
+    )
+
+    window.current_project = project
+    window._refresh_subjects = lambda: None
+    window._auto_select_latest_session_for_subject = lambda: None
+    window._auto_fill_paths = lambda: None
+    window._refresh_export_controls = lambda: None
+    window._seed_stream_name_input = lambda: None
+
+    window._select_subject(subject)
+
+    widget = window.fields["infer"]["actuation_min_prob"]
+    assert widget.value() == pytest.approx(0.0)
 
 
 def test_autofill_dependent_paths_sets_timestamped_step7_out_dir(

@@ -12,6 +12,7 @@ from utils.default_recipe import LIVE_INFER_RECIPE_DEFAULTS
 from utils.inference import InferenceConfig, InferenceEngine
 from utils.postprocess import PostprocessSettings, PostprocessState
 from utils.runtime_utils import TemperatureScalingState
+from utils.step7_config import build_step7_replay_runtime_config, load_step7_config
 from visualization.live_viz import parse_viz_line
 
 
@@ -404,6 +405,149 @@ def test_live_infer_defaults_match_best_live_profile():
     assert config_defaults["actuation_min_speed"] == pytest.approx(0.5)
     assert config_defaults["modulate_actuation_speed"] is False
     assert config_defaults["actuation_speed_gamma"] == pytest.approx(1.0)
+
+
+def test_build_live_parity_report_metadata_includes_rejection_accounting():
+    mod = _load_live_module()
+
+    metadata = mod._build_live_parity_report_metadata(
+        runtime_manifest={
+            "selected_session_dir": "/tmp/sessionA",
+            "stream_contract": {
+                "contract_ok": True,
+                "mismatches": [],
+                "resolved": {
+                    "channel_reorder_to_model_order": [1, 0, 3, 2],
+                    "channel_reorder_applied": True,
+                },
+            },
+            "stream_resolution": {"source_id": "stream-123"},
+            "stream_selection": {"source_id_preference": {"requested_source_id": "stream-123"}},
+            "artifacts": {
+                "run_dir": "/tmp/run",
+                "model_path": "/tmp/run/finger_action_model.pt",
+                "model_sha256": "modelhash",
+                "scaler_path": "/tmp/run/scaler.npz",
+                "scaler_sha256": "scalerhash",
+            },
+            "runtime": {
+                "window_sec": 0.25,
+                "hop_sec": 0.05,
+                "target_fs": 256.0,
+                "alignment_internal_max_gap_s": 0.06,
+                "alignment_edge_max_gap_s": 1.0 / 256.0 * 4.0,
+            },
+        },
+        summary_payload={
+            "candidate_window_count": 10,
+            "accepted_window_count": 8,
+            "alignment_fail_count": 2,
+            "dropped_window_reason_counts": {
+                "gap_exceeds_threshold": 1,
+                "nonfinite_window_values": 1,
+            },
+        },
+    )
+
+    assert metadata["candidate_window_count"] == 10
+    assert metadata["accepted_window_count"] == 8
+    assert metadata["rejected_window_count"] == 2
+    assert metadata["alignment_fail_count"] == 2
+    assert metadata["rejection_reason_counts"]["gap_exceeds_threshold"] == 1
+    assert metadata["channel_contract_status"]["contract_ok"] is True
+    assert metadata["artifact_pins"]["selected_session_dir"] == "/tmp/sessionA"
+
+
+def test_write_live_parity_report_writes_artifact_when_capture_disabled(tmp_path: Path):
+    mod = _load_live_module()
+    out_dir = tmp_path / "live_infer"
+    out_dir.mkdir()
+    runtime_manifest_path = out_dir / "live_runtime_manifest.json"
+    summary_path = out_dir / "live_prediction_summary.json"
+    runtime_manifest_path.write_text(
+        json.dumps(
+            {
+                "runtime": {"window_sec": 0.25, "hop_sec": 0.05, "target_fs": 256.0},
+                "artifacts": {},
+                "stream_contract": {"contract_ok": True, "mismatches": [], "resolved": {}},
+            }
+        )
+    )
+    summary_path.write_text(
+        json.dumps(
+            {
+                "candidate_window_count": 4,
+                "accepted_window_count": 3,
+                "alignment_fail_count": 1,
+                "dropped_window_reason_counts": {"gap_exceeds_threshold": 1},
+            }
+        )
+    )
+
+    report_path, report_error = mod._write_live_parity_report(
+        out_dir=out_dir,
+        device_name="cpu",
+        runtime_manifest_path=runtime_manifest_path,
+        summary_path=summary_path,
+        parity_capture_enabled=False,
+    )
+
+    assert report_error is None
+    assert report_path == out_dir / "parity_report.json"
+    report = json.loads(report_path.read_text())
+    assert report["status"] == "parity_unavailable"
+    assert report["candidate_window_count"] == 4
+    assert report["accepted_window_count"] == 3
+    assert report["rejected_window_count"] == 1
+
+
+def test_active_winning_step7_config_uses_audited_gate_values() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    active_config = (
+        repo_root
+        / "Projects"
+        / "2-M16"
+        / "subjects"
+        / "2-M16"
+        / "winning_model"
+        / "configs"
+        / "infer.json"
+    )
+    ui_mirror = (
+        repo_root
+        / "Projects"
+        / "2-M16"
+        / "subjects"
+        / "2-M16"
+        / "config"
+        / "infer.json"
+    )
+    archived_config = (
+        repo_root
+        / "Projects"
+        / "2-M16"
+        / "subjects"
+        / "2-M16"
+        / "archive"
+        / "step7"
+        / "config_snapshots"
+        / "original_subject_config"
+        / "infer.json"
+    )
+
+    _, active_settings = load_step7_config(active_config)
+    _, mirror_settings = load_step7_config(ui_mirror)
+    _, archived_settings = load_step7_config(archived_config)
+    runtime_config = build_step7_replay_runtime_config(active_settings)
+
+    assert active_settings["actuation_min_prob"] == pytest.approx(0.0)
+    assert mirror_settings["actuation_min_prob"] == pytest.approx(0.0)
+    assert archived_settings["actuation_min_prob"] == pytest.approx(0.24)
+    assert active_settings["actuation_stability"] == 2
+    assert active_settings["actuation_repeat_ms"] == 100
+    assert active_settings["actuation_cooldown_ms"] == 0
+    assert active_settings["postprocess"] is False
+    assert runtime_config.actuation_min_prob == pytest.approx(0.0)
 
 
 class _DummyMCModel(torch.nn.Module):
@@ -869,7 +1013,7 @@ def test_main_uses_config_model_override_with_session_dir(tmp_path, monkeypatch)
     assert captured["scaler_path"] == str(scaler_path)
 
 
-def test_main_falls_back_to_latest_trained_sibling_session(tmp_path, monkeypatch):
+def test_main_refuses_cross_session_fallback_when_session_is_pinned(tmp_path, monkeypatch):
     mod = _load_live_module()
     repo_root = tmp_path
     selected_session = repo_root / "Projects" / "P" / "subjects" / "S" / "sessions" / "live_only"
@@ -911,35 +1055,13 @@ def test_main_falls_back_to_latest_trained_sibling_session(tmp_path, monkeypatch
             }
         )
     )
-
-    captured = {}
-
-    class _DummyModel:
-        def eval(self):
-            return self
-
-    def _fake_load_model_and_scaler(model_arg, scaler_arg, device=None):
-        captured["model_path"] = model_arg
-        captured["scaler_path"] = scaler_arg
-        return _DummyModel(), object()
-
-    def _stop_after_model_load(*_args, **_kwargs):
-        raise RuntimeError("stop after model load")
-
-    monkeypatch.setattr(mod, "load_model_and_scaler", _fake_load_model_and_scaler)
-    monkeypatch.setattr(mod, "_resolve_lsl_inlet", _stop_after_model_load)
     monkeypatch.setattr(mod, "setup_logger", lambda **_kwargs: None)
     monkeypatch.setattr(
         mod.sys,
         "argv",
         ["7_live_infer_and_actuate.py", "--config", str(config_path), "--session-dir", str(selected_session)],
     )
-
-    with pytest.raises(RuntimeError, match="stop after model load"):
-        mod.main()
-
-    assert captured["model_path"] == str(model_path)
-    assert captured["scaler_path"] == str(scaler_path)
+    assert mod.main() == 2
 
 
 def test_parse_viz_line_accepts_vizjson():

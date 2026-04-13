@@ -425,6 +425,8 @@ def test_live_prediction_summary_finalization_sync_persists_runtime_manifest_sta
             tmp_path / "live_input_distribution_report.json"
         ),
         "distribution_report_write_error": None,
+        "parity_report_path": None,
+        "parity_report_write_error": None,
         "cleanup_errors": ["window_audit_log_close_error"],
         "required_outputs_ok": False,
         "required_output_errors": ["missing parity report"],
@@ -1026,6 +1028,45 @@ def test_resolve_live_launch_plan_requires_session_run_or_explicit_artifacts(tmp
         )
 
 
+def test_resolve_live_launch_plan_does_not_borrow_run_from_other_session(tmp_path: Path):
+    mod = _load_module("7_live_infer_and_actuate.py", "live_launch_plan_no_cross_session_drift")
+
+    selected_session = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "sessions" / "sessPinned"
+    selected_session.mkdir(parents=True)
+    other_run = (
+        tmp_path
+        / "Projects"
+        / "Demo"
+        / "subjects"
+        / "S01"
+        / "sessions"
+        / "sessOther"
+        / "processed"
+        / "models"
+        / "run_001"
+    )
+    other_run.mkdir(parents=True)
+    (other_run / "finger_action_model.pt").write_text("model")
+    (other_run / "scaler.npz").write_text("scaler")
+    config_path = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "config" / "infer.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps({"project_name": "Demo", "subject_id": "S01"}))
+
+    with pytest.raises(RuntimeError, match="Selected session has no model run directory"):
+        mod.resolve_live_launch_plan(
+            config_path=config_path,
+            config_payload={"project_name": "Demo", "subject_id": "S01"},
+            config_settings={"session_dir": str(selected_session)},
+            session_dir_override=str(selected_session),
+            project_name_override=None,
+            subject_id_override=None,
+            model_path_override=None,
+            scaler_path_override=None,
+            out_dir_override=None,
+            allow_outside_base=False,
+        )
+
+
 def test_resolve_live_launch_plan_accepts_explicit_artifacts_without_session_run(tmp_path: Path):
     mod = _load_module("7_live_infer_and_actuate.py", "live_launch_plan_explicit_artifacts")
 
@@ -1178,6 +1219,7 @@ def test_collect_required_output_status_flags_missing_required_files(tmp_path: P
         segment_break_path=segment_breaks,
         summary_path=out_dir / "live_prediction_summary.json",
         distribution_report_path=out_dir / "live_input_distribution_report.json",
+        parity_report_path=out_dir / "parity_report.json",
         parity_capture=SimpleNamespace(
             manifest_path=parity_dir / "capture_manifest.json",
             records_path=parity_dir / "captured_windows.json",
@@ -1186,6 +1228,7 @@ def test_collect_required_output_status_flags_missing_required_files(tmp_path: P
         cleanup_errors=["prediction_log_close_error: broken pipe"],
         summary_write_error="summary build failed",
         distribution_report_write_error="distribution report failed",
+        parity_report_write_error="parity replay failed",
     )
 
     assert output_hashes["live_log_sha256"] is not None
@@ -1193,5 +1236,7 @@ def test_collect_required_output_status_flags_missing_required_files(tmp_path: P
     assert any("summary_missing_or_unreadable" in err for err in errors)
     assert any("distribution_report_write_error" in err for err in errors)
     assert any("distribution_report_missing_or_unreadable" in err for err in errors)
+    assert any("parity_report_write_error" in err for err in errors)
+    assert any("parity_report_missing_or_unreadable" in err for err in errors)
     assert any("parity_capture_records_missing_or_unreadable" in err for err in errors)
     assert any("prediction_log_close_error" in err for err in errors)

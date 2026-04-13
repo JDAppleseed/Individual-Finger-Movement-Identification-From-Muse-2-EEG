@@ -125,6 +125,13 @@ from utils.label_schema import (
 from utils.postprocess import PostprocessSettings
 from utils.session_event_io import resolve_raw_shard_paths
 from utils.session_layout import SessionLayout, resolve_latest_run_dir
+from utils.step7_config import (
+    build_step7_postprocess_settings,
+    build_step7_replay_runtime_config,
+    diff_step7_settings,
+    load_step7_config,
+    resolve_subject_step7_config_path,
+)
 from visualization.live_viz import parse_viz_line
 from visualization.replay_viz import ReplayVisualizer
 
@@ -348,84 +355,14 @@ def _build_scrambled_replay_order(
     return [idx for group_idx in ordered_group_ids for idx in groups[int(group_idx)]]
 
 
-def _coerce_bool(value: Any, default: bool) -> bool:
-    if value is None:
-        return bool(default)
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "on"}:
-        return True
-    if text in {"0", "false", "no", "off"}:
-        return False
-    return bool(default)
-
-
 def _build_replay_postprocess_settings(
     infer_settings: dict[str, Any],
 ) -> PostprocessSettings:
-    defaults = PostprocessSettings()
-    kwargs = {
-        field.name: infer_settings.get(field.name, getattr(defaults, field.name))
-        for field in dataclass_fields(PostprocessSettings)
-    }
-    return PostprocessSettings(**kwargs)
+    return build_step7_postprocess_settings(infer_settings)
 
 
 def _build_replay_runtime_config(infer_settings: dict[str, Any]) -> Any:
-    from utils.live_infer_common import ReplayRuntimeConfig
-
-    defaults = ReplayRuntimeConfig()
-    kwargs = {
-        field.name: infer_settings.get(field.name, getattr(defaults, field.name))
-        for field in dataclass_fields(ReplayRuntimeConfig)
-    }
-    latency_policy = str(infer_settings.get("latency_policy", "warn")).strip().lower()
-    kwargs["latency_mode"] = "ignore" if latency_policy == "warn" else str(kwargs["latency_mode"])
-    if str(kwargs["latency_mode"]).strip().lower() != "fixed":
-        kwargs["fixed_latency_ms"] = None
-    kwargs["reset_on_trial_change"] = _coerce_bool(kwargs["reset_on_trial_change"], True)
-    kwargs["deterministic"] = _coerce_bool(kwargs["deterministic"], True)
-    kwargs["modulate_actuation_speed"] = _coerce_bool(
-        kwargs["modulate_actuation_speed"], True
-    )
-    kwargs["use_inference_engine"] = _coerce_bool(
-        kwargs["use_inference_engine"], False
-    )
-    kwargs["live_quality_enabled"] = _coerce_bool(
-        kwargs["live_quality_enabled"], True
-    )
-    return ReplayRuntimeConfig(
-        window_sec=float(kwargs["window_sec"]),
-        hop_sec=float(kwargs["hop_sec"]),
-        latency_threshold_ms=float(kwargs["latency_threshold_ms"]),
-        actuation_min_prob=float(kwargs["actuation_min_prob"]),
-        actuation_stability=int(kwargs["actuation_stability"]),
-        actuation_cooldown_ms=int(kwargs["actuation_cooldown_ms"]),
-        actuation_repeat_ms=int(kwargs["actuation_repeat_ms"]),
-        actuation_min_speed=float(kwargs["actuation_min_speed"]),
-        modulate_actuation_speed=bool(kwargs["modulate_actuation_speed"]),
-        actuation_speed_gamma=float(kwargs["actuation_speed_gamma"]),
-        use_inference_engine=bool(kwargs["use_inference_engine"]),
-        mc_passes=int(kwargs["mc_passes"]),
-        uncertainty_base_threshold=float(kwargs["uncertainty_base_threshold"]),
-        uncertainty_weight=float(kwargs["uncertainty_weight"]),
-        live_quality_enabled=bool(kwargs["live_quality_enabled"]),
-        input_clip_abs_z=float(kwargs["input_clip_abs_z"]),
-        bad_channel_rms_z=float(kwargs["bad_channel_rms_z"]),
-        bad_channel_abs_p95_z=float(kwargs["bad_channel_abs_p95_z"]),
-        bad_channel_clipped_frac=float(kwargs["bad_channel_clipped_frac"]),
-        bad_window_clipped_frac=float(kwargs["bad_window_clipped_frac"]),
-        bad_window_max_masked_channels=int(kwargs["bad_window_max_masked_channels"]),
-        latency_mode=str(kwargs["latency_mode"]),
-        fixed_latency_ms=(
-            float(kwargs["fixed_latency_ms"])
-            if kwargs["fixed_latency_ms"] is not None
-            else None
-        ),
-        reset_on_trial_change=bool(kwargs["reset_on_trial_change"]),
-        deterministic=bool(kwargs["deterministic"]),
-    )
+    return build_step7_replay_runtime_config(infer_settings)
 
 
 _LIVE_INFER_UI_MODULE: Optional[Any] = None
@@ -470,6 +407,7 @@ class PreparedLiveInferLaunch:
     settings: Dict[str, Any]
     subject_dir: Path
     session_dir: Optional[Path]
+    base_config_path: Optional[Path] = None
 
 
 @dataclass
@@ -7010,15 +6948,22 @@ class MainWindow(QMainWindow):
             widget.blockSignals(False)
 
     def _load_saved_step_settings(self, subject_dir: Path, step_id: str) -> None:
-        path = subject_dir / "config" / f"{step_id}.json"
+        path = (
+            resolve_subject_step7_config_path(subject_dir)
+            if step_id == "infer"
+            else subject_dir / "config" / f"{step_id}.json"
+        )
         if not path.exists():
             return
         try:
-            payload = json.loads(path.read_text())
+            if step_id == "infer":
+                payload, settings = load_step7_config(path)
+            else:
+                payload = json.loads(path.read_text())
+                settings = payload.get("settings")
         except Exception as exc:
             self._append_log(f"⚠️ Failed to load saved {step_id} config: {exc}")
             return
-        settings = payload.get("settings")
         if not isinstance(settings, dict):
             return
         if step_id == "step1":
@@ -7817,6 +7762,7 @@ class MainWindow(QMainWindow):
                     model_path = run_dir / "finger_action_model.pt"
                     scaler_path = run_dir / "scaler.npz"
                     return run_id, (model_path if model_path.exists() else None), (scaler_path if scaler_path.exists() else None)
+            return None, None, None
 
         sessions_root = subject_dir / "sessions"
         if sessions_root.exists():
@@ -8738,7 +8684,16 @@ class MainWindow(QMainWindow):
             self._append_log("Actuation confirmation cancelled; run aborted.")
             return None
 
-        config_path = subject_dir / "config" / "infer.json"
+        base_config_path = resolve_subject_step7_config_path(subject_dir)
+        base_settings: Dict[str, Any] = {}
+        if base_config_path.exists():
+            try:
+                _, base_settings = load_step7_config(base_config_path)
+            except Exception as exc:
+                self._append_log(
+                    f"⚠️ Failed to load base Step 7 config {base_config_path}: {exc}"
+                )
+        config_path = Path(str(settings["out_dir"])) / "step7_launch_config.json"
         session_id_value = self.current_session_ui or "UNKNOWN"
         if infer_session_dir is not None:
             session_id_value = infer_session_dir.name
@@ -8750,6 +8705,18 @@ class MainWindow(QMainWindow):
             timebase_version=TIMEBASE_VERSION,
         )
         config_payload = config.to_dict()
+        config_payload["config_resolution"] = {
+            "base_config_path": str(base_config_path),
+            "runtime_override_keys": sorted(
+                diff_step7_settings(base_settings, settings).keys()
+            ),
+            "resolution_order": [
+                "step7_defaults",
+                "canonical_step7_config",
+                "ui_runtime_state",
+                "explicit_cli_overrides",
+            ],
+        }
         write_json(config_path, config_payload)
 
         args = [str(script_info.path), "--config", str(config_path)]
@@ -8770,6 +8737,7 @@ class MainWindow(QMainWindow):
             settings=dict(settings),
             subject_dir=subject_dir,
             session_dir=infer_session_dir,
+            base_config_path=base_config_path,
         )
 
     def _execute_prepared_live_infer_launch(
@@ -8816,6 +8784,7 @@ class MainWindow(QMainWindow):
         )
         lines = [
             f"Config: {launch.config_path}",
+            f"Base config: {launch.base_config_path or '-'}",
             f"Session dir: {launch.session_dir or '-'}",
             f"Deployment session dir: {launch.settings.get('deployment_session_dir') or '-'}",
             f"Model: {launch.settings.get('model_path') or '-'}",

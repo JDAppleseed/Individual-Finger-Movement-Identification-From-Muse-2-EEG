@@ -86,10 +86,9 @@ def resolve_replay_artifact_paths(
         _infer_session_dir_from_artifact(model_path),
         _infer_session_dir_from_artifact(scaler_path),
     ]
-    if npz_path is None and model_path is None and scaler_path is None and replay_ready_fallback is not None and not selected_session_ready:
-        candidates.extend([replay_ready_fallback, session_dir])
-    else:
-        candidates.extend([session_dir, replay_ready_fallback])
+    candidates.append(session_dir)
+    if session_dir is None and replay_ready_fallback is not None:
+        candidates.append(replay_ready_fallback)
 
     for candidate in candidates:
         if candidate is None or not candidate.exists():

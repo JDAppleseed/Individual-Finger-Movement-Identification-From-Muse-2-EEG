@@ -112,7 +112,7 @@ def test_resolve_replay_artifact_paths_falls_back_to_latest_replay_ready_session
     latest_scaler.write_bytes(b"scaler")
 
     resolved = resolve_replay_artifact_paths(
-        session_dir=stale_session,
+        session_dir=None,
         sessions_root=tmp_path,
         npz_text="",
         model_text="",
@@ -123,4 +123,37 @@ def test_resolve_replay_artifact_paths_falls_back_to_latest_replay_ready_session
         latest_npz.resolve(),
         latest_model.resolve(),
         latest_scaler.resolve(),
+    )
+
+
+def test_resolve_replay_artifact_paths_does_not_drift_when_session_is_pinned(
+    tmp_path: Path,
+) -> None:
+    stale_session = tmp_path / "stale_session"
+    stale_processed = stale_session / "processed"
+    stale_processed.mkdir(parents=True)
+    (stale_processed / "eeg_windows.npz").write_bytes(b"stale")
+    (stale_processed / "models").mkdir()
+
+    latest_ready = tmp_path / "latest_ready"
+    latest_run = latest_ready / "processed" / "models" / "run2"
+    latest_run.mkdir(parents=True)
+    latest_npz = latest_ready / "processed" / "eeg_windows.npz"
+    latest_npz.parent.mkdir(parents=True, exist_ok=True)
+    latest_npz.write_bytes(b"latest")
+    (latest_run / "finger_action_model.pt").write_bytes(b"model")
+    (latest_run / "scaler.npz").write_bytes(b"scaler")
+
+    resolved = resolve_replay_artifact_paths(
+        session_dir=stale_session,
+        sessions_root=tmp_path,
+        npz_text="",
+        model_text="",
+        scaler_text="",
+    )
+
+    assert resolved == (
+        (stale_session / "processed" / "eeg_windows.npz").resolve(),
+        None,
+        None,
     )

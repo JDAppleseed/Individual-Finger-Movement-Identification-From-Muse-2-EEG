@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import asdict, fields
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -21,17 +21,20 @@ from tools.analyze_live_predictions import (
     write_segments_csv,
 )
 from utils.live_infer_common import (
-    ReplayRuntimeConfig,
     compute_replay_metrics,
     load_model_artifacts,
     replay_ordered_windows,
     require_deployable_run,
     write_predictions_jsonl,
 )
-from utils.postprocess import PostprocessSettings
 from utils.runtime_utils import now_utc_iso
 from utils.sequence_data import load_sequence_npz
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
+from utils.step7_config import (
+    build_step7_postprocess_settings,
+    build_step7_replay_runtime_config,
+    load_step7_config,
+)
 
 
 def _load_config(path: str | None) -> tuple[dict[str, Any], Path | None]:
@@ -72,19 +75,6 @@ def _resolve_path(value: Any, *, base_dir: Path | None = None) -> Path | None:
     if not path.is_absolute():
         return REPO_ROOT / path
     return path
-
-
-def _coerce_bool(value: Any, default: bool) -> bool:
-    if value is None:
-        return bool(default)
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "on"}:
-        return True
-    if text in {"0", "false", "no", "off"}:
-        return False
-    return bool(default)
 
 
 def _resolve_device(requested: str) -> torch.device:
@@ -173,18 +163,8 @@ def _resolve_target_session_dirs(
 
 
 def _load_json_file(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text())
-    settings = payload.get("settings")
-    return dict(settings) if isinstance(settings, dict) else dict(payload)
-
-
-def _build_postprocess_settings(infer_settings: dict[str, Any]) -> PostprocessSettings:
-    defaults = PostprocessSettings()
-    kwargs = {
-        field.name: infer_settings.get(field.name, getattr(defaults, field.name))
-        for field in fields(PostprocessSettings)
-    }
-    return PostprocessSettings(**kwargs)
+    _, settings = load_step7_config(path)
+    return settings
 
 
 def _build_runtime_config(
@@ -195,71 +175,18 @@ def _build_runtime_config(
     fixed_latency_ms: float | None,
     reset_on_trial_change: Optional[bool],
     deterministic: Optional[bool],
-) -> ReplayRuntimeConfig:
-    defaults = ReplayRuntimeConfig()
-    kwargs = {field.name: getattr(defaults, field.name) for field in fields(ReplayRuntimeConfig)}
-    for key in kwargs:
-        if key in infer_settings:
-            kwargs[key] = infer_settings[key]
-        if key in settings:
-            kwargs[key] = settings[key]
-    kwargs["latency_mode"] = (
-        str(latency_mode)
-        if latency_mode is not None
-        else str(settings.get("latency_mode", kwargs["latency_mode"]))
-    )
-    kwargs["fixed_latency_ms"] = (
-        float(fixed_latency_ms)
-        if fixed_latency_ms is not None
-        else (
-            float(settings["fixed_latency_ms"])
-            if settings.get("fixed_latency_ms") is not None
-            else kwargs["fixed_latency_ms"]
+) -> Any:
+    try:
+        return build_step7_replay_runtime_config(
+            infer_settings,
+            settings=settings,
+            latency_mode=latency_mode,
+            fixed_latency_ms=fixed_latency_ms,
+            reset_on_trial_change=reset_on_trial_change,
+            deterministic=deterministic,
         )
-    )
-    kwargs["reset_on_trial_change"] = (
-        bool(reset_on_trial_change)
-        if reset_on_trial_change is not None
-        else _coerce_bool(settings.get("reset_on_trial_change"), kwargs["reset_on_trial_change"])
-    )
-    kwargs["deterministic"] = (
-        bool(deterministic)
-        if deterministic is not None
-        else _coerce_bool(settings.get("deterministic"), kwargs["deterministic"])
-    )
-    if str(kwargs["latency_mode"]).strip().lower() == "fixed" and kwargs["fixed_latency_ms"] is None:
+    except ValueError:
         raise SystemExit("--fixed-latency-ms is required when --latency-mode=fixed")
-    return ReplayRuntimeConfig(
-        window_sec=float(kwargs["window_sec"]),
-        hop_sec=float(kwargs["hop_sec"]),
-        latency_threshold_ms=float(kwargs["latency_threshold_ms"]),
-        actuation_min_prob=float(kwargs["actuation_min_prob"]),
-        actuation_stability=int(kwargs["actuation_stability"]),
-        actuation_cooldown_ms=int(kwargs["actuation_cooldown_ms"]),
-        actuation_repeat_ms=int(kwargs["actuation_repeat_ms"]),
-        actuation_min_speed=float(kwargs["actuation_min_speed"]),
-        modulate_actuation_speed=_coerce_bool(kwargs["modulate_actuation_speed"], True),
-        actuation_speed_gamma=float(kwargs["actuation_speed_gamma"]),
-        use_inference_engine=_coerce_bool(kwargs["use_inference_engine"], False),
-        mc_passes=int(kwargs["mc_passes"]),
-        uncertainty_base_threshold=float(kwargs["uncertainty_base_threshold"]),
-        uncertainty_weight=float(kwargs["uncertainty_weight"]),
-        live_quality_enabled=_coerce_bool(kwargs["live_quality_enabled"], True),
-        input_clip_abs_z=float(kwargs["input_clip_abs_z"]),
-        bad_channel_rms_z=float(kwargs["bad_channel_rms_z"]),
-        bad_channel_abs_p95_z=float(kwargs["bad_channel_abs_p95_z"]),
-        bad_channel_clipped_frac=float(kwargs["bad_channel_clipped_frac"]),
-        bad_window_clipped_frac=float(kwargs["bad_window_clipped_frac"]),
-        bad_window_max_masked_channels=int(kwargs["bad_window_max_masked_channels"]),
-        latency_mode=str(kwargs["latency_mode"]),
-        fixed_latency_ms=(
-            float(kwargs["fixed_latency_ms"])
-            if kwargs["fixed_latency_ms"] is not None
-            else None
-        ),
-        reset_on_trial_change=bool(kwargs["reset_on_trial_change"]),
-        deterministic=bool(kwargs["deterministic"]),
-    )
 
 
 def _ensure_windows_ntc(X: np.ndarray, meta: dict[str, Any]) -> np.ndarray:
@@ -587,7 +514,7 @@ def main() -> int:
     infer_config_path = infer_config_path.resolve()
     infer_settings = _load_json_file(infer_config_path)
     postprocess_enabled = _coerce_bool(infer_settings.get("postprocess"), True)
-    postprocess_settings = _build_postprocess_settings(infer_settings)
+    postprocess_settings = build_step7_postprocess_settings(infer_settings)
     runtime_config = _build_runtime_config(
         infer_settings=infer_settings,
         settings=settings,

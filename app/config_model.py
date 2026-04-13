@@ -9,10 +9,10 @@ from typing import Any, Dict
 from utils.default_recipe import (
     ARTIFACT_DEFAULTS,
     EVAL_RECIPE_DEFAULTS,
-    LIVE_INFER_RECIPE_DEFAULTS,
     TRAIN_RECIPE_DEFAULTS,
     WINDOW_EXTRACTION_DEFAULTS,
 )
+from utils.step7_config import default_step7_settings
 
 SCHEMA_VERSION = "1.0"
 TIMEBASE_VERSION = "absolute_v1"
@@ -262,89 +262,7 @@ def default_topomap_settings() -> Dict[str, Any]:
 
 
 def default_infer_settings() -> Dict[str, Any]:
-    return {
-        "deployment_session_dir": None,
-        "session_dir": None,
-        "model_path": f"models/{ARTIFACT_DEFAULTS['model']}",
-        "scaler_path": str(ARTIFACT_DEFAULTS["scaler"]),
-        "out_dir": None,
-        "device": "auto",
-        "stream_name": "Muse2-EEG",
-        "stream_type": "EEG",
-        "lsl_source_id": None,
-        "LSL_RESOLVE_TIMEOUT": 25.0,
-        "REQUIRED_LSL_LABELS": ["TP9", "AF7", "AF8", "TP10"],
-        "REQUIRE_EXACTLY_4_CHANNELS": True,
-        "LIVE_VIZ_ENABLED": bool(LIVE_INFER_RECIPE_DEFAULTS["LIVE_VIZ_ENABLED"]),
-        "LIVE_VIZ_FPS": int(LIVE_INFER_RECIPE_DEFAULTS["LIVE_VIZ_FPS"]),
-        "window_sec": float(LIVE_INFER_RECIPE_DEFAULTS["window_sec"]),
-        "hop_sec": float(LIVE_INFER_RECIPE_DEFAULTS["hop_sec"]),
-        "target_fs": DEFAULT_TARGET_FS,
-        "alignment_internal_max_gap_s": float(
-            LIVE_INFER_RECIPE_DEFAULTS["alignment_internal_max_gap_s"]
-        ),
-        "allow_drop": bool(LIVE_INFER_RECIPE_DEFAULTS["allow_drop"]),
-        "latency_threshold_ms": float(LIVE_INFER_RECIPE_DEFAULTS["latency_threshold_ms"]),
-        "latency_policy": str(LIVE_INFER_RECIPE_DEFAULTS["latency_policy"]),
-        "log_every": float(LIVE_INFER_RECIPE_DEFAULTS["log_every"]),
-        "enable_actuation": bool(LIVE_INFER_RECIPE_DEFAULTS["enable_actuation"]),
-        "serial_port": LIVE_INFER_RECIPE_DEFAULTS["serial_port"],
-        "serial_baud": int(LIVE_INFER_RECIPE_DEFAULTS["serial_baud"]),
-        "bluetooth_target": LIVE_INFER_RECIPE_DEFAULTS["bluetooth_target"],
-        "no_file_io": bool(LIVE_INFER_RECIPE_DEFAULTS["no_file_io"]),
-        "actuation_min_prob": float(LIVE_INFER_RECIPE_DEFAULTS["actuation_min_prob"]),
-        "actuation_stability": int(LIVE_INFER_RECIPE_DEFAULTS["actuation_stability"]),
-        "actuation_cooldown_ms": int(LIVE_INFER_RECIPE_DEFAULTS["actuation_cooldown_ms"]),
-        "actuation_repeat_ms": int(LIVE_INFER_RECIPE_DEFAULTS["actuation_repeat_ms"]),
-        "actuation_min_speed": float(LIVE_INFER_RECIPE_DEFAULTS["actuation_min_speed"]),
-        "modulate_actuation_speed": bool(
-            LIVE_INFER_RECIPE_DEFAULTS["modulate_actuation_speed"]
-        ),
-        "actuation_speed_gamma": float(LIVE_INFER_RECIPE_DEFAULTS["actuation_speed_gamma"]),
-        "postprocess": bool(LIVE_INFER_RECIPE_DEFAULTS["postprocess"]),
-        "smoothing_enabled": bool(LIVE_INFER_RECIPE_DEFAULTS["smoothing_enabled"]),
-        "smoothing_method": str(LIVE_INFER_RECIPE_DEFAULTS["smoothing_method"]),
-        "smoothing_window": int(LIVE_INFER_RECIPE_DEFAULTS["smoothing_window"]),
-        "hysteresis_enabled": bool(LIVE_INFER_RECIPE_DEFAULTS["hysteresis_enabled"]),
-        "hysteresis_frames": int(LIVE_INFER_RECIPE_DEFAULTS["hysteresis_frames"]),
-        "threshold_action": float(LIVE_INFER_RECIPE_DEFAULTS["threshold_action"]),
-        "threshold_finger": float(LIVE_INFER_RECIPE_DEFAULTS["threshold_finger"]),
-        "threshold_applicability": float(LIVE_INFER_RECIPE_DEFAULTS["threshold_applicability"]),
-        "adjacency_enabled": bool(LIVE_INFER_RECIPE_DEFAULTS["adjacency_enabled"]),
-        "hysteresis_margin": float(LIVE_INFER_RECIPE_DEFAULTS["hysteresis_margin"]),
-        "finger_delta": float(LIVE_INFER_RECIPE_DEFAULTS["finger_delta"]),
-        "finger_mode": str(LIVE_INFER_RECIPE_DEFAULTS["finger_mode"]),
-        "rest_bias_correction_enabled": bool(
-            LIVE_INFER_RECIPE_DEFAULTS["rest_bias_correction_enabled"]
-        ),
-        "rest_bias_strength": float(LIVE_INFER_RECIPE_DEFAULTS["rest_bias_strength"]),
-        "rest_bias_min_windows": int(LIVE_INFER_RECIPE_DEFAULTS["rest_bias_min_windows"]),
-        "live_quality_enabled": bool(LIVE_INFER_RECIPE_DEFAULTS["live_quality_enabled"]),
-        "input_clip_abs_z": float(LIVE_INFER_RECIPE_DEFAULTS["input_clip_abs_z"]),
-        "bad_channel_rms_z": float(LIVE_INFER_RECIPE_DEFAULTS["bad_channel_rms_z"]),
-        "bad_channel_abs_p95_z": float(
-            LIVE_INFER_RECIPE_DEFAULTS["bad_channel_abs_p95_z"]
-        ),
-        "bad_channel_clipped_frac": float(
-            LIVE_INFER_RECIPE_DEFAULTS["bad_channel_clipped_frac"]
-        ),
-        "bad_window_clipped_frac": float(
-            LIVE_INFER_RECIPE_DEFAULTS["bad_window_clipped_frac"]
-        ),
-        "bad_window_max_masked_channels": int(
-            LIVE_INFER_RECIPE_DEFAULTS["bad_window_max_masked_channels"]
-        ),
-        "use_inference_engine": bool(LIVE_INFER_RECIPE_DEFAULTS["use_inference_engine"]),
-        "mc_passes": int(LIVE_INFER_RECIPE_DEFAULTS["mc_passes"]),
-        "uncertainty_base_threshold": float(
-            LIVE_INFER_RECIPE_DEFAULTS["uncertainty_base_threshold"]
-        ),
-        "uncertainty_weight": float(LIVE_INFER_RECIPE_DEFAULTS["uncertainty_weight"]),
-        "parity_capture_enabled": True,
-        "parity_capture_max_windows": 64,
-        "parity_capture_flush_every": 8,
-        "pred_log": None,
-    }
+    return default_step7_settings()
 
 
 def default_live_review_settings() -> Dict[str, Any]:
