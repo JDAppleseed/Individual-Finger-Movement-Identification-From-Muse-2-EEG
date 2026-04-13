@@ -10009,6 +10009,7 @@ class MainWindow(QMainWindow):
             "stream_found_label_mismatch",
             "stream_found_channel_count_mismatch",
             "stream_found_source_id_mismatch",
+            "source_id_resolved_mismatch",
         }:
             message = (
                 f"Expected labels: {labels} ({'exact' if require_exact else 'min'}).\n"
@@ -10044,6 +10045,42 @@ class MainWindow(QMainWindow):
                 f"{message}\n\nDetails:\n{json.dumps(result.to_dict(), indent=2)}",
             )
             self._update_live_status("Live status: stream metadata missing labels")
+            self._set_live_buttons_state()
+            return result
+
+        if result.reason == "stream_selection_ambiguous":
+            message = (
+                f"Multiple candidate LSL streams matched {stream_name or '-'} / {stream_type or '-'}.\n"
+                f"Requested source_id: {source_id or '-'}.\n"
+                "Set a specific lsl_source_id before launch so Step 7 binds to exactly one stream."
+            )
+            if not interactive:
+                self._update_live_status("Live status: stream selection ambiguous")
+                self._set_live_buttons_state()
+                return result
+            self._show_blocking_notice(
+                "Ambiguous LSL Stream Selection",
+                f"{message}\n\nDetails:\n{json.dumps(result.to_dict(), indent=2)}",
+            )
+            self._update_live_status("Live status: stream selection ambiguous")
+            self._set_live_buttons_state()
+            return result
+
+        if result.reason in {
+            "stream_resolved_but_inlet_open_failed",
+            "stream_resolved_but_no_samples_pulled",
+            "healthcheck_sample_shape_invalid",
+            "healthcheck_stream_pull_contract_violation",
+            "measured_sps_mismatch",
+        }:
+            if interactive:
+                self._show_blocking_notice(
+                    "Healthcheck Failed",
+                    f"{result.summary}\n\nDetails:\n{json.dumps(result.to_dict(), indent=2)}",
+                )
+                self._update_live_status(f"Live status: waiting on {result.reason}")
+            else:
+                self._update_live_status(f"Live status: waiting on {result.reason}")
             self._set_live_buttons_state()
             return result
 

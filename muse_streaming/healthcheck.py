@@ -5,7 +5,7 @@ import statistics
 import time
 import warnings
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from muse_streaming.config import (
     DEFAULT_LABELS,
@@ -62,6 +62,15 @@ class HealthcheckResult:
     raw_metadata_labels: List[str] = field(default_factory=list)
     normalized_metadata_labels: List[str] = field(default_factory=list)
     label_metadata_present: bool = False
+    stream_uid: Optional[str] = None
+    matching_candidate_count: int = 0
+    matching_candidates: List[Dict[str, object]] = field(default_factory=list)
+    inlet_created: bool = False
+    inlet_opened: bool = False
+    pull_attempts: int = 0
+    first_sample_timestamp: Optional[float] = None
+    first_sample_length: Optional[int] = None
+    sample_validation_error: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -85,6 +94,15 @@ class HealthcheckResult:
             "raw_metadata_labels": list(self.raw_metadata_labels),
             "normalized_metadata_labels": list(self.normalized_metadata_labels),
             "label_metadata_present": bool(self.label_metadata_present),
+            "stream_uid": self.stream_uid,
+            "matching_candidate_count": int(self.matching_candidate_count),
+            "matching_candidates": list(self.matching_candidates),
+            "inlet_created": bool(self.inlet_created),
+            "inlet_opened": bool(self.inlet_opened),
+            "pull_attempts": int(self.pull_attempts),
+            "first_sample_timestamp": self.first_sample_timestamp,
+            "first_sample_length": self.first_sample_length,
+            "sample_validation_error": self.sample_validation_error,
         }
 
 
@@ -114,6 +132,22 @@ def _source_id_of(info: StreamInfo) -> Optional[str]:
     return normalize_source_id(value)
 
 
+def _uid_of(info: StreamInfo) -> Optional[str]:
+    getter = getattr(info, "uid", None)
+    if not callable(getter):
+        return None
+    try:
+        value = getter()
+    except Exception:
+        return None
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def _candidate_signatures(candidates: Iterable[StreamInfo]) -> List[Dict[str, object]]:
+    return [stream_signature(candidate) for candidate in candidates]
+
+
 def _hydrate_stream_info(inlet: StreamInlet, fallback_info: StreamInfo) -> StreamInfo:
     info_getter = getattr(inlet, "info", None)
     if not callable(info_getter):
@@ -127,6 +161,23 @@ def _hydrate_stream_info(inlet: StreamInlet, fallback_info: StreamInfo) -> Strea
             return fallback_info
     except Exception:
         return fallback_info
+
+
+def _open_inlet_stream(inlet: StreamInlet, timeout_s: float) -> None:
+    opener = getattr(inlet, "open_stream", None)
+    if not callable(opener):
+        return
+    try:
+        opener(timeout=timeout_s)
+        return
+    except TypeError:
+        pass
+    try:
+        opener(timeout_s)
+        return
+    except TypeError:
+        pass
+    opener()
 
 
 def run_healthcheck(
@@ -230,6 +281,7 @@ def run_healthcheck(
     )
     expected_name = stream.name or "auto"
     expected_type = stream.stype or DEFAULT_STREAM_TYPE
+    candidate_signatures = _candidate_signatures(matching_candidates)
 
     if not matching_candidates:
         summary = (
@@ -254,6 +306,7 @@ def run_healthcheck(
             timebase_warnings=[],
             source_id=None,
             requested_source_id=requested_source_id,
+            matching_candidate_count=0,
         )
 
     if requested_source_id:
@@ -301,11 +354,108 @@ def run_healthcheck(
                 timebase_warnings=[],
                 source_id=None,
                 requested_source_id=requested_source_id,
+                matching_candidate_count=len(matching_candidates),
+                matching_candidates=candidate_signatures,
             )
     else:
+        if len(matching_candidates) > 1:
+            summary = (
+                f"Multiple live streams matched name='{expected_name}' type='{expected_type}'. "
+                "Set lsl_source_id to bind Step 7 to a single stream. "
+                f"Matches={candidate_signatures}."
+            )
+            return HealthcheckResult(
+                ok=False,
+                reason="stream_selection_ambiguous",
+                summary=summary,
+                name=expected_name if expected_name != "auto" else "",
+                stype=expected_type,
+                channel_count=0,
+                labels=[],
+                samples_received=0,
+                measured_sps=None,
+                expected_sps=expected_sps,
+                jitter_s=None,
+                latency_s=None,
+                nominal_srate=0.0,
+                timebase_ok=False,
+                timebase_warnings=[],
+                source_id=None,
+                requested_source_id=None,
+                matching_candidate_count=len(matching_candidates),
+                matching_candidates=candidate_signatures,
+            )
         match = matching_candidates[0]
 
-    inlet = StreamInlet(match)
+    inlet = None
+    try:
+        inlet = StreamInlet(match)
+    except Exception as exc:
+        summary = (
+            f"Stream '{match.name()}' ({match.type()}) resolved, but StreamInlet creation failed: "
+            f"{exc!r}. Selected stream={stream_signature(match)}."
+        )
+        return HealthcheckResult(
+            ok=False,
+            reason="stream_resolved_but_inlet_open_failed",
+            summary=summary,
+            name=match.name(),
+            stype=match.type(),
+            channel_count=int(match.channel_count() or 0),
+            labels=[],
+            samples_received=0,
+            measured_sps=None,
+            expected_sps=expected_sps,
+            jitter_s=None,
+            latency_s=None,
+            nominal_srate=float(match.nominal_srate() or 0.0),
+            timebase_ok=False,
+            timebase_warnings=[],
+            source_id=_source_id_of(match),
+            requested_source_id=requested_source_id,
+            stream_uid=_uid_of(match),
+            matching_candidate_count=len(matching_candidates),
+            matching_candidates=candidate_signatures,
+            inlet_created=False,
+            inlet_opened=False,
+            sample_validation_error=repr(exc),
+        )
+
+    inlet_opened = False
+    try:
+        _open_inlet_stream(inlet, timeout_s=max(0.5, min(float(timeout_s), 2.0)))
+        inlet_opened = True
+    except Exception as exc:
+        summary = (
+            f"Stream '{match.name()}' ({match.type()}) resolved, but inlet open failed: "
+            f"{exc!r}. Selected stream={stream_signature(match)}."
+        )
+        return HealthcheckResult(
+            ok=False,
+            reason="stream_resolved_but_inlet_open_failed",
+            summary=summary,
+            name=match.name(),
+            stype=match.type(),
+            channel_count=int(match.channel_count() or 0),
+            labels=[],
+            samples_received=0,
+            measured_sps=None,
+            expected_sps=expected_sps,
+            jitter_s=None,
+            latency_s=None,
+            nominal_srate=float(match.nominal_srate() or 0.0),
+            timebase_ok=False,
+            timebase_warnings=[],
+            source_id=_source_id_of(match),
+            requested_source_id=requested_source_id,
+            stream_uid=_uid_of(match),
+            matching_candidate_count=len(matching_candidates),
+            matching_candidates=candidate_signatures,
+            inlet_created=True,
+            inlet_opened=False,
+            sample_validation_error=repr(exc),
+        )
+
     resolved_info = _hydrate_stream_info(inlet, match)
     channel_count = int(resolved_info.channel_count())
     label_report = describe_lsl_channel_labels(resolved_info)
@@ -315,6 +465,41 @@ def run_healthcheck(
     nominal_srate = float(resolved_info.nominal_srate() or 0.0)
     expected_sps = float(stream.nominal_srate or nominal_srate or DEFAULT_NOMINAL_SRATE)
     resolved_source_id = _source_id_of(resolved_info)
+    selected_uid = _uid_of(resolved_info) or _uid_of(match)
+
+    if requested_source_id and resolved_source_id and resolved_source_id != requested_source_id:
+        summary = (
+            f"Stream '{match.name()}' ({match.type()}) metadata resolved to source_id="
+            f"{resolved_source_id}, but requested source_id={requested_source_id}. "
+            f"Selected stream={stream_signature(match)}."
+        )
+        return HealthcheckResult(
+            ok=False,
+            reason="source_id_resolved_mismatch",
+            summary=summary,
+            name=match.name(),
+            stype=match.type(),
+            channel_count=channel_count,
+            labels=labels,
+            samples_received=0,
+            measured_sps=None,
+            expected_sps=expected_sps,
+            jitter_s=None,
+            latency_s=None,
+            nominal_srate=nominal_srate,
+            timebase_ok=False,
+            timebase_warnings=[],
+            source_id=resolved_source_id,
+            requested_source_id=requested_source_id,
+            raw_metadata_labels=raw_metadata_labels,
+            normalized_metadata_labels=labels,
+            label_metadata_present=label_metadata_present,
+            stream_uid=selected_uid,
+            matching_candidate_count=len(matching_candidates),
+            matching_candidates=candidate_signatures,
+            inlet_created=True,
+            inlet_opened=inlet_opened,
+        )
 
     if require_exact_channels and channel_count != len(required_labels):
         summary = (
@@ -343,6 +528,11 @@ def run_healthcheck(
             raw_metadata_labels=raw_metadata_labels,
             normalized_metadata_labels=labels,
             label_metadata_present=label_metadata_present,
+            stream_uid=selected_uid,
+            matching_candidate_count=len(matching_candidates),
+            matching_candidates=candidate_signatures,
+            inlet_created=True,
+            inlet_opened=inlet_opened,
         )
 
     if not label_metadata_present:
@@ -372,6 +562,11 @@ def run_healthcheck(
             raw_metadata_labels=raw_metadata_labels,
             normalized_metadata_labels=labels,
             label_metadata_present=label_metadata_present,
+            stream_uid=selected_uid,
+            matching_candidate_count=len(matching_candidates),
+            matching_candidates=candidate_signatures,
+            inlet_created=True,
+            inlet_opened=inlet_opened,
         )
 
     if not _match_labels(labels, required_labels):
@@ -401,6 +596,11 @@ def run_healthcheck(
             raw_metadata_labels=raw_metadata_labels,
             normalized_metadata_labels=labels,
             label_metadata_present=label_metadata_present,
+            stream_uid=selected_uid,
+            matching_candidate_count=len(matching_candidates),
+            matching_candidates=candidate_signatures,
+            inlet_created=True,
+            inlet_opened=inlet_opened,
         )
 
     if expected_sps and nominal_srate:
@@ -431,6 +631,11 @@ def run_healthcheck(
                 raw_metadata_labels=raw_metadata_labels,
                 normalized_metadata_labels=labels,
                 label_metadata_present=label_metadata_present,
+                stream_uid=selected_uid,
+                matching_candidate_count=len(matching_candidates),
+                matching_candidates=candidate_signatures,
+                inlet_created=True,
+                inlet_opened=inlet_opened,
             )
 
     start = time.monotonic()
@@ -439,10 +644,37 @@ def run_healthcheck(
     timestamps: List[float] = []
     arrival_times: List[float] = []
     latency_samples: List[float] = []
+    pull_attempts = 0
+    first_sample_timestamp: Optional[float] = None
+    first_sample_length: Optional[int] = None
+    sample_validation_error: Optional[str] = None
+    pull_contract_error = False
     while time.monotonic() - start < timeout_s:
-        sample, lsl_ts = inlet.pull_sample(timeout=0.2)
+        pull_attempts += 1
+        try:
+            sample, lsl_ts = inlet.pull_sample(timeout=0.2)
+        except Exception as exc:
+            sample_validation_error = repr(exc)
+            pull_contract_error = True
+            break
         if sample is None:
             continue
+        if first_sample_timestamp is None and lsl_ts is not None:
+            first_sample_timestamp = float(lsl_ts)
+        if first_sample_length is None:
+            try:
+                first_sample_length = len(sample)
+            except Exception:
+                first_sample_length = None
+        try:
+            sample_length = len(sample)
+        except Exception:
+            sample_length = None
+        if sample_length != channel_count:
+            sample_validation_error = (
+                f"expected {channel_count} channels but received {sample_length}"
+            )
+            break
         samples += 1
         arrival_times.append(time.monotonic())
         if lsl_ts is not None:
@@ -480,9 +712,15 @@ def run_healthcheck(
     if latency_samples:
         latency_s = float(sum(latency_samples) / len(latency_samples))
 
-    ok = samples >= max(1, target_samples)
-    reason = "ok" if ok else "no_samples"
-    if ok and measured_sps is not None:
+    ok = samples > 0 and sample_validation_error is None
+    reason = "ok" if ok else "stream_resolved_but_no_samples_pulled"
+    if sample_validation_error is not None:
+        if pull_contract_error:
+            reason = "healthcheck_stream_pull_contract_violation"
+        else:
+            reason = "healthcheck_sample_shape_invalid"
+        ok = False
+    elif ok and measured_sps is not None:
         if abs(measured_sps - expected_sps) > nominal_srate_tolerance:
             ok = False
             reason = "measured_sps_mismatch"
@@ -494,10 +732,22 @@ def run_healthcheck(
         timebase_ok = check.ok
         timebase_warnings = check.warnings
 
-    if reason == "no_samples":
+    if reason == "stream_resolved_but_no_samples_pulled":
         summary = (
-            f"Stream '{match.name()}' ({match.type()}) resolved, but no samples "
-            f"arrived within {timeout_s:.1f}s. Ensure the Muse is streaming."
+            f"Stream '{match.name()}' ({match.type()}) resolved and inlet opened, "
+            f"but no samples were pulled within {timeout_s:.1f}s after {pull_attempts} "
+            f"attempts. Selected stream={stream_signature(match)}."
+        )
+    elif reason == "healthcheck_sample_shape_invalid":
+        summary = (
+            f"Stream '{match.name()}' ({match.type()}) produced a malformed sample: "
+            f"{sample_validation_error}. Expected channel_count={channel_count}, "
+            f"first_sample_length={first_sample_length!r}, first_sample_timestamp={first_sample_timestamp!r}."
+        )
+    elif reason == "healthcheck_stream_pull_contract_violation":
+        summary = (
+            f"Stream '{match.name()}' ({match.type()}) resolved, but sample pull failed: "
+            f"{sample_validation_error}. Selected stream={stream_signature(match)}."
         )
     elif reason == "measured_sps_mismatch" and measured_sps is not None:
         summary = (
@@ -507,7 +757,7 @@ def run_healthcheck(
         )
     else:
         window_text = f" over {window_s:.2f}s" if window_s is not None else ""
-        measured_text = f"{measured_sps:.2f}" if measured_sps is not None else "n/a"
+        measured_text = f"{measured_sps:.2f}" if measured_sps is not None else "sample-flow"
         summary = (
             f"Stream '{match.name()}' ({match.type()}) healthy: measured "
             f"{measured_text} Hz (expected {expected_sps:.2f} Hz){window_text}, "
@@ -541,6 +791,15 @@ def run_healthcheck(
         raw_metadata_labels=raw_metadata_labels,
         normalized_metadata_labels=labels,
         label_metadata_present=label_metadata_present,
+        stream_uid=selected_uid,
+        matching_candidate_count=len(matching_candidates),
+        matching_candidates=candidate_signatures,
+        inlet_created=True,
+        inlet_opened=inlet_opened,
+        pull_attempts=pull_attempts,
+        first_sample_timestamp=first_sample_timestamp,
+        first_sample_length=first_sample_length,
+        sample_validation_error=sample_validation_error,
     )
 
 
