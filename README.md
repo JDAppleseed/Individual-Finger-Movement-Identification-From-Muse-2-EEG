@@ -132,10 +132,10 @@ python 4_generate_reports.py --session-dir <session_dir>
 
 ### Step 7 Live Inference
 
-For the current decisive `2-M16` live workflow, follow `docs/ops/STEP7_LIVE_RUNBOOK.md`.
+For decisive live runs, follow `docs/ops/STEP7_LIVE_RUNBOOK.md`.
 
-- Canonical config: `Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json`
-- Archived legacy Step 7 artifacts: `Projects/2-M16/subjects/2-M16/archive/step7/`
+- Canonical Step 7 config: `Projects/<ProjectName>/subjects/<subject_id>/winning_model/configs/infer.json`
+- Archived legacy Step 7 artifacts: `Projects/<ProjectName>/subjects/<subject_id>/archive/step7/`
 
 Manual preflight:
 
@@ -251,8 +251,8 @@ Step 7b prefers fresh `live_infer_<run_tag>` outputs over bare or legacy `live_i
 
 - `docs/ops/STEP7_LIVE_RUNBOOK.md` covers the decisive Step 7 manual run path.
 - `docs/ops/SYSTEM_DEPS.md` lists optional system packages for PDF/report generation.
-- For the decisive `2-M16` Step 7 run, `Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json` is the canonical CLI config. `Projects/2-M16/subjects/2-M16/config/infer.json` is the UI working mirror.
-- Checked-in configs under `Projects/2-M16/.../config/` are subject-specific reproducibility snapshots, not repo-wide defaults.
+- For a decisive Step 7 run, use the active subject's `Projects/<ProjectName>/subjects/<subject_id>/winning_model/configs/infer.json` as the canonical CLI config. The matching `Projects/<ProjectName>/subjects/<subject_id>/config/infer.json` file is the UI working mirror.
+- Checked-in configs under `Projects/<ProjectName>/subjects/<subject_id>/config/` are subject-specific reproducibility snapshots, not repo-wide defaults.
 - `paper/`, `paper_artifacts/`, and `paper_figures/` are kept local and are ignored by Git.
 - Detailed schemas live in `docs/spec/DATA_CONTRACT.md` and `docs/spec/SCHEMAS.md`.
 
