@@ -748,33 +748,33 @@ TOOLTIPS: Dict[str, str] = {
     "HARD_STOP_AFTER_UNHEALTHY_S": "Seconds of continuous unhealthy stream before hard stop.",
     "FAILED_WRITE_WINDOW_S": "Seconds to write failed debug files during unhealthy window.",
     "FAILED_DIR": "Directory for failed debug writes.",
-    "REQUIRED_LSL_LABELS": "Required LSL channel labels (case-insensitive).",
+    "REQUIRED_LSL_LABELS": "Expected LSL channel labels (case-insensitive).",
     "REQUIRE_EXACTLY_4_CHANNELS": "Require exactly 4 EEG channels from LSL.",
-    "LIVE_VIZ_ENABLED": "Emit Step 7 live model-view data for the Model Views window.",
-    "LIVE_VIZ_FPS": "Step 7 live model-view update rate (Hz).",
+    "LIVE_VIZ_ENABLED": "Send Step 7 live model-view data to the Model Views window.",
+    "LIVE_VIZ_FPS": "Step 7 live model-view refresh rate (Hz).",
     "STREAMER_INTERNAL": "Internal streamer enabled.",
     "STREAMER_STREAM_NAME": "Internal streamer LSL name.",
     "STREAMER_STREAM_TYPE": "Internal streamer LSL type.",
     "LABEL_CHECK_ACKNOWLEDGED": "Operator acknowledged label mismatch.",
-    "model_path": "Model path for live inference.",
-    "scaler_path": "Scaler path for live inference.",
-    "session_dir": "Session directory under subjects/<id>/sessions/<session_id>. For Step 7, this is the launch/preflight anchor and should be the canonical deployment session.",
-    "npz": "Window dataset NPZ. Leave blank to auto-resolve from the selected session when supported.",
-    "out_dir": "Output directory override for the current step.",
+    "model_path": "Model file for Step 7 live inference.",
+    "scaler_path": "Scaler file for Step 7 live inference.",
+    "session_dir": "Session directory under subjects/<id>/sessions/<session_id>. In Step 7, this is the launch/preflight session.",
+    "npz": "Window dataset NPZ. Leave blank to auto-resolve it from the selected session when supported.",
+    "out_dir": "Output directory for this step.",
     "out": "Single-figure output path.",
-    "stream_name": "LSL stream name for live inference.",
-    "stream_type": "LSL stream type for live inference.",
-    "lsl_source_id": "Explicit LSL source-id to pin the exact live stream identity. Required for a decisive Step 7 run.",
-    "LSL_RESOLVE_TIMEOUT": "Seconds Step 7 will wait while resolving the live LSL stream.",
+    "stream_name": "LSL stream name for Step 7 live inference.",
+    "stream_type": "LSL stream type for Step 7 live inference.",
+    "lsl_source_id": "Pin Step 7 to one live LSL source_id. Required for decisive live runs.",
+    "LSL_RESOLVE_TIMEOUT": "Seconds Step 7 waits while resolving the live LSL stream.",
     "alignment_internal_max_gap_s": "Maximum internal sample gap tolerated inside a live window before alignment drops it.",
     "hop_sec": "Window hop length in seconds.",
-    "target_fs": "Target sampling rate for live inference.",
-    "allow_drop": "Allow dropping windows in live inference.",
+    "target_fs": "Target sample rate for Step 7 live inference.",
+    "allow_drop": "Allow dropping windows in Step 7 live inference.",
     "latency_threshold_ms": "Latency p95 threshold (ms).",
     "latency_policy": "Latency policy when threshold is exceeded.",
     "log_every": "Live inference log interval (s).",
-    "enable_actuation": "Enable robot hand actuation (explicit opt-in, requires confirmation).",
-    "serial_port": "Serial port for actuation. Leave blank to auto-detect, but set it explicitly for live hardware when possible.",
+    "enable_actuation": "Enable robot hand actuation. Explicit opt-in and requires confirmation.",
+    "serial_port": "Serial port for actuation. Leave blank to auto-detect; set it explicitly when multiple devices are attached.",
     "serial_baud": "Serial baud rate for the hand controller. Must match the Arduino sketch.",
     "actuation_min_prob": "Minimum joint confidence required before a command is sent.",
     "actuation_stability": "Consecutive stable windows required before actuation.",
@@ -782,7 +782,7 @@ TOOLTIPS: Dict[str, str] = {
     "actuation_repeat_ms": "Minimum delay before repeating the same command in milliseconds.",
     "actuation_min_speed": "Minimum non-zero speed scalar allowed for actuated commands.",
     "bluetooth_target": "Bluetooth device name/address for actuation.",
-    "no_file_io": "Disable file outputs during live inference (max performance).",
+    "no_file_io": "Disable file outputs during Step 7. Use only for non-decisive debug runs.",
     "modulate_actuation_speed": "Modulate actuation speed from prediction confidence.",
     "actuation_speed_gamma": "Gamma curve for confidence-based actuation speed modulation.",
     "postprocess": "Enable live postprocessing before action and finger decisions are committed.",
@@ -812,11 +812,11 @@ TOOLTIPS: Dict[str, str] = {
     "bad_channel_clipped_frac": "Mask a channel when its clipped-sample fraction exceeds this threshold.",
     "bad_window_clipped_frac": "Quality-gate a window when the total clipped fraction exceeds this threshold.",
     "bad_window_max_masked_channels": "Maximum bad-channel count that can be masked instead of dropping the live window.",
-    "parity_capture_enabled": "Persist accepted live windows for replay parity checks. Disable only for non-decisive debug runs.",
+    "parity_capture_enabled": "Save accepted live windows for replay parity checks. Leave enabled for decisive runs.",
     "parity_capture_max_windows": "Maximum number of accepted windows retained for parity replay.",
     "parity_capture_flush_every": "Flush parity capture files after this many accepted windows.",
-    "deployment_session_dir": "Optional offline session directory used only by the decisive preflight smoke/distribution checks. Leave it equal to Step 7 session_dir unless you have a deliberate reason to test against a different offline reference.",
-    "infer_subject_override": "Subject override for Step 7 (defaults to current subject).",
+    "deployment_session_dir": "Optional offline session used only for decisive Step 7 preflight checks. Leave it equal to Step 7 session_dir unless you intentionally need a different reference.",
+    "infer_subject_override": "Optional subject override for Step 7. Defaults to the selected subject.",
     "project_name": "Project name for auto-resolving latest session.",
     "subject_id": "Subject ID for auto-resolving latest session.",
     "suite": "Generate the full experimental topomap suite instead of a single figure.",
@@ -853,10 +853,10 @@ TOOLTIPS: Dict[str, str] = {
     "pin_memory": "Pin DataLoader memory (useful for CUDA).",
     "save_preds": "Output path for test predictions.",
     "save_temperature": "Output path for fitted post-hoc temperature scaling parameters.",
-    "pred_log": "Prediction log (JSONL) to analyze. Leave blank to auto-resolve the latest Step 7 log under the selected session.",
+    "pred_log": "Prediction log (JSONL) to analyze. Leave blank to use the latest Step 7 log under the selected session.",
     "out_json": "Output JSON summary path for live prediction review.",
     "segments_csv": "Output CSV of predicted state segments.",
-    "review_csv": "Output CSV of predicted state segments with blank columns for manual video review.",
+    "review_csv": "Review CSV with blank columns for manual video review.",
     "video_offset_s": "Video offset applied to exported segment timestamps for manual review.",
     "short_segment_sec": "Duration threshold used to flag short actuatable bursts in the live review summary.",
     "run_dir": "Explicit output directory for training run.",
@@ -2284,8 +2284,8 @@ class MainWindow(QMainWindow):
         replay_scramble_row = QHBoxLayout()
         self.replay_scramble_checkbox = QCheckBox("Scrambled event order")
         self.replay_scramble_checkbox.setToolTip(
-            "Replay-only visualization mode. Preserves each event's internal window "
-            "order but shuffles event blocks so the robot hand shows more varied motion."
+            "Replay-only view. Preserves each event's internal window order but shuffles "
+            "event blocks so the robot hand shows more varied motion."
         )
         self.replay_scramble_checkbox.toggled.connect(self._toggle_replay_scramble)
         replay_scramble_row.addWidget(self.replay_scramble_checkbox)
@@ -2296,8 +2296,8 @@ class MainWindow(QMainWindow):
             "Robot hand preview (replay only)"
         )
         self.replay_hand_preview_checkbox.setToolTip(
-            "Uses Step 7 serial settings and the shared Step 7-equivalent replay "
-            "actuation logic. Correctness coloring appears only when replay labels exist."
+            "Uses Step 7 serial settings and Step 7-equivalent replay actuation. "
+            "Correctness coloring appears only when replay labels exist."
         )
         self.replay_hand_preview_checkbox.toggled.connect(
             self._toggle_replay_hand_preview
@@ -2358,7 +2358,7 @@ class MainWindow(QMainWindow):
 
         live_tab = QWidget()
         live_layout = QVBoxLayout(live_tab)
-        live_notice = QLabel("Available only while Step 7 Live Infer + Actuate is actively running.")
+        live_notice = QLabel("Visible only while Step 7 is actively running.")
         live_notice.setWordWrap(True)
         live_layout.addWidget(live_notice)
         self.live_pred_label = QLabel("Current prediction: -")
@@ -2373,33 +2373,33 @@ class MainWindow(QMainWindow):
         self._add_section_header(
             live_layout,
             "Feature Maps",
-            "Latest convolutional feature maps from the active Step 7 inference window.",
+            "Latest convolutional feature maps from the active Step 7 window.",
         )
         live_layout.addWidget(self.live_feature_view)
         self._add_section_header(
             live_layout,
             "Hidden Magnitude",
-            "Streaming LSTM hidden-state magnitude from the active Step 7 inference window.",
+            "Streaming LSTM hidden-state magnitude from the active Step 7 window.",
         )
         live_layout.addWidget(self.live_hidden_plot)
         self._add_section_header(
             live_layout,
             "Prediction Timeline (Fingers)",
-            "Per-timestep finger probabilities for the latest Step 7 inference window.",
+            "Per-timestep finger probabilities for the latest Step 7 window.",
         )
         self.live_pred_finger_plot = pg.PlotWidget()
         live_layout.addWidget(self.live_pred_finger_plot)
         self._add_section_header(
             live_layout,
             "Prediction Timeline (Actions)",
-            "Per-timestep action probabilities for the latest Step 7 inference window.",
+            "Per-timestep action probabilities for the latest Step 7 window.",
         )
         self.live_pred_action_plot = pg.PlotWidget()
         live_layout.addWidget(self.live_pred_action_plot)
         self._add_section_header(
             live_layout,
             "Saliency",
-            "Input saliency for the latest Step 7 inference window.",
+            "Input saliency for the latest Step 7 window.",
         )
         live_layout.addWidget(self.live_saliency_view)
 
@@ -3459,31 +3459,31 @@ class MainWindow(QMainWindow):
         header_row.addWidget(
             self._make_info_button(
                 "Pipeline Overview",
-                "High-level map of the end-to-end pipeline. Use the left navigation to "
-                "move through steps in order.",
+                "High-level map of the operator workflow. Use the left navigation to "
+                "move through the main steps in order.",
             )
         )
         header_row.addStretch(1)
         layout.addLayout(header_row)
         intro = QLabel(
-            "Use the navigation on the left to walk through the lossless pipeline. "
-            "Record (lossless) captures raw shards + events only (no inference). "
-            "Window extraction, dataset topomaps, and training are offline, live inference is a separate script, "
-            "and post-live review turns Step 7 prediction logs into segments for manual validation."
+            "Use the left navigation to move through the lossless pipeline. "
+            "Step 1 records raw shards and events only. Extraction, topomaps, training, "
+            "and evaluation are offline. Step 7 handles live inference, and Step 7b "
+            "reviews saved live outputs."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
         for label, row in [
-            ("1) Record (Lossless)", WORKFLOW_ROWS["step1"]),
+            ("Step 1: Record (Lossless)", WORKFLOW_ROWS["step1"]),
             ("Events: Mark/Edit (Optional)", WORKFLOW_ROWS["event_tools"]),
-            ("Validate Session (Tool)", WORKFLOW_ROWS["validate_session"]),
-            ("1b) Extract Windows", WORKFLOW_ROWS["step1b"]),
-            ("1c) Dataset Topomaps", WORKFLOW_ROWS["topomaps"]),
-            ("2) Train Model", WORKFLOW_ROWS["train"]),
-            ("3+) Evaluate / Reports", WORKFLOW_ROWS["evaluate"]),
-            ("7) Live Infer + Actuate", WORKFLOW_ROWS["infer"]),
-            ("7b) Review Live Predictions", WORKFLOW_ROWS["live_review"]),
+            ("Validate Session", WORKFLOW_ROWS["validate_session"]),
+            ("Step 1b: Extract Windows", WORKFLOW_ROWS["step1b"]),
+            ("Step 1c: Dataset Topomaps", WORKFLOW_ROWS["topomaps"]),
+            ("Step 2: Train Model", WORKFLOW_ROWS["train"]),
+            ("Step 3+: Evaluate / Reports", WORKFLOW_ROWS["evaluate"]),
+            ("Step 7: Live Infer + Actuate", WORKFLOW_ROWS["infer"]),
+            ("Step 7b: Review Live Predictions", WORKFLOW_ROWS["live_review"]),
         ]:
             box = QGroupBox(label)
             box_layout = QVBoxLayout(box)
@@ -3599,17 +3599,15 @@ class MainWindow(QMainWindow):
         header_row.addWidget(
             self._make_info_button(
                 "Evaluate / Reports",
-                "Runs model evaluation, Deepchecks diagnostics, paper figures, "
-                "and reports for the selected session. Recommended order: "
-                "Step 3 → 3b → 3c → 4.",
+                "Runs evaluation, Deepchecks diagnostics, figures, and reports for "
+                "the selected session. Recommended order: Step 3 → 3b → 3c → 4.",
             )
         )
         header_row.addStretch(1)
         layout.addLayout(header_row)
         note = QLabel(
-            "Run evaluation on the selected session. Recommended order: "
-            "Step 3 → 3b → 3c → 4. Outputs write under "
-            "`sessions/<id>/processed/` by default."
+            "Run evaluation on the selected session. Recommended order: Step 3 → 3b "
+            "→ 3c → 4. Outputs write under `sessions/<id>/processed/` by default."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -3658,7 +3656,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(box)
         defaults = default_evaluate_settings()
         desc = QLabel(
-            "Core evaluation: action/finger/joint accuracy, raw invalid-pair rate, "
+            "Core evaluation: action/finger/joint accuracy, invalid-pair rate, "
             "confusion matrices, calibration curves, and cached predictions. "
             "Uses the latest model under the selected session."
         )
@@ -4023,9 +4021,7 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_step1_page(self) -> QWidget:
-        lossless_banner = QLabel(
-            "LOSSLESS RECORD — raw EEG + events only. No inference. No drops allowed."
-        )
+        lossless_banner = QLabel("LOSSLESS RECORD: raw EEG + events only. No inference. No drops.")
         lossless_banner.setStyleSheet(
             "background: #263238; color: #fff; padding: 6px; font-weight: 700;"
         )
@@ -4049,18 +4045,16 @@ class MainWindow(QMainWindow):
         header_row.addWidget(
             self._make_info_button(
                 "Events: Mark/Edit",
-                "Review or repair event labels after capture. Use this when you need to "
-                "clean up timestamps or correct labels.",
+                "Review or repair event labels after capture.",
             )
         )
         header_row.addStretch(1)
         layout.addLayout(header_row)
-        info = QLabel("Post-hoc event review/edit tools for the current session.")
+        info = QLabel("Review or edit events for the current session.")
         layout.addWidget(info)
         note = QLabel(
-            "Live graph + event labeling run inside Step 1: Record (Lossless) "
-            "(1_stream_and_record.py). "
-            "This page is for review/repair after capture."
+            "Live graph and event labeling run inside Step 1. Use this page for "
+            "post-capture review and repair."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -4135,9 +4129,9 @@ class MainWindow(QMainWindow):
 
     def _build_step1b_page(self) -> QWidget:
         note = QLabel(
-            "Extract windows from a lossless session directory (raw/ + events.jsonl). "
-            "Use the Session Directory (sessions/<session_id>) field or select a session on the Validate Session page. "
-            "Step 1b rejects OPEN/CLOSE events labeled with finger NONE, so fix or prune those events before extraction."
+            "Extract windows from a lossless session directory (`raw/` + `events.jsonl`). "
+            "Use the Session Dir field here or select a session on the Validate Session page. "
+            "Step 1b rejects `OPEN/CLOSE + NONE`, so fix or prune those events first."
         )
         note.setWordWrap(True)
         return self._build_step_page(
@@ -4151,9 +4145,10 @@ class MainWindow(QMainWindow):
 
     def _build_topomap_page(self) -> QWidget:
         note = QLabel(
-            "Step 1c renders experimental Muse topomaps from extracted windows to inspect dataset trends, "
-            "channel asymmetry, and session drift. This is intentionally separate from Step 3 model evaluation. "
-            "The default mode generates the full suite into the selected session's reports folder."
+            "Step 1c renders experimental Muse topomaps from extracted windows to inspect "
+            "dataset trends, channel asymmetry, and drift. This is dataset QC, not Step 3 "
+            "model evaluation. The default mode writes the full suite to the selected "
+            "session's reports folder."
         )
         note.setWordWrap(True)
         return self._build_step_page(
@@ -4179,8 +4174,8 @@ class MainWindow(QMainWindow):
     def _build_train_page(self) -> QWidget:
         note = QLabel(
             "Step 2 trains the model, then fits post-hoc temperature scaling on a held-out "
-            "calibration subset of the training split. The run now saves model, scaler, "
-            "test predictions, and `temperature_scaling.json` together."
+            "calibration subset. The run saves the model, scaler, test predictions, and "
+            "`temperature_scaling.json` together."
         )
         note.setWordWrap(True)
         return self._build_step_page(
@@ -4220,32 +4215,24 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Live Inference Notes")
         layout = QVBoxLayout(box)
         note = QLabel(
-            "Live inference runs in 7_live_infer_and_actuate.py. "
-            "The UI writes the selected subject's Step 7 config, then launches the same "
-            "runner and session-dir path used from the terminal. "
-            "The Step 7 Session dir field is the authoritative launch/preflight session; "
-            "the main session selector only seeds it when that field is blank. "
-            "When a session (or subject/project) is selected, the latest trained run "
-            "is auto-resolved unless you provide explicit model/scaler overrides. "
-            "The runtime default output is processed/live_infer, but decisive runs should pin a "
-            "fresh out_dir such as processed/live_infer_<run_tag>; the decisive preflight refuses "
-            "reused live output folders. "
-            "Disable file outputs only for non-decisive debug runs; decisive preflight blocks "
-            "no_file_io because it suppresses required evidence. "
-            "Saved subject Step 7 settings are reloaded into this form when you change subjects. "
-            "Use the inference subject dropdown to target a different subject for Step 7. "
-            "Actuation is opt-in and requires confirmation before running. "
-            "Saved run-specific temperature scaling is auto-loaded and applied before softmax. "
-            "The Stream Setup page remains the source of truth for a selected live LSL stream; "
-            "the Step 7 stream fields stay synced for manual overrides. "
-            "Launching from the UI now runs the hardened decisive preflight first and freezes "
-            "the exact launch contract before the process starts."
+            "Use the UI for normal Step 7 runs. It writes the selected subject's Step 7 "
+            "config and launches the same runner used from the CLI.\n\n"
+            "The Step 7 Session dir field is the authoritative launch/preflight session. "
+            "The main session selector only seeds that field when it is blank.\n\n"
+            "When a subject/session is selected, the latest model/scaler deployment bundle "
+            "auto-resolves unless you set explicit overrides. For decisive runs, use a fresh "
+            "out_dir such as `processed/live_infer_<run_tag>`.\n\n"
+            "Leave file output enabled for decisive runs. `no_file_io` is for non-decisive "
+            "debug runs only.\n\n"
+            "Actuation is opt-in and requires confirmation. Saved temperature scaling loads "
+            "automatically. Stream Setup remains the source of truth for the selected LSL "
+            "stream, and the UI runs decisive preflight before Step 7 starts."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
 
         self.live_status_label = QLabel(
-            "Live status: stream health not checked; decisive preflight not yet run"
+            "Live status: stream health not checked; preflight not yet run"
         )
         self.live_status_label.setWordWrap(True)
         layout.addWidget(self.live_status_label)
@@ -4253,7 +4240,7 @@ class MainWindow(QMainWindow):
         self.live_launch_summary = QPlainTextEdit()
         self.live_launch_summary.setReadOnly(True)
         self.live_launch_summary.setPlaceholderText(
-            "Step 7 effective config, decisive preflight verdict, and post-run evidence status appear here."
+            "Resolved Step 7 config, preflight verdict, and post-run evidence appear here."
         )
         self.live_launch_summary.setMaximumHeight(220)
         layout.addWidget(self.live_launch_summary)
@@ -4263,13 +4250,12 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Post-Live Review Notes")
         layout = QVBoxLayout(box)
         note = QLabel(
-            "Use this step after a Step 7 session to summarize predictions.jsonl, "
-            "export predicted state segments, and generate a review CSV for video alignment. "
-            "If you leave the prediction log blank, the tool auto-resolves the latest "
+            "Use this step after Step 7 to summarize `predictions.jsonl`, export predicted "
+            "segments, and generate a review CSV.\n\n"
+            "If `pred_log` is blank, the tool resolves the latest "
             "`processed/live_infer*/predictions.jsonl` under the selected Step 7 session, "
-            "preferring fresh `live_infer_<run_tag>` outputs over bare or legacy names. "
-            "The review CSV is intended for manual comparison against recorded video "
-            "or robot-hand motion during shadow-mode validation."
+            "preferring fresh `live_infer_<run_tag>` outputs over bare or legacy names.\n\n"
+            "Use the review CSV for manual comparison against recorded video or robot-hand motion."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -4292,8 +4278,8 @@ class MainWindow(QMainWindow):
         layout.addLayout(header_row)
 
         msg = QLabel(
-            "Export the selected lossless session to an EEGLAB-compatible MAT-file. "
-            "The export uses raw shards plus canonical events and writes a `.set` or `.mat` file."
+            "Export the selected lossless session to an EEGLAB `.set` or `.mat` file. "
+            "The export uses raw shards and canonical events."
         )
         msg.setWordWrap(True)
         layout.addWidget(msg)
@@ -4342,7 +4328,7 @@ class MainWindow(QMainWindow):
         out_layout.addRow("Export File", out_widget)
         layout.addWidget(out_box)
 
-        self.export_status_label = QLabel("Pick a recorded session to enable export.")
+        self.export_status_label = QLabel("Select a recorded session to enable export.")
         self.export_status_label.setWordWrap(True)
         layout.addWidget(self.export_status_label)
 
@@ -4443,13 +4429,13 @@ class MainWindow(QMainWindow):
                 "temperature scaling."
             ),
             "infer": (
-                "Run live inference on an LSL stream or CSV input. Optional actuation is opt-in "
-                "with safety confirmation, latency logging, and auto-loaded run-specific "
-                "temperature scaling."
+                "Run live inference on an LSL stream or CSV input. The UI is the normal "
+                "operator path; the CLI remains available for manual control. Optional "
+                "actuation is opt-in and requires confirmation."
             ),
             "live_review": (
                 "Summarize Step 7 prediction logs, export predicted command segments, and "
-                "generate a reviewer-friendly CSV for video-aligned validation of live sessions."
+                "generate a review CSV for video-aligned validation."
             ),
         }
         return descriptions.get(step_id, "")
@@ -4502,10 +4488,10 @@ class MainWindow(QMainWindow):
             live_box = QGroupBox("Live Graph + Event Labeling")
             live_layout = QVBoxLayout(live_box)
             live_note = QLabel(
-                "The live plot and keyboard event labeling run inside Step 1 "
-                "(1_stream_and_record.py). Keep 'Enable plot' and 'Event marking' checked "
-                "for live capture. Controls: Space=hold event, o/c/r=mode, a/k/n=override, "
-                "1-5=assign finger, q or ESC=stop."
+                "The live plot and keyboard event labeling run inside Step 1. Keep "
+                "'Enable plot' and 'Event marking' checked when you want live labeling. "
+                "Controls: Space=hold event, o/c/r=mode, a/k/n=override, 1-5=assign "
+                "finger, q or ESC=stop."
             )
             live_note.setWordWrap(True)
             live_layout.addWidget(live_note)
@@ -4578,7 +4564,7 @@ class MainWindow(QMainWindow):
 
         if include_event_tools:
             hint = QLabel(
-                "Event marking runs inside Step 1 when enabled. Event review available on Events page."
+                "Event marking runs inside Step 1. Use Events for post-capture review."
             )
             hint.setWordWrap(True)
             layout.addWidget(hint)
@@ -7576,7 +7562,10 @@ class MainWindow(QMainWindow):
         session_text = self.export_session_dir_input.text().strip()
         session_dir = Path(session_text).expanduser() if session_text else None
         export_ready = False
-        status = "Pick a recorded session directory under `subjects/<id>/sessions/<session_id>` to enable export."
+        status = (
+            "Select a recorded session directory under "
+            "`subjects/<id>/sessions/<session_id>` to enable export."
+        )
         if session_dir and session_dir.exists():
             try:
                 session_dir = session_dir.resolve()
@@ -8288,8 +8277,9 @@ class MainWindow(QMainWindow):
                     QMessageBox.warning(
                         self,
                         "Session Dir Required",
-                        "Missing session dir. Step 2 requires the session folder that contains processed EEG windows\n"
-                        "(produced by Step 1b). Select subjects/<id>/sessions/<session_id>.",
+                        "Select the session folder under subjects/<id>/sessions/<session_id>.\n\n"
+                        "Step 2 needs the session that contains the processed EEG windows "
+                        "produced by Step 1b.",
                     )
                     return
             else:
@@ -8298,8 +8288,8 @@ class MainWindow(QMainWindow):
                     QMessageBox.warning(
                         self,
                         "Session Dir Required",
-                        "Missing session dir. Select the session folder under subjects/<id>/sessions/<session_id> "
-                        "or ensure the subject has at least one session.",
+                        "Select the session folder under subjects/<id>/sessions/<session_id>, "
+                        "or ensure the subject already has a session.",
                     )
                     return
         if step_id == "step1b":
@@ -8618,8 +8608,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Session Dir Required",
-                "Missing session dir. Select the session folder under subjects/<id>/sessions/<session_id> "
-                "or ensure the subject has at least one session.",
+                "Select the session folder under subjects/<id>/sessions/<session_id>, "
+                "or ensure the subject already has a session.",
             )
             return None
 
@@ -8675,9 +8665,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Expected Channel Labels Missing",
-                "Step 7 cannot prove model-order channel mapping for this launch.\n\n"
-                "Provide REQUIRED_LSL_LABELS or ensure the selected deployment session "
-                "contains training_npz.channel_names in processed/eeg_windows.npz.",
+                "Step 7 cannot verify model-order channel mapping for this launch.\n\n"
+                "Set REQUIRED_LSL_LABELS or use a deployment session whose "
+                "`processed/eeg_windows.npz` contains `training_npz.channel_names`.",
             )
             return None
         settings["LABEL_CHECK_EXPECTED_LABELS"] = list(expected_labels)
@@ -9564,7 +9554,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Session Dir Required",
-                "Missing session dir. Select the session folder under subjects/<id>/sessions/<session_id>.",
+                "Select the session folder under subjects/<id>/sessions/<session_id>.",
             )
             return False
         npz_path = self._resolve_windows_npz_for_current(subject_dir)
@@ -10164,9 +10154,9 @@ class MainWindow(QMainWindow):
             if interactive:
                 self._show_blocking_notice(
                     "Expected Channel Labels Missing",
-                    "Step 7 cannot prove model-order channel mapping for this launch.\n\n"
-                    "Provide REQUIRED_LSL_LABELS or ensure the selected deployment session "
-                    "contains training_npz.channel_names in processed/eeg_windows.npz.",
+                    "Step 7 cannot verify model-order channel mapping for this launch.\n\n"
+                    "Set REQUIRED_LSL_LABELS or use a deployment session whose "
+                    "`processed/eeg_windows.npz` contains `training_npz.channel_names`.",
                 )
             self._update_live_status("Live status: expected channel labels missing")
             self._set_live_buttons_state()

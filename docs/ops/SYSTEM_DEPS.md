@@ -1,10 +1,10 @@
 # System Dependencies
 
-These dependencies are **not** available on PyPI and must be installed with system
-package managers. They are required only for generating LaTeX/PDF reports and
-front-end tooling, not for core model training/evaluation.
+These packages are optional. You do not need them for normal UI or CLI use.
 
-## LaTeX (reports)
+Install them only if you need LaTeX/PDF report generation or other non-PyPI tooling.
+
+## LaTeX For Reports
 
 ### macOS (MacTeX/BasicTeX)
 

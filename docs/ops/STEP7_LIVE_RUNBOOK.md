@@ -1,29 +1,30 @@
 # Step 7 Live Runbook
 
+Use the UI for normal Step 7 work. Use this runbook when you need the manual CLI path for the decisive `2-M16` live run.
+
 ## Scope
 
-Use this runbook for the next real Step 7 live inference run. The goal is an explicit, fail-closed, auditable run that can settle accepted-window inference parity on captured live data.
+This is the fail-closed, auditable manual flow for a real Step 7 live inference run.
 
-Legacy compare/tuning sessions and superseded Step 7 live outputs for `2-M16` were archived under
-`Projects/2-M16/subjects/2-M16/archive/step7/`. They remain available for historical reference but
-are not part of the active live workflow.
+Legacy compare/tuning sessions and superseded Step 7 outputs for `2-M16` are archived under `Projects/2-M16/subjects/2-M16/archive/step7/`. Keep them for reference only; they are not part of the active live workflow.
 
-## Pin These Inputs
+## Pinned Inputs
 
 - Config: `Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json`
 - Session dir: `Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2`
-- Model: pinned in the config and runtime manifest
-- Scaler: pinned in the config and runtime manifest
-- Temperature scaling: resolved beside the pinned model and required at startup
-- Live stream identity: set `LSL_SOURCE_ID` for the actual headset before launch
-- Output dir: use a fresh per-run directory every time
+- Deployment bundle: model, scaler, and temperature scaling resolved from the pinned config and runtime manifest
+- Live stream identity: set `LSL_SOURCE_ID` to the exact headset you want
+- Output dir: use a fresh `processed/live_infer_<run_tag>` directory every run
 
-UI note:
+## UI Notes
+
 - On the Step 7 page, the Step 7 `Session dir` field is the authoritative launch/preflight session.
-- Do not assume the main session selector should override a pinned Step 7 deployment session.
-- Step 7b auto-resolves the latest live output under that Step 7 session and prefers fresh `live_infer_<run_tag>` directories over bare or legacy names.
+- Do not assume the main session selector overrides a pinned Step 7 session.
+- Step 7b resolves the latest live output under that Step 7 session and prefers fresh `live_infer_<run_tag>` directories over bare or legacy names.
 
-## Preflight
+## Optional CLI Flow
+
+### 1. Preflight
 
 ```bash
 export CONFIG="/Users/jonathandavanzo/Desktop/Individual-Finger-Movement-Identification-From-Muse-2-EEG/Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json"
@@ -42,16 +43,16 @@ python3 tools/live_preflight.py \
   --distribution-probe-seconds 15
 ```
 
-Preflight must show all of the following before launch:
+Before launch, confirm all of the following:
 
-- `requested_source_id` is the value you expect for this headset
+- `requested_source_id` is the headset you expect
 - `selected_source_id` matches `requested_source_id`
 - `stream_contract_ok` is `True`
 - `Distribution probe verdict` is not `catastrophic`
-- `out_dir` does not already exist with files in it
-- no errors about missing model, scaler, temperature scaling, or deployable run invariants
+- `out_dir` does not already contain files
+- there are no errors about missing model, scaler, temperature scaling, or deployable-run invariants
 
-## Live Run
+### 2. Launch
 
 ```bash
 python3 7_live_infer_and_actuate.py \
@@ -64,9 +65,9 @@ python3 7_live_infer_and_actuate.py \
   --parity-capture-flush-every 1
 ```
 
-## Expected Outputs
+### 3. Expected Outputs
 
-These files must exist after the run when `no_file_io=false`:
+When `no_file_io=false`, these files must exist after the run:
 
 - `$OUT_DIR/live_infer.log`
 - `$OUT_DIR/live_runtime_manifest.json`
@@ -78,7 +79,7 @@ These files must exist after the run when `no_file_io=false`:
 - `$OUT_DIR/parity_capture/capture_manifest.json`
 - `$OUT_DIR/parity_capture/captured_windows.json`
 
-## Immediate Post-Run Checks
+### 4. Immediate Post-Run Check
 
 ```bash
 python3 - <<'PY' "$OUT_DIR"
@@ -101,25 +102,25 @@ print(json.dumps(payload, indent=2, sort_keys=True))
 PY
 ```
 
-Healthy output looks like:
+Healthy output should show:
 
-- `stream_contract_ok` is `true`
-- `required_outputs_ok` is `true`
-- `required_output_errors` is `null`
-- `selected_source_id` matches the pinned headset id
-- `termination_reason` is `ok` or `interrupted`
-- `distribution_report_write_error` is `null`
+- `stream_contract_ok=true`
+- `required_outputs_ok=true`
+- `required_output_errors=null`
+- `selected_source_id` matching the pinned headset id
+- `termination_reason=ok` or `termination_reason=interrupted`
+- `distribution_report_write_error=null`
 
-## Replay
+### 5. Replay
 
 ```bash
 python3 tools/replay_live_capture.py \
   --capture-dir "$OUT_DIR/parity_capture"
 ```
 
-This must write `$OUT_DIR/parity_report.json`. The command returns nonzero if the capture is malformed or if replay parity fails.
+This must write `$OUT_DIR/parity_report.json`. The command returns nonzero if the capture is malformed or replay parity fails.
 
-## Audit
+### 6. Audit
 
 ```bash
 python3 tools/audit_live_parity.py \
@@ -130,15 +131,15 @@ python3 tools/audit_live_parity.py \
   --write-md
 ```
 
-Healthy audit output after replay looks like:
+Healthy audit output should show:
 
-- `evidence.completeness` is `complete`
-- `evidence.accepted_window_parity_evidence` is `confirmed`
-- `evidence.distribution_evidence` is `confirmed`
+- `evidence.completeness=complete`
+- `evidence.accepted_window_parity_evidence=confirmed`
+- `evidence.distribution_evidence=confirmed`
 - `blocking_errors` is empty
 - `dominant_limiter` is present and consistent with the run evidence
 
-The audit may still confirm pre-inference window/alignment loss. That does not invalidate parity capture if replay evidence is complete.
+The audit can still confirm pre-inference window/alignment loss. That does not invalidate parity capture if replay evidence is complete.
 
 ## Immediate Failure Signatures
 
