@@ -32,7 +32,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Deque, Optional, Sequence, Tuple
+from typing import Any, Collection, Deque, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -1347,11 +1347,36 @@ def _is_default_infer_artifact_path(path_value: Optional[str], filename: str) ->
     }
 
 
-def _dir_has_entries(path: Path) -> bool:
+LIVE_LAUNCH_RESERVED_OUTDIR_FILENAMES = frozenset(
+    {
+        "step7_launch_config.json",
+        "live_preflight_report.json",
+    }
+)
+
+
+def _dir_entry_names(
+    path: Path,
+    *,
+    ignored_names: Optional[Collection[str]] = None,
+) -> list[str]:
+    ignored = {str(name).strip() for name in (ignored_names or ()) if str(name).strip()}
     try:
-        return any(path.iterdir())
+        return sorted(
+            entry.name
+            for entry in path.iterdir()
+            if entry.name not in ignored
+        )
     except FileNotFoundError:
-        return False
+        return []
+
+
+def _dir_has_entries(
+    path: Path,
+    *,
+    ignored_names: Optional[Collection[str]] = None,
+) -> bool:
+    return bool(_dir_entry_names(path, ignored_names=ignored_names))
 
 
 def _collect_required_output_status(
@@ -1445,6 +1470,7 @@ def resolve_live_launch_plan(
     out_dir_override: Optional[str],
     allow_outside_base: bool,
     no_file_io_override: Optional[bool] = None,
+    validate_out_dir_freshness: bool = True,
 ) -> LiveLaunchPlan:
     repo_root = _resolve_repo_root(config_path)
     project_name, subject_id = _derive_project_subject(
@@ -1625,7 +1651,15 @@ def resolve_live_launch_plan(
         else bool(config_no_file_io)
     )
     record_raw = not no_file_io
-    if record_raw and out_dir.exists() and _dir_has_entries(out_dir):
+    if (
+        validate_out_dir_freshness
+        and record_raw
+        and out_dir.exists()
+        and _dir_has_entries(
+            out_dir,
+            ignored_names=LIVE_LAUNCH_RESERVED_OUTDIR_FILENAMES,
+        )
+    ):
         raise RuntimeError(
             f"Output dir already exists and is not empty: {out_dir}. "
             "Choose a fresh --out-dir for an unambiguous live run."

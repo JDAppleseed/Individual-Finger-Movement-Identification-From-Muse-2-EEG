@@ -24,6 +24,11 @@ from tools.analyze_live_raw_inputs import build_distribution_report
 from utils.channel_labels import parse_channel_label_list
 from utils.live_infer_common import require_deployable_run
 from utils.live_parity import write_json
+from utils.live_preflight_report import (
+    LIVE_PREFLIGHT_REPORT_VERSION,
+    serialize_live_preflight_launch_plan,
+    extract_live_preflight_launch_plan,
+)
 from utils.lsl_stream_select import resolve_source_id_preference
 from utils.session_layout import SessionLayout
 
@@ -397,6 +402,10 @@ def _build_step7_command(
     ]
     if launch_plan.selected_session_dir is not None:
         cmd += ["--session-dir", str(launch_plan.selected_session_dir)]
+    if getattr(launch_plan, "model_path", None) is not None:
+        cmd += ["--model-path", str(launch_plan.model_path)]
+    if getattr(launch_plan, "scaler_path", None) is not None:
+        cmd += ["--scaler-path", str(launch_plan.scaler_path)]
     cmd += ["--out-dir", str(launch_plan.out_dir)]
     if source_id:
         cmd += ["--lsl-source-id", str(source_id)]
@@ -410,52 +419,11 @@ def _build_step7_command(
     return _shell_join(cmd)
 
 
-def _serialize_launch_plan(launch_plan: Any) -> dict[str, Any] | None:
-    if launch_plan is None:
+def _normalized_text(value: Any) -> str | None:
+    if value in (None, ""):
         return None
-    return {
-        "project_name": getattr(launch_plan, "project_name", None),
-        "subject_id": getattr(launch_plan, "subject_id", None),
-        "selection_source": getattr(launch_plan, "selection_source", None),
-        "session_dir_inferred": bool(
-            getattr(launch_plan, "session_dir_inferred", False)
-        ),
-        "selected_session_dir": (
-            str(getattr(launch_plan, "selected_session_dir", ""))
-            if getattr(launch_plan, "selected_session_dir", None) is not None
-            else None
-        ),
-        "explicit_overrides": list(
-            getattr(launch_plan, "explicit_overrides", ()) or ()
-        ),
-        "chosen_run_dir": (
-            str(getattr(launch_plan, "chosen_run_dir", ""))
-            if getattr(launch_plan, "chosen_run_dir", None) is not None
-            else None
-        ),
-        "model_path": (
-            str(getattr(launch_plan, "model_path", ""))
-            if getattr(launch_plan, "model_path", None) is not None
-            else None
-        ),
-        "scaler_path": (
-            str(getattr(launch_plan, "scaler_path", ""))
-            if getattr(launch_plan, "scaler_path", None) is not None
-            else None
-        ),
-        "temperature_path": (
-            str(getattr(launch_plan, "temperature_path", ""))
-            if getattr(launch_plan, "temperature_path", None) is not None
-            else None
-        ),
-        "out_dir": (
-            str(getattr(launch_plan, "out_dir", ""))
-            if getattr(launch_plan, "out_dir", None) is not None
-            else None
-        ),
-        "no_file_io": bool(getattr(launch_plan, "no_file_io", False)),
-        "record_raw": bool(getattr(launch_plan, "record_raw", False)),
-    }
+    text = str(value).strip()
+    return text or None
 
 
 def run_live_preflight(
@@ -482,6 +450,7 @@ def run_live_preflight(
     validation = validate_live_infer(deepcopy(settings))
     live_mod = _load_live_module()
     _, live_defaults = live_mod._build_arg_parser()
+    config_payload = json.loads(config_path.read_text())
 
     errors = list(validation.errors)
     warnings = list(validation.warnings)
@@ -489,10 +458,79 @@ def run_live_preflight(
     configured_required_labels = parse_labels(settings.get("REQUIRED_LSL_LABELS"))
 
     launch_plan = None
+    serialized_launch_plan = None
+    launch_plan_resolution_succeeded = False
+    launch_plan_resolved_before_validation = False
+    launch_plan_resolution_source = None
+    launch_plan_validation_errors: list[str] = []
+    launch_plan_inputs: dict[str, dict[str, Any]] = {
+        "session_dir": {
+            "cli_override": _normalized_text(session_dir),
+            "config_value": _normalized_text(settings.get("session_dir")),
+            "effective": None,
+            "source": None,
+        },
+        "model_path": {
+            "cli_override": _normalized_text(model_path),
+            "config_value": _normalized_text(settings.get("model_path")),
+            "effective": None,
+            "source": None,
+        },
+        "scaler_path": {
+            "cli_override": _normalized_text(scaler_path),
+            "config_value": _normalized_text(settings.get("scaler_path")),
+            "effective": None,
+            "source": None,
+        },
+        "out_dir": {
+            "cli_override": _normalized_text(out_dir),
+            "config_value": _normalized_text(settings.get("out_dir")),
+            "effective": None,
+            "source": None,
+        },
+        "lsl_source_id": {
+            "cli_override": _normalized_text(lsl_source_id),
+            "config_value": _normalized_text(
+                settings.get("lsl_source_id") or settings.get("LSL_SOURCE_ID")
+            ),
+            "effective": None,
+            "source": None,
+        },
+    }
+
+    def _record_error(message: str, *, validation_error: bool = False) -> None:
+        if message not in errors:
+            errors.append(message)
+        if validation_error and message not in launch_plan_validation_errors:
+            launch_plan_validation_errors.append(message)
+
+    def _set_launch_input_effective(
+        key: str,
+        effective_value: Any,
+        *,
+        fallback_source: str | None = None,
+    ) -> None:
+        slot = launch_plan_inputs.setdefault(
+            key,
+            {
+                "cli_override": None,
+                "config_value": None,
+                "effective": None,
+                "source": None,
+            },
+        )
+        slot["effective"] = _normalized_text(effective_value)
+        if slot.get("cli_override"):
+            slot["source"] = "cli_override"
+        elif slot.get("config_value"):
+            slot["source"] = "config"
+        else:
+            slot["source"] = fallback_source
+
     try:
         launch_plan = live_mod.resolve_live_launch_plan(
             config_path=config_path,
-            config_payload=json.loads(config_path.read_text()),
+            config_payload=config_payload,
             config_settings=settings,
             session_dir_override=session_dir,
             project_name_override=project_name,
@@ -502,9 +540,48 @@ def run_live_preflight(
             out_dir_override=out_dir,
             allow_outside_base=False,
             no_file_io_override=None,
+            validate_out_dir_freshness=False,
         )
+        launch_plan_resolution_succeeded = True
+        launch_plan_resolved_before_validation = True
+        launch_plan_resolution_source = str(
+            getattr(launch_plan, "selection_source", None) or "resolved"
+        )
+        _set_launch_input_effective(
+            "session_dir",
+            (
+                str(launch_plan.selected_session_dir)
+                if getattr(launch_plan, "selected_session_dir", None) is not None
+                else None
+            ),
+            fallback_source=(
+                "subject_latest"
+                if bool(getattr(launch_plan, "session_dir_inferred", False))
+                else None
+            ),
+        )
+        _set_launch_input_effective(
+            "model_path",
+            str(getattr(launch_plan, "model_path", "") or "") or None,
+            fallback_source="auto_resolved",
+        )
+        _set_launch_input_effective(
+            "scaler_path",
+            str(getattr(launch_plan, "scaler_path", "") or "") or None,
+            fallback_source="auto_resolved",
+        )
+        _set_launch_input_effective(
+            "out_dir",
+            str(getattr(launch_plan, "out_dir", "") or "") or None,
+            fallback_source="default",
+        )
+        serialized_launch_plan = serialize_live_preflight_launch_plan(launch_plan)
     except Exception as exc:
-        errors.append(str(exc))
+        detail = str(exc)
+        if "Output dir already exists and is not empty" in detail:
+            _record_error(f"preflight_out_dir_not_fresh: {detail}", validation_error=True)
+        else:
+            _record_error(f"preflight_launch_plan_contract_violation: {detail}")
 
     source_pref = resolve_source_id_preference(
         cli_source_id=lsl_source_id,
@@ -518,6 +595,11 @@ def run_live_preflight(
         "requested_source_id": source_pref.requested_source_id,
         "source": source_pref.source,
     }
+    _set_launch_input_effective(
+        "lsl_source_id",
+        source_pref.requested_source_id,
+        fallback_source=source_pref.source,
+    )
     if source_pref.requested_source_id is not None:
         warnings = [
             warning
@@ -578,21 +660,56 @@ def run_live_preflight(
     smoke_session_dir = None
     windows_npz = None
     if launch_plan is not None:
+        reserved_out_dir_names = getattr(
+            live_mod,
+            "LIVE_LAUNCH_RESERVED_OUTDIR_FILENAMES",
+            ("step7_launch_config.json", "live_preflight_report.json"),
+        )
+        ignored_names = {
+            str(name).strip()
+            for name in reserved_out_dir_names
+            if str(name).strip()
+        }
+        unexpected_out_dir_entries: list[str] = []
+        try:
+            unexpected_out_dir_entries = sorted(
+                entry.name
+                for entry in Path(launch_plan.out_dir).iterdir()
+                if entry.name not in ignored_names
+            )
+        except FileNotFoundError:
+            unexpected_out_dir_entries = []
+        if launch_plan.record_raw and unexpected_out_dir_entries:
+            detail = (
+                f"Output dir already exists and is not empty: {launch_plan.out_dir}. "
+                "Choose a fresh --out-dir for an unambiguous live run."
+            )
+            _record_error(f"preflight_out_dir_not_fresh: {detail}", validation_error=True)
         if launch_plan.no_file_io:
-            errors.append("no_file_io is enabled. Disable it for the next live run.")
+            _record_error(
+                "no_file_io is enabled. Disable it for the next live run.",
+                validation_error=True,
+            )
         if not launch_plan.model_path.exists():
-            errors.append(f"model_path not found: {launch_plan.model_path}")
+            _record_error(
+                f"preflight_model_path_invalid: model_path not found: {launch_plan.model_path}",
+                validation_error=True,
+            )
         if not launch_plan.scaler_path.exists():
-            errors.append(f"scaler_path not found: {launch_plan.scaler_path}")
+            _record_error(
+                f"preflight_scaler_path_invalid: scaler_path not found: {launch_plan.scaler_path}",
+                validation_error=True,
+            )
         if not launch_plan.temperature_path.exists():
-            errors.append(
-                f"temperature_scaling.json not found: {launch_plan.temperature_path}"
+            _record_error(
+                f"temperature_scaling.json not found: {launch_plan.temperature_path}",
+                validation_error=True,
             )
         if settings.get("enable_actuation"):
             try:
                 deployable_info = require_deployable_run(launch_plan.model_path.parent)
             except RuntimeError as exc:
-                errors.append(str(exc))
+                _record_error(str(exc), validation_error=True)
         deployment_session_dir = _resolve_repo_path(settings.get("deployment_session_dir"))
         smoke_session_dir = launch_plan.selected_session_dir
         if smoke_session_dir is not None and smoke_session_dir.exists():
@@ -621,16 +738,26 @@ def run_live_preflight(
                     deployment_run_dir=launch_plan.model_path.parent,
                 )
             except Exception as exc:
-                errors.append(f"expected channel labels unavailable: {exc}")
+                _record_error(
+                    f"expected channel labels unavailable: {exc}",
+                    validation_error=True,
+                )
 
     distribution_probe_compact = None
     if probe_distribution:
         if resolved_stream is None:
-            errors.append("distribution probe requires a resolved live stream")
-        elif launch_plan is None or not launch_plan.model_path.exists():
-            errors.append("distribution probe requires a valid deployment model path")
-        elif windows_npz is None or not windows_npz.exists():
+            _record_error("distribution probe requires a resolved live stream")
+        elif launch_plan is None:
             errors.append(
+                "preflight_model_path_missing: distribution probe requires a valid deployment model path"
+            )
+        elif not launch_plan.model_path.exists():
+            _record_error(
+                f"preflight_model_path_invalid: distribution probe requires an existing deployment model path: {launch_plan.model_path}",
+                validation_error=True,
+            )
+        elif windows_npz is None or not windows_npz.exists():
+            _record_error(
                 "distribution probe requires an offline windows NPZ for comparison"
             )
         else:
@@ -672,8 +799,11 @@ def run_live_preflight(
                 )
                 errors.extend(probe_errors)
                 warnings.extend(probe_warnings)
+                for probe_error in probe_errors:
+                    if probe_error not in launch_plan_validation_errors:
+                        launch_plan_validation_errors.append(probe_error)
             except Exception as exc:
-                errors.append(f"distribution probe failed: {exc}")
+                _record_error(f"distribution probe failed: {exc}")
 
     smoke_ok = True
     smoke_cmd = None
@@ -772,12 +902,40 @@ def run_live_preflight(
         "smoke_session_dir": str(smoke_session_dir) if smoke_session_dir else None,
     }
 
+    launch_plan_contract_status = "not_resolved"
+    launch_plan_contract_diagnostics: dict[str, Any] = {}
+    if launch_plan_resolution_succeeded:
+        if serialized_launch_plan is None:
+            serialized_launch_plan = serialize_live_preflight_launch_plan(launch_plan)
+        _validated_launch_plan, launch_plan_contract_diagnostics = (
+            extract_live_preflight_launch_plan({"launch_plan": serialized_launch_plan})
+        )
+        launch_plan_contract_status = str(
+            launch_plan_contract_diagnostics.get("reason") or "ok"
+        )
+        if launch_plan_contract_status != "ok":
+            errors.append(
+                "preflight_launch_plan_contract_violation: "
+                f"launch_plan serialized to an unusable value after successful resolution. "
+                f"reason={launch_plan_contract_status}"
+            )
+
     return {
+        "report_version": LIVE_PREFLIGHT_REPORT_VERSION,
         "ready": bool(not errors and smoke_ok),
         "config_path": str(config_path),
         "errors": errors,
         "warnings": warnings,
-        "launch_plan": _serialize_launch_plan(launch_plan),
+        "launch_plan": serialized_launch_plan,
+        "launch_plan_resolution_succeeded": bool(launch_plan_resolution_succeeded),
+        "launch_plan_resolved_before_validation": bool(
+            launch_plan_resolved_before_validation
+        ),
+        "launch_plan_resolution_source": launch_plan_resolution_source,
+        "launch_plan_inputs": launch_plan_inputs,
+        "launch_plan_validation_errors": launch_plan_validation_errors,
+        "launch_plan_contract_status": launch_plan_contract_status,
+        "launch_plan_contract_diagnostics": launch_plan_contract_diagnostics,
         "source_preference": source_pref_payload,
         "stream_probe": {
             "resolution": stream_resolution,

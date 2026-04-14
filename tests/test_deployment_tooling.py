@@ -711,6 +711,7 @@ def test_run_live_preflight_fails_without_source_id_or_parity_capture(
         ),
     )
     monkeypatch.setattr(mod, "_load_live_module", lambda: fake_live_mod)
+    monkeypatch.delenv("LSL_SOURCE_ID", raising=False)
 
     report = mod.run_live_preflight(config_path=config_path, skip_smoke=True)
 
@@ -719,7 +720,14 @@ def test_run_live_preflight_fails_without_source_id_or_parity_capture(
     assert any("parity_capture_enabled is not enabled" in err for err in report["errors"])
     assert report["effective_contract"]["requested_source_id"] is None
     assert report["effective_contract"]["parity_capture_enabled"] is False
+    assert report["report_version"] == 1
+    assert report["launch_plan_resolution_succeeded"] is True
+    assert report["launch_plan_contract_status"] == "ok"
+    assert report["launch_plan"]["schema_version"] == 1
+    assert report["launch_plan"]["selected_session_dir"] == str(session_dir)
     assert report["launch_plan"]["model_path"] == str(model_path)
+    assert report["launch_plan"]["scaler_path"] == str(scaler_path)
+    assert report["launch_plan"]["out_dir"] == str(out_dir)
 
 
 def test_run_live_preflight_accepts_env_source_id_and_emits_recommended_commands(
@@ -792,12 +800,192 @@ def test_run_live_preflight_accepts_env_source_id_and_emits_recommended_commands
 
     assert report["ready"] is True
     assert report["errors"] == []
+    assert report["report_version"] == 1
+    assert report["launch_plan_resolution_succeeded"] is True
+    assert report["launch_plan_contract_status"] == "ok"
+    assert report["launch_plan"]["schema_version"] == 1
+    assert report["launch_plan"]["selected_session_dir"] == str(session_dir)
     assert report["effective_contract"]["requested_source_id"] == "env-source-123"
     assert report["effective_contract"]["source_id_source"] == "env"
     assert report["effective_contract"]["parity_capture_enabled"] is True
     assert "--lsl-source-id env-source-123" in report["recommended_commands"]["live"]
+    assert f"--model-path {model_path}" in report["recommended_commands"]["live"]
+    assert f"--scaler-path {scaler_path}" in report["recommended_commands"]["live"]
     assert "--parity-capture-enabled" in report["recommended_commands"]["live"]
     assert not any("lsl_source_id is blank in config" in warning for warning in report["warnings"])
+
+
+def test_run_live_preflight_classifies_nonfresh_out_dir_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    mod = _load_module("tools/live_preflight.py", "live_preflight_outdir_classification")
+    config_path = tmp_path / "infer.json"
+    config_path.write_text(json.dumps({"settings": {}}))
+
+    fake_live_mod = SimpleNamespace(
+        _build_arg_parser=lambda: (None, {"parity_capture_enabled": True}),
+        resolve_live_launch_plan=lambda **kwargs: (_ for _ in ()).throw(
+            RuntimeError(
+                "Output dir already exists and is not empty: /tmp/live_infer. Choose a fresh --out-dir for an unambiguous live run."
+            )
+        ),
+    )
+    monkeypatch.setattr(mod, "_load_live_module", lambda: fake_live_mod)
+
+    report = mod.run_live_preflight(
+        config_path=config_path,
+        allow_no_source_id=True,
+        allow_no_parity_capture=True,
+        skip_smoke=True,
+    )
+
+    assert report["ready"] is False
+    assert any(
+        error.startswith("preflight_out_dir_not_fresh:")
+        for error in report["errors"]
+    )
+
+
+def test_run_live_preflight_flags_empty_launch_plan_after_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    mod = _load_module("tools/live_preflight.py", "live_preflight_launch_plan_contract")
+    config_path = tmp_path / "infer.json"
+    config_path.write_text(json.dumps({"settings": {}}))
+
+    launch_plan = SimpleNamespace(
+        project_name="Demo",
+        subject_id="S01",
+        selection_source="config",
+        session_dir_inferred=False,
+        selected_session_dir=tmp_path / "session",
+        explicit_overrides=[],
+        chosen_run_dir=tmp_path / "run",
+        model_path=tmp_path / "run" / "finger_action_model.pt",
+        scaler_path=tmp_path / "run" / "scaler.npz",
+        temperature_path=tmp_path / "run" / "temperature_scaling.json",
+        out_dir=tmp_path / "live_infer",
+        no_file_io=False,
+        record_raw=False,
+    )
+
+    fake_live_mod = SimpleNamespace(
+        _build_arg_parser=lambda: (None, {"parity_capture_enabled": True}),
+        resolve_live_launch_plan=lambda **kwargs: launch_plan,
+    )
+    monkeypatch.setattr(mod, "_load_live_module", lambda: fake_live_mod)
+    monkeypatch.setattr(mod, "serialize_live_preflight_launch_plan", lambda lp: {})
+
+    report = mod.run_live_preflight(
+        config_path=config_path,
+        allow_no_source_id=True,
+        allow_no_parity_capture=True,
+        skip_smoke=True,
+    )
+
+    assert report["launch_plan_resolution_succeeded"] is True
+    assert report["launch_plan"] == {}
+    assert report["launch_plan_contract_status"] == "preflight_launch_plan_empty"
+    assert any(
+        "preflight_launch_plan_contract_violation" in error
+        for error in report["errors"]
+    )
+
+
+def test_run_live_preflight_preserves_resolved_plan_when_out_dir_validation_fails(
+    tmp_path: Path,
+):
+    mod = _load_module("tools/live_preflight.py", "live_preflight_preserve_plan_outdir")
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True)
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    model_path = artifact_dir / "finger_action_model.pt"
+    scaler_path = artifact_dir / "scaler.npz"
+    temperature_path = artifact_dir / "temperature_scaling.json"
+    model_path.write_text("model")
+    scaler_path.write_text("scaler")
+    temperature_path.write_text("{}")
+    out_dir = session_dir / "processed" / "live_infer_001"
+    out_dir.mkdir(parents=True)
+    (out_dir / "stale.txt").write_text("stale")
+
+    config_path = tmp_path / "infer.json"
+    config_path.write_text(json.dumps({"settings": {}}))
+
+    report = mod.run_live_preflight(
+        config_path=config_path,
+        session_dir=str(session_dir),
+        model_path=str(model_path),
+        scaler_path=str(scaler_path),
+        out_dir=str(out_dir),
+        allow_no_source_id=True,
+        allow_no_parity_capture=True,
+        skip_smoke=True,
+    )
+
+    assert report["ready"] is False
+    assert report["launch_plan_resolution_succeeded"] is True
+    assert report["launch_plan_resolved_before_validation"] is True
+    assert report["launch_plan_contract_status"] == "ok"
+    assert report["launch_plan"]["selected_session_dir"] == str(session_dir.resolve())
+    assert report["launch_plan"]["model_path"] == str(model_path.resolve())
+    assert report["launch_plan"]["scaler_path"] == str(scaler_path.resolve())
+    assert report["launch_plan"]["out_dir"] == str(out_dir.resolve())
+    assert any(
+        error.startswith("preflight_out_dir_not_fresh:")
+        for error in report["errors"]
+    )
+    assert any(
+        error.startswith("preflight_out_dir_not_fresh:")
+        for error in report["launch_plan_validation_errors"]
+    )
+    assert report["launch_plan_inputs"]["model_path"]["source"] == "cli_override"
+    assert report["launch_plan_inputs"]["out_dir"]["source"] == "cli_override"
+
+
+def test_run_live_preflight_preserves_resolved_plan_when_model_path_is_invalid(
+    tmp_path: Path,
+):
+    mod = _load_module("tools/live_preflight.py", "live_preflight_preserve_plan_model")
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True)
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    model_path = artifact_dir / "missing_model.pt"
+    scaler_path = artifact_dir / "scaler.npz"
+    scaler_path.write_text("scaler")
+    out_dir = session_dir / "processed" / "live_infer_002"
+    config_path = tmp_path / "infer.json"
+    config_path.write_text(json.dumps({"settings": {}}))
+
+    report = mod.run_live_preflight(
+        config_path=config_path,
+        session_dir=str(session_dir),
+        model_path=str(model_path),
+        scaler_path=str(scaler_path),
+        out_dir=str(out_dir),
+        allow_no_source_id=True,
+        allow_no_parity_capture=True,
+        skip_smoke=True,
+    )
+
+    assert report["ready"] is False
+    assert report["launch_plan_resolution_succeeded"] is True
+    assert report["launch_plan_contract_status"] == "ok"
+    assert report["launch_plan"]["model_path"] == str(model_path.resolve())
+    assert any(
+        error.startswith("preflight_model_path_invalid:")
+        for error in report["errors"]
+    )
+    assert any(
+        error.startswith("preflight_model_path_invalid:")
+        for error in report["launch_plan_validation_errors"]
+    )
+    assert report["launch_plan_inputs"]["model_path"]["source"] == "cli_override"
+    assert report["launch_plan_inputs"]["session_dir"]["source"] == "cli_override"
 
 
 def test_live_preflight_main_writes_report_artifact(
@@ -1040,6 +1228,38 @@ def test_resolve_live_launch_plan_rejects_nonempty_output_dir(tmp_path: Path):
             out_dir_override=None,
             allow_outside_base=False,
         )
+
+
+def test_resolve_live_launch_plan_allows_reserved_preflight_files_only(tmp_path: Path):
+    mod = _load_module("7_live_infer_and_actuate.py", "live_launch_plan_reserved_preflight_out")
+
+    session_dir = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "sessions" / "sessReserved"
+    run_dir = session_dir / "processed" / "models" / "run_001"
+    run_dir.mkdir(parents=True)
+    (run_dir / "finger_action_model.pt").write_text("model")
+    (run_dir / "scaler.npz").write_text("scaler")
+    out_dir = session_dir / "processed" / "live_infer"
+    out_dir.mkdir(parents=True)
+    (out_dir / "step7_launch_config.json").write_text("{}")
+    (out_dir / "live_preflight_report.json").write_text("{}")
+    config_path = tmp_path / "Projects" / "Demo" / "subjects" / "S01" / "config" / "infer.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps({"project_name": "Demo", "subject_id": "S01"}))
+
+    plan = mod.resolve_live_launch_plan(
+        config_path=config_path,
+        config_payload={"project_name": "Demo", "subject_id": "S01"},
+        config_settings={"session_dir": str(session_dir)},
+        session_dir_override=str(session_dir),
+        project_name_override=None,
+        subject_id_override=None,
+        model_path_override=None,
+        scaler_path_override=None,
+        out_dir_override=None,
+        allow_outside_base=False,
+    )
+
+    assert plan.out_dir == out_dir.resolve()
 
 
 def test_resolve_live_launch_plan_requires_session_run_or_explicit_artifacts(tmp_path: Path):

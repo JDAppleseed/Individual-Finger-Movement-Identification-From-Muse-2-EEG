@@ -292,7 +292,7 @@ def test_prepare_live_infer_launch_freezes_source_and_session_artifacts(
 
     assert launch is not None
     assert launch.settings["lsl_source_id"] == "captured-source-123"
-    assert launch.settings["deployment_session_dir"] == str(session_dir)
+    assert launch.settings["deployment_session_dir"] == str(session_dir.resolve())
     assert launch.settings["model_path"].endswith("run_001/finger_action_model.pt")
     assert launch.settings["scaler_path"].endswith("run_001/scaler.npz")
     assert launch.settings["out_dir"].endswith("processed/live_infer_20250101_000010")
@@ -307,6 +307,54 @@ def test_prepare_live_infer_launch_freezes_source_and_session_artifacts(
     )
     persisted = json.loads(canonical_config_path.read_text())
     assert persisted["settings"]["actuation_min_prob"] == pytest.approx(0.2)
+    assert "--model-path" in launch.args
+    assert "--scaler-path" in launch.args
+    assert "--out-dir" in launch.args
+    assert "captured-source-123" in launch.args
+
+
+def test_prepare_live_infer_launch_refreshes_autofilled_out_dir_for_new_launch_action(
+    window, monkeypatch: pytest.MonkeyPatch
+):
+    project = "Demo"
+    subject = "S01"
+    backend_session = "20250101_000000"
+    ui_session = f"{subject}_{backend_session}"
+    subject_dir = Path("Projects") / project / "subjects" / subject
+    session_dir = subject_dir / "sessions" / ui_session
+    run_dir = session_dir / "processed" / "models" / "run_001"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "finger_action_model.pt").write_text("model")
+    (run_dir / "scaler.npz").write_text("scaler")
+    (run_dir / "temperature_scaling.json").write_text("{}")
+
+    stale_out_dir = session_dir / "processed" / "live_infer_20250101_000010"
+    stale_out_dir.mkdir(parents=True, exist_ok=True)
+    (stale_out_dir / "stale.txt").write_text("stale")
+
+    window.current_project = project
+    window.current_subject = subject
+    window.current_session_backend = backend_session
+    window.current_session_ui = ui_session
+    window.session_dir_input.setText(str(session_dir))
+    window.live_stream_name = "Muse2-EEG"
+    window.live_stream_type = "EEG"
+    window.live_lsl_source_id = "captured-source-123"
+
+    infer_fields = window.fields["infer"]
+    infer_fields["stream_name"].setText("Muse2-EEG")
+    infer_fields["stream_type"].setText("EEG")
+    infer_fields["deployment_session_dir"].setText(str(session_dir))
+    infer_fields["out_dir"].setText(str(stale_out_dir))
+    window._auto_field_values["infer.out_dir"] = str(stale_out_dir)
+
+    monkeypatch.setattr(ui_mod, "session_backend_id", lambda timestamp=None: "20250101_000011")
+
+    launch = window._prepare_live_infer_launch(window.scripts["live_infer"])
+
+    assert launch is not None
+    assert launch.settings["out_dir"].endswith("processed/live_infer_20250101_000011")
+    assert "20250101_000010" not in launch.settings["out_dir"]
 
 
 def test_select_subject_prefers_canonical_step7_config_over_subject_mirror(
@@ -514,6 +562,39 @@ def test_build_live_preflight_args_uses_explicit_report_artifact(window, tmp_pat
     assert "--json" not in args
 
 
+def test_build_live_preflight_args_uses_frozen_launch_plan_paths(window, tmp_path: Path):
+    resolved_plan = SimpleNamespace(
+        selected_session_dir=tmp_path / "session",
+        model_path=tmp_path / "artifacts" / "finger_action_model.pt",
+        scaler_path=tmp_path / "artifacts" / "scaler.npz",
+        out_dir=tmp_path / "live_infer_001",
+    )
+    launch = ui_mod.PreparedLiveInferLaunch(
+        args=[],
+        cwd=str(tmp_path),
+        env={"LSL_SOURCE_ID": "source-123"},
+        config_path=tmp_path / "infer.json",
+        config_payload={},
+        settings={"lsl_source_id": "source-123"},
+        subject_dir=tmp_path,
+        session_dir=tmp_path / "session",
+        preflight_report_path=tmp_path / "live_preflight_report.json",
+        resolved_launch_plan=resolved_plan,
+    )
+
+    args = window._build_live_preflight_args(launch)
+
+    assert ["--session-dir", str(resolved_plan.selected_session_dir)] == args[5:7]
+    assert "--model-path" in args
+    assert str(resolved_plan.model_path) in args
+    assert "--scaler-path" in args
+    assert str(resolved_plan.scaler_path) in args
+    assert "--out-dir" in args
+    assert str(resolved_plan.out_dir) in args
+    assert "--lsl-source-id" in args
+    assert "source-123" in args
+
+
 def test_load_live_preflight_report_reports_missing_empty_and_malformed(window, tmp_path: Path):
     report_path = tmp_path / "live_preflight_report.json"
 
@@ -609,6 +690,349 @@ def test_live_preflight_finish_surfaces_specific_contract_failure(
     assert notices
     assert "preflight_subprocess_failed" in notices[0][1]
     assert "report_exists=False" in notices[0][1]
+
+
+def test_live_preflight_finish_blocks_on_launch_plan_mismatch(
+    window, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    report_path = tmp_path / "live_preflight_report.json"
+    payload = {
+        "ready": True,
+        "warnings": [],
+        "errors": [],
+        "launch_plan": {
+            "selected_session_dir": str(tmp_path / "other_session"),
+            "model_path": str(tmp_path / "other_model.pt"),
+            "scaler_path": str(tmp_path / "other_scaler.npz"),
+            "out_dir": str(tmp_path / "other_live_infer"),
+        },
+        "effective_contract": {},
+    }
+    report_path.write_text(json.dumps(payload))
+
+    launch = ui_mod.PreparedLiveInferLaunch(
+        args=[],
+        cwd=str(tmp_path),
+        env={},
+        config_path=tmp_path / "infer.json",
+        config_payload={},
+        settings={},
+        subject_dir=tmp_path,
+        session_dir=tmp_path / "session",
+        preflight_report_path=report_path,
+        resolved_launch_plan=SimpleNamespace(
+            selected_session_dir=tmp_path / "session",
+            model_path=tmp_path / "finger_action_model.pt",
+            scaler_path=tmp_path / "scaler.npz",
+            out_dir=tmp_path / "live_infer",
+        ),
+    )
+    window._pending_live_launch = launch
+    window._live_preflight_lines = []
+
+    notices = []
+    monkeypatch.setattr(window, "_show_blocking_notice", lambda title, message: notices.append((title, message)))
+
+    window._on_live_preflight_finished(0, 0)
+
+    assert notices
+    assert "preflight_runtime_resolution_mismatch" in notices[0][1]
+
+
+def test_live_preflight_finish_uses_matching_launch_plan_on_blocked_preflight(
+    window, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    report_path = tmp_path / "live_preflight_report.json"
+    payload = {
+        "ready": False,
+        "warnings": [],
+        "errors": [
+            "preflight_out_dir_not_fresh: Output dir already exists and is not empty: /tmp/live_infer. Choose a fresh --out-dir for an unambiguous live run."
+        ],
+        "launch_plan": {
+            "selected_session_dir": str(tmp_path / "session"),
+            "model_path": str(tmp_path / "finger_action_model.pt"),
+            "scaler_path": str(tmp_path / "scaler.npz"),
+            "out_dir": str(tmp_path / "live_infer"),
+        },
+        "launch_plan_resolution_succeeded": True,
+        "launch_plan_resolved_before_validation": True,
+        "launch_plan_contract_status": "ok",
+        "launch_plan_validation_errors": [
+            "preflight_out_dir_not_fresh: Output dir already exists and is not empty: /tmp/live_infer. Choose a fresh --out-dir for an unambiguous live run."
+        ],
+        "effective_contract": {},
+    }
+    report_path.write_text(json.dumps(payload))
+
+    launch = ui_mod.PreparedLiveInferLaunch(
+        args=[],
+        cwd=str(tmp_path),
+        env={},
+        config_path=tmp_path / "infer.json",
+        config_payload={},
+        settings={},
+        subject_dir=tmp_path,
+        session_dir=tmp_path / "session",
+        preflight_report_path=report_path,
+        resolved_launch_plan=SimpleNamespace(
+            selected_session_dir=tmp_path / "session",
+            model_path=tmp_path / "finger_action_model.pt",
+            scaler_path=tmp_path / "scaler.npz",
+            out_dir=tmp_path / "live_infer",
+        ),
+    )
+    window._pending_live_launch = launch
+    window._live_preflight_lines = []
+
+    notices = []
+    monkeypatch.setattr(
+        window,
+        "_show_blocking_notice",
+        lambda title, message: notices.append((title, message)),
+    )
+
+    window._on_live_preflight_finished(0, 0)
+
+    assert notices
+    assert notices[0][0] == "Step 7 Not Ready"
+    assert "preflight_out_dir_not_fresh" in notices[0][1]
+    assert "preflight_runtime_resolution_mismatch" not in notices[0][1]
+    assert "preflight_launch_plan_empty" not in notices[0][1]
+
+
+def test_live_preflight_finish_reports_missing_launch_plan_distinctly(
+    window, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    report_path = tmp_path / "live_preflight_report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "ready": True,
+                "warnings": [],
+                "errors": [],
+                "effective_contract": {},
+            }
+        )
+    )
+
+    launch = ui_mod.PreparedLiveInferLaunch(
+        args=[],
+        cwd=str(tmp_path),
+        env={},
+        config_path=tmp_path / "infer.json",
+        config_payload={},
+        settings={},
+        subject_dir=tmp_path,
+        session_dir=tmp_path / "session",
+        preflight_report_path=report_path,
+        resolved_launch_plan=SimpleNamespace(
+            selected_session_dir=tmp_path / "session",
+            model_path=tmp_path / "finger_action_model.pt",
+            scaler_path=tmp_path / "scaler.npz",
+            out_dir=tmp_path / "live_infer",
+        ),
+    )
+    window._pending_live_launch = launch
+    window._live_preflight_lines = []
+
+    notices = []
+    monkeypatch.setattr(
+        window,
+        "_show_blocking_notice",
+        lambda title, message: notices.append((title, message)),
+    )
+
+    window._on_live_preflight_finished(0, 0)
+
+    assert notices
+    assert "preflight_launch_plan_missing" in notices[0][1]
+    assert "launch_plan_present=False" in notices[0][1]
+
+
+def test_live_preflight_finish_reports_null_launch_plan_as_empty(
+    window, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    report_path = tmp_path / "live_preflight_report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "ready": True,
+                "warnings": [],
+                "errors": [],
+                "launch_plan": None,
+                "effective_contract": {},
+            }
+        )
+    )
+
+    launch = ui_mod.PreparedLiveInferLaunch(
+        args=[],
+        cwd=str(tmp_path),
+        env={},
+        config_path=tmp_path / "infer.json",
+        config_payload={},
+        settings={},
+        subject_dir=tmp_path,
+        session_dir=tmp_path / "session",
+        preflight_report_path=report_path,
+        resolved_launch_plan=SimpleNamespace(
+            selected_session_dir=tmp_path / "session",
+            model_path=tmp_path / "finger_action_model.pt",
+            scaler_path=tmp_path / "scaler.npz",
+            out_dir=tmp_path / "live_infer",
+        ),
+    )
+    window._pending_live_launch = launch
+    window._live_preflight_lines = []
+
+    notices = []
+    monkeypatch.setattr(
+        window,
+        "_show_blocking_notice",
+        lambda title, message: notices.append((title, message)),
+    )
+
+    window._on_live_preflight_finished(0, 0)
+
+    assert notices
+    assert "preflight_launch_plan_empty" in notices[0][1]
+    assert "launch_plan_key_exists=True" in notices[0][1]
+    assert "launch_plan_is_empty=True" in notices[0][1]
+
+
+def test_live_preflight_finish_reports_empty_launch_plan_as_empty(
+    window, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    report_path = tmp_path / "live_preflight_report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "ready": True,
+                "warnings": [],
+                "errors": [],
+                "launch_plan": {},
+                "effective_contract": {},
+            }
+        )
+    )
+
+    launch = ui_mod.PreparedLiveInferLaunch(
+        args=[],
+        cwd=str(tmp_path),
+        env={},
+        config_path=tmp_path / "infer.json",
+        config_payload={},
+        settings={},
+        subject_dir=tmp_path,
+        session_dir=tmp_path / "session",
+        preflight_report_path=report_path,
+        resolved_launch_plan=SimpleNamespace(
+            selected_session_dir=tmp_path / "session",
+            model_path=tmp_path / "finger_action_model.pt",
+            scaler_path=tmp_path / "scaler.npz",
+            out_dir=tmp_path / "live_infer",
+        ),
+    )
+    window._pending_live_launch = launch
+    window._live_preflight_lines = []
+
+    notices = []
+    monkeypatch.setattr(
+        window,
+        "_show_blocking_notice",
+        lambda title, message: notices.append((title, message)),
+    )
+
+    window._on_live_preflight_finished(0, 0)
+
+    assert notices
+    assert "preflight_launch_plan_empty" in notices[0][1]
+    assert "launch_plan_key_exists=True" in notices[0][1]
+    assert "launch_plan_is_empty=True" in notices[0][1]
+
+
+def test_live_preflight_finish_reports_launch_plan_schema_mismatch_distinctly(
+    window, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    report_path = tmp_path / "live_preflight_report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "ready": True,
+                "warnings": [],
+                "errors": [],
+                "launch_plan": {"out_dir": ""},
+                "effective_contract": {},
+            }
+        )
+    )
+
+    launch = ui_mod.PreparedLiveInferLaunch(
+        args=[],
+        cwd=str(tmp_path),
+        env={},
+        config_path=tmp_path / "infer.json",
+        config_payload={},
+        settings={},
+        subject_dir=tmp_path,
+        session_dir=tmp_path / "session",
+        preflight_report_path=report_path,
+        resolved_launch_plan=SimpleNamespace(
+            selected_session_dir=tmp_path / "session",
+            model_path=tmp_path / "finger_action_model.pt",
+            scaler_path=tmp_path / "scaler.npz",
+            out_dir=tmp_path / "live_infer",
+        ),
+    )
+    window._pending_live_launch = launch
+    window._live_preflight_lines = []
+
+    notices = []
+    monkeypatch.setattr(
+        window,
+        "_show_blocking_notice",
+        lambda title, message: notices.append((title, message)),
+    )
+
+    window._on_live_preflight_finished(0, 0)
+
+    assert notices
+    assert "preflight_launch_plan_schema_mismatch" in notices[0][1]
+    assert "missing_keys" in notices[0][1]
+    assert "empty_keys" in notices[0][1]
+
+
+def test_execute_prepared_live_infer_launch_uses_frozen_args_not_current_widgets(
+    window, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    captured = {}
+    runner = SimpleNamespace(
+        start=lambda exe, args, cwd=None, env=None: captured.update(
+            {"exe": exe, "args": list(args), "cwd": cwd, "env": dict(env or {})}
+        )
+    )
+    monkeypatch.setattr(window, "runner", runner)
+    monkeypatch.setattr(window, "_write_session_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window, "_set_step_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window, "_append_log", lambda *args, **kwargs: None)
+
+    window.fields["infer"]["model_path"].setText(str(tmp_path / "ui_model.pt"))
+    launch = ui_mod.PreparedLiveInferLaunch(
+        args=["/tmp/7_live_infer_and_actuate.py", "--config", str(tmp_path / "frozen.json"), "--model-path", str(tmp_path / "frozen_model.pt")],
+        cwd=str(tmp_path),
+        env={"LSL_SOURCE_ID": "source-123"},
+        config_path=tmp_path / "frozen.json",
+        config_payload={},
+        settings={"model_path": str(tmp_path / "frozen_model.pt")},
+        subject_dir=tmp_path,
+        session_dir=tmp_path / "session",
+    )
+
+    window._execute_prepared_live_infer_launch(launch)
+
+    assert str(tmp_path / "frozen_model.pt") in captured["args"]
+    assert str(tmp_path / "ui_model.pt") not in captured["args"]
 
 
 def test_prepare_live_infer_launch_derives_effective_expected_labels_from_training_npz(

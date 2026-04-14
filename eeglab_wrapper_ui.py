@@ -124,6 +124,10 @@ from utils.label_schema import (
     uses_active_finger_head,
 )
 from utils.postprocess import PostprocessSettings
+from utils.live_preflight_report import (
+    LIVE_PREFLIGHT_LAUNCH_PLAN_REQUIRED_KEYS,
+    extract_live_preflight_launch_plan,
+)
 from utils.session_event_io import resolve_raw_shard_paths
 from utils.session_layout import SessionLayout, resolve_latest_run_dir
 from utils.step7_config import (
@@ -410,6 +414,7 @@ class PreparedLiveInferLaunch:
     session_dir: Optional[Path]
     base_config_path: Optional[Path] = None
     preflight_report_path: Optional[Path] = None
+    resolved_launch_plan: Optional[Any] = None
 
 
 @dataclass
@@ -8619,10 +8624,14 @@ class MainWindow(QMainWindow):
             return None
 
         raw_out_dir = str(settings.get("out_dir") or "").strip()
-        if not raw_out_dir:
-            default_out_dir = self._default_live_infer_out_dir(infer_session_dir)
+        out_dir_widget = self.fields.get("infer", {}).get("out_dir")
+        if should_replace_autofilled_text(
+            raw_out_dir,
+            self._auto_field_values.get("infer.out_dir"),
+            {"", "live_infer", "processed/live_infer"},
+        ):
+            default_out_dir = self._default_live_infer_out_dir(infer_session_dir).resolve()
             settings["out_dir"] = str(default_out_dir)
-            out_dir_widget = self.fields.get("infer", {}).get("out_dir")
             if isinstance(out_dir_widget, QLineEdit):
                 self._maybe_autofill_text(
                     out_dir_widget,
@@ -8630,6 +8639,8 @@ class MainWindow(QMainWindow):
                     key="infer.out_dir",
                     legacy_values={"", "live_infer", "processed/live_infer"},
                 )
+        elif raw_out_dir:
+            settings["out_dir"] = str(Path(raw_out_dir).expanduser())
 
         settings["subject_id"] = subject_for_step
 
@@ -8695,7 +8706,6 @@ class MainWindow(QMainWindow):
                 self._append_log(
                     f"⚠️ Failed to load base Step 7 config {base_config_path}: {exc}"
                 )
-        config_path = Path(str(settings["out_dir"])) / "step7_launch_config.json"
         session_id_value = self.current_session_ui or "UNKNOWN"
         if infer_session_dir is not None:
             session_id_value = infer_session_dir.name
@@ -8719,18 +8729,68 @@ class MainWindow(QMainWindow):
                 "explicit_cli_overrides",
             ],
         }
-        write_json(config_path, config_payload)
+        config_path = Path(str(settings["out_dir"])) / "step7_launch_config.json"
+        live_mod = _load_live_infer_ui_module(self.repo_root)
+        try:
+            resolved_launch_plan = live_mod.resolve_live_launch_plan(
+                config_path=config_path,
+                config_payload=config_payload,
+                config_settings=settings,
+                session_dir_override=str(infer_session_dir),
+                project_name_override=self.current_project,
+                subject_id_override=subject_for_step,
+                model_path_override=str(settings.get("model_path") or "").strip() or None,
+                scaler_path_override=str(settings.get("scaler_path") or "").strip() or None,
+                out_dir_override=str(settings.get("out_dir") or "").strip() or None,
+                allow_outside_base=False,
+                no_file_io_override=None,
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Invalid Step 7 Launch Plan",
+                str(exc),
+            )
+            return None
 
-        args = [str(script_info.path), "--config", str(config_path)]
-        args.extend(["--session-dir", str(infer_session_dir)])
-        args.extend(self._collect_step_args("infer"))
-        preflight_report_path = Path(str(settings["out_dir"])) / "live_preflight_report.json"
-
+        settings["session_dir"] = str(
+            resolved_launch_plan.selected_session_dir or infer_session_dir
+        )
+        settings["deployment_session_dir"] = str(
+            resolved_launch_plan.selected_session_dir or infer_session_dir
+        )
+        settings["model_path"] = str(resolved_launch_plan.model_path)
+        settings["scaler_path"] = str(resolved_launch_plan.scaler_path)
+        settings["out_dir"] = str(resolved_launch_plan.out_dir)
+        config_path = resolved_launch_plan.out_dir / "step7_launch_config.json"
+        preflight_report_path = (
+            resolved_launch_plan.out_dir / "live_preflight_report.json"
+        )
         launch_env: Dict[str, Optional[str]] = {
             "LSL_SOURCE_ID": connector_source_id,
             "LSL_STREAM_NAME": str(self.live_stream_name).strip() or None,
             "LSL_STREAM_TYPE": str(self.live_stream_type).strip() or None,
         }
+        config_payload["settings"] = dict(settings)
+        config_payload["config_resolution"]["runtime_override_keys"] = sorted(
+            diff_step7_settings(base_settings, settings).keys()
+        )
+        write_json(config_path, config_payload)
+
+        requested_source_id = (
+            str(settings.get("lsl_source_id") or "").strip()
+            or str(launch_env.get("LSL_SOURCE_ID") or "").strip()
+            or None
+        )
+        args = [str(script_info.path), "--config", str(config_path)]
+        if resolved_launch_plan.selected_session_dir is not None:
+            args.extend(["--session-dir", str(resolved_launch_plan.selected_session_dir)])
+        args.extend(["--model-path", str(resolved_launch_plan.model_path)])
+        args.extend(["--scaler-path", str(resolved_launch_plan.scaler_path)])
+        args.extend(["--out-dir", str(resolved_launch_plan.out_dir)])
+        if requested_source_id:
+            args.extend(["--lsl-source-id", requested_source_id])
+
         return PreparedLiveInferLaunch(
             args=args,
             cwd=str(self.repo_root),
@@ -8739,9 +8799,10 @@ class MainWindow(QMainWindow):
             config_payload=config_payload,
             settings=dict(settings),
             subject_dir=subject_dir,
-            session_dir=infer_session_dir,
+            session_dir=(resolved_launch_plan.selected_session_dir or infer_session_dir),
             base_config_path=base_config_path,
             preflight_report_path=preflight_report_path,
+            resolved_launch_plan=resolved_launch_plan,
         )
 
     def _execute_prepared_live_infer_launch(
@@ -8812,6 +8873,28 @@ class MainWindow(QMainWindow):
         ]
         return "\n".join(lines)
 
+    def _build_live_launch_override_args(
+        self, launch: PreparedLiveInferLaunch
+    ) -> list[str]:
+        args: list[str] = []
+        plan = launch.resolved_launch_plan
+        if plan is not None and getattr(plan, "selected_session_dir", None) is not None:
+            args.extend(["--session-dir", str(plan.selected_session_dir)])
+        if plan is not None and getattr(plan, "model_path", None) is not None:
+            args.extend(["--model-path", str(plan.model_path)])
+        if plan is not None and getattr(plan, "scaler_path", None) is not None:
+            args.extend(["--scaler-path", str(plan.scaler_path)])
+        if plan is not None and getattr(plan, "out_dir", None) is not None:
+            args.extend(["--out-dir", str(plan.out_dir)])
+        requested_source_id = (
+            str(launch.settings.get("lsl_source_id") or "").strip()
+            or str(launch.env.get("LSL_SOURCE_ID") or "").strip()
+            or None
+        )
+        if requested_source_id:
+            args.extend(["--lsl-source-id", requested_source_id])
+        return args
+
     def _build_live_preflight_args(self, launch: PreparedLiveInferLaunch) -> list[str]:
         args = [
             str(self.repo_root / "tools" / "live_preflight.py"),
@@ -8820,9 +8903,60 @@ class MainWindow(QMainWindow):
             "--probe-stream",
             "--probe-distribution",
         ]
+        args.extend(self._build_live_launch_override_args(launch))
         if launch.preflight_report_path is not None:
             args.extend(["--report-path", str(launch.preflight_report_path)])
         return args
+
+    def _validate_live_preflight_launch_plan(
+        self,
+        launch: PreparedLiveInferLaunch,
+        report: Dict[str, Any],
+    ) -> tuple[str, list[str], Dict[str, Any]]:
+        plan = launch.resolved_launch_plan
+        if plan is None:
+            return "ok", [], {}
+        observed_plan, schema_diagnostics = extract_live_preflight_launch_plan(report)
+        expected_pairs = {
+            "selected_session_dir": (
+                str(plan.selected_session_dir)
+                if getattr(plan, "selected_session_dir", None) is not None
+                else None
+            ),
+            "model_path": (
+                str(plan.model_path)
+                if getattr(plan, "model_path", None) is not None
+                else None
+            ),
+            "scaler_path": (
+                str(plan.scaler_path)
+                if getattr(plan, "scaler_path", None) is not None
+                else None
+            ),
+            "out_dir": (
+                str(plan.out_dir)
+                if getattr(plan, "out_dir", None) is not None
+                else None
+            ),
+        }
+        diagnostics: Dict[str, Any] = {
+            "comparison_keys": list(LIVE_PREFLIGHT_LAUNCH_PLAN_REQUIRED_KEYS),
+            "expected_launch_plan": expected_pairs,
+            "observed_launch_plan": observed_plan or {},
+            "schema_diagnostics": schema_diagnostics,
+        }
+        if schema_diagnostics.get("reason") != "ok":
+            return str(schema_diagnostics.get("reason")), [], diagnostics
+        mismatches: list[str] = []
+        for key, expected in expected_pairs.items():
+            observed = observed_plan.get(key) if observed_plan is not None else None
+            if expected != observed:
+                mismatches.append(
+                    f"{key}: expected={expected or '-'} observed={observed or '-'}"
+                )
+        if mismatches:
+            return "preflight_runtime_resolution_mismatch", mismatches, diagnostics
+        return "ok", [], diagnostics
 
     def _on_live_preflight_started(self) -> None:
         self._append_log("[step7-preflight] decisive preflight started.")
@@ -8984,6 +9118,87 @@ class MainWindow(QMainWindow):
             return
 
         launch_plan = report.get("launch_plan") or {}
+        if launch is not None:
+            launch_plan_reason, parity_mismatches, launch_plan_diagnostics = (
+                self._validate_live_preflight_launch_plan(
+                    launch, report
+                )
+            )
+            if launch_plan_reason != "ok":
+                self._pending_live_launch = None
+                self._set_step_status("infer", "Preflight Failed")
+                if launch_plan_reason == "preflight_runtime_resolution_mismatch":
+                    self._update_live_status("Live status: preflight/runtime mismatch")
+                    message = (
+                        "Decisive preflight resolved a different Step 7 launch plan than the frozen UI launch.\n\n"
+                        "Reason: preflight_runtime_resolution_mismatch\n"
+                        + "\n".join(parity_mismatches)
+                    )
+                else:
+                    self._update_live_status("Live status: preflight launch plan missing")
+                    schema_diagnostics = launch_plan_diagnostics.get(
+                        "schema_diagnostics", {}
+                    )
+                    message = (
+                        "Decisive preflight did not return a usable resolved Step 7 launch plan for UI comparison.\n\n"
+                        f"Reason: {launch_plan_reason}\n"
+                        f"Comparison keys: {launch_plan_diagnostics.get('comparison_keys') or []}\n"
+                        f"Report keys: {schema_diagnostics.get('report_keys') or []}\n"
+                        f"launch_plan_key_exists={bool(schema_diagnostics.get('launch_plan_key_exists'))}\n"
+                        f"launch_plan_present={bool(schema_diagnostics.get('launch_plan_present'))}\n"
+                        f"launch_plan_type={schema_diagnostics.get('launch_plan_type') or '-'}\n"
+                        f"launch_plan_is_empty={bool(schema_diagnostics.get('launch_plan_is_empty'))}\n"
+                        f"missing_keys={schema_diagnostics.get('missing_keys') or []}\n"
+                        f"empty_keys={schema_diagnostics.get('empty_keys') or []}\n"
+                        f"raw_launch_plan_preview={schema_diagnostics.get('raw_launch_plan_preview') or '-'}\n"
+                    )
+                    if report.get("launch_plan_resolution_succeeded") is not None:
+                        message += (
+                            f"launch_plan_resolution_succeeded={bool(report.get('launch_plan_resolution_succeeded'))}\n"
+                            f"launch_plan_resolved_before_validation={bool(report.get('launch_plan_resolved_before_validation'))}\n"
+                            f"launch_plan_resolution_source={report.get('launch_plan_resolution_source') or '-'}\n"
+                            f"launch_plan_contract_status={report.get('launch_plan_contract_status') or '-'}\n"
+                        )
+                    launch_plan_inputs = report.get("launch_plan_inputs") or {}
+                    if launch_plan_inputs:
+                        message += (
+                            "launch_plan_inputs="
+                            + json.dumps(launch_plan_inputs, indent=2)
+                            + "\n"
+                        )
+                    launch_plan_validation_errors = (
+                        report.get("launch_plan_validation_errors") or []
+                    )
+                    if launch_plan_validation_errors:
+                        message += (
+                            "launch_plan_validation_errors:\n"
+                            + "\n".join(
+                                f"- {error}"
+                                for error in launch_plan_validation_errors[:10]
+                            )
+                            + "\n"
+                        )
+                    report_errors = report.get("errors") or []
+                    if report_errors:
+                        message += "Reported preflight errors:\n" + "\n".join(
+                            f"- {error}" for error in report_errors[:10]
+                        ) + "\n"
+                expected_launch_plan = launch_plan_diagnostics.get(
+                    "expected_launch_plan", {}
+                )
+                observed_launch_plan = launch_plan_diagnostics.get(
+                    "observed_launch_plan", {}
+                )
+                message += (
+                    "\nExpected launch plan:\n"
+                    + json.dumps(expected_launch_plan, indent=2)
+                    + "\nObserved launch plan:\n"
+                    + json.dumps(observed_launch_plan, indent=2)
+                )
+                self._append_log("[step7-preflight] " + message.replace("\n\n", "\n"))
+                self._show_blocking_notice("Step 7 Preflight Failed", message)
+                self._set_live_buttons_state()
+                return
         out_dir_text = launch_plan.get("out_dir")
         self._last_live_infer_out_dir = (
             Path(out_dir_text) if isinstance(out_dir_text, str) and out_dir_text else None
@@ -9048,6 +9263,10 @@ class MainWindow(QMainWindow):
         lines = [
             f"Preflight ready: {bool(report.get('ready'))}",
             f"Config: {report.get('config_path') or '-'}",
+            f"Launch plan resolved: {bool(report.get('launch_plan_resolution_succeeded'))}",
+            f"Launch plan resolved before validation: {bool(report.get('launch_plan_resolved_before_validation'))}",
+            f"Launch plan resolution source: {report.get('launch_plan_resolution_source') or '-'}",
+            f"Launch plan contract: {report.get('launch_plan_contract_status') or '-'}",
             f"Selection source: {launch_plan.get('selection_source') or '-'}",
             f"Session dir: {launch_plan.get('selected_session_dir') or '-'}",
             f"Deployment session dir: {contract.get('smoke_session_dir') or '-'}",
@@ -9089,6 +9308,12 @@ class MainWindow(QMainWindow):
         if report.get("errors"):
             lines.extend(["", "Errors:"])
             lines.extend(f"- {error}" for error in report.get("errors") or [])
+        if report.get("launch_plan_validation_errors"):
+            lines.extend(["", "Launch Plan Validation Errors:"])
+            lines.extend(
+                f"- {error}"
+                for error in report.get("launch_plan_validation_errors") or []
+            )
         return "\n".join(lines)
 
     def _summarize_live_preflight_failure(self, report: Dict[str, Any]) -> str:
