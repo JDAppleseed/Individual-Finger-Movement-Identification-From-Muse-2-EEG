@@ -1056,9 +1056,9 @@ def test_prepare_live_infer_launch_derives_effective_expected_labels_from_traini
     )
 
     monkeypatch.setattr(
-        ui_mod.QMessageBox,
-        "warning",
-        lambda _parent, title, message: pytest.fail(
+        window,
+        "_show_warning_message",
+        lambda title, message: pytest.fail(
             f"Unexpected warning dialog: {title}: {message}"
         ),
     )
@@ -1118,12 +1118,12 @@ def test_prepare_live_infer_launch_blocks_when_expected_labels_are_unavailable(
 
     captured: dict[str, str] = {}
 
-    def fake_warning(_parent, title, message):
+    def fake_warning(title, message):
         captured["title"] = title
         captured["message"] = message
         return 0
 
-    monkeypatch.setattr(ui_mod.QMessageBox, "warning", fake_warning)
+    monkeypatch.setattr(window, "_show_warning_message", fake_warning)
 
     window.current_project = project
     window.current_subject = subject

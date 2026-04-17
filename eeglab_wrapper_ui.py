@@ -111,7 +111,11 @@ from app.ui_config_validation import validate_step_settings
 from muse_streaming.config import DEFAULT_STREAM_NAME, DEFAULT_STREAM_TYPE
 from muse_streaming.healthcheck import run_healthcheck
 from utils.channel_labels import normalize_channel_labels, parse_channel_label_list
-from utils.eeglab_export import default_eeglab_export_path, export_session_to_eeglab
+from utils.eeglab_export import (
+    default_eeglab_export_path,
+    export_session_to_eeglab,
+    resolve_eeglab_export_events_path,
+)
 from utils.label_schema import (
     ACTION_NAMES,
     FINGER_NAMES,
@@ -972,7 +976,58 @@ QTabBar::tab { background: rgb(80, 100, 130); color: white; padding: 6px 10px; }
 QTabBar::tab:selected { background: rgb(110, 130, 170); }
 """
 
+READABLE_DIALOG_STYLE = """
+QDialog { background: rgb(238, 243, 250); }
+QLabel { color: rgb(41, 57, 82); font-weight: 600; }
+QLineEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox,
+QPlainTextEdit,
+QTextEdit,
+QAbstractSpinBox {
+  background: rgb(252, 253, 255);
+  color: rgb(26, 38, 58);
+  border: 1px solid #9aacc6;
+  border-radius: 6px;
+  padding: 4px 6px;
+  selection-background-color: rgb(110, 130, 170);
+  selection-color: white;
+}
+QTextEdit[readOnly="true"],
+QPlainTextEdit[readOnly="true"] {
+  background: rgb(244, 247, 252);
+  color: rgb(33, 48, 71);
+}
+QAbstractItemView,
+QComboBox QAbstractItemView {
+  background: rgb(252, 253, 255);
+  color: rgb(26, 38, 58);
+  border: 1px solid #9aacc6;
+  selection-background-color: rgb(110, 130, 170);
+  selection-color: white;
+}
+QPushButton {
+  background: rgb(110, 130, 170);
+  color: white;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-weight: 600;
+}
+QPushButton:hover { background: rgb(130, 150, 190); }
+QPushButton:disabled { background: rgb(105, 120, 150); color: rgba(255,255,255,180); }
+"""
+
 _BATT_RE = re.compile(r"(?:BATTERY|Battery)\s*[:=]\s*(\d{1,3})\s*%?", re.IGNORECASE)
+
+
+def _append_stylesheet(widget: QWidget, style: str) -> None:
+    existing = widget.styleSheet().strip()
+    widget.setStyleSheet(f"{existing}\n{style}" if existing else style)
+
+
+def _apply_readable_dialog_style(dialog: QDialog) -> None:
+    _append_stylesheet(dialog, READABLE_DIALOG_STYLE)
 
 
 class OutlineStyle(QProxyStyle):
@@ -1122,7 +1177,6 @@ class OutlinePlainTextEdit(QPlainTextEdit):
 class OutlineTextEdit(QTextEdit):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._outline_highlighter = OutlineTextHighlighter(self.document())
 
 
 class OutlineSpinBox(QSpinBox):
@@ -1189,6 +1243,7 @@ class SubjectDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Subject")
         self._info = info or SubjectInfo(subject_id="")
+        _apply_readable_dialog_style(self)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -2455,7 +2510,7 @@ class MainWindow(QMainWindow):
             "background: #c9d2df; color: #2c3e50; font-weight: 700; }"
             "QToolButton:hover { background: #d7dee8; }"
         )
-        btn.clicked.connect(lambda: QMessageBox.information(self, title, body))
+        btn.clicked.connect(lambda: self._show_info_message(title, body))
         return btn
 
     def _add_section_header(self, layout: QVBoxLayout, title: str, body: str) -> None:
@@ -7013,7 +7068,7 @@ class MainWindow(QMainWindow):
 
     def _edit_subject(self) -> None:
         if not self.current_project:
-            QMessageBox.warning(self, "Project Required", "Select a project first.")
+            self._show_warning_message("Project Required", "Select a project first.")
             return
         subject_id = self.subject_combo.currentText()
         subject_dir = (
@@ -7033,7 +7088,7 @@ class MainWindow(QMainWindow):
             return
         info = dialog.info()
         if not info.subject_id:
-            QMessageBox.warning(self, "Missing Subject", "Subject ID is required.")
+            self._show_warning_message("Missing Subject", "Subject ID is required.")
             return
         subject_dir = subject_root(self.current_project, info.subject_id)
         ensure_subject_dirs(subject_dir)
@@ -7250,11 +7305,7 @@ class MainWindow(QMainWindow):
     def _event_file_for_session(self, session_dir: Optional[Path]) -> Optional[Path]:
         if session_dir is None:
             return None
-        for rel in ("events/events.jsonl", "events/events.json", "events/events.csv"):
-            candidate = session_dir / rel
-            if candidate.exists() and candidate.is_file():
-                return candidate
-        return None
+        return resolve_eeglab_export_events_path(session_dir)
 
     def _propagate_session_dir_autofill(
         self, prev_value: Optional[str], new_value: str
@@ -7610,8 +7661,7 @@ class MainWindow(QMainWindow):
             else ""
         )
         if not session_text:
-            QMessageBox.warning(
-                self,
+            self._show_warning_message(
                 "Session Dir Required",
                 "Select a session directory before exporting.",
             )
@@ -7622,8 +7672,7 @@ class MainWindow(QMainWindow):
             else ""
         )
         if not out_text:
-            QMessageBox.warning(
-                self,
+            self._show_warning_message(
                 "Output Path Required",
                 "Choose an output `.set` or `.mat` file.",
             )
@@ -7632,7 +7681,7 @@ class MainWindow(QMainWindow):
             summary = export_session_to_eeglab(session_text, out_text)
         except Exception as exc:
             self._append_log(f"EEGLAB export failed: {exc}")
-            QMessageBox.warning(self, "EEGLAB Export Failed", str(exc))
+            self._show_warning_message("EEGLAB Export Failed", str(exc))
             return
         self._append_log(
             "EEGLAB export wrote "
@@ -7643,8 +7692,7 @@ class MainWindow(QMainWindow):
             f"Exported `{summary.out_path.name}` from `{summary.session_dir.name}` "
             f"with {summary.event_count} event(s)."
         )
-        QMessageBox.information(
-            self,
+        self._show_info_message(
             "EEGLAB Export Complete",
             f"Wrote {summary.out_path}\n\n"
             f"Channels: {summary.channel_count}\n"
@@ -8151,21 +8199,20 @@ class MainWindow(QMainWindow):
             self._eval_queue_active = False
             self._eval_queue = []
         if not self.current_project or not self.current_subject:
-            QMessageBox.warning(
-                self, "Project/Subject Required", "Select a project and subject first."
+            self._show_warning_message(
+                "Project/Subject Required", "Select a project and subject first."
             )
             return
         if self.runner.is_running() or self.live_preflight_runner.is_running():
-            QMessageBox.warning(
-                self,
+            self._show_warning_message(
                 "Busy",
                 "Another step or Step 7 decisive preflight is still running.",
             )
             return
         script_info = self.scripts.get(script_key)
         if not script_info:
-            QMessageBox.warning(
-                self, "Missing Script", f"Script for {step_id} not found."
+            self._show_warning_message(
+                "Missing Script", f"Script for {step_id} not found."
             )
             return
         if (
@@ -8283,8 +8330,7 @@ class MainWindow(QMainWindow):
             if step_id == "train":
                 session_dir_path = self._resolve_effective_session_dir(step_id="train")
                 if not session_dir_path:
-                    QMessageBox.warning(
-                        self,
+                    self._show_warning_message(
                         "Session Dir Required",
                         "Select the session folder under subjects/<id>/sessions/<session_id>.\n\n"
                         "Step 2 needs the session that contains the processed EEG windows "
@@ -8294,8 +8340,7 @@ class MainWindow(QMainWindow):
             else:
                 session_dir_path = infer_session_dir
                 if not session_dir_path:
-                    QMessageBox.warning(
-                        self,
+                    self._show_warning_message(
                         "Session Dir Required",
                         "Select the session folder under subjects/<id>/sessions/<session_id>, "
                         "or ensure the subject already has a session.",
@@ -8346,8 +8391,7 @@ class MainWindow(QMainWindow):
                 elif legacy_candidate_npz.exists():
                     settings["npz"] = str(legacy_candidate_npz)
             if not settings.get("session_dir") and not settings.get("npz"):
-                QMessageBox.warning(
-                    self,
+                self._show_warning_message(
                     "Dataset Required",
                     "Select a session with extracted windows or provide an explicit eeg_windows.npz path before running dataset topomaps.",
                 )
@@ -8370,11 +8414,7 @@ class MainWindow(QMainWindow):
 
         validation = validate_step_settings(step_id, settings)
         if not validation.ok:
-            QMessageBox.warning(
-                self,
-                "Invalid Settings",
-                "\n".join(validation.errors),
-            )
+            self._show_warning_message("Invalid Settings", "\n".join(validation.errors))
             return
         for warning in validation.warnings:
             self._append_log(f"⚠️ {warning}")
@@ -8538,18 +8578,18 @@ class MainWindow(QMainWindow):
             self._eval_queue_active = False
             self._eval_queue = []
         if not self.current_project or not self.current_subject:
-            QMessageBox.warning(
-                self, "Project/Subject Required", "Select a project and subject first."
+            self._show_warning_message(
+                "Project/Subject Required", "Select a project and subject first."
             )
             return
         if self.runner.is_running() or self.live_preflight_runner.is_running():
-            QMessageBox.warning(
-                self, "Busy", "Another step or Step 7 decisive preflight is still running."
+            self._show_warning_message(
+                "Busy", "Another step or Step 7 decisive preflight is still running."
             )
             return
         script_info = self.scripts.get("live_infer")
         if not script_info:
-            QMessageBox.warning(self, "Missing Script", "Script for infer not found.")
+            self._show_warning_message("Missing Script", "Script for infer not found.")
             return
 
         launch = self._prepare_live_infer_launch(script_info)
@@ -8614,8 +8654,7 @@ class MainWindow(QMainWindow):
             if not str(settings.get("deployment_session_dir") or "").strip():
                 settings["deployment_session_dir"] = str(infer_session_dir)
         else:
-            QMessageBox.warning(
-                self,
+            self._show_warning_message(
                 "Session Dir Required",
                 "Select the session folder under subjects/<id>/sessions/<session_id>, "
                 "or ensure the subject already has a session.",
@@ -8671,8 +8710,7 @@ class MainWindow(QMainWindow):
             settings
         )
         if not expected_labels:
-            QMessageBox.warning(
-                self,
+            self._show_warning_message(
                 "Expected Channel Labels Missing",
                 "Step 7 cannot prove model-order channel mapping for this launch.\n\n"
                 "Set REQUIRED_LSL_LABELS or use a deployment session whose "
@@ -8683,11 +8721,7 @@ class MainWindow(QMainWindow):
         settings["LABEL_CHECK_EXPECTED_LABELS_SOURCE"] = expected_labels_source
         validation = validate_step_settings("infer", settings)
         if not validation.ok:
-            QMessageBox.warning(
-                self,
-                "Invalid Settings",
-                "\n".join(validation.errors),
-            )
+            self._show_warning_message("Invalid Settings", "\n".join(validation.errors))
             return None
         for warning in validation.warnings:
             self._append_log(f"⚠️ {warning}")
@@ -8745,11 +8779,7 @@ class MainWindow(QMainWindow):
                 no_file_io_override=None,
             )
         except Exception as exc:
-            QMessageBox.warning(
-                self,
-                "Invalid Step 7 Launch Plan",
-                str(exc),
-            )
+            self._show_warning_message("Invalid Step 7 Launch Plan", str(exc))
             return None
 
         settings["session_dir"] = str(
@@ -9334,6 +9364,7 @@ class MainWindow(QMainWindow):
     def _confirm_live_launch_after_preflight(self, report: Dict[str, Any]) -> bool:
         dialog = QDialog(self)
         dialog.setWindowTitle("Confirm Step 7 Launch")
+        _apply_readable_dialog_style(dialog)
         layout = QVBoxLayout(dialog)
         summary = QLabel(
             "Decisive Step 7 preflight passed. Launch exactly this frozen runtime contract?"
@@ -9425,11 +9456,13 @@ class MainWindow(QMainWindow):
 
     def _create_new_session(self) -> None:
         if not self.current_subject:
-            QMessageBox.warning(self, "Subject Required", "Select a subject first.")
+            self._show_warning_message("Subject Required", "Select a subject first.")
             return
         session_root_value = self.session_root_input.text().strip()
         if not session_root_value:
-            QMessageBox.warning(self, "Session Root Required", "Select a session root.")
+            self._show_warning_message(
+                "Session Root Required", "Select a session root."
+            )
             return
         session_id = session_backend_id()
         session_dir = Path(session_root_value) / f"{self.current_subject}_{session_id}"
@@ -9560,8 +9593,7 @@ class MainWindow(QMainWindow):
         subject_dir = subject_root(self.current_project, self.current_subject)
         session_dir = self._resolve_session_dir_for_current(subject_dir)
         if not session_dir:
-            QMessageBox.warning(
-                self,
+            self._show_warning_message(
                 "Session Dir Required",
                 "Select the session folder under subjects/<id>/sessions/<session_id>.",
             )
@@ -9589,8 +9621,7 @@ class MainWindow(QMainWindow):
                     self._append_log(
                         "WARNING: Run dir override appears to belong to a different session."
                     )
-                    QMessageBox.warning(
-                        self,
+                    self._show_warning_message(
                         "Run Dir Override Mismatch",
                         "The run dir override appears to belong to a different session.\n\n"
                         f"Selected session dir:\n{session_resolved}\n\n"
@@ -10434,28 +10465,26 @@ class MainWindow(QMainWindow):
             self.live_status_label.setText(text)
 
     def _confirm_actuation(self) -> bool:
-        dialog = QMessageBox(self)
-        dialog.setWindowTitle("Confirm Actuation")
-        dialog.setText("Actuation enabled. Confirm the hand is safe and clear.")
-        dialog.setIcon(QMessageBox.Warning)
-        dialog.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-        self._style_message_box(dialog)
-        return dialog.exec() == QMessageBox.Ok
+        return (
+            self._exec_message_box(
+                "Confirm Actuation",
+                "Actuation enabled. Confirm the hand is safe and clear.",
+                icon=QMessageBox.Warning,
+                buttons=QMessageBox.Ok | QMessageBox.Cancel,
+                default_button=QMessageBox.Cancel,
+            )
+            == QMessageBox.Ok
+        )
 
     def _show_blocking_notice(self, title: str, message: str) -> None:
-        dialog = QMessageBox(self)
-        dialog.setWindowTitle(title)
-        dialog.setText(message)
-        dialog.setIcon(QMessageBox.Warning)
-        dialog.setStandardButtons(QMessageBox.Ok)
-        self._style_message_box(dialog)
-        dialog.exec()
+        self._exec_message_box(title, message, icon=QMessageBox.Warning)
 
     def _show_blocking_ack(
         self, title: str, message: str, details: Optional[Dict[str, Any]] = None
     ) -> bool:
         dialog = QDialog(self)
         dialog.setWindowTitle(title)
+        _apply_readable_dialog_style(dialog)
         layout = QVBoxLayout(dialog)
         summary = QLabel(message)
         summary.setWordWrap(True)
@@ -10476,6 +10505,31 @@ class MainWindow(QMainWindow):
             "QMessageBox QLabel { color: #eef2f7; font-weight: 600; min-width: 360px; }"
             "QMessageBox QPushButton { min-width: 72px; }"
         )
+
+    def _exec_message_box(
+        self,
+        title: str,
+        message: str,
+        *,
+        icon,
+        buttons=QMessageBox.Ok,
+        default_button=None,
+    ) -> int:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle(title)
+        dialog.setText(message)
+        dialog.setIcon(icon)
+        dialog.setStandardButtons(buttons)
+        if default_button is not None:
+            dialog.setDefaultButton(default_button)
+        self._style_message_box(dialog)
+        return dialog.exec()
+
+    def _show_warning_message(self, title: str, message: str) -> None:
+        self._exec_message_box(title, message, icon=QMessageBox.Warning)
+
+    def _show_info_message(self, title: str, message: str) -> None:
+        self._exec_message_box(title, message, icon=QMessageBox.Information)
 
     def _show_info_dialog(self, title: str, message: str) -> None:
         dialog = QDialog(self)
@@ -10745,6 +10799,7 @@ class MainWindow(QMainWindow):
     def _show_hard_stop_modal(self, report_path: Optional[Path]) -> None:
         dialog = QDialog(self)
         dialog.setWindowTitle("HARD STOP — Stream Unhealthy")
+        _apply_readable_dialog_style(dialog)
         layout = QVBoxLayout(dialog)
         summary = QLabel(
             "The live stream stopped due to an unhealthy signal. "
@@ -11464,16 +11519,14 @@ class MainWindow(QMainWindow):
         if features_override is not None:
             args += ["--features", str(features_override)]
         if session_dir and session_events is None and events_override is None:
-            QMessageBox.warning(
-                self,
+            self._show_warning_message(
                 "No Events In Session",
                 "The selected session does not contain events/events.jsonl.\n\n"
                 "Choose a recorded source session with raw/ and events/, not a combined processed session.",
             )
             return
         if not session_dir and events_override is None:
-            QMessageBox.warning(
-                self,
+            self._show_warning_message(
                 "Session Dir Required",
                 "Select a session directory or provide an explicit events file before launching event review.",
             )
@@ -11510,16 +11563,14 @@ class MainWindow(QMainWindow):
         if self.event_json_report.text().strip():
             args += ["--json-report", self.event_json_report.text().strip()]
         if session_dir and session_events is None and events_override is None:
-            QMessageBox.warning(
-                self,
+            self._show_warning_message(
                 "No Events In Session",
                 "The selected session does not contain events/events.jsonl.\n\n"
                 "Choose a recorded source session with raw/ and events/, not a combined processed session.",
             )
             return
         if not session_dir and events_override is None:
-            QMessageBox.warning(
-                self,
+            self._show_warning_message(
                 "Session Dir Required",
                 "Select a session directory or provide an explicit events file before validating events.",
             )

@@ -65,11 +65,78 @@ def _sampling_rate(meta: dict[str, Any], lsl_ts_mono: np.ndarray) -> float:
     return 256.0
 
 
-def _find_events_file(session_dir: Path) -> Optional[Path]:
-    for rel in ("events/events.jsonl", "events/events.json", "events/events.csv"):
-        candidate = session_dir / rel
+def _existing_file(candidate: Path) -> Optional[Path]:
+    try:
+        if candidate.exists() and candidate.is_file():
+            return candidate.resolve()
+    except Exception:
         if candidate.exists() and candidate.is_file():
             return candidate
+    return None
+
+
+def _event_path_from_value(session_dir: Path, value: Any) -> Optional[Path]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    candidate = Path(text).expanduser()
+    if not candidate.is_absolute():
+        candidate = session_dir / candidate
+    return _existing_file(candidate)
+
+
+def resolve_eeglab_export_events_path(session_dir: Path | str) -> Optional[Path]:
+    session_dir = Path(session_dir).expanduser()
+    if session_dir.exists():
+        session_dir = session_dir.resolve()
+
+    seen: set[str] = set()
+
+    def _remember(candidate: Optional[Path]) -> Optional[Path]:
+        if candidate is None:
+            return None
+        key = str(candidate)
+        if key in seen:
+            return None
+        seen.add(key)
+        return candidate
+
+    for rel in ("events/events.jsonl", "events/events.json", "events/events.csv"):
+        candidate = _remember(_existing_file(session_dir / rel))
+        if candidate is not None:
+            return candidate
+
+    metadata_keys = (
+        "events_jsonl_path",
+        "events_json_path",
+        "events_csv_path",
+        "events_jsonl",
+        "events_json",
+        "events_csv",
+        "events_path",
+    )
+    for name in ("meta.json", "session_meta.json", "manifest.json", "run_meta.json"):
+        payload = _read_json(session_dir / name)
+        if not isinstance(payload, dict):
+            continue
+        for key in metadata_keys:
+            candidate = _remember(_event_path_from_value(session_dir, payload.get(key)))
+            if candidate is not None:
+                return candidate
+        files = payload.get("files")
+        if isinstance(files, dict):
+            for key in metadata_keys:
+                candidate = _remember(_event_path_from_value(session_dir, files.get(key)))
+                if candidate is not None:
+                    return candidate
+
+    events_dir = session_dir / "events"
+    if events_dir.exists():
+        for pattern in ("*.jsonl", "*.json", "*.csv"):
+            for path in sorted(events_dir.glob(pattern)):
+                candidate = _remember(_existing_file(path))
+                if candidate is not None:
+                    return candidate
     return None
 
 
@@ -121,7 +188,7 @@ def export_session_to_eeglab(
 
     event_rows: list[dict[str, Any]] = []
     skipped_event_count = 0
-    events_path = _find_events_file(session_dir)
+    events_path = resolve_eeglab_export_events_path(session_dir)
     if events_path is not None:
         for idx, payload in enumerate(load_event_payloads(events_path)):
             event = normalize_event_payload(payload, fallback_index=idx)

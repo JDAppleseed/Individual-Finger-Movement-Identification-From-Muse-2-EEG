@@ -3,7 +3,11 @@ import json
 import numpy as np
 from scipy.io import loadmat
 
-from utils.eeglab_export import default_eeglab_export_path, export_session_to_eeglab
+from utils.eeglab_export import (
+    default_eeglab_export_path,
+    export_session_to_eeglab,
+    resolve_eeglab_export_events_path,
+)
 
 
 def _write_session(tmp_path):
@@ -84,3 +88,32 @@ def test_export_session_to_eeglab_skips_out_of_range_events(tmp_path):
 
     assert summary.event_count == 0
     assert summary.skipped_event_count == 1
+
+
+def test_export_session_to_eeglab_uses_metadata_event_path_fallback(tmp_path):
+    session_dir = _write_session(tmp_path)
+    custom_events = session_dir / "logs" / "captured_events.jsonl"
+    custom_events.parent.mkdir(parents=True, exist_ok=True)
+    custom_events.write_text((session_dir / "events" / "events.jsonl").read_text())
+    (session_dir / "events" / "events.jsonl").unlink()
+
+    meta = json.loads((session_dir / "meta.json").read_text())
+    meta["events_jsonl_path"] = str(custom_events)
+    (session_dir / "meta.json").write_text(json.dumps(meta))
+
+    assert resolve_eeglab_export_events_path(session_dir) == custom_events.resolve()
+
+    summary = export_session_to_eeglab(session_dir)
+
+    assert summary.event_count == 1
+
+
+def test_export_session_to_eeglab_without_events_still_writes_set_file(tmp_path):
+    session_dir = _write_session(tmp_path)
+    (session_dir / "events" / "events.jsonl").unlink()
+
+    summary = export_session_to_eeglab(session_dir)
+
+    assert summary.out_path.exists()
+    assert summary.event_count == 0
+    assert summary.skipped_event_count == 0
