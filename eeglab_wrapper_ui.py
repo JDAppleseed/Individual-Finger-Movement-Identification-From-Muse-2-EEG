@@ -750,6 +750,7 @@ TOOLTIPS: Dict[str, str] = {
     "FAILED_DIR": "Directory for failed debug writes.",
     "REQUIRED_LSL_LABELS": "Expected LSL channel labels (case-insensitive).",
     "REQUIRE_EXACTLY_4_CHANNELS": "Require exactly 4 EEG channels from LSL.",
+    "LIVE_EEG_PLOT_ENABLED": "Show the same live 4-channel EEG plot used in Step 1 while Step 7 is running.",
     "LIVE_VIZ_ENABLED": "Send Step 7 live model-view data to the Model Views window.",
     "LIVE_VIZ_FPS": "Step 7 live model-view refresh rate (Hz).",
     "STREAMER_INTERNAL": "Internal streamer enabled.",
@@ -4887,6 +4888,13 @@ class MainWindow(QMainWindow):
             self._add_checkbox(
                 step_id,
                 form,
+                "LIVE_EEG_PLOT_ENABLED",
+                "Show Step 1-style live EEG plot",
+                defaults,
+            )
+            self._add_checkbox(
+                step_id,
+                form,
                 "LIVE_VIZ_ENABLED",
                 "Emit Step 7 live model views",
                 defaults,
@@ -6369,6 +6377,7 @@ class MainWindow(QMainWindow):
                 "bad_channel_clipped_frac": "Bad channel clipped frac",
                 "bad_window_clipped_frac": "Bad window clipped frac",
                 "bad_window_max_masked_channels": "Bad window max masked channels",
+                "LIVE_EEG_PLOT_ENABLED": "Show Step 1-style live EEG plot",
                 "LIVE_VIZ_ENABLED": "Emit Step 7 live model views",
                 "LIVE_VIZ_FPS": "Step 7 live viz FPS",
                 "latency_threshold_ms": "Latency threshold (ms)",
@@ -8665,7 +8674,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Expected Channel Labels Missing",
-                "Step 7 cannot verify model-order channel mapping for this launch.\n\n"
+                "Step 7 cannot prove model-order channel mapping for this launch.\n\n"
                 "Set REQUIRED_LSL_LABELS or use a deployment session whose "
                 "`processed/eeg_windows.npz` contains `training_npz.channel_names`.",
             )
@@ -10154,7 +10163,7 @@ class MainWindow(QMainWindow):
             if interactive:
                 self._show_blocking_notice(
                     "Expected Channel Labels Missing",
-                    "Step 7 cannot verify model-order channel mapping for this launch.\n\n"
+                    "Step 7 cannot prove model-order channel mapping for this launch.\n\n"
                     "Set REQUIRED_LSL_LABELS or use a deployment session whose "
                     "`processed/eeg_windows.npz` contains `training_npz.channel_names`.",
                 )

@@ -71,6 +71,7 @@ from utils.label_schema import (
     finger_confidence_for_id,
     is_valid_action_finger,
 )
+from utils.live_eeg_plot import LiveEEGPlotRuntime
 from utils.live_infer_common import (
     LiveWindowQuality,
     ReplayRuntimeConfig,
@@ -934,6 +935,21 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         type=float,
         metavar="SECONDS",
         help="Emit progress logs at this interval, in seconds.",
+    )
+    eeg_plot_group = stream_group.add_mutually_exclusive_group()
+    eeg_plot_group.add_argument(
+        "--live-eeg-plot",
+        "--live_eeg_plot",
+        dest="LIVE_EEG_PLOT_ENABLED",
+        action="store_true",
+        help="Show the Step 1-style live 4-channel EEG plot during Step 7.",
+    )
+    eeg_plot_group.add_argument(
+        "--no-live-eeg-plot",
+        "--no_live_eeg_plot",
+        dest="LIVE_EEG_PLOT_ENABLED",
+        action="store_false",
+        help="Disable the Step 1-style live 4-channel EEG plot during Step 7.",
     )
     stream_group.add_argument(
         "--live-viz",
@@ -3447,6 +3463,7 @@ def main() -> int:
     segment_break_flush_every = 10
     segment_break_log_count = 0
     parity_capture: Optional[LiveParityCapture] = None
+    live_eeg_plot_runtime: Optional[LiveEEGPlotRuntime] = None
     summary_path: Optional[Path] = None
     summary_write_error: Optional[str] = None
     distribution_report_path: Optional[Path] = None
@@ -3503,6 +3520,7 @@ def main() -> int:
             expected_channel_labels,
             expected_channel_labels_source,
         )
+    live_eeg_plot_enabled = bool(getattr(args, "LIVE_EEG_PLOT_ENABLED", False))
     live_viz_enabled = bool(getattr(args, "LIVE_VIZ_ENABLED", False))
     live_viz_fps = float(getattr(args, "LIVE_VIZ_FPS", 0.0) or 0.0)
     if live_viz_fps <= 0.0:
@@ -3581,6 +3599,9 @@ def main() -> int:
             ),
             "alignment_edge_max_gap_s": (1.0 / float(args.target_fs) * 4.0),
             "live_quality_enabled": bool(args.live_quality_enabled),
+            "live_eeg_plot": {
+                "enabled": bool(live_eeg_plot_enabled),
+            },
             "quality_thresholds": {
                 "input_clip_abs_z": float(args.input_clip_abs_z),
                 "bad_channel_rms_z": float(args.bad_channel_rms_z),
@@ -3809,6 +3830,47 @@ def main() -> int:
         )
         _persist_manifest_error("stream_channel_reorder_error", exc)
         raise exc
+    plot_channel_labels = list(expected_channel_labels) if expected_channel_labels else [
+        f"ch{i + 1}" for i in range(int(ch))
+    ]
+    if live_eeg_plot_enabled:
+        live_eeg_plot_runtime = LiveEEGPlotRuntime(
+            enabled=True,
+            nominal_srate=float(sfreq),
+            channel_labels=plot_channel_labels,
+            expected_channels=len(plot_channel_labels),
+            title=f"Step 7: Live EEG {subject_id or '-'}",
+        )
+        live_eeg_plot_runtime.start()
+        runtime_manifest["runtime"]["live_eeg_plot"] = {
+            "enabled": True,
+            "plot_decim": int(live_eeg_plot_runtime.plot_decim),
+            "plot_buffer_len": int(live_eeg_plot_runtime.plot_buffer_len),
+            "plot_display_fs": float(live_eeg_plot_runtime.plot_display_fs),
+            "plot_fps": float(live_eeg_plot_runtime.plot_fps),
+            "plot_window_sec": float(live_eeg_plot_runtime.plot_window_sec),
+            "plot_scale": str(live_eeg_plot_runtime.plot_scale),
+            "plot_fixed_ylim": [
+                float(live_eeg_plot_runtime.plot_fixed_ylim[0]),
+                float(live_eeg_plot_runtime.plot_fixed_ylim[1]),
+            ],
+            "plot_reference_overlay": bool(
+                live_eeg_plot_runtime.plot_reference_overlay
+            ),
+            "plot_channel_spacing_uv": float(
+                live_eeg_plot_runtime.plot_channel_spacing_uv
+            ),
+            "channel_labels": list(plot_channel_labels),
+        }
+        if runtime_manifest_path is not None:
+            _write_runtime_manifest()
+        logger.info(
+            "[plot] Step 1-style live EEG plot enabled labels=%s display_fs=%.1f plot_fps=%.1f decim=%s",
+            plot_channel_labels,
+            float(live_eeg_plot_runtime.plot_display_fs),
+            float(live_eeg_plot_runtime.plot_fps),
+            int(live_eeg_plot_runtime.plot_decim),
+        )
     parity_capture = LiveParityCapture(
         root_dir=Path(out_dir),
         settings=ParityCaptureSettings(
@@ -3899,6 +3961,7 @@ def main() -> int:
     last_sent: Optional[Tuple[int, int]] = None
     last_send_ts = 0.0
     sample_seq = 0
+    live_eeg_plot_sample_seq = 0
     actuation_history: Deque[ActuationDecision] = deque(
         maxlen=max(1, int(args.actuation_stability))
     )
@@ -4041,6 +4104,15 @@ def main() -> int:
                     vec = np.asarray(sample, dtype=np.float32)
                     if channel_reorder is not None and vec.ndim == 1:
                         vec = vec[np.asarray(channel_reorder, dtype=np.int64)]
+                    if live_eeg_plot_runtime is not None:
+                        live_eeg_plot_runtime.append_sample(
+                            sample_index=int(live_eeg_plot_sample_seq),
+                            now_s=float(time_s),
+                            sample=vec,
+                        )
+                        if not live_eeg_plot_runtime.plot_start_requested:
+                            live_eeg_plot_runtime.request_start()
+                        live_eeg_plot_sample_seq += 1
                     sample_flags = 0
                     if not np.all(np.isfinite(vec)):
                         sample_flags |= RAW_FLAG_NONFINITE
@@ -4084,6 +4156,9 @@ def main() -> int:
                     actuation_command_shaper.note_valid(
                         timebase_ms=int(round(float(sample_mono) * 1000.0))
                     )
+
+            if live_eeg_plot_runtime is not None:
+                live_eeg_plot_runtime.check_startup_timeout(time.monotonic(), logger)
 
             # Infer over available windows
             time_s = float(latest_stream_time_s)
@@ -4884,6 +4959,11 @@ def main() -> int:
         raise
     finally:
         cleanup_errors: list[str] = []
+        if live_eeg_plot_runtime is not None:
+            try:
+                live_eeg_plot_runtime.stop()
+            except Exception as exc:
+                cleanup_errors.append(f"live_eeg_plot_stop_error: {exc}")
         if record_raw and session_writer is not None:
             try:
                 if raw_buffer:

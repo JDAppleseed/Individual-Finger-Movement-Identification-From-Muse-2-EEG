@@ -24,6 +24,9 @@ def default_step7_settings() -> dict[str, Any]:
         "LSL_RESOLVE_TIMEOUT": 25.0,
         "REQUIRED_LSL_LABELS": list(_DEFAULT_REQUIRED_LSL_LABELS),
         "REQUIRE_EXACTLY_4_CHANNELS": True,
+        "LIVE_EEG_PLOT_ENABLED": bool(
+            LIVE_INFER_RECIPE_DEFAULTS["LIVE_EEG_PLOT_ENABLED"]
+        ),
         "LIVE_VIZ_ENABLED": bool(LIVE_INFER_RECIPE_DEFAULTS["LIVE_VIZ_ENABLED"]),
         "LIVE_VIZ_FPS": int(LIVE_INFER_RECIPE_DEFAULTS["LIVE_VIZ_FPS"]),
         "window_sec": float(LIVE_INFER_RECIPE_DEFAULTS["window_sec"]),

@@ -21,6 +21,7 @@ Legacy compare/tuning sessions and superseded Step 7 outputs for `2-M16` are arc
 - On the Step 7 page, the Step 7 `Session dir` field is the authoritative launch/preflight session.
 - Do not assume the main session selector overrides a pinned Step 7 session.
 - Step 7b resolves the latest live output under that Step 7 session and prefers fresh `live_infer_<run_tag>` directories over bare or legacy names.
+- `Show Step 1-style live EEG plot` is enabled by default so Step 7 starts with the same 4-channel stream-health view used in Step 1. Disable it only when you explicitly want the leanest live loop.
 
 ## Optional CLI Flow
 
@@ -60,6 +61,7 @@ python3 7_live_infer_and_actuate.py \
   --session-dir "$SESSION_DIR" \
   --out-dir "$OUT_DIR" \
   --lsl-source-id "$LSL_SOURCE_ID" \
+  --live-eeg-plot \
   --parity-capture-enabled \
   --parity-capture-max-windows 128 \
   --parity-capture-flush-every 1

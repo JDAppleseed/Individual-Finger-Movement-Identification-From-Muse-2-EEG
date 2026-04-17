@@ -99,6 +99,7 @@ EVAL_RECIPE_DEFAULTS: Dict[str, Any] = {
 }
 
 LIVE_INFER_RECIPE_DEFAULTS: Dict[str, Any] = {
+    "LIVE_EEG_PLOT_ENABLED": True,
     "LIVE_VIZ_ENABLED": False,
     "LIVE_VIZ_FPS": 2.0,
     "window_sec": float(WINDOW_EXTRACTION_DEFAULTS["window_sec"]),

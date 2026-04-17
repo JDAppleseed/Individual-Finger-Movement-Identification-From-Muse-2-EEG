@@ -333,6 +333,7 @@ def test_live_infer_defaults_match_best_live_profile():
     assert PostprocessSettings().smoothing_enabled is False
     assert defaults["postprocess"] is False
     assert defaults["finger_mode"] == "raw"
+    assert defaults["LIVE_EEG_PLOT_ENABLED"] is True
     assert defaults["window_sec"] == pytest.approx(0.25)
     assert defaults["hop_sec"] == pytest.approx(0.05)
     assert defaults["latency_threshold_ms"] == pytest.approx(750.0)
@@ -370,6 +371,7 @@ def test_live_infer_defaults_match_best_live_profile():
     assert defaults["actuation_speed_gamma"] == pytest.approx(1.0)
     assert config_defaults["postprocess"] is False
     assert config_defaults["finger_mode"] == "raw"
+    assert config_defaults["LIVE_EEG_PLOT_ENABLED"] is True
     assert config_defaults["window_sec"] == pytest.approx(0.25)
     assert config_defaults["hop_sec"] == pytest.approx(0.05)
     assert config_defaults["latency_threshold_ms"] == pytest.approx(750.0)
@@ -788,6 +790,7 @@ def test_parser_accepts_ui_hyphenated_flags():
         [
             "--config",
             "infer.json",
+            "--live-eeg-plot",
             "--enable-actuation",
             "--window-sec",
             "0.5",
@@ -797,6 +800,7 @@ def test_parser_accepts_ui_hyphenated_flags():
         ]
     )
 
+    assert args.LIVE_EEG_PLOT_ENABLED is True
     assert args.enable_actuation is True
     assert np.isclose(args.window_sec, 0.5)
     assert args.allow_drop is True

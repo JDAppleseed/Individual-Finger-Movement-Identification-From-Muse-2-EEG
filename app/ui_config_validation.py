@@ -115,6 +115,7 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
             "Legacy key 'ENABLE_ACTUATION' is not supported; migrate to 'enable_actuation'."
         )
     for key in (
+        "LIVE_EEG_PLOT_ENABLED",
         "enable_actuation",
         "modulate_actuation_speed",
         "use_inference_engine",

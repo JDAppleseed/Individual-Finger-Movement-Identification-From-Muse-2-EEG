@@ -67,6 +67,7 @@ def test_config_templates_match_canonical_recipe():
     assert infer["LSL_RESOLVE_TIMEOUT"] == 25.0
     assert infer["REQUIRED_LSL_LABELS"] == ["TP9", "AF7", "AF8", "TP10"]
     assert infer["REQUIRE_EXACTLY_4_CHANNELS"] is True
+    assert infer["LIVE_EEG_PLOT_ENABLED"] is True
     assert infer["parity_capture_enabled"] is True
     assert infer["parity_capture_max_windows"] == 64
     assert infer["parity_capture_flush_every"] == 8
@@ -138,6 +139,10 @@ def test_step_entrypoints_consume_canonical_defaults():
 
     live_mod = _load_module("7_live_infer_and_actuate.py", "test_live_defaults")
     _, live_defaults = live_mod._build_arg_parser()
+    assert (
+        live_defaults["LIVE_EEG_PLOT_ENABLED"]
+        == LIVE_INFER_RECIPE_DEFAULTS["LIVE_EEG_PLOT_ENABLED"]
+    )
     assert live_defaults["window_sec"] == LIVE_INFER_RECIPE_DEFAULTS["window_sec"]
     assert live_defaults["hop_sec"] == LIVE_INFER_RECIPE_DEFAULTS["hop_sec"]
     assert (
