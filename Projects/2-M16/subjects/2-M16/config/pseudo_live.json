@@ -6,7 +6,7 @@
   "session_id": "combined_20260319_081200_pruned_rest_events_0_1_2",
   "settings": {
     "benchmark_label": "current_checkpoint_replay",
-    "deployment_run_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050",
+    "deployment_run_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260319_075520",
     "deployment_session_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2",
     "deterministic": true,
     "infer_config": "Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json",

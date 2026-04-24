@@ -86,33 +86,41 @@ Expected final dataset:
 
 | Path | Bytes | SHA256 |
 | --- | ---: | --- |
-| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/session_config.json` | 4,670 | `4db62ee7f6033521ae8c80e3af65f59296c8d5595c6e0f538f64e5944d1d7721` |
+| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/session_config.json` | 4,647 | `084c4bb7d16cb35bbcc1d771cf5859ef50e016b361a8bd7d896ea5da94a35414` |
 | `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/eeg_windows.npz` | 11,444,609 | `8d823df8926d113ecff45412a7d170f2b7feffa1a7aff1cf410429bdc34c7914` |
 | `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/filter_manifest.json` | 645 | `6b7ef550c2fb2c9e2ccaf276d4c281f5b92e023717e79147d4cd55319130718b` |
 
-## Reference Run
+## Featured Deployment Run
 
-Reference run ID: `20260403_grouptrial_rest050`
+Featured deployment run ID: `20260319_075520`
+
+This run is the public/deployment model after the April 24 model-selection audit. The April 3 run `20260403_grouptrial_rest050` wins the offline holdout and event-level scores, but March 19 is safer for public deployment claims: `93.32%` cleaned pseudo-live would-send precision and `0.12%` false REST actuation. See `../../../../docs/2M16_MODEL_SELECTION_AUDIT.md` for the ranking table.
 
 | Path | Bytes | SHA256 |
 | --- | ---: | --- |
-| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050/finger_action_model.pt` | 117,453 | `8bf5b652a215cde72097cdb21d1ca499e9c18d78e566c7e2c424b6fe804a6f57` |
-| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050/scaler.npz` | 1,854 | `189edceb4c7a1b9eb55ad70b4992483140b9e5e48a8288026ec99e7811d3246d` |
-| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050/temperature_scaling.json` | 554 | `4f5baa75caec22d0ec165e255758b66ebb623cee03f27f80eaab1094cd032f77` |
-| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050/test_predictions.npz` | 96,248 | `83a498ece6a55111600cc6c984f99a555b1a35b2271e651d50c91e530c34e5cf` |
-| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050/metrics.json` | 1,744 | `2f075bd732f309756743d893098688983b63f7d04246a6a932c04197e58fc129` |
-| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050/train_config.json` | 5,557 | `efd319d85546b98ef0f724dbfedaac003817bc9302ac93a40aa0b833bfd7ab2e` |
-| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/reports/20260403_grouptrial_rest050/eval_manifest.json` | 24,246 | `42027752c5fb2eb7039eaee2740d18e4487bd4d516e70c4d63b6e0a3fa4c5756` |
-| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/reports/20260403_grouptrial_rest050/report.html` | 10,149 | `b0439d4ffb709796544497abf2955f79ae7b8461826e0cf9e4e5c3a06058cd2f` |
-| `winning_model/winning_model_manifest.json` | 834 | `b2e116a6a1fb2034aa0543f48f1cfaee80e1860e8e903be173892cfe9d908eae` |
+| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260319_075520/finger_action_model.pt` | 117,453 | `dc8683313460c8de14eec28862344f51486e8cc032b260ab45d56442487616a6` |
+| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260319_075520/scaler.npz` | 1,854 | `325b219e2043d76fde485638118c26da8bf573cc491bae2aeeb2761549999628` |
+| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260319_075520/temperature_scaling.json` | 559 | `fe36aad46ff904eae120123c7cd8e61d0b9b99bd814ef6bd23920d9401d18a02` |
+| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260319_075520/test_predictions.npz` | 100,453 | `8fcaf59e6a1d25c644889547c22e612db37bc66344dfad47e6fefd0d00be88b9` |
+| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260319_075520/metrics.json` | 1,570 | `033418996a8361b1588080920e8d66d07086917e3a482cbb0072f33f674eca1d` |
+| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260319_075520/train_config.json` | 3,783 | `f92f2a5f36c7ddaf830664adadcd7342149a8f316d45d918a444083b51e84a3e` |
+| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/reports/20260319_075520/eval_manifest.json` | 28,068 | `38660f82925304a24d4ccc7ef01e26c8ebc0da5a4170dd4a55ebc79cad6a858d` |
+| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/reports/20260319_075520/report.html` | 10,467 | `47ca7786af41be1b1dc881027e7e1797162487d6839763b0497cd789d5626b31` |
+| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/reports/20260319_075520/action_confusion.png` | 16,370 | `b2e74ea9a19e0f4165712b9982e3b29b099277b1ad1ce8ec0a0ee03212de48f1` |
+| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/reports/20260319_075520/finger_confusion.png` | 22,124 | `968b5627e32a088dc65b457921027497d99c2a055c4ecde95aed45038e3a8451` |
+| `sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/reports/20260319_075520/eval_UNKNOWN.png` | 89,316 | `5257929401e7a57648933c3abb0cfbc02318e17be0004104fc0696f308c1cecf` |
+| `winning_model/winning_model_manifest.json` | 1,128 | `01f2f447c07520952c88364e83aab32e71f3f161268bbc677f4102eb568ea507` |
+
+Metrics from `winning_model/session_report/eval_manifest.json`:
+- Action accuracy: `89.79%`
+- Joint action+finger accuracy: `84.66%`
+- Non-REST finger accuracy: `85.96%`
+- REST true positive rate: `98.37%`
+- Event-level action accuracy: `92.56%`
+- Event-level joint action+finger accuracy: `87.60%`
+- Event-level non-REST finger accuracy: `90.68%`
 
 The report images `action_confusion.png`, `finger_confusion.png`, and `eval_UNKNOWN.png` are also published in both the canonical report directory and the `winning_model/session_report/` snapshot.
-
-Reference metrics from `winning_model/session_report/eval_manifest.json`:
-- Action accuracy: `91.83%`
-- Joint action+finger accuracy: `86.66%`
-- Non-REST finger accuracy: `88.11%`
-- REST true positive rate: `94.79%`
 
 ## Excluded
 

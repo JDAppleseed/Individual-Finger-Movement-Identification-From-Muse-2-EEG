@@ -4,7 +4,12 @@ This folder is the stable copy of the current best `2-M16` deployment candidate.
 
 Source:
 - Session: `combined_20260319_081200_pruned_rest_events_0_1_2`
-- Run: `20260403_grouptrial_rest050`
+- Run: `20260319_075520`
+
+Selection:
+- `20260319_075520` is the featured public/deployment checkpoint.
+- `20260403_grouptrial_rest050` remains the better offline holdout/event-level benchmark, but it is not the deployment snapshot because its cleaned-corpus would-send precision is lower and its false REST actuation is higher.
+- See `../../../../../docs/2M16_MODEL_SELECTION_AUDIT.md` from the repository root for the comparison table.
 
 Published contents:
 - `configs/`: deployment-facing configs for inference and pseudo-live replay setup.

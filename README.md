@@ -22,7 +22,7 @@ Run the reference sanity checks:
 python3 tools/build_2m16_reference_dataset.py --check-only
 
 SESSION_DIR="Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2"
-RUN_DIR="$SESSION_DIR/processed/models/20260403_grouptrial_rest050"
+RUN_DIR="$SESSION_DIR/processed/models/20260319_075520"
 
 python3 tools/smoke_inference.py \
   --npz "$SESSION_DIR/processed/eeg_windows.npz" \
@@ -100,8 +100,10 @@ It includes:
 - Three raw source sessions with events, manifests, metadata, timebase reports, and raw shards.
 - Per-source extracted `processed/eeg_windows.npz` files.
 - The final pruned combined dataset.
-- Reference run `20260403_grouptrial_rest050`.
+- Featured deployment run `20260319_075520`.
 - `winning_model/` configs, model artifacts, figures, reports, and manifests.
+
+The April 3 run `20260403_grouptrial_rest050` remains documented as an offline benchmark, but it is not the featured deployment model because the March 19 checkpoint wins the public safety metrics: `93.32%` would-send precision and `0.12%` false REST actuation on the cleaned pseudo-live corpus.
 
 Use it to verify your environment, compare model changes, and understand the expected artifact layout:
 
@@ -143,7 +145,7 @@ Use this process when expanding beyond `2-M16`:
 7. Train a baseline with a run ID that records the recipe, split mode, seed, and dataset paths.
 8. Evaluate on a held-out split that matches the research question. Prefer grouped splits when repeated windows from one trial could leak across train/test.
 9. Compare against the reference bundle only as a sanity benchmark. New subjects may differ in signal quality, trial design, and class balance.
-10. Publish only a curated artifact set: source sessions, final dataset, reference run, figures, reports, configs, and manifests.
+10. Publish only a curated artifact set: source sessions, final dataset, featured run, figures, reports, configs, and manifests.
 
 When publishing a new bundle, update `.gitignore` with narrow exceptions for that subject instead of unignoring the whole `Projects/` tree.
 
@@ -196,8 +198,8 @@ python3 tools/build_2m16_reference_dataset.py --check-only
 
 python3 tools/smoke_inference.py \
   --npz Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/eeg_windows.npz \
-  --model Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050/finger_action_model.pt \
-  --scaler Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050/scaler.npz
+  --model Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260319_075520/finger_action_model.pt \
+  --scaler Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260319_075520/scaler.npz
 
 python3 -m pytest -q \
   tests/test_default_recipe.py \

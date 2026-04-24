@@ -1,11 +1,14 @@
 {
   "subject_id": "2-M16",
   "snapshot_label": "winning_model",
+  "selection_role": "featured_public_deployment_checkpoint",
+  "selection_decision_utc": "2026-04-24T00:00:00-07:00",
   "source_session_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2",
-  "source_run_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050",
-  "source_report_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/reports/20260403_grouptrial_rest050",
+  "source_run_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260319_075520",
+  "source_report_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/reports/20260319_075520",
   "source_repo_report": "Projects/2-M16/subjects/2-M16/winning_model/repo_report/report.html",
   "source_replay_dirs": [],
+  "comparison_note": "April 3 wins offline holdout/event-level scores, but March 19 is displayed and published as the deployment model because it wins would-send precision and false REST actuation.",
   "copied_artifacts": {
     "configs_dir": "configs",
     "model_run_dir": "model_run",

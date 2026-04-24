@@ -1,6 +1,6 @@
 # 2-M16 Quickstart
 
-This guide is the clone-first path for the published `2-M16` bundle. It lets a new user validate the dataset, rebuild the reference windows, train a new model, and compare against the current reference run without collecting new EEG.
+This guide is the clone-first path for the published `2-M16` bundle. It lets a new user validate the dataset, rebuild the reference windows, train a new model, and compare against the featured deployment run without collecting new EEG.
 
 ## Published Bundle
 
@@ -118,10 +118,10 @@ python3 3_evaluate_model.py \
   --run-dir "$SESSION_DIR/processed/models/$RUN_ID"
 ```
 
-Evaluate the reference run:
+Evaluate the featured deployment run:
 
 ```bash
-REF_RUN="$SESSION_DIR/processed/models/20260403_grouptrial_rest050"
+REF_RUN="$SESSION_DIR/processed/models/20260319_075520"
 
 python3 3_evaluate_model.py \
   --config Projects/2-M16/subjects/2-M16/config/evaluate.json \
@@ -132,27 +132,36 @@ python3 3_evaluate_model.py \
 The reference evaluation writes reports under:
 
 ```text
-Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/reports/20260403_grouptrial_rest050/
+Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/reports/20260319_075520/
 ```
 
 ## Reference Results
 
-Reference run:
+Featured deployment run:
 
 ```text
-20260403_grouptrial_rest050
+20260319_075520
 ```
 
 Metrics from `winning_model/session_report/eval_manifest.json`:
 
 | Metric | Value |
 | --- | ---: |
-| Action accuracy | `91.83%` |
-| Joint action+finger accuracy | `86.66%` |
-| Non-REST finger accuracy | `88.11%` |
-| REST true positive rate | `94.79%` |
-| Action ECE | `0.0398` |
-| Non-REST finger ECE | `0.0160` |
+| Action accuracy | `89.79%` |
+| Joint action+finger accuracy | `84.66%` |
+| Non-REST finger accuracy | `85.96%` |
+| REST true positive rate | `98.37%` |
+| REST precision | `80.11%` |
+| Action ECE | `0.0232` |
+| Non-REST finger ECE | `0.0273` |
+| Event-level action accuracy | `92.56%` |
+| Event-level joint accuracy | `87.60%` |
+| Event-level non-REST finger accuracy | `90.68%` |
+
+Selection note:
+- `20260403_grouptrial_rest050` wins the offline holdout and event-level leaderboard.
+- `20260319_075520` is the public/deployment model because it wins cleaned pseudo-live would-send precision (`93.32%` vs `80.06%`) and false REST actuation (`0.12%` vs `6.74%`).
+- See `docs/2M16_MODEL_SELECTION_AUDIT.md` for the concrete ranking table and diagnosis.
 
 Smoke-test the deployable artifacts:
 
@@ -170,7 +179,7 @@ Published:
 - Raw shards, events, manifests, run metadata, and timebase reports for the three source sessions
 - Per-source extracted `processed/eeg_windows.npz`
 - Final pruned combined `processed/eeg_windows.npz`
-- Reference model run, scaler, cached predictions, temperature scaling, report figures, and manifests
+- Featured deployment model run, scaler, cached predictions, temperature scaling, report figures, and manifests
 - Stable `winning_model/` snapshot
 
 Not published:
