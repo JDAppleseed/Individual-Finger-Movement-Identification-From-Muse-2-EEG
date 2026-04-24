@@ -1,0 +1,23 @@
+{
+  "TIMEBASE_VERSION": "absolute_v1",
+  "created_at": "2026-04-05T00:00:00-07:00",
+  "project_name": "2-M16",
+  "schema_version": "1.0",
+  "session_id": "combined_20260319_081200_pruned_rest_events_0_1_2",
+  "settings": {
+    "CSV_OFFLINE_PATH": null,
+    "LSL_STREAM_NAME": "Muse2-EEG",
+    "LSL_STREAM_TYPE": "EEG",
+    "TIMEBASE_VERSION": "absolute_v1",
+    "out_json": "live_prediction_summary.json",
+    "pred_log": null,
+    "review_csv": "predicted_segments_review.csv",
+    "segments_csv": "predicted_segments.csv",
+    "session_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2",
+    "short_segment_sec": 0.25,
+    "subject_id": "2-M16",
+    "video_offset_s": 0.0
+  },
+  "subject_id": "2-M16",
+  "timebase_version": "absolute_v1"
+}

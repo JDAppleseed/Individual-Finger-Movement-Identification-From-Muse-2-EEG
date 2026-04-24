@@ -1,0 +1,20 @@
+{
+  "TIMEBASE_VERSION": "absolute_v1",
+  "created_at": "2026-04-04T00:35:13+00:00",
+  "project_name": "2-M16",
+  "schema_version": "1.0",
+  "session_id": "PENDING",
+  "settings": {
+    "amp_mode": "off",
+    "batch_size": 1024,
+    "device": "auto",
+    "hop_seconds": null,
+    "max_samples": null,
+    "purge_seconds": 0.0,
+    "run_dir": null,
+    "split_mode": null,
+    "subject_id": "2-M16"
+  },
+  "subject_id": "2-M16",
+  "timebase_version": "absolute_v1"
+}

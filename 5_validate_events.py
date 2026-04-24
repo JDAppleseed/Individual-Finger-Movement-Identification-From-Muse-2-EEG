@@ -248,7 +248,9 @@ def repair_event(row):
         row["finger_id"] = FINGER_NONE
         row["type"] = "rest"
     elif action_id != ACTION_REST and finger_id == FINGER_NONE:
-        row["type"] = event_type_for(int(row["action_id"]), int(row["finger_id"]))
+        # The active finger cannot be inferred safely; leave the row invalid so
+        # the operator can correct or prune it before extraction/training.
+        pass
     else:
         row["type"] = event_type_for(int(row["action_id"]), int(row["finger_id"]))
 

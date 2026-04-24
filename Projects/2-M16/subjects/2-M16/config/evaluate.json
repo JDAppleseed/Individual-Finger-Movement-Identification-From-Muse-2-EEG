@@ -1,0 +1,32 @@
+{
+  "TIMEBASE_VERSION": "absolute_v1",
+  "created_at": "2026-04-04T00:35:13+00:00",
+  "project_name": "2-M16",
+  "schema_version": "1.0",
+  "session_id": "PENDING",
+  "settings": {
+    "adjacency": false,
+    "amp_mode": "off",
+    "batch_size": 256,
+    "deterministic": true,
+    "device": "auto",
+    "export_test_pred": false,
+    "hysteresis": false,
+    "hysteresis_frames": 3,
+    "max_samples": null,
+    "no_manifest": false,
+    "run_dir": null,
+    "save_manifest": null,
+    "smooth": false,
+    "smooth_action_only": false,
+    "smooth_method": "vote",
+    "smooth_window": 5,
+    "split_seed": 43,
+    "subject_id": "2-M16",
+    "threshold_action": 0.75,
+    "threshold_applicability": 0.4,
+    "threshold_finger": 0.75
+  },
+  "subject_id": "2-M16",
+  "timebase_version": "absolute_v1"
+}

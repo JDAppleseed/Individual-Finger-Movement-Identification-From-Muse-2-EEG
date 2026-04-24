@@ -1,0 +1,26 @@
+{
+  "TIMEBASE_VERSION": "absolute_v1",
+  "created_at": "2026-03-19T08:18:00-07:00",
+  "project_name": "2-M16",
+  "schema_version": "1.0",
+  "session_id": "combined_20260319_081200_pruned_rest_events_0_1_2",
+  "settings": {
+    "benchmark_label": "current_checkpoint_replay",
+    "deployment_run_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050",
+    "deployment_session_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2",
+    "deterministic": true,
+    "infer_config": "Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json",
+    "current_replay_targets": [
+      "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2",
+      "Projects/2-M16/subjects/2-M16/sessions/2-M16_20260216_150056_01",
+      "Projects/2-M16/subjects/2-M16/sessions/2-M16_20260317_190134"
+    ],
+    "latency_mode": "ignore",
+    "realism_target_session_dir": "Projects/2-M16/subjects/2-M16/sessions/2-M16_20260317_190134",
+    "reset_on_trial_change": true,
+    "validation_train_config": null,
+    "validation_train_session_dir": null
+  },
+  "subject_id": "2-M16",
+  "timebase_version": "absolute_v1"
+}

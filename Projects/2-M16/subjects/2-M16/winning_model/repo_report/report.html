@@ -1,0 +1,121 @@
+
+    <html>
+    <head><title>BCI Run Report - 20260403_grouptrial_rest050</title></head>
+    <body>
+    <h1>EEG BCI Run Report</h1>
+
+    <h2>Run</h2>
+    <ul>
+      <li><b>run_dir</b>: Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050</li>
+      <li><b>out_dir</b>: reports/runs/20260403_grouptrial_rest050</li>
+      <li><b>generated</b>: 2026-04-04T05:38:36.481689+00:00</li>
+    </ul>
+
+    <h2>Artifacts</h2>
+    <ul>
+      <li><b>metrics</b>: metrics.json</li>
+      <li><b>train_config</b>: train_config.json</li>
+      <li><b>test_predictions</b>: test_predictions.npz</li>
+    </ul>
+
+    <h2>Performance (from predictions)</h2>
+    <ul>
+      <li>Action accuracy: 91.83%</li>
+      <li>Action F1 (macro/weighted): 0.913 / 0.918</li>
+      <li>Applicability FP(rest) / FN(non-REST): 14.98% / 2.36%</li>
+      <li>Action/applicability disagreement: 1.65%</li>
+      <li>Raw non-REST+NONE count/rate: 0 / 0.00%</li>
+      <li>Committed REST+active count/rate: 0 / 0.00%</li>
+      <li>Committed non-REST+NONE count/rate: 0 / 0.00%</li>
+      <li>Sent REST+active count/rate: N/A / N/A</li>
+      <li>Sent non-REST+NONE count/rate: N/A / N/A</li>
+      <li>Deployment pair invariant OK: True</li>
+      <li>Joint accuracy (overall/non-REST): 86.66% / 85.41%</li>
+      <li>Finger accuracy (non-REST): 88.11%</li>
+      <li>Finger F1 (non-REST macro/weighted): 0.738 / 0.891</li>
+      <li>Finger accuracy (overall): 89.00%</li>
+      <li>Finger F1 (overall macro/weighted): 0.885 / 0.888</li>
+      <li>REST TPR: 94.79% | REST FPR: 2.66% | REST Precision: 84.59% | REST F1: 0.894</li>
+      <li>Deprecated raw valid/invalid pair rate: 85.05% / 14.95%</li>
+      <li>Deprecated raw REST+active count/rate: 344 / 14.95%</li>
+    </ul>
+
+    
+    
+    
+    
+    
+    
+    
+    <h2>Per-Finger Non-REST Metrics</h2>
+    <table border="1" cellpadding="4" cellspacing="0">
+      <tr><th>Finger</th><th>Correct</th><th>Support</th><th>Predicted</th><th>Accuracy</th><th>Precision</th><th>Recall</th><th>F1</th></tr>
+      <tr><td>THUMB</td><td>466</td><td>466</td><td>466</td><td>100.00%</td><td>100.00%</td><td>100.00%</td><td>100.00%</td></tr><tr><td>INDEX</td><td>313</td><td>327</td><td>363</td><td>95.72%</td><td>86.23%</td><td>95.72%</td><td>90.72%</td></tr><tr><td>MIDDLE</td><td>380</td><td>443</td><td>424</td><td>85.78%</td><td>89.62%</td><td>85.78%</td><td>87.66%</td></tr><tr><td>RING</td><td>252</td><td>365</td><td>272</td><td>69.04%</td><td>92.65%</td><td>69.04%</td><td>79.12%</td></tr><tr><td>PINKY</td><td>346</td><td>393</td><td>416</td><td>88.04%</td><td>83.17%</td><td>88.04%</td><td>85.54%</td></tr>
+    </table>
+    
+
+    <h2>Confusion Matrices</h2>
+    <img src="action_confusion.png" width="400"/><img src="finger_confusion.png" width="400"/>
+
+    <h2>metrics.json</h2>
+    <pre>{
+  "schema_version": 1,
+  "created_utc": "2026-04-04T05:25:16.158773+00:00",
+  "npz_path": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/eeg_windows.npz",
+  "run_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050",
+  "train": {
+    "avg_loss": 0.7438625701035375,
+    "action_acc": 0.8647540983606558,
+    "finger_acc": 0.8724133205426888,
+    "epochs": 60,
+    "batch_size": 64,
+    "lr": 0.001,
+    "seed": 43
+  },
+  "temperature_scaling": {
+    "action_temperature": 1.0,
+    "finger_temperature": 1.0,
+    "applicability_temperature": 1.0,
+    "fit_sample_count": 874,
+    "fit_non_rest_count": 771,
+    "has_applicability_temperature": true,
+    "source": "fit_on_holdout",
+    "metrics": {
+      "action": {
+        "nll_before": 0.4310529828071594,
+        "nll_after": 0.4310529828071594
+      },
+      "finger": {
+        "nll_before": 0.35804715752601624,
+        "nll_after": 0.35804715752601624
+      },
+      "applicability": {
+        "nll_before": 0.1862296760082245,
+        "nll_after": 0.1862296760082245
+      }
+    }
+  },
+  "test": {
+    "action_acc": 0.9182963928726641,
+    "finger_acc_non_rest": 0.8846539618856569,
+    "n_test": 2301,
+    "n_test_non_rest": 1994
+  },
+  "timing": {
+    "normalization_sec": 0.04907895900000003,
+    "training_sec": 70.702402416,
+    "avg_epoch_sec": 1.1783733736,
+    "temperature_fit_sec": 0.0811718330000133,
+    "test_inference_sec": 0.2107912080000034
+  },
+  "artifacts": {
+    "model": "finger_action_model.pt",
+    "scaler": "scaler.npz",
+    "preds": "test_predictions.npz",
+    "temperature_scaling": "temperature_scaling.json"
+  }
+}</pre>
+
+    </body>
+    </html>
+    

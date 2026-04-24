@@ -1,0 +1,16 @@
+{
+  "subject_id": "2-M16",
+  "snapshot_label": "winning_model",
+  "source_session_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2",
+  "source_run_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050",
+  "source_report_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/reports/20260403_grouptrial_rest050",
+  "source_repo_report": "Projects/2-M16/subjects/2-M16/winning_model/repo_report/report.html",
+  "source_replay_dirs": [],
+  "copied_artifacts": {
+    "configs_dir": "configs",
+    "model_run_dir": "model_run",
+    "session_report_dir": "session_report",
+    "repo_report_dir": "repo_report",
+    "pseudo_live_dir": "pseudo_live"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "subject_id": "2-M16",
+  "session_id": "2-M16_20260315_145838_01",
+  "termination_reason": "signal_2",
+  "created_utc": "2026-03-15T22:04:50+00:00",
+  "raw_csv": "Projects/2-M16/subjects/2-M16/sessions/2-M16_20260315_145838_01/raw/raw.csv",
+  "events_csv": "Projects/2-M16/subjects/2-M16/sessions/2-M16_20260315_145838_01/events/events.csv",
+  "events_jsonl": "Projects/2-M16/subjects/2-M16/sessions/2-M16_20260315_145838_01/events/events.jsonl",
+  "samples_received": 79320,
+  "samples_written": 79320,
+  "events_written": 8,
+  "queue_max_depth": 56,
+  "stream": {
+    "name": "Muse2-EEG-2-M16",
+    "type": "EEG",
+    "source_id": "muse2-13946-1773611954993",
+    "channels": 4,
+    "nominal_srate": 256.0
+  }
+}

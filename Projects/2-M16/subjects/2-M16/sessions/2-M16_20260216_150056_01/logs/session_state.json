@@ -1,0 +1,13 @@
+{
+  "subject_id": "2-M16",
+  "session_id": "2-M16_20260216_150056_01",
+  "session_ui_id": "2-M16_20260216_150056_01",
+  "session_dir": "Projects/2-M16/subjects/2-M16/sessions/2-M16_20260216_150056_01",
+  "updated_utc": "2026-02-16T23:52:58+00:00",
+  "data_stream_active": false,
+  "termination_reason": "signal_2",
+  "hard_stop_triggered": false,
+  "samples_received": 799740,
+  "samples_written": 799740,
+  "events_written": 579
+}

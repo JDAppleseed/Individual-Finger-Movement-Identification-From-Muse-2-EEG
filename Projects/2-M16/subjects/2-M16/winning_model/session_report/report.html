@@ -1,0 +1,179 @@
+
+    <html>
+    <head><title>BCI Run Report - 20260403_grouptrial_rest050</title></head>
+    <body>
+    <h1>EEG BCI Run Report</h1>
+
+    <h2>Run</h2>
+    <ul>
+      <li><b>run_dir</b>: Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050</li>
+      <li><b>out_dir</b>: Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/reports/20260403_grouptrial_rest050</li>
+      <li><b>generated</b>: 2026-04-04T05:36:59.470607+00:00</li>
+    </ul>
+
+    <h2>Artifacts</h2>
+    <ul>
+      <li><b>metrics</b>: metrics.json</li>
+      <li><b>train_config</b>: train_config.json</li>
+      <li><b>test_predictions</b>: test_predictions.npz</li>
+    </ul>
+
+    <h2>Performance (from predictions)</h2>
+    <ul>
+      <li>Action accuracy: 91.83%</li>
+      <li>Action F1 (macro/weighted): 0.913 / 0.918</li>
+      <li>Applicability FP(rest) / FN(non-REST): 14.98% / 2.36%</li>
+      <li>Action/applicability disagreement: 1.65%</li>
+      <li>Raw non-REST+NONE count/rate: 0 / 0.00%</li>
+      <li>Committed REST+active count/rate: 0 / 0.00%</li>
+      <li>Committed non-REST+NONE count/rate: 0 / 0.00%</li>
+      <li>Sent REST+active count/rate: N/A / N/A</li>
+      <li>Sent non-REST+NONE count/rate: N/A / N/A</li>
+      <li>Deployment pair invariant OK: True</li>
+      <li>Joint accuracy (overall/non-REST): 86.66% / 85.41%</li>
+      <li>Finger accuracy (non-REST): 88.11%</li>
+      <li>Finger F1 (non-REST macro/weighted): 0.738 / 0.891</li>
+      <li>Finger accuracy (overall): 89.00%</li>
+      <li>Finger F1 (overall macro/weighted): 0.885 / 0.888</li>
+      <li>REST TPR: 94.79% | REST FPR: 2.66% | REST Precision: 84.59% | REST F1: 0.894</li>
+      <li>Deprecated raw valid/invalid pair rate: 85.05% / 14.95%</li>
+      <li>Deprecated raw REST+active count/rate: 344 / 14.95%</li>
+    </ul>
+
+    
+        <h2>Primary Mixed Holdout</h2>
+        <ul>
+          <li>Test windows: 2301</li>
+          <li>Action counts: REST(0)=307, OPEN(1)=921, CLOSE(2)=1073</li>
+          <li>Finger counts: NONE(0)=307, THUMB(1)=466, INDEX(2)=327, MIDDLE(3)=443, RING(4)=365, PINKY(5)=393</li>
+          <li>Action accuracy: 91.83%</li>
+          <li>Joint accuracy: 86.66%</li>
+          <li>Finger accuracy (non-REST): 88.11%</li>
+          <li>REST TPR / Precision: 94.79% / 84.59%</li>
+          <li>Applicability FP(rest) / FN(non-REST): 14.98% / 2.36%</li>
+          <li>Action/applicability disagreement: 1.65%</li>
+          <li>Raw non-REST+NONE rate: 0.00%</li>
+          <li>Committed REST+active rate: 0.00%</li>
+          <li>Committed non-REST+NONE rate: 0.00%</li>
+          <li>Deployment pair invariant OK: True</li>
+        </ul>
+        
+    
+        <h2>Auxiliary Quiet-REST Benchmark</h2>
+        <ul>
+          <li>Windows: 1059</li>
+          <li>REST events: 8</li>
+          <li>Sessions: 2-M16_20260315_145838_01</li>
+          <li>Action accuracy: 91.03%</li>
+          <li>REST TPR / Precision / F1: 91.03% / 100.00% / 0.953</li>
+        </ul>
+        
+    
+        <h2>Core Full-Session Replay</h2>
+        <ul>
+          <li>Windows: 11388</li>
+          <li>Sessions: 2-M16_20260216_150056_01, 2-M16_20260317_190134</li>
+          <li>Action accuracy: 89.42%</li>
+          <li>Joint accuracy: 85.73%</li>
+          <li>Finger accuracy (non-REST): 88.33%</li>
+          <li>REST TPR / Precision: 87.88% / 74.90%</li>
+          <li>Applicability FP(rest) / FN(non-REST): 20.37% / 3.09%</li>
+          <li>Action/applicability disagreement: 2.10%</li>
+          <li>Raw non-REST+NONE rate: 0.00%</li>
+          <li>Committed REST+active rate: 0.00%</li>
+          <li>Committed non-REST+NONE rate: 0.00%</li>
+          <li>Deployment pair invariant OK: True</li>
+        </ul>
+        
+    
+        <h2>Repeated Split Summary</h2>
+        <ul>
+          <li>Seeds: 7, 21, 42, 84, 168</li>
+          <li>Action accuracy mean/std: 90.26% / 0.97%</li>
+          <li>Joint accuracy mean/std: 86.60% / 0.97%</li>
+          <li>Finger accuracy non-REST mean/std: 88.38% / 1.48%</li>
+          <li>REST TPR mean/std: 92.98% / 2.11%</li>
+          <li>REST precision mean/std: 82.64% / 4.86%</li>
+        </ul>
+        
+    
+    
+        <h2>REST Event Breakdown</h2>
+        <table border="1" cellpadding="4" cellspacing="0">
+          <tr><th>Event</th><th>Session</th><th>Windows</th><th>REST TPR</th><th>Pred action counts</th><th>Pred pair counts</th><th>Median p(REST)</th><th>Median p(OPEN)</th><th>Median p(CLOSE)</th><th>Start</th><th>End</th></tr>
+          <tr><td>0</td><td>2-M16_20260317_190134</td><td>100</td><td>100.00%</td><td>REST(0)=100</td><td>{"REST+NONE": 100}</td><td>0.744</td><td>0.075</td><td>0.177</td><td>61.800</td><td>67.000</td></tr><tr><td>3</td><td>2-M16_20260317_190134</td><td>79</td><td>98.73%</td><td>REST(0)=78, CLOSE(2)=1</td><td>{"REST+NONE": 78, "CLOSE+MIDDLE": 1}</td><td>0.671</td><td>0.114</td><td>0.210</td><td>115.300</td><td>119.850</td></tr><tr><td>5</td><td>2-M16_20260317_190134</td><td>88</td><td>85.23%</td><td>REST(0)=75, OPEN(1)=13</td><td>{"REST+NONE": 75, "OPEN+MIDDLE": 9, "OPEN+INDEX": 4}</td><td>0.499</td><td>0.293</td><td>0.192</td><td>165.150</td><td>170.150</td></tr><tr><td>11</td><td>2-M16_20260317_190134</td><td>111</td><td>91.89%</td><td>REST(0)=102, OPEN(1)=9</td><td>{"REST+NONE": 102, "OPEN+INDEX": 6, "OPEN+MIDDLE": 3}</td><td>0.496</td><td>0.290</td><td>0.199</td><td>231.150</td><td>236.900</td></tr><tr><td>21</td><td>2-M16_20260317_190134</td><td>92</td><td>79.35%</td><td>REST(0)=73, OPEN(1)=12, CLOSE(2)=7</td><td>{"REST+NONE": 73, "OPEN+MIDDLE": 11, "CLOSE+RING": 5, "CLOSE+INDEX": 2, "OPEN+INDEX": 1}</td><td>0.471</td><td>0.213</td><td>0.254</td><td>418.400</td><td>423.550</td></tr><tr><td>22</td><td>2-M16_20260317_190134</td><td>135</td><td>88.15%</td><td>REST(0)=119, OPEN(1)=15, CLOSE(2)=1</td><td>{"REST+NONE": 119, "OPEN+MIDDLE": 13, "OPEN+PINKY": 2, "CLOSE+MIDDLE": 1}</td><td>0.525</td><td>0.235</td><td>0.227</td><td>435.550</td><td>442.500</td></tr><tr><td>28</td><td>2-M16_20260317_190134</td><td>115</td><td>94.78%</td><td>REST(0)=109, OPEN(1)=3, CLOSE(2)=3</td><td>{"REST+NONE": 109, "OPEN+MIDDLE": 3, "CLOSE+RING": 2, "CLOSE+INDEX": 1}</td><td>0.614</td><td>0.183</td><td>0.181</td><td>546.650</td><td>554.050</td></tr><tr><td>29</td><td>2-M16_20260317_190134</td><td>132</td><td>100.00%</td><td>REST(0)=132</td><td>{"REST+NONE": 132}</td><td>0.852</td><td>0.076</td><td>0.069</td><td>561.050</td><td>568.200</td></tr><tr><td>30</td><td>2-M16_20260317_190134</td><td>140</td><td>98.57%</td><td>REST(0)=138, OPEN(1)=2</td><td>{"REST+NONE": 138, "OPEN+MIDDLE": 1, "OPEN+PINKY": 1}</td><td>0.629</td><td>0.200</td><td>0.160</td><td>574.900</td><td>583.100</td></tr><tr><td>31</td><td>2-M16_20260317_190134</td><td>148</td><td>97.30%</td><td>REST(0)=144, OPEN(1)=4</td><td>{"REST+NONE": 144, "OPEN+MIDDLE": 4}</td><td>0.691</td><td>0.141</td><td>0.151</td><td>590.200</td><td>598.900</td></tr><tr><td>577</td><td>2-M16_20260216_150056_01</td><td>205</td><td>54.63%</td><td>REST(0)=112, OPEN(1)=79, CLOSE(2)=14</td><td>{"REST+NONE": 112, "OPEN+PINKY": 77, "CLOSE+INDEX": 12, "OPEN+INDEX": 2, "CLOSE+RING": 2}</td><td>0.485</td><td>0.351</td><td>0.067</td><td>3078.400</td><td>3088.850</td></tr>
+        </table>
+        
+    
+    <h2>Per-Finger Non-REST Metrics</h2>
+    <table border="1" cellpadding="4" cellspacing="0">
+      <tr><th>Finger</th><th>Correct</th><th>Support</th><th>Predicted</th><th>Accuracy</th><th>Precision</th><th>Recall</th><th>F1</th></tr>
+      <tr><td>THUMB</td><td>466</td><td>466</td><td>466</td><td>100.00%</td><td>100.00%</td><td>100.00%</td><td>100.00%</td></tr><tr><td>INDEX</td><td>313</td><td>327</td><td>363</td><td>95.72%</td><td>86.23%</td><td>95.72%</td><td>90.72%</td></tr><tr><td>MIDDLE</td><td>380</td><td>443</td><td>424</td><td>85.78%</td><td>89.62%</td><td>85.78%</td><td>87.66%</td></tr><tr><td>RING</td><td>252</td><td>365</td><td>272</td><td>69.04%</td><td>92.65%</td><td>69.04%</td><td>79.12%</td></tr><tr><td>PINKY</td><td>346</td><td>393</td><td>416</td><td>88.04%</td><td>83.17%</td><td>88.04%</td><td>85.54%</td></tr>
+    </table>
+    
+
+    <h2>Confusion Matrices</h2>
+    <img src="action_confusion.png" width="400"/><img src="finger_confusion.png" width="400"/>
+
+    <h2>metrics.json</h2>
+    <pre>{
+  "schema_version": 1,
+  "created_utc": "2026-04-04T05:25:16.158773+00:00",
+  "npz_path": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/eeg_windows.npz",
+  "run_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050",
+  "train": {
+    "avg_loss": 0.7438625701035375,
+    "action_acc": 0.8647540983606558,
+    "finger_acc": 0.8724133205426888,
+    "epochs": 60,
+    "batch_size": 64,
+    "lr": 0.001,
+    "seed": 43
+  },
+  "temperature_scaling": {
+    "action_temperature": 1.0,
+    "finger_temperature": 1.0,
+    "applicability_temperature": 1.0,
+    "fit_sample_count": 874,
+    "fit_non_rest_count": 771,
+    "has_applicability_temperature": true,
+    "source": "fit_on_holdout",
+    "metrics": {
+      "action": {
+        "nll_before": 0.4310529828071594,
+        "nll_after": 0.4310529828071594
+      },
+      "finger": {
+        "nll_before": 0.35804715752601624,
+        "nll_after": 0.35804715752601624
+      },
+      "applicability": {
+        "nll_before": 0.1862296760082245,
+        "nll_after": 0.1862296760082245
+      }
+    }
+  },
+  "test": {
+    "action_acc": 0.9182963928726641,
+    "finger_acc_non_rest": 0.8846539618856569,
+    "n_test": 2301,
+    "n_test_non_rest": 1994
+  },
+  "timing": {
+    "normalization_sec": 0.04907895900000003,
+    "training_sec": 70.702402416,
+    "avg_epoch_sec": 1.1783733736,
+    "temperature_fit_sec": 0.0811718330000133,
+    "test_inference_sec": 0.2107912080000034
+  },
+  "artifacts": {
+    "model": "finger_action_model.pt",
+    "scaler": "scaler.npz",
+    "preds": "test_predictions.npz",
+    "temperature_scaling": "temperature_scaling.json"
+  }
+}</pre>
+
+    </body>
+    </html>
+    

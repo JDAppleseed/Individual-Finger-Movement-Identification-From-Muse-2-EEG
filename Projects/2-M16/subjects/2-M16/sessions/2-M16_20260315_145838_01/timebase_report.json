@@ -1,0 +1,1356 @@
+{
+  "subject_id": "2-M16",
+  "session_id": "2-M16_20260315_145838_01",
+  "ranges": [
+    {
+      "path": "raw/eeg_raw_shard_000.npy",
+      "seq_min": 0,
+      "seq_max": 639,
+      "count": 640,
+      "lsl_ts_mono_start": 579167.0026234838,
+      "lsl_ts_mono_end": 579169.3890179234,
+      "local_ts_start": 1773611973.4740438,
+      "local_ts_end": 1773611975.63845
+    },
+    {
+      "path": "raw/eeg_raw_shard_001.npy",
+      "seq_min": 640,
+      "seq_max": 1151,
+      "count": 512,
+      "lsl_ts_mono_start": 579169.3929241734,
+      "lsl_ts_mono_end": 579171.3841913417,
+      "local_ts_start": 1773611975.638463,
+      "local_ts_end": 1773611977.66288
+    },
+    {
+      "path": "raw/eeg_raw_shard_002.npy",
+      "seq_min": 1152,
+      "seq_max": 1791,
+      "count": 640,
+      "lsl_ts_mono_start": 579171.3880975917,
+      "lsl_ts_mono_end": 579173.8805938058,
+      "local_ts_start": 1773611977.6629388,
+      "local_ts_end": 1773611980.138593
+    },
+    {
+      "path": "raw/eeg_raw_shard_003.npy",
+      "seq_min": 1792,
+      "seq_max": 2303,
+      "count": 512,
+      "lsl_ts_mono_start": 579173.8845000558,
+      "lsl_ts_mono_end": 579175.8784059819,
+      "local_ts_start": 1773611980.138603,
+      "local_ts_end": 1773611982.14841
+    },
+    {
+      "path": "raw/eeg_raw_shard_004.npy",
+      "seq_min": 2304,
+      "seq_max": 2943,
+      "count": 640,
+      "lsl_ts_mono_start": 579175.8823122319,
+      "lsl_ts_mono_end": 579178.3274445266,
+      "local_ts_start": 1773611982.148449,
+      "local_ts_end": 1773611984.593791
+    },
+    {
+      "path": "raw/eeg_raw_shard_005.npy",
+      "seq_min": 2944,
+      "seq_max": 3583,
+      "count": 640,
+      "lsl_ts_mono_start": 579178.3313507766,
+      "lsl_ts_mono_end": 579180.7259158349,
+      "local_ts_start": 1773611984.593802,
+      "local_ts_end": 1773611986.978427
+    },
+    {
+      "path": "raw/eeg_raw_shard_006.npy",
+      "seq_min": 3584,
+      "seq_max": 4095,
+      "count": 512,
+      "lsl_ts_mono_start": 579180.7298220849,
+      "lsl_ts_mono_end": 579182.7280687722,
+      "local_ts_start": 1773611986.9784389,
+      "local_ts_end": 1773611988.9888582
+    },
+    {
+      "path": "raw/eeg_raw_shard_007.npy",
+      "seq_min": 4096,
+      "seq_max": 4735,
+      "count": 640,
+      "lsl_ts_mono_start": 579182.7319750222,
+      "lsl_ts_mono_end": 579185.2121822571,
+      "local_ts_start": 1773611988.988868,
+      "local_ts_end": 1773611991.433501
+    },
+    {
+      "path": "raw/eeg_raw_shard_008.npy",
+      "seq_min": 4736,
+      "seq_max": 5375,
+      "count": 640,
+      "lsl_ts_mono_start": 579185.2160885071,
+      "lsl_ts_mono_end": 579187.6519069753,
+      "local_ts_start": 1773611991.4335082,
+      "local_ts_end": 1773611993.908534
+    },
+    {
+      "path": "raw/eeg_raw_shard_009.npy",
+      "seq_min": 5376,
+      "seq_max": 6015,
+      "count": 640,
+      "lsl_ts_mono_start": 579187.6558132253,
+      "lsl_ts_mono_end": 579190.1459913803,
+      "local_ts_start": 1773611993.908551,
+      "local_ts_end": 1773611996.3985019
+    },
+    {
+      "path": "raw/eeg_raw_shard_010.npy",
+      "seq_min": 6016,
+      "seq_max": 6655,
+      "count": 640,
+      "lsl_ts_mono_start": 579190.1498976303,
+      "lsl_ts_mono_end": 579192.593306389,
+      "local_ts_start": 1773611996.3985121,
+      "local_ts_end": 1773611998.842895
+    },
+    {
+      "path": "raw/eeg_raw_shard_011.npy",
+      "seq_min": 6656,
+      "seq_max": 7167,
+      "count": 512,
+      "lsl_ts_mono_start": 579192.597212639,
+      "lsl_ts_mono_end": 579194.5923766263,
+      "local_ts_start": 1773611998.842906,
+      "local_ts_end": 1773612000.853634
+    },
+    {
+      "path": "raw/eeg_raw_shard_012.npy",
+      "seq_min": 7168,
+      "seq_max": 7679,
+      "count": 512,
+      "lsl_ts_mono_start": 579194.5962828763,
+      "lsl_ts_mono_end": 579196.5920403549,
+      "local_ts_start": 1773612000.8536499,
+      "local_ts_end": 1773612002.877373
+    },
+    {
+      "path": "raw/eeg_raw_shard_013.npy",
+      "seq_min": 7680,
+      "seq_max": 8319,
+      "count": 640,
+      "lsl_ts_mono_start": 579196.5959466049,
+      "lsl_ts_mono_end": 579199.0917821291,
+      "local_ts_start": 1773612002.877432,
+      "local_ts_end": 1773612005.370862
+    },
+    {
+      "path": "raw/eeg_raw_shard_014.npy",
+      "seq_min": 8320,
+      "seq_max": 8834,
+      "count": 515,
+      "lsl_ts_mono_start": 579199.0956883791,
+      "lsl_ts_mono_end": 579201.1054423092,
+      "local_ts_start": 1773612005.370879,
+      "local_ts_end": 1773612007.377693
+    },
+    {
+      "path": "raw/eeg_raw_shard_015.npy",
+      "seq_min": 8835,
+      "seq_max": 9474,
+      "count": 640,
+      "lsl_ts_mono_start": 579201.1093485592,
+      "lsl_ts_mono_end": 579203.5055435734,
+      "local_ts_start": 1773612007.377707,
+      "local_ts_end": 1773612009.7639308
+    },
+    {
+      "path": "raw/eeg_raw_shard_016.npy",
+      "seq_min": 9475,
+      "seq_max": 10114,
+      "count": 640,
+      "lsl_ts_mono_start": 579203.5094498234,
+      "lsl_ts_mono_end": 579205.9562334316,
+      "local_ts_start": 1773612009.763944,
+      "local_ts_end": 1773612012.193509
+    },
+    {
+      "path": "raw/eeg_raw_shard_017.npy",
+      "seq_min": 10115,
+      "seq_max": 10626,
+      "count": 512,
+      "lsl_ts_mono_start": 579205.9602687286,
+      "lsl_ts_mono_end": 579207.9590276745,
+      "local_ts_start": 1773612012.252151,
+      "local_ts_end": 1773612014.2038112
+    },
+    {
+      "path": "raw/eeg_raw_shard_018.npy",
+      "seq_min": 10627,
+      "seq_max": 11266,
+      "count": 640,
+      "lsl_ts_mono_start": 579207.9629339245,
+      "lsl_ts_mono_end": 579210.4099269727,
+      "local_ts_start": 1773612014.203824,
+      "local_ts_end": 1773612016.603884
+    },
+    {
+      "path": "raw/eeg_raw_shard_019.npy",
+      "seq_min": 11267,
+      "seq_max": 11778,
+      "count": 512,
+      "lsl_ts_mono_start": 579210.4133877633,
+      "lsl_ts_mono_end": 579212.3622343632,
+      "local_ts_start": 1773612016.648393,
+      "local_ts_end": 1773612018.628522
+    },
+    {
+      "path": "raw/eeg_raw_shard_020.npy",
+      "seq_min": 11779,
+      "seq_max": 12418,
+      "count": 640,
+      "lsl_ts_mono_start": 579212.3661406132,
+      "lsl_ts_mono_end": 579214.8164657112,
+      "local_ts_start": 1773612018.628534,
+      "local_ts_end": 1773612021.086569
+    },
+    {
+      "path": "raw/eeg_raw_shard_021.npy",
+      "seq_min": 12419,
+      "seq_max": 13058,
+      "count": 640,
+      "lsl_ts_mono_start": 579214.8205614745,
+      "lsl_ts_mono_end": 579217.3208154402,
+      "local_ts_start": 1773612021.11842,
+      "local_ts_end": 1773612023.592294
+    },
+    {
+      "path": "raw/eeg_raw_shard_022.npy",
+      "seq_min": 13059,
+      "seq_max": 13698,
+      "count": 640,
+      "lsl_ts_mono_start": 579217.3247216902,
+      "lsl_ts_mono_end": 579219.7914092893,
+      "local_ts_start": 1773612023.592305,
+      "local_ts_end": 1773612026.024263
+    },
+    {
+      "path": "raw/eeg_raw_shard_023.npy",
+      "seq_min": 13699,
+      "seq_max": 14210,
+      "count": 512,
+      "lsl_ts_mono_start": 579219.7914102894,
+      "lsl_ts_mono_end": 579221.7740773621,
+      "local_ts_start": 1773612026.024279,
+      "local_ts_end": 1773612028.0476658
+    },
+    {
+      "path": "raw/eeg_raw_shard_024.npy",
+      "seq_min": 14211,
+      "seq_max": 14850,
+      "count": 640,
+      "lsl_ts_mono_start": 579221.7779836121,
+      "lsl_ts_mono_end": 579224.2742300082,
+      "local_ts_start": 1773612028.047681,
+      "local_ts_end": 1773612030.5388212
+    },
+    {
+      "path": "raw/eeg_raw_shard_025.npy",
+      "seq_min": 14851,
+      "seq_max": 15490,
+      "count": 640,
+      "lsl_ts_mono_start": 579224.2781362582,
+      "lsl_ts_mono_end": 579226.6612829939,
+      "local_ts_start": 1773612030.538833,
+      "local_ts_end": 1773612032.863787
+    },
+    {
+      "path": "raw/eeg_raw_shard_026.npy",
+      "seq_min": 15491,
+      "seq_max": 16130,
+      "count": 640,
+      "lsl_ts_mono_start": 579226.6649841265,
+      "lsl_ts_mono_end": 579229.1008873173,
+      "local_ts_start": 1773612032.923722,
+      "local_ts_end": 1773612035.353415
+    },
+    {
+      "path": "raw/eeg_raw_shard_027.npy",
+      "seq_min": 16131,
+      "seq_max": 16770,
+      "count": 640,
+      "lsl_ts_mono_start": 579229.1047935673,
+      "lsl_ts_mono_end": 579231.497304176,
+      "local_ts_start": 1773612035.353426,
+      "local_ts_end": 1773612037.753927
+    },
+    {
+      "path": "raw/eeg_raw_shard_028.npy",
+      "seq_min": 16771,
+      "seq_max": 17282,
+      "count": 512,
+      "lsl_ts_mono_start": 579231.501210426,
+      "lsl_ts_mono_end": 579233.4978070469,
+      "local_ts_start": 1773612037.7539358,
+      "local_ts_end": 1773612039.763756
+    },
+    {
+      "path": "raw/eeg_raw_shard_029.npy",
+      "seq_min": 17283,
+      "seq_max": 17922,
+      "count": 640,
+      "lsl_ts_mono_start": 579233.5017132969,
+      "lsl_ts_mono_end": 579235.9981253708,
+      "local_ts_start": 1773612039.763764,
+      "local_ts_end": 1773612042.2537842
+    },
+    {
+      "path": "raw/eeg_raw_shard_030.npy",
+      "seq_min": 17923,
+      "seq_max": 18434,
+      "count": 512,
+      "lsl_ts_mono_start": 579236.0020316208,
+      "lsl_ts_mono_end": 579237.9987302304,
+      "local_ts_start": 1773612042.2537951,
+      "local_ts_end": 1773612044.264083
+    },
+    {
+      "path": "raw/eeg_raw_shard_031.npy",
+      "seq_min": 18435,
+      "seq_max": 19074,
+      "count": 640,
+      "lsl_ts_mono_start": 579238.0026364804,
+      "lsl_ts_mono_end": 579240.4982631673,
+      "local_ts_start": 1773612044.264097,
+      "local_ts_end": 1773612046.7537699
+    },
+    {
+      "path": "raw/eeg_raw_shard_032.npy",
+      "seq_min": 19075,
+      "seq_max": 19714,
+      "count": 640,
+      "lsl_ts_mono_start": 579240.5021694173,
+      "lsl_ts_mono_end": 579242.9469991019,
+      "local_ts_start": 1773612046.753781,
+      "local_ts_end": 1773612049.183727
+    },
+    {
+      "path": "raw/eeg_raw_shard_033.npy",
+      "seq_min": 19715,
+      "seq_max": 20226,
+      "count": 512,
+      "lsl_ts_mono_start": 579242.950890955,
+      "lsl_ts_mono_end": 579244.947894558,
+      "local_ts_start": 1773612049.2284968,
+      "local_ts_end": 1773612051.194787
+    },
+    {
+      "path": "raw/eeg_raw_shard_034.npy",
+      "seq_min": 20227,
+      "seq_max": 20866,
+      "count": 640,
+      "lsl_ts_mono_start": 579244.951800808,
+      "lsl_ts_mono_end": 579247.3982491456,
+      "local_ts_start": 1773612051.194797,
+      "local_ts_end": 1773612053.638981
+    },
+    {
+      "path": "raw/eeg_raw_shard_035.npy",
+      "seq_min": 20867,
+      "seq_max": 21378,
+      "count": 512,
+      "lsl_ts_mono_start": 579247.4021822587,
+      "lsl_ts_mono_end": 579249.3998389388,
+      "local_ts_start": 1773612053.683882,
+      "local_ts_end": 1773612055.649015
+    },
+    {
+      "path": "raw/eeg_raw_shard_036.npy",
+      "seq_min": 21379,
+      "seq_max": 21890,
+      "count": 512,
+      "lsl_ts_mono_start": 579249.4037451888,
+      "lsl_ts_mono_end": 579251.4013330945,
+      "local_ts_start": 1773612055.649025,
+      "local_ts_end": 1773612057.674114
+    },
+    {
+      "path": "raw/eeg_raw_shard_037.npy",
+      "seq_min": 21891,
+      "seq_max": 22530,
+      "count": 640,
+      "lsl_ts_mono_start": 579251.4052393445,
+      "lsl_ts_mono_end": 579253.9018356006,
+      "local_ts_start": 1773612057.6741261,
+      "local_ts_end": 1773612060.1490119
+    },
+    {
+      "path": "raw/eeg_raw_shard_038.npy",
+      "seq_min": 22531,
+      "seq_max": 23042,
+      "count": 512,
+      "lsl_ts_mono_start": 579253.9057418506,
+      "lsl_ts_mono_end": 579255.9019315757,
+      "local_ts_start": 1773612060.1490262,
+      "local_ts_end": 1773612062.1739478
+    },
+    {
+      "path": "raw/eeg_raw_shard_039.npy",
+      "seq_min": 23043,
+      "seq_max": 23682,
+      "count": 640,
+      "lsl_ts_mono_start": 579255.9058378257,
+      "lsl_ts_mono_end": 579258.4027419756,
+      "local_ts_start": 1773612062.173961,
+      "local_ts_end": 1773612064.649591
+    },
+    {
+      "path": "raw/eeg_raw_shard_040.npy",
+      "seq_min": 23683,
+      "seq_max": 24322,
+      "count": 640,
+      "lsl_ts_mono_start": 579258.4066482256,
+      "lsl_ts_mono_end": 579260.8846410932,
+      "local_ts_start": 1773612064.64961,
+      "local_ts_end": 1773612067.109202
+    },
+    {
+      "path": "raw/eeg_raw_shard_041.npy",
+      "seq_min": 24323,
+      "seq_max": 24962,
+      "count": 640,
+      "lsl_ts_mono_start": 579260.8882547518,
+      "lsl_ts_mono_end": 579263.3237579206,
+      "local_ts_start": 1773612067.138345,
+      "local_ts_end": 1773612069.5687099
+    },
+    {
+      "path": "raw/eeg_raw_shard_042.npy",
+      "seq_min": 24963,
+      "seq_max": 25602,
+      "count": 640,
+      "lsl_ts_mono_start": 579263.3276641706,
+      "lsl_ts_mono_end": 579265.8174234149,
+      "local_ts_start": 1773612069.5687182,
+      "local_ts_end": 1773612072.058681
+    },
+    {
+      "path": "raw/eeg_raw_shard_043.npy",
+      "seq_min": 25603,
+      "seq_max": 26242,
+      "count": 640,
+      "lsl_ts_mono_start": 579265.8213296649,
+      "lsl_ts_mono_end": 579268.2650828045,
+      "local_ts_start": 1773612072.058691,
+      "local_ts_end": 1773612074.4889731
+    },
+    {
+      "path": "raw/eeg_raw_shard_044.npy",
+      "seq_min": 26243,
+      "seq_max": 26754,
+      "count": 512,
+      "lsl_ts_mono_start": 579268.2688473585,
+      "lsl_ts_mono_end": 579270.2633330723,
+      "local_ts_start": 1773612074.5338318,
+      "local_ts_end": 1773612076.514037
+    },
+    {
+      "path": "raw/eeg_raw_shard_045.npy",
+      "seq_min": 26755,
+      "seq_max": 27266,
+      "count": 512,
+      "lsl_ts_mono_start": 579270.2672393223,
+      "lsl_ts_mono_end": 579272.26188168,
+      "local_ts_start": 1773612076.514048,
+      "local_ts_end": 1773612078.524174
+    },
+    {
+      "path": "raw/eeg_raw_shard_046.npy",
+      "seq_min": 27267,
+      "seq_max": 27906,
+      "count": 640,
+      "lsl_ts_mono_start": 579272.26578793,
+      "lsl_ts_mono_end": 579274.7105244489,
+      "local_ts_start": 1773612078.524191,
+      "local_ts_end": 1773612080.969455
+    },
+    {
+      "path": "raw/eeg_raw_shard_047.npy",
+      "seq_min": 27907,
+      "seq_max": 28418,
+      "count": 512,
+      "lsl_ts_mono_start": 579274.7144306989,
+      "lsl_ts_mono_end": 579276.711999773,
+      "local_ts_start": 1773612080.969474,
+      "local_ts_end": 1773612082.979257
+    },
+    {
+      "path": "raw/eeg_raw_shard_048.npy",
+      "seq_min": 28419,
+      "seq_max": 29058,
+      "count": 640,
+      "lsl_ts_mono_start": 579276.715906023,
+      "lsl_ts_mono_end": 579279.2122917253,
+      "local_ts_start": 1773612082.9792662,
+      "local_ts_end": 1773612085.471057
+    },
+    {
+      "path": "raw/eeg_raw_shard_049.npy",
+      "seq_min": 29059,
+      "seq_max": 29570,
+      "count": 512,
+      "lsl_ts_mono_start": 579279.2161979753,
+      "lsl_ts_mono_end": 579281.2120200698,
+      "local_ts_start": 1773612085.4710789,
+      "local_ts_end": 1773612087.479499
+    },
+    {
+      "path": "raw/eeg_raw_shard_050.npy",
+      "seq_min": 29571,
+      "seq_max": 30210,
+      "count": 640,
+      "lsl_ts_mono_start": 579281.2159263198,
+      "lsl_ts_mono_end": 579283.7119582003,
+      "local_ts_start": 1773612087.47951,
+      "local_ts_end": 1773612089.969206
+    },
+    {
+      "path": "raw/eeg_raw_shard_051.npy",
+      "seq_min": 30211,
+      "seq_max": 30722,
+      "count": 512,
+      "lsl_ts_mono_start": 579283.7158644503,
+      "lsl_ts_mono_end": 579285.713009118,
+      "local_ts_start": 1773612089.969213,
+      "local_ts_end": 1773612091.994517
+    },
+    {
+      "path": "raw/eeg_raw_shard_052.npy",
+      "seq_min": 30723,
+      "seq_max": 31362,
+      "count": 640,
+      "lsl_ts_mono_start": 579285.716915368,
+      "lsl_ts_mono_end": 579288.2128658588,
+      "local_ts_start": 1773612091.994526,
+      "local_ts_end": 1773612094.4684129
+    },
+    {
+      "path": "raw/eeg_raw_shard_053.npy",
+      "seq_min": 31363,
+      "seq_max": 31874,
+      "count": 512,
+      "lsl_ts_mono_start": 579288.2167721088,
+      "lsl_ts_mono_end": 579290.2125674371,
+      "local_ts_start": 1773612094.4687512,
+      "local_ts_end": 1773612096.479821
+    },
+    {
+      "path": "raw/eeg_raw_shard_054.npy",
+      "seq_min": 31875,
+      "seq_max": 32514,
+      "count": 640,
+      "lsl_ts_mono_start": 579290.2164736871,
+      "lsl_ts_mono_end": 579292.662861325,
+      "local_ts_start": 1773612096.479836,
+      "local_ts_end": 1773612098.909653
+    },
+    {
+      "path": "raw/eeg_raw_shard_055.npy",
+      "seq_min": 32515,
+      "seq_max": 33026,
+      "count": 512,
+      "lsl_ts_mono_start": 579292.666767575,
+      "lsl_ts_mono_end": 579294.6633710272,
+      "local_ts_start": 1773612098.909659,
+      "local_ts_end": 1773612100.934294
+    },
+    {
+      "path": "raw/eeg_raw_shard_056.npy",
+      "seq_min": 33027,
+      "seq_max": 33666,
+      "count": 640,
+      "lsl_ts_mono_start": 579294.6672772772,
+      "lsl_ts_mono_end": 579297.163098275,
+      "local_ts_start": 1773612100.934316,
+      "local_ts_end": 1773612103.409676
+    },
+    {
+      "path": "raw/eeg_raw_shard_057.npy",
+      "seq_min": 33667,
+      "seq_max": 34178,
+      "count": 512,
+      "lsl_ts_mono_start": 579297.167004525,
+      "lsl_ts_mono_end": 579299.1648068476,
+      "local_ts_start": 1773612103.409687,
+      "local_ts_end": 1773612105.4347992
+    },
+    {
+      "path": "raw/eeg_raw_shard_058.npy",
+      "seq_min": 34179,
+      "seq_max": 34818,
+      "count": 640,
+      "lsl_ts_mono_start": 579299.1687130976,
+      "lsl_ts_mono_end": 579301.6650283295,
+      "local_ts_start": 1773612105.4348302,
+      "local_ts_end": 1773612107.909514
+    },
+    {
+      "path": "raw/eeg_raw_shard_059.npy",
+      "seq_min": 34819,
+      "seq_max": 35330,
+      "count": 512,
+      "lsl_ts_mono_start": 579301.6689345795,
+      "lsl_ts_mono_end": 579303.6648936688,
+      "local_ts_start": 1773612107.9095209,
+      "local_ts_end": 1773612109.9479702
+    },
+    {
+      "path": "raw/eeg_raw_shard_060.npy",
+      "seq_min": 35331,
+      "seq_max": 35970,
+      "count": 640,
+      "lsl_ts_mono_start": 579303.6687999188,
+      "lsl_ts_mono_end": 579306.1145324302,
+      "local_ts_start": 1773612109.947983,
+      "local_ts_end": 1773612112.3646872
+    },
+    {
+      "path": "raw/eeg_raw_shard_061.npy",
+      "seq_min": 35971,
+      "seq_max": 36482,
+      "count": 512,
+      "lsl_ts_mono_start": 579306.1184386802,
+      "lsl_ts_mono_end": 579308.1149064751,
+      "local_ts_start": 1773612112.364699,
+      "local_ts_end": 1773612114.374964
+    },
+    {
+      "path": "raw/eeg_raw_shard_062.npy",
+      "seq_min": 36483,
+      "seq_max": 37122,
+      "count": 640,
+      "lsl_ts_mono_start": 579308.1188127251,
+      "lsl_ts_mono_end": 579310.5642146232,
+      "local_ts_start": 1773612114.3749812,
+      "local_ts_end": 1773612116.819624
+    },
+    {
+      "path": "raw/eeg_raw_shard_063.npy",
+      "seq_min": 37123,
+      "seq_max": 37762,
+      "count": 640,
+      "lsl_ts_mono_start": 579310.5681208732,
+      "lsl_ts_mono_end": 579313.0132980158,
+      "local_ts_start": 1773612116.819956,
+      "local_ts_end": 1773612119.219563
+    },
+    {
+      "path": "raw/eeg_raw_shard_064.npy",
+      "seq_min": 37763,
+      "seq_max": 38274,
+      "count": 512,
+      "lsl_ts_mono_start": 579313.0136215948,
+      "lsl_ts_mono_end": 579314.997209953,
+      "local_ts_start": 1773612119.249398,
+      "local_ts_end": 1773612121.229975
+    },
+    {
+      "path": "raw/eeg_raw_shard_065.npy",
+      "seq_min": 38275,
+      "seq_max": 38914,
+      "count": 640,
+      "lsl_ts_mono_start": 579315.001116203,
+      "lsl_ts_mono_end": 579317.4385047231,
+      "local_ts_start": 1773612121.2299871,
+      "local_ts_end": 1773612123.659889
+    },
+    {
+      "path": "raw/eeg_raw_shard_066.npy",
+      "seq_min": 38915,
+      "seq_max": 39426,
+      "count": 512,
+      "lsl_ts_mono_start": 579317.4422330258,
+      "lsl_ts_mono_end": 579319.4345985792,
+      "local_ts_start": 1773612123.7045681,
+      "local_ts_end": 1773612125.683763
+    },
+    {
+      "path": "raw/eeg_raw_shard_067.npy",
+      "seq_min": 39427,
+      "seq_max": 39938,
+      "count": 512,
+      "lsl_ts_mono_start": 579319.4385048292,
+      "lsl_ts_mono_end": 579321.4320402743,
+      "local_ts_start": 1773612125.683773,
+      "local_ts_end": 1773612127.6962
+    },
+    {
+      "path": "raw/eeg_raw_shard_068.npy",
+      "seq_min": 39939,
+      "seq_max": 40578,
+      "count": 640,
+      "lsl_ts_mono_start": 579321.4359465243,
+      "lsl_ts_mono_end": 579323.9302424348,
+      "local_ts_start": 1773612127.696222,
+      "local_ts_end": 1773612130.1715221
+    },
+    {
+      "path": "raw/eeg_raw_shard_069.npy",
+      "seq_min": 40579,
+      "seq_max": 41090,
+      "count": 512,
+      "lsl_ts_mono_start": 579323.9341486848,
+      "lsl_ts_mono_end": 579325.9291121119,
+      "local_ts_start": 1773612130.17154,
+      "local_ts_end": 1773612132.209265
+    },
+    {
+      "path": "raw/eeg_raw_shard_070.npy",
+      "seq_min": 41091,
+      "seq_max": 41730,
+      "count": 640,
+      "lsl_ts_mono_start": 579325.9330183619,
+      "lsl_ts_mono_end": 579328.3789819175,
+      "local_ts_start": 1773612132.209279,
+      "local_ts_end": 1773612134.624882
+    },
+    {
+      "path": "raw/eeg_raw_shard_071.npy",
+      "seq_min": 41731,
+      "seq_max": 42242,
+      "count": 512,
+      "lsl_ts_mono_start": 579328.3828881675,
+      "lsl_ts_mono_end": 579330.3797754238,
+      "local_ts_start": 1773612134.62489,
+      "local_ts_end": 1773612136.6496
+    },
+    {
+      "path": "raw/eeg_raw_shard_072.npy",
+      "seq_min": 42243,
+      "seq_max": 42882,
+      "count": 640,
+      "lsl_ts_mono_start": 579330.3836816738,
+      "lsl_ts_mono_end": 579332.8303240692,
+      "local_ts_start": 1773612136.6496131,
+      "local_ts_end": 1773612139.094799
+    },
+    {
+      "path": "raw/eeg_raw_shard_073.npy",
+      "seq_min": 42883,
+      "seq_max": 43394,
+      "count": 512,
+      "lsl_ts_mono_start": 579332.8342303192,
+      "lsl_ts_mono_end": 579334.8319451462,
+      "local_ts_start": 1773612139.094809,
+      "local_ts_end": 1773612141.103998
+    },
+    {
+      "path": "raw/eeg_raw_shard_074.npy",
+      "seq_min": 43395,
+      "seq_max": 44034,
+      "count": 640,
+      "lsl_ts_mono_start": 579334.8358513962,
+      "lsl_ts_mono_end": 579337.2831525432,
+      "local_ts_start": 1773612141.104011,
+      "local_ts_end": 1773612143.5352042
+    },
+    {
+      "path": "raw/eeg_raw_shard_075.npy",
+      "seq_min": 44035,
+      "seq_max": 44546,
+      "count": 512,
+      "lsl_ts_mono_start": 579337.2870587932,
+      "lsl_ts_mono_end": 579339.2848125942,
+      "local_ts_start": 1773612143.5352151,
+      "local_ts_end": 1773612145.5462751
+    },
+    {
+      "path": "raw/eeg_raw_shard_076.npy",
+      "seq_min": 44547,
+      "seq_max": 45186,
+      "count": 640,
+      "lsl_ts_mono_start": 579339.2887188442,
+      "lsl_ts_mono_end": 579341.7863571724,
+      "local_ts_start": 1773612145.54629,
+      "local_ts_end": 1773612148.036163
+    },
+    {
+      "path": "raw/eeg_raw_shard_077.npy",
+      "seq_min": 45187,
+      "seq_max": 45826,
+      "count": 640,
+      "lsl_ts_mono_start": 579341.7902634224,
+      "lsl_ts_mono_end": 579344.2363965918,
+      "local_ts_start": 1773612148.036174,
+      "local_ts_end": 1773612150.479014
+    },
+    {
+      "path": "raw/eeg_raw_shard_078.npy",
+      "seq_min": 45827,
+      "seq_max": 46338,
+      "count": 512,
+      "lsl_ts_mono_start": 579344.2403463796,
+      "lsl_ts_mono_end": 579346.2384520952,
+      "local_ts_start": 1773612150.524638,
+      "local_ts_end": 1773612152.5043159
+    },
+    {
+      "path": "raw/eeg_raw_shard_079.npy",
+      "seq_min": 46339,
+      "seq_max": 46978,
+      "count": 640,
+      "lsl_ts_mono_start": 579346.2423583452,
+      "lsl_ts_mono_end": 579348.688175966,
+      "local_ts_start": 1773612152.504334,
+      "local_ts_end": 1773612154.920358
+    },
+    {
+      "path": "raw/eeg_raw_shard_080.npy",
+      "seq_min": 46979,
+      "seq_max": 47618,
+      "count": 640,
+      "lsl_ts_mono_start": 579348.6920133259,
+      "lsl_ts_mono_end": 579351.1376986199,
+      "local_ts_start": 1773612154.965151,
+      "local_ts_end": 1773612157.410115
+    },
+    {
+      "path": "raw/eeg_raw_shard_081.npy",
+      "seq_min": 47619,
+      "seq_max": 48258,
+      "count": 640,
+      "lsl_ts_mono_start": 579351.1416048699,
+      "lsl_ts_mono_end": 579353.6275083335,
+      "local_ts_start": 1773612157.4101272,
+      "local_ts_end": 1773612159.839811
+    },
+    {
+      "path": "raw/eeg_raw_shard_082.npy",
+      "seq_min": 48259,
+      "seq_max": 48898,
+      "count": 640,
+      "lsl_ts_mono_start": 579353.6314145835,
+      "lsl_ts_mono_end": 579356.016013833,
+      "local_ts_start": 1773612159.8398201,
+      "local_ts_end": 1773612162.2553651
+    },
+    {
+      "path": "raw/eeg_raw_shard_083.npy",
+      "seq_min": 48899,
+      "seq_max": 49538,
+      "count": 640,
+      "lsl_ts_mono_start": 579356.0197742359,
+      "lsl_ts_mono_end": 579358.510331573,
+      "local_ts_start": 1773612162.2852962,
+      "local_ts_end": 1773612164.774208
+    },
+    {
+      "path": "raw/eeg_raw_shard_084.npy",
+      "seq_min": 49539,
+      "seq_max": 50178,
+      "count": 640,
+      "lsl_ts_mono_start": 579358.514237823,
+      "lsl_ts_mono_end": 579361.006142976,
+      "local_ts_start": 1773612164.77422,
+      "local_ts_end": 1773612167.250665
+    },
+    {
+      "path": "raw/eeg_raw_shard_085.npy",
+      "seq_min": 50179,
+      "seq_max": 50690,
+      "count": 512,
+      "lsl_ts_mono_start": 579361.010049226,
+      "lsl_ts_mono_end": 579363.0044035069,
+      "local_ts_start": 1773612167.2506728,
+      "local_ts_end": 1773612169.2602181
+    },
+    {
+      "path": "raw/eeg_raw_shard_086.npy",
+      "seq_min": 50691,
+      "seq_max": 51330,
+      "count": 640,
+      "lsl_ts_mono_start": 579363.0083097569,
+      "lsl_ts_mono_end": 579365.5037078348,
+      "local_ts_start": 1773612169.260232,
+      "local_ts_end": 1773612171.749801
+    },
+    {
+      "path": "raw/eeg_raw_shard_087.npy",
+      "seq_min": 51331,
+      "seq_max": 51970,
+      "count": 640,
+      "lsl_ts_mono_start": 579365.5076140848,
+      "lsl_ts_mono_end": 579367.901859493,
+      "local_ts_start": 1773612171.749823,
+      "local_ts_end": 1773612174.1361222
+    },
+    {
+      "path": "raw/eeg_raw_shard_088.npy",
+      "seq_min": 51971,
+      "seq_max": 52610,
+      "count": 640,
+      "lsl_ts_mono_start": 579367.9058595377,
+      "lsl_ts_mono_end": 579370.3526033442,
+      "local_ts_start": 1773612174.195138,
+      "local_ts_end": 1773612176.62546
+    },
+    {
+      "path": "raw/eeg_raw_shard_089.npy",
+      "seq_min": 52611,
+      "seq_max": 53250,
+      "count": 640,
+      "lsl_ts_mono_start": 579370.3565095942,
+      "lsl_ts_mono_end": 579372.848814709,
+      "local_ts_start": 1773612176.62547,
+      "local_ts_end": 1773612179.070119
+    },
+    {
+      "path": "raw/eeg_raw_shard_090.npy",
+      "seq_min": 53251,
+      "seq_max": 53890,
+      "count": 640,
+      "lsl_ts_mono_start": 579372.852720959,
+      "lsl_ts_mono_end": 579375.2354824903,
+      "local_ts_start": 1773612179.0701299,
+      "local_ts_end": 1773612181.455424
+    },
+    {
+      "path": "raw/eeg_raw_shard_091.npy",
+      "seq_min": 53891,
+      "seq_max": 54402,
+      "count": 512,
+      "lsl_ts_mono_start": 579375.2391960912,
+      "lsl_ts_mono_end": 579377.2292605805,
+      "local_ts_start": 1773612181.5000582,
+      "local_ts_end": 1773612183.465185
+    },
+    {
+      "path": "raw/eeg_raw_shard_092.npy",
+      "seq_min": 54403,
+      "seq_max": 55042,
+      "count": 640,
+      "lsl_ts_mono_start": 579377.2331668305,
+      "lsl_ts_mono_end": 579379.6756454669,
+      "local_ts_start": 1773612183.4651961,
+      "local_ts_end": 1773612185.9101498
+    },
+    {
+      "path": "raw/eeg_raw_shard_093.npy",
+      "seq_min": 55043,
+      "seq_max": 55682,
+      "count": 640,
+      "lsl_ts_mono_start": 579379.6795096414,
+      "lsl_ts_mono_end": 579382.123330757,
+      "local_ts_start": 1773612185.955318,
+      "local_ts_end": 1773612188.400715
+    },
+    {
+      "path": "raw/eeg_raw_shard_094.npy",
+      "seq_min": 55683,
+      "seq_max": 56322,
+      "count": 640,
+      "lsl_ts_mono_start": 579382.127237007,
+      "lsl_ts_mono_end": 579384.6234297466,
+      "local_ts_start": 1773612188.400728,
+      "local_ts_end": 1773612190.8753579
+    },
+    {
+      "path": "raw/eeg_raw_shard_095.npy",
+      "seq_min": 56323,
+      "seq_max": 56962,
+      "count": 640,
+      "lsl_ts_mono_start": 579384.6273359966,
+      "lsl_ts_mono_end": 579387.0652228277,
+      "local_ts_start": 1773612190.875372,
+      "local_ts_end": 1773612193.260103
+    },
+    {
+      "path": "raw/eeg_raw_shard_096.npy",
+      "seq_min": 56963,
+      "seq_max": 57602,
+      "count": 640,
+      "lsl_ts_mono_start": 579387.0686954241,
+      "lsl_ts_mono_end": 579389.5018841036,
+      "local_ts_start": 1773612193.3057432,
+      "local_ts_end": 1773612195.749599
+    },
+    {
+      "path": "raw/eeg_raw_shard_097.npy",
+      "seq_min": 57603,
+      "seq_max": 58242,
+      "count": 640,
+      "lsl_ts_mono_start": 579389.5057903536,
+      "lsl_ts_mono_end": 579391.9941334372,
+      "local_ts_start": 1773612195.74961,
+      "local_ts_end": 1773612198.2253828
+    },
+    {
+      "path": "raw/eeg_raw_shard_098.npy",
+      "seq_min": 58243,
+      "seq_max": 58882,
+      "count": 640,
+      "lsl_ts_mono_start": 579391.9980396872,
+      "lsl_ts_mono_end": 579394.4407389188,
+      "local_ts_start": 1773612198.2253928,
+      "local_ts_end": 1773612200.6712708
+    },
+    {
+      "path": "raw/eeg_raw_shard_099.npy",
+      "seq_min": 58883,
+      "seq_max": 59522,
+      "count": 640,
+      "lsl_ts_mono_start": 579394.4445520438,
+      "lsl_ts_mono_end": 579396.8889435352,
+      "local_ts_start": 1773612200.715328,
+      "local_ts_end": 1773612203.1597419
+    },
+    {
+      "path": "raw/eeg_raw_shard_100.npy",
+      "seq_min": 59523,
+      "seq_max": 59718,
+      "count": 196,
+      "lsl_ts_mono_start": 579396.8928497852,
+      "lsl_ts_mono_end": 579398.2049949924,
+      "local_ts_start": 1773612203.1597571,
+      "local_ts_end": 1773612214.486507
+    },
+    {
+      "path": "raw/eeg_raw_shard_101.npy",
+      "seq_min": 59719,
+      "seq_max": 60230,
+      "count": 512,
+      "lsl_ts_mono_start": 579398.2089012424,
+      "lsl_ts_mono_end": 579402.3549949919,
+      "local_ts_start": 1773612214.486517,
+      "local_ts_end": 1773612216.495457
+    },
+    {
+      "path": "raw/eeg_raw_shard_102.npy",
+      "seq_min": 60231,
+      "seq_max": 60870,
+      "count": 640,
+      "lsl_ts_mono_start": 579402.3589012419,
+      "lsl_ts_mono_end": 579407.5049949912,
+      "local_ts_start": 1773612216.49547,
+      "local_ts_end": 1773612218.97024
+    },
+    {
+      "path": "raw/eeg_raw_shard_103.npy",
+      "seq_min": 60871,
+      "seq_max": 61382,
+      "count": 512,
+      "lsl_ts_mono_start": 579407.5089012412,
+      "lsl_ts_mono_end": 579411.6549949908,
+      "local_ts_start": 1773612218.970248,
+      "local_ts_end": 1773612220.99523
+    },
+    {
+      "path": "raw/eeg_raw_shard_104.npy",
+      "seq_min": 61383,
+      "seq_max": 62022,
+      "count": 640,
+      "lsl_ts_mono_start": 579411.6589012408,
+      "lsl_ts_mono_end": 579416.8049949901,
+      "local_ts_start": 1773612220.995237,
+      "local_ts_end": 1773612223.304859
+    },
+    {
+      "path": "raw/eeg_raw_shard_105.npy",
+      "seq_min": 62023,
+      "seq_max": 62662,
+      "count": 640,
+      "lsl_ts_mono_start": 579416.8089012401,
+      "lsl_ts_mono_end": 579419.3808566078,
+      "local_ts_start": 1773612223.3048651,
+      "local_ts_end": 1773612225.734376
+    },
+    {
+      "path": "raw/eeg_raw_shard_106.npy",
+      "seq_min": 62663,
+      "seq_max": 63302,
+      "count": 640,
+      "lsl_ts_mono_start": 579419.3857725064,
+      "lsl_ts_mono_end": 579421.9209011332,
+      "local_ts_start": 1773612225.7656279,
+      "local_ts_end": 1773612228.210402
+    },
+    {
+      "path": "raw/eeg_raw_shard_107.npy",
+      "seq_min": 63303,
+      "seq_max": 63942,
+      "count": 640,
+      "lsl_ts_mono_start": 579421.9248073832,
+      "lsl_ts_mono_end": 579424.4291678513,
+      "local_ts_start": 1773612228.2104099,
+      "local_ts_end": 1773612230.68515
+    },
+    {
+      "path": "raw/eeg_raw_shard_108.npy",
+      "seq_min": 63943,
+      "seq_max": 64582,
+      "count": 640,
+      "lsl_ts_mono_start": 579424.4330741013,
+      "lsl_ts_mono_end": 579426.8669197262,
+      "local_ts_start": 1773612230.6851552,
+      "local_ts_end": 1773612233.085414
+    },
+    {
+      "path": "raw/eeg_raw_shard_109.npy",
+      "seq_min": 64583,
+      "seq_max": 65222,
+      "count": 640,
+      "lsl_ts_mono_start": 579426.8707661286,
+      "lsl_ts_mono_end": 579429.3098539986,
+      "local_ts_start": 1773612233.144703,
+      "local_ts_end": 1773612235.591081
+    },
+    {
+      "path": "raw/eeg_raw_shard_110.npy",
+      "seq_min": 65223,
+      "seq_max": 65862,
+      "count": 640,
+      "lsl_ts_mono_start": 579429.3137602486,
+      "lsl_ts_mono_end": 579431.8055089482,
+      "local_ts_start": 1773612235.59109,
+      "local_ts_end": 1773612238.050362
+    },
+    {
+      "path": "raw/eeg_raw_shard_111.npy",
+      "seq_min": 65863,
+      "seq_max": 66374,
+      "count": 512,
+      "lsl_ts_mono_start": 579431.8094151982,
+      "lsl_ts_mono_end": 579433.8029322393,
+      "local_ts_start": 1773612238.0503669,
+      "local_ts_end": 1773612240.0603678
+    },
+    {
+      "path": "raw/eeg_raw_shard_112.npy",
+      "seq_min": 66375,
+      "seq_max": 67014,
+      "count": 640,
+      "lsl_ts_mono_start": 579433.8068384893,
+      "lsl_ts_mono_end": 579436.3012169106,
+      "local_ts_start": 1773612240.060374,
+      "local_ts_end": 1773612242.505897
+    },
+    {
+      "path": "raw/eeg_raw_shard_113.npy",
+      "seq_min": 67015,
+      "seq_max": 67654,
+      "count": 640,
+      "lsl_ts_mono_start": 579436.3051231606,
+      "lsl_ts_mono_end": 579438.7018549113,
+      "local_ts_start": 1773612242.5059142,
+      "local_ts_end": 1773612244.93631
+    },
+    {
+      "path": "raw/eeg_raw_shard_114.npy",
+      "seq_min": 67655,
+      "seq_max": 68166,
+      "count": 512,
+      "lsl_ts_mono_start": 579438.7057085051,
+      "lsl_ts_mono_end": 579440.7035474733,
+      "local_ts_start": 1773612244.980327,
+      "local_ts_end": 1773612246.959975
+    },
+    {
+      "path": "raw/eeg_raw_shard_115.npy",
+      "seq_min": 68167,
+      "seq_max": 68678,
+      "count": 512,
+      "lsl_ts_mono_start": 579440.7074537233,
+      "lsl_ts_mono_end": 579442.7052125331,
+      "local_ts_start": 1773612246.960005,
+      "local_ts_end": 1773612248.9712908
+    },
+    {
+      "path": "raw/eeg_raw_shard_116.npy",
+      "seq_min": 68679,
+      "seq_max": 69318,
+      "count": 640,
+      "lsl_ts_mono_start": 579442.7091187831,
+      "lsl_ts_mono_end": 579445.1562331081,
+      "local_ts_start": 1773612248.971314,
+      "local_ts_end": 1773612251.4153001
+    },
+    {
+      "path": "raw/eeg_raw_shard_117.npy",
+      "seq_min": 69319,
+      "seq_max": 69830,
+      "count": 512,
+      "lsl_ts_mono_start": 579445.1601393581,
+      "lsl_ts_mono_end": 579447.1575460448,
+      "local_ts_start": 1773612251.415308,
+      "local_ts_end": 1773612253.439195
+    },
+    {
+      "path": "raw/eeg_raw_shard_118.npy",
+      "seq_min": 69831,
+      "seq_max": 70470,
+      "count": 640,
+      "lsl_ts_mono_start": 579447.1614522948,
+      "lsl_ts_mono_end": 579449.658256657,
+      "local_ts_start": 1773612253.439209,
+      "local_ts_end": 1773612255.900021
+    },
+    {
+      "path": "raw/eeg_raw_shard_119.npy",
+      "seq_min": 70471,
+      "seq_max": 71110,
+      "count": 640,
+      "lsl_ts_mono_start": 579449.662162907,
+      "lsl_ts_mono_end": 579452.1085532727,
+      "local_ts_start": 1773612255.90003,
+      "local_ts_end": 1773612258.346719
+    },
+    {
+      "path": "raw/eeg_raw_shard_120.npy",
+      "seq_min": 71111,
+      "seq_max": 71622,
+      "count": 512,
+      "lsl_ts_mono_start": 579452.1124411062,
+      "lsl_ts_mono_end": 579454.1095587865,
+      "local_ts_start": 1773612258.39045,
+      "local_ts_end": 1773612260.35551
+    },
+    {
+      "path": "raw/eeg_raw_shard_121.npy",
+      "seq_min": 71623,
+      "seq_max": 72134,
+      "count": 512,
+      "lsl_ts_mono_start": 579454.1134650365,
+      "lsl_ts_mono_end": 579456.110477146,
+      "local_ts_start": 1773612260.355517,
+      "local_ts_end": 1773612262.3805718
+    },
+    {
+      "path": "raw/eeg_raw_shard_122.npy",
+      "seq_min": 72135,
+      "seq_max": 72774,
+      "count": 640,
+      "lsl_ts_mono_start": 579456.114383396,
+      "lsl_ts_mono_end": 579458.6104737892,
+      "local_ts_start": 1773612262.380579,
+      "local_ts_end": 1773612264.855832
+    },
+    {
+      "path": "raw/eeg_raw_shard_123.npy",
+      "seq_min": 72775,
+      "seq_max": 73286,
+      "count": 512,
+      "lsl_ts_mono_start": 579458.6143800392,
+      "lsl_ts_mono_end": 579460.6100098055,
+      "local_ts_start": 1773612264.855838,
+      "local_ts_end": 1773612266.896346
+    },
+    {
+      "path": "raw/eeg_raw_shard_124.npy",
+      "seq_min": 73287,
+      "seq_max": 73926,
+      "count": 640,
+      "lsl_ts_mono_start": 579460.6139160555,
+      "lsl_ts_mono_end": 579463.0056332704,
+      "local_ts_start": 1773612266.896381,
+      "local_ts_end": 1773612269.248278
+    },
+    {
+      "path": "raw/eeg_raw_shard_125.npy",
+      "seq_min": 73927,
+      "seq_max": 74566,
+      "count": 640,
+      "lsl_ts_mono_start": 579463.0095395204,
+      "lsl_ts_mono_end": 579465.4896290129,
+      "local_ts_start": 1773612269.248288,
+      "local_ts_end": 1773612271.710596
+    },
+    {
+      "path": "raw/eeg_raw_shard_126.npy",
+      "seq_min": 74567,
+      "seq_max": 75206,
+      "count": 640,
+      "lsl_ts_mono_start": 579465.4933467212,
+      "lsl_ts_mono_end": 579467.9314391948,
+      "local_ts_start": 1773612271.754528,
+      "local_ts_end": 1773612274.185513
+    },
+    {
+      "path": "raw/eeg_raw_shard_127.npy",
+      "seq_min": 75207,
+      "seq_max": 75846,
+      "count": 640,
+      "lsl_ts_mono_start": 579467.9353454448,
+      "lsl_ts_mono_end": 579470.3774619882,
+      "local_ts_start": 1773612274.1855218,
+      "local_ts_end": 1773612276.6308658
+    },
+    {
+      "path": "raw/eeg_raw_shard_128.npy",
+      "seq_min": 75847,
+      "seq_max": 76358,
+      "count": 512,
+      "lsl_ts_mono_start": 579470.3813682382,
+      "lsl_ts_mono_end": 579472.3767376047,
+      "local_ts_start": 1773612276.630872,
+      "local_ts_end": 1773612278.640692
+    },
+    {
+      "path": "raw/eeg_raw_shard_129.npy",
+      "seq_min": 76359,
+      "seq_max": 76998,
+      "count": 640,
+      "lsl_ts_mono_start": 579472.3806438547,
+      "lsl_ts_mono_end": 579474.875442462,
+      "local_ts_start": 1773612278.640699,
+      "local_ts_end": 1773612281.145792
+    },
+    {
+      "path": "raw/eeg_raw_shard_130.npy",
+      "seq_min": 76999,
+      "seq_max": 77638,
+      "count": 640,
+      "lsl_ts_mono_start": 579474.879348712,
+      "lsl_ts_mono_end": 579477.3743690501,
+      "local_ts_start": 1773612281.145802,
+      "local_ts_end": 1773612283.606337
+    },
+    {
+      "path": "raw/eeg_raw_shard_131.npy",
+      "seq_min": 77639,
+      "seq_max": 78150,
+      "count": 512,
+      "lsl_ts_mono_start": 579477.3781988005,
+      "lsl_ts_mono_end": 579479.3735056261,
+      "local_ts_start": 1773612283.650442,
+      "local_ts_end": 1773612285.6160388
+    },
+    {
+      "path": "raw/eeg_raw_shard_132.npy",
+      "seq_min": 78151,
+      "seq_max": 78790,
+      "count": 640,
+      "lsl_ts_mono_start": 579479.3774118761,
+      "lsl_ts_mono_end": 579481.8227872003,
+      "local_ts_start": 1773612285.616045,
+      "local_ts_end": 1773612288.060396
+    },
+    {
+      "path": "raw/eeg_raw_shard_133.npy",
+      "seq_min": 78791,
+      "seq_max": 79302,
+      "count": 512,
+      "lsl_ts_mono_start": 579481.8266839833,
+      "lsl_ts_mono_end": 579483.8254609964,
+      "local_ts_start": 1773612288.105556,
+      "local_ts_end": 1773612290.071172
+    },
+    {
+      "path": "raw/eeg_raw_shard_134.npy",
+      "seq_min": 79303,
+      "seq_max": 79319,
+      "count": 17,
+      "lsl_ts_mono_start": 579483.8293672464,
+      "lsl_ts_mono_end": 579483.8919607239,
+      "local_ts_start": 1773612290.071178,
+      "local_ts_end": 1773612290.175751
+    }
+  ]
+}

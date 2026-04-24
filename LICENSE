@@ -1,66 +1,189 @@
-© COPYRIGHT & PROPRIETARY NOTICE
+AlphaHand Open Research License 1.0
 
-Copyright © 2025 Jonathan Davanzo.
-All Rights Reserved.
+Copyright 2025 Jonathan Davanzo.
 
-Proprietary Software Notice
+This license is intended to support open research, education, nonprofit work,
+charitable use, public-interest development, and community improvement of the
+AlphaHand EEG finger movement identification project while requiring for-profit
+commercial use to be approved by the copyright holder.
 
-This software, including but not limited to all source code, scripts, models, architectures, pipelines, documentation, data schemas, user interfaces, and experimental methodologies (collectively, the “Software”), is the exclusive intellectual property of Jonathan Davanzo.
+This is not the Apache License 2.0. It is an Apache-style permissive research
+license with additional public-source and commercial-approval conditions.
 
-The Software is protected under United States and international copyright, trade secret, and intellectual property laws.
+1. Definitions
 
-Restrictions on Use (for monetary gain)
+"Licensor" means Jonathan Davanzo, the copyright holder.
 
-UNLESS EXPLICITLY AUTHORIZED IN WRITING BY THE COPYRIGHT HOLDER, the following actions are STRICTLY PROHIBITED:
-	1.	Copying or Duplication
-	•	Reproduction of the Software in whole or in part
-	•	Distribution in source or compiled form
-	2.	Modification or Derivative Works
-	•	Alteration, refactoring, or extension of the code
-	•	Creation of derivative models, pipelines, or systems
-	•	Reimplementation of the methodology for independent use
-	3.	Commercial or Academic Use
-	•	Use in products, services, startups, or consulting
-	•	Use in research papers, theses, or competitions
-	•	Use in demonstrations, presentations, or benchmarks
-	4.	Patent or IP Claims
-	•	Filing or assisting in filing patents derived from the Software
-	•	Claiming ownership of methods, architectures, or workflows
-	•	Incorporating this work into patentable systems
-	5.	Reverse Engineering or Extraction
-	•	Attempting to infer design logic, model behavior, or training strategies
-	•	Extracting datasets, weights, or internal representations
+"Software" means the source code, scripts, models, architectures, pipelines,
+documentation, data schemas, user interfaces, datasets, model weights,
+configuration files, reports, figures, and other artifacts included in this
+repository.
 
-Licensing & Authorization
+"You" means any individual or organization exercising permissions under this
+license.
 
-Any permission to use, modify, reproduce, distribute, or commercialize the Software must:
-	•	Be granted explicitly in writing
-	•	Be signed by the copyright holder
-	•	Include financial compensation agreed upon in advance (Academic useage may be exempt at the discretion of the Copyright Holder)
-	•	Define scope, duration, and purpose of use
+"Use" means to use, copy, reproduce, modify, prepare derivative works, train,
+evaluate, display, perform, publish, distribute, deploy, or otherwise work with
+the Software.
 
-Verbal agreements, implied consent, or third-party permissions are invalid.
+"Modification" means any change, extension, adaptation, integration, model,
+dataset, configuration, documentation, workflow, report, or derived artifact
+based on or using the Software.
 
-Ownership Retention
+"Non-Commercial Use" means use that is not primarily intended for, directed
+toward, or connected to monetary compensation, revenue generation, paid
+services, paid products, venture-backed product development, consulting,
+commercial research, enterprise internal development, advertising-supported
+services, or other for-profit advantage.
 
-All rights, title, and interest in and to the Software remain solely with Jonathan Davanzo, including:
-	•	Present and future versions
-	•	Improvements or enhancements
-	•	Related intellectual property
+"Commercial Use" includes use by or for a for-profit business, startup,
+consultancy, product, service, paid research program, paid benchmark, paid
+deployment, paid API, paid dataset, paid model, or any other use intended to
+produce commercial advantage or monetary compensation.
 
-No rights are transferred by possession, access, or viewing of the Software.
+"Public Source" means the complete source code, scripts, configs,
+documentation, and other human-readable materials needed to understand, build,
+modify, train, evaluate, and reproduce the relevant work are publicly available
+at no charge.
 
-Enforcement
+2. Grant Of Rights For Permitted Uses
 
-Unauthorized use of the Software constitutes willful infringement and may result in:
-	•	Civil liability
-	•	Injunctive relief
-	•	Monetary damages
-	•	Legal fees and costs
+Subject to this license, the Licensor grants You a worldwide, royalty-free,
+non-exclusive, non-transferable license to use, copy, modify, reproduce,
+publish, and distribute the Software for:
 
-Contact for Licensing or Authorization
+- personal learning and experimentation;
+- academic research;
+- classroom or educational use;
+- nonprofit research;
+- charity, humanitarian, accessibility, and public-interest work;
+- community open-source development; and
+- other Non-Commercial Uses.
 
-Requests for licensing, collaboration, or authorized use must be submitted in writing to:
+3. Public-Source Requirement
 
+Any Use of the Software must remain open and public-source.
+
+If You modify, extend, integrate, deploy, distribute, publish, or publicly
+present any work that uses or depends on the Software, You must:
+
+- make Your complete corresponding source code and Modifications publicly
+  available at no charge;
+- include the scripts, configs, prompts, training recipes, evaluation commands,
+  and documentation reasonably needed to reproduce Your changes and results;
+- keep this license and copyright notice with the Software and any
+  Modifications;
+- clearly state what You changed; and
+- link back to the original AlphaHand repository or project page.
+
+You may not use the Software in a closed-source project, closed-source model
+pipeline, closed-source dataset pipeline, closed-source product, or private
+deployment unless the Licensor gives You separate written permission.
+
+4. Nonprofit, Charity, And Similar Organizations
+
+Nonprofit organizations, charities, educational organizations, public-interest
+groups, humanitarian organizations, and similar non-commercial organizations may
+use the Software free of charge, provided that:
+
+- the use is not for for-profit commercial advantage;
+- any project, product, deployment, dataset, model, report, or system that
+  incorporates or is attached to the Software remains Public Source;
+- all Modifications are published at no charge; and
+- attribution to the original AlphaHand repository and author is preserved.
+
+5. Commercial And For-Profit Use
+
+Commercial Use is not permitted under this license without prior written
+approval from the Licensor.
+
+For-profit companies, startups, consultants, paid research groups, paid product
+teams, and other commercial actors must obtain a separate written license or
+approval before using the Software for Commercial Use.
+
+Written approval must identify the permitted scope, duration, purpose,
+organization, and any financial terms. Verbal permission, implied permission,
+or third-party permission is not sufficient.
+
+6. Attribution
+
+Any permitted public use, publication, demo, report, derivative work, dataset,
+model, or deployment must include reasonable attribution to:
+
+AlphaHand EEG Finger Movement Identification
 Jonathan Davanzo
-(Author & Copyright Holder)
+https://alphahand.org
+
+Attribution must not imply endorsement by the Licensor unless endorsement is
+separately granted in writing.
+
+7. Patents
+
+For permitted Non-Commercial Uses only, the Licensor grants You a royalty-free,
+non-exclusive patent license to make, use, and distribute the Software to the
+extent necessary to exercise the permissions granted by this license.
+
+If You file, maintain, or support a patent claim alleging that the Software or
+any permitted use of it infringes a patent, then all patent and copyright
+permissions granted to You under this license terminate immediately.
+
+This license does not grant permission to file patents on the Software,
+methodology, models, datasets, workflows, or Modifications derived from the
+Software without separate written approval from the Licensor.
+
+8. Human-Subject Data, Safety, And Ethics
+
+The Software may include or process EEG and other human-subject research data.
+You are responsible for complying with all applicable consent, privacy,
+research ethics, medical-device, safety, data-protection, and institutional
+requirements.
+
+You must not use the Software to identify, re-identify, exploit, harm, or make
+medical claims about any person.
+
+Live actuation and hardware integrations are experimental. You are responsible
+for testing, supervision, safety controls, and compliance before operating any
+hardware.
+
+9. Third-Party Components
+
+Third-party dependencies, libraries, tools, datasets, and assets may be subject
+to their own licenses. This license does not override third-party license
+terms.
+
+10. No Trademark Rights
+
+This license does not grant trademark rights in "AlphaHand", project logos, or
+other marks, except as needed for truthful attribution.
+
+11. Disclaimer Of Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, ACCURACY, SAFETY, OR RELIABILITY.
+
+12. Limitation Of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR SHALL NOT BE LIABLE FOR
+ANY CLAIM, DAMAGES, LOSSES, OR OTHER LIABILITY ARISING FROM OR RELATED TO THE
+SOFTWARE, THIS LICENSE, DATA USE, MODEL OUTPUTS, HARDWARE ACTUATION, OR ANY
+USE OF THE SOFTWARE.
+
+13. Termination
+
+Any violation of this license automatically terminates Your rights under it.
+Upon termination, You must stop using, distributing, deploying, and presenting
+the Software and any unauthorized Modifications.
+
+Rights may be reinstated only by written permission from the Licensor.
+
+14. No Waiver
+
+Failure by the Licensor to enforce any term of this license does not waive the
+right to enforce that term later.
+
+15. Contact For Commercial Approval Or Additional Permissions
+
+Requests for Commercial Use, closed-source use, patent permissions, special
+redistribution terms, or other additional permissions must be submitted in
+writing to the Licensor.

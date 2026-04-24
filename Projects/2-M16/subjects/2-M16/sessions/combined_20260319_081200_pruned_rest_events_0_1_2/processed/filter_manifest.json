@@ -1,0 +1,20 @@
+{
+  "source_session_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260317_211414",
+  "derived_session_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2",
+  "source_npz": "Projects/2-M16/subjects/2-M16/sessions/combined_20260317_211414/processed/eeg_windows.npz",
+  "filter": {
+    "session_id": "2-M16_20260216_150056_01",
+    "event_ids": [
+      0,
+      1,
+      2
+    ],
+    "action_id": 0,
+    "reason": "pruned REST events repeatedly inferred as movement or dominating held-out REST failures"
+  },
+  "counts": {
+    "source_n": 12969,
+    "removed_n": 522,
+    "kept_n": 12447
+  }
+}

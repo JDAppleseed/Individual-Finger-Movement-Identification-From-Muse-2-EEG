@@ -1,263 +1,242 @@
-# EEG Finger + Action Classification (Muse 2)
+# AlphaHand EEG Finger Movement Identification
 
-This repository supports subject-level EEG recording, window extraction, model training, evaluation, reporting, and Step 7 live inference for finger + action classification (`REST`, `OPEN`, `CLOSE`).
+This repository contains the research pipeline behind AlphaHand: recording Muse 2 EEG, labeling finger/action trials, extracting model-ready windows, training and evaluating classifiers, generating reports, and running live inference with optional actuation.
 
-The normal operator path is the UI in `eeglab_wrapper_ui.py`. The CLI remains available for advanced, manual, or automated runs.
+The project is intended for developers and researchers who want to reproduce the current results, add new subjects and datasets, test better models, and improve the end-to-end system. Public project context, results, methods notes, and manuscript status live at `https://alphahand.org`.
 
-## Who This Is For
+The included `2-M16` bundle is a reference dataset and model snapshot. It is a starting point for validation and experimentation, not the whole scope of the repository.
 
-Use this repo if you need to:
+## Start Here
 
-- record lossless EEG sessions from a Muse 2 or another 4-channel LSL EEG stream
-- train and evaluate a subject/session/model/scaler deployment bundle
-- run Step 7 live inference, with optional actuation
-- review saved live predictions after a run
-
-## Recommended Workflow
-
-Use the UI unless you specifically need CLI or manual control.
-
-Launch:
-
-```bash
-source .venv/bin/activate
-python eeglab_wrapper_ui.py
-```
-
-The UI is the recommended path for:
-
-- stream setup
-- session recording
-- extraction, training, evaluation, and reports
-- Step 7 launch/preflight
-- Step 7b live-review workflows
-
-## Requirements
-
-- Python 3.11
-- macOS or Linux
-- Muse 2 or another LSL EEG stream with 4 channels for live recording
-- `requirements.txt` installed in a virtual environment
-- optional: LaTeX for PDF reports; see `docs/ops/SYSTEM_DEPS.md`
-- optional: Arduino/serial hardware for Step 7 actuation
-
-## Quick Start
-
-Set up the environment:
+Set up Python:
 
 ```bash
 ./scripts/setup_venv.sh
 source .venv/bin/activate
-python scripts/diagnose_env.py
+python3 scripts/diagnose_env.py
 ```
 
-Start the UI:
+Run the reference sanity checks:
 
 ```bash
-python eeglab_wrapper_ui.py
+python3 tools/build_2m16_reference_dataset.py --check-only
+
+SESSION_DIR="Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2"
+RUN_DIR="$SESSION_DIR/processed/models/20260403_grouptrial_rest050"
+
+python3 tools/smoke_inference.py \
+  --npz "$SESSION_DIR/processed/eeg_windows.npz" \
+  --model "$RUN_DIR/finger_action_model.pt" \
+  --scaler "$RUN_DIR/scaler.npz"
 ```
 
-Important connection note:
+Then choose a path:
+- Use the published reference bundle: `docs/2M16_QUICKSTART.md`
+- Run the full UI workflow: `python3 eeglab_wrapper_ui.py`
+- Record and train a new subject from CLI: follow the step map below
+- Prepare live inference: `docs/ops/STEP7_LIVE_RUNBOOK.md`
 
-- Step 1 and Step 7 read from an LSL EEG stream.
-- They do not talk to the Muse over BLE directly.
-- For Muse 2, create the LSL stream first, either with the UI's Muse Connector or another BLE -> LSL bridge.
+## What This Repo Provides
 
-## Core UI Workflow
+- Lossless EEG capture from a Muse 2 or any compatible 4-channel LSL EEG stream.
+- Session-level raw shards, event labels, manifests, and timebase diagnostics.
+- Offline window extraction into `eeg_windows.npz`.
+- PyTorch training for action classification (`REST`, `OPEN`, `CLOSE`) and active-finger classification.
+- Evaluation, calibration, confusion figures, HTML reports, and cached test predictions.
+- Pseudo-live replay and Step 7 live inference/actuation tooling.
+- A curated `2-M16` reference bundle so new contributors can verify their setup without collecting data first.
 
-1. Open the UI and choose the project and subject.
-2. On `Stream Setup`, connect the Muse or select the existing LSL stream.
-3. Run `Step 1: Record (Lossless)` to create a session directory with raw shards and events.
-4. Use `Validate Session` to confirm the session looks healthy.
-5. Run `Step 1b: Extract Windows`.
-6. Run `Step 2: Train Model`.
-7. Run `Step 3+` for evaluation, Deepchecks, figures, and reports.
-8. Run `Step 7: Live Infer + Actuate` when you are ready for live inference.
-9. Run `Step 7b: Review Live Predictions` to summarize saved predictions and export review CSVs.
+## Repository Map
 
-Step 7 UI notes:
+Important entrypoints:
+- `eeglab_wrapper_ui.py`: main operator UI for setup, recording, extraction, training, evaluation, and live inference.
+- `1_stream_and_record.py`: Step 1 lossless recording.
+- `1b_extract_windows.py`: Step 1b raw/event to window extraction.
+- `2_train_model.py`: Step 2 model training.
+- `3_evaluate_model.py`: Step 3 evaluation and calibration.
+- `3b_deepchecks_evaluate.py`: additional model checks.
+- `3c_live_paper_figures.py`: figures used by reports and research writeups.
+- `4_generate_reports.py`: report generation.
+- `5_review_events.py`, `5_validate_events.py`: event review and repair tools.
+- `7_live_infer_and_actuate.py`: Step 7 live inference and optional hardware actuation.
 
-- The Step 7 `Session dir` field is the authoritative launch and preflight session.
-- The main session selector only seeds that field when it is blank.
-- In Step 7, `session_dir` resolves the deployment bundle and output location. It is not the live EEG source.
-- For decisive runs, use a fresh `processed/live_infer_<run_tag>` output directory.
+Important docs:
+- `docs/2M16_QUICKSTART.md`: reproduce and experiment with the included reference bundle.
+- `docs/spec/DATA_CONTRACT.md`: lossless session contract.
+- `docs/spec/SCHEMAS.md`: artifact filenames and schemas.
+- `docs/ops/RUNBOOK.md`: operational checks and deployment model gates.
+- `docs/ops/STEP7_LIVE_RUNBOOK.md`: decisive live inference runbook.
+- `docs/ops/SYSTEM_DEPS.md`: optional system dependencies.
 
-Labeling rules:
+## Pipeline Operating Manual
 
-- `REST` must pair with finger `NONE`.
-- `OPEN` and `CLOSE` must pair with an active finger.
-- `Step 1b` fails fast on `OPEN/CLOSE + NONE`, so fix or prune those events before extraction.
+Use repo-relative paths in configs, commands, docs, and manifests. Public artifacts should not contain local absolute paths.
 
-## Optional CLI Flow
+| Step | Goal | Main command or UI action | Output to inspect |
+| --- | --- | --- | --- |
+| 0 | Create/select project and subject | UI project selector | `Projects/<project>/subjects/<subject>/` |
+| 1 | Record lossless EEG and events | `python3 1_stream_and_record.py` | `raw/eeg_raw_shard_*.npy`, `events/events.jsonl`, `manifest.json` |
+| 1a | Validate capture health | `python3 -m muse_streaming.validate_session --session <session_dir>` | no missing sequence ranges, healthy timebase |
+| 1b | Extract model windows | `python3 1b_extract_windows.py --session-dir <session_dir>` | `processed/eeg_windows.npz`, `extraction_report.json` |
+| 2 | Train a model | `python3 2_train_model.py --session-dir <session_dir>` | `processed/models/<run_id>/` |
+| 3 | Evaluate and calibrate | `python3 3_evaluate_model.py --session-dir <session_dir> --run-dir <run_dir>` | `eval_manifest.json`, figures, cached predictions |
+| 3b/3c | Run deeper checks and figures | `python3 3b_deepchecks_evaluate.py`, `python3 3c_live_paper_figures.py` | diagnostics and paper/report figures |
+| 4 | Publish a report | `python3 4_generate_reports.py --session-dir <session_dir>` | HTML report and report assets |
+| 5 | Review labels | `python3 5_review_events.py`, `python3 5_validate_events.py` | fixed or documented event issues |
+| 6 | Sweep ideas | `python3 6_sweep.py` | comparative runs and metrics |
+| 7 | Live inference/actuation | `python3 7_live_infer_and_actuate.py --config <infer_json>` | `processed/live_infer_<run_id>/` evidence |
 
-Use the CLI when you need manual control, scripting, or automation.
+For live recording and Step 7, create or select an LSL EEG stream first. The pipeline reads from LSL; it does not talk directly to Muse over BLE unless you use a separate bridge such as the UI Muse connector or `python3 -m cli start-streamer`.
 
-### Record And Prepare A Session
+## Published Reference Bundle
 
-If you need a BLE -> LSL bridge outside the UI:
-
-```bash
-python -m cli start-streamer
-```
-
-Record a new lossless session:
-
-```bash
-python 1_stream_and_record.py --enable-plot --plot-scale fixed --plot-fixed-ylim -200 200
-```
-
-Validate and extract:
-
-```bash
-python -m muse_streaming.validate_session --session <session_dir>
-python 1b_extract_windows.py --session-dir <session_dir>
-```
-
-Review or repair events if needed:
-
-```bash
-python 5_review_events.py --session-dir <session_dir>
-python 5_validate_events.py --session-dir <session_dir> --apply
-```
-
-### Train, Evaluate, And Report
-
-```bash
-python 2_train_model.py --session-dir <session_dir>
-python 3_evaluate_model.py --session-dir <session_dir>
-python 3b_deepchecks_evaluate.py --session-dir <session_dir>
-python 3c_live_paper_figures.py --session-dir <session_dir>
-python 4_generate_reports.py --session-dir <session_dir>
-```
-
-### Step 7 Live Inference
-
-For decisive live runs, follow `docs/ops/STEP7_LIVE_RUNBOOK.md`.
-
-- Canonical Step 7 config: `Projects/<ProjectName>/subjects/<subject_id>/winning_model/configs/infer.json`
-- Archived legacy Step 7 artifacts: `Projects/<ProjectName>/subjects/<subject_id>/archive/step7/`
-
-Manual preflight:
-
-```bash
-python tools/live_preflight.py \
-  --config <infer_config.json> \
-  --session-dir <session_dir> \
-  --out-dir <session_dir>/processed/live_infer_<run_tag> \
-  --probe-stream \
-  --probe-distribution
-```
-
-Manual launch:
-
-```bash
-python 7_live_infer_and_actuate.py \
-  --config <infer_config.json> \
-  --session-dir <session_dir> \
-  --out-dir <session_dir>/processed/live_infer_<run_tag>
-```
-
-Optional actuation:
-
-```bash
-python 7_live_infer_and_actuate.py \
-  --config <infer_config.json> \
-  --session-dir <session_dir> \
-  --enable_actuation
-```
-
-Step 7 notes:
-
-- `session_dir` selects the deployment bundle and output location, not the live stream.
-- When `--enable_actuation` is set and `--serial_port` is omitted, Step 7 auto-detects a likely Arduino serial port.
-- If multiple serial devices are attached, pass `--serial_port` explicitly.
-- Leave file output enabled for decisive runs. `no_file_io=true` suppresses required evidence.
-
-### Step 7b Review
-
-Summarize the latest saved live predictions under a session:
-
-```bash
-python tools/analyze_live_predictions.py --session-dir <session_dir>
-```
-
-Use an explicit log path if needed:
-
-```bash
-python tools/analyze_live_predictions.py \
-  --pred-log <session_dir>/processed/live_infer*/predictions.jsonl \
-  --out-json <summary.json> \
-  --segments-csv <predicted_segments.csv> \
-  --review-csv <predicted_segments_review.csv>
-```
-
-### Legacy Muse Streaming CLI
-
-The legacy Muse streaming CLI writes CSV artifacts under `data/`. It is separate from the session-directory pipeline.
-
-Common commands:
-
-```bash
-python -m cli list-streams
-python -m cli healthcheck --stream-name Muse2-EEG --check-timebase
-python -m cli record --output-dir data --subject-id <subject_id>
-```
-
-## Outputs And Artifacts
-
-Canonical session directories live under:
+The curated reference bundle lives at:
 
 ```text
-Projects/<project>/subjects/<subject_id>/sessions/<subject_id>_<session_id>/
+Projects/2-M16/subjects/2-M16/
 ```
 
-Notes:
+It includes:
+- Three raw source sessions with events, manifests, metadata, timebase reports, and raw shards.
+- Per-source extracted `processed/eeg_windows.npz` files.
+- The final pruned combined dataset.
+- Reference run `20260403_grouptrial_rest050`.
+- `winning_model/` configs, model artifacts, figures, reports, and manifests.
 
-- If needed, `session_id` is auto-prefixed with `subject_id`.
-- The UI writes per-subject configs under `Projects/<ProjectName>/subjects/<subject_id>/config/`.
-- The UI snapshots each session launch to `sessions/<session_id>/session_config.json`.
+Use it to verify your environment, compare model changes, and understand the expected artifact layout:
 
-Common outputs:
+```bash
+python3 tools/build_2m16_reference_dataset.py --check-only
+```
 
-- raw EEG shards: `<session_dir>/raw/eeg_raw_shard_*.npy`
-- event log: `<session_dir>/events/events.jsonl`
-- extracted windows: `<session_dir>/processed/eeg_windows.npz`
-- model runs: `<session_dir>/processed/models/<run_id>/`
-- reports: `<session_dir>/processed/reports/<run_id>/`
-- Step 7 live outputs: `<session_dir>/processed/live_infer_<run_tag>/`
+Detailed inventory and hashes are in `Projects/2-M16/subjects/2-M16/PUBLISHED_ARTIFACTS.md`.
 
-Deployment bundle:
+## Train A Baseline On The Reference Dataset
 
-- `finger_action_model.pt`
-- `scaler.npz`
-- `temperature_scaling.json`
+```bash
+SESSION_DIR="Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2"
+RUN_ID="$(date +%Y%m%d_%H%M%S)_local"
 
-Step 7b prefers fresh `live_infer_<run_tag>` outputs over bare or legacy `live_infer` directories.
+python3 2_train_model.py \
+  --config Projects/2-M16/subjects/2-M16/config/train.json \
+  --session-dir "$SESSION_DIR" \
+  --run-dir "$SESSION_DIR/processed/models/$RUN_ID"
 
-## Troubleshooting
+python3 3_evaluate_model.py \
+  --config Projects/2-M16/subjects/2-M16/config/evaluate.json \
+  --session-dir "$SESSION_DIR" \
+  --run-dir "$SESSION_DIR/processed/models/$RUN_ID"
+```
 
-- No live EEG stream found:
-  Start or select an LSL stream first. Step 1 and Step 7 require LSL input.
-- Step 1b rejects labels:
-  Check for `OPEN/CLOSE + NONE` events and correct or remove them.
-- Step 7 is pointing at the wrong session:
-  Use the Step 7 `Session dir` field. That field controls Step 7 launch and preflight.
-- Step 7 output directory already exists:
-  Use a fresh `processed/live_infer_<run_tag>` directory for decisive runs.
-- macOS `pylsl` library errors:
-  Run `brew install labstreaminglayer/tap/lsl` and set `PYLSL_LIB=/opt/homebrew/Frameworks/lsl.framework/lsl`.
+New local runs under `Projects/.../processed/models/` stay ignored unless deliberately added to a curated release.
 
-## Developer Notes
+## Add A New Subject Or Dataset
 
-- `docs/ops/STEP7_LIVE_RUNBOOK.md` covers the decisive Step 7 manual run path.
-- `docs/ops/SYSTEM_DEPS.md` lists optional system packages for PDF/report generation.
-- For a decisive Step 7 run, use the active subject's `Projects/<ProjectName>/subjects/<subject_id>/winning_model/configs/infer.json` as the canonical CLI config. The matching `Projects/<ProjectName>/subjects/<subject_id>/config/infer.json` file is the UI working mirror.
-- Checked-in configs under `Projects/<ProjectName>/subjects/<subject_id>/config/` are subject-specific reproducibility snapshots, not repo-wide defaults.
-- `paper/`, `paper_artifacts/`, and `paper_figures/` are kept local and are ignored by Git.
-- Detailed schemas live in `docs/spec/DATA_CONTRACT.md` and `docs/spec/SCHEMAS.md`.
+Use this process when expanding beyond `2-M16`:
 
-## License And Ethics
+1. Create a new subject under `Projects/<project>/subjects/<subject>/`.
+2. Record multiple sessions with consistent channel order, clear trial prompts, and enough REST coverage.
+3. Keep raw shards and `events/events.jsonl` as the source of truth. Derived windows and models should be reproducible from those inputs.
+4. Validate every source session before extraction.
+5. Fix invalid labels before training. Do not train on ambiguous labels.
+6. Extract windows with documented settings and keep `extraction_report.json`.
+7. Train a baseline with a run ID that records the recipe, split mode, seed, and dataset paths.
+8. Evaluate on a held-out split that matches the research question. Prefer grouped splits when repeated windows from one trial could leak across train/test.
+9. Compare against the reference bundle only as a sanity benchmark. New subjects may differ in signal quality, trial design, and class balance.
+10. Publish only a curated artifact set: source sessions, final dataset, reference run, figures, reports, configs, and manifests.
 
-This repository is proprietary. See `LICENSE` for usage restrictions and authorization requirements.
+When publishing a new bundle, update `.gitignore` with narrow exceptions for that subject instead of unignoring the whole `Projects/` tree.
 
-Handle subject data confidentially and use the system responsibly.
+## Labels And Data Contract
+
+Canonical actions:
+- `REST = 0`
+- `OPEN = 1`
+- `CLOSE = 2`
+
+Canonical fingers:
+- `NONE = 0`
+- `THUMB = 1`
+- `INDEX = 2`
+- `MIDDLE = 3`
+- `RING = 4`
+- `PINKY = 5`
+
+Rules:
+- `REST` must pair with `NONE`.
+- `OPEN` and `CLOSE` must pair with an active finger.
+- `OPEN/CLOSE + NONE` is invalid for extraction, training, and deployment.
+- `REST + active finger` is invalid as a committed/deployed label.
+
+For artifact schemas, see `docs/spec/SCHEMAS.md`. For lossless raw-session invariants, see `docs/spec/DATA_CONTRACT.md`.
+
+## Development And Improvement Areas
+
+Good community research contributions include:
+- Better data collection protocols for additional subjects and sessions.
+- More robust preprocessing and artifact rejection.
+- Architecture experiments that keep the public dataset contract stable.
+- Cross-subject, leave-session-out, and grouped-trial evaluation improvements.
+- Calibration, uncertainty, and actuation-gating improvements.
+- Better reports, visualizations, and diagnostics that make failures easier to understand.
+- Clear published bundles for new subjects with reproducible hashes and repo-relative configs.
+
+Keep changes measurable. Every model or pipeline claim should point to a config, dataset, run directory, and evaluation manifest.
+
+## Validation Before Publishing
+
+Run the focused checks for this documentation/artifact bundle:
+
+```bash
+LEAK_PATTERN='/User''s/|Desktop/Individual''-Finger'
+rg "$LEAK_PATTERN" README.md docs Projects/2-M16 \
+  -g '!*.npy' -g '!*.pt' -g '!*.png' -g '!*.html'
+
+python3 tools/build_2m16_reference_dataset.py --check-only
+
+python3 tools/smoke_inference.py \
+  --npz Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/eeg_windows.npz \
+  --model Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050/finger_action_model.pt \
+  --scaler Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260403_grouptrial_rest050/scaler.npz
+
+python3 -m pytest -q \
+  tests/test_default_recipe.py \
+  tests/test_label_schema.py \
+  tests/test_extract_windows_logic.py \
+  tests/test_cache_dataset_info_validation.py
+```
+
+For a full local development pass, also run:
+
+```bash
+python3 -m compileall .
+python3 -m pytest -q
+```
+
+## Requirements
+
+- Python 3.11 or 3.12 for the intended environment.
+- macOS or Linux.
+- `requirements.txt` installed in a virtual environment.
+- Muse 2 or another 4-channel LSL EEG stream for new live recording.
+- Optional: LaTeX for PDF reports; see `docs/ops/SYSTEM_DEPS.md`.
+- Optional: Arduino/serial hardware for Step 7 actuation.
+
+Some tests may run on other Python versions, but published workflows should state the version used.
+
+## Publication, License, And Ethics
+
+This is human-subject EEG research infrastructure. Treat raw data, subject metadata, and live actuation outputs with care.
+
+Before distributing new data or model artifacts:
+- Confirm the subject/data release is authorized.
+- Remove local absolute paths from public files.
+- Publish only a curated artifact set with hashes.
+- State what was intentionally excluded.
+
+License summary:
+- Non-commercial research, education, nonprofit, charity, humanitarian, and public-interest use is allowed.
+- Any use, modification, integration, deployment, or published work must remain public-source and must publish changes at no charge.
+- For-profit commercial use requires prior written approval from Jonathan Davanzo.
+
+See `LICENSE` for the full terms that govern use and redistribution.

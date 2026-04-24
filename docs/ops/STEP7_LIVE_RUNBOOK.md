@@ -28,8 +28,8 @@ Legacy compare/tuning sessions and superseded Step 7 outputs for `2-M16` are arc
 ### 1. Preflight
 
 ```bash
-export CONFIG="/Users/jonathandavanzo/Desktop/Individual-Finger-Movement-Identification-From-Muse-2-EEG/Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json"
-export SESSION_DIR="/Users/jonathandavanzo/Desktop/Individual-Finger-Movement-Identification-From-Muse-2-EEG/Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2"
+export CONFIG="Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json"
+export SESSION_DIR="Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2"
 export RUN_TAG="$(date +%Y%m%d_%H%M%S)"
 export OUT_DIR="$SESSION_DIR/processed/live_infer_$RUN_TAG"
 export LSL_SOURCE_ID="<live-headset-source-id>"

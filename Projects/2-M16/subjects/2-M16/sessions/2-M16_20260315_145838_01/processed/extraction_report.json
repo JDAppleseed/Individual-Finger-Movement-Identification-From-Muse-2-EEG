@@ -1,0 +1,45 @@
+{
+  "total_windows": 6333,
+  "kept_windows": 1059,
+  "drop_counts": {
+    "no_overlap": 5229,
+    "artifact": 0,
+    "guard_band": 0,
+    "invalid_label": 0,
+    "short_segment": 0,
+    "gap": 0,
+    "ambiguous": 0,
+    "rest_subsample": 0,
+    "rest_cap": 0
+  },
+  "rest_policy": {
+    "policy": "label_gated",
+    "keep_baseline_events": -1,
+    "subsample_prob": 1.0,
+    "seed": 42,
+    "rest_max_windows": null,
+    "baseline_rest_event_indices_count": 8,
+    "rest_kept": 1059,
+    "rest_dropped": 0,
+    "rest_by_exclusion_kept": 0,
+    "rest_by_low_overlap_kept": 0
+  },
+  "timebase_version": "absolute_v1",
+  "subject_id": "2-M16",
+  "session_id": "2-M16_20260315_145838_01",
+  "events_path": "Projects/2-M16/subjects/2-M16/sessions/2-M16_20260315_145838_01/events/events.jsonl",
+  "features_path": "Projects/2-M16/subjects/2-M16/sessions/2-M16_20260315_145838_01/raw",
+  "gap_threshold_s": 0.25,
+  "gap_policy": "strict_drop",
+  "gap_interp_max_s": 0.05,
+  "allow_gap_interp": false,
+  "allow_partial": false,
+  "session_manifest": {
+    "seq_min": 0,
+    "seq_max": 79319,
+    "expected_sample_count": 79320,
+    "actual_sample_count": 79320,
+    "missing_seq_count": 0,
+    "termination_reason": "signal_2"
+  }
+}
