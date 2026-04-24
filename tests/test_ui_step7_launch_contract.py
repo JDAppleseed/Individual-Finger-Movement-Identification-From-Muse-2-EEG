@@ -413,6 +413,55 @@ def test_autofill_dependent_paths_sets_timestamped_step7_out_dir(
     assert out_dir_widget.text().endswith("processed/live_infer_20250101_000011")
 
 
+def test_autofill_step7_artifacts_prefers_winning_model_snapshot(
+    window, monkeypatch: pytest.MonkeyPatch
+):
+    project = "Demo"
+    subject = "S01"
+    ui_session = f"{subject}_20250101_000000"
+    subject_dir = Path("Projects") / project / "subjects" / subject
+    session_dir = subject_dir / "sessions" / ui_session
+    winning_run = session_dir / "processed" / "models" / "20260319_075520"
+    newer_local_run = session_dir / "processed" / "models" / "20260403_grouptrial_rest050"
+    for run_dir in (winning_run, newer_local_run):
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "finger_action_model.pt").write_text("model")
+        (run_dir / "scaler.npz").write_text("scaler")
+
+    winning_config = subject_dir / "winning_model" / "configs" / "infer.json"
+    winning_config.parent.mkdir(parents=True, exist_ok=True)
+    winning_config.write_text(
+        json.dumps(
+            {
+                "settings": {
+                    "session_dir": str(session_dir),
+                    "deployment_session_dir": str(session_dir),
+                    "model_path": str(winning_run / "finger_action_model.pt"),
+                    "scaler_path": str(winning_run / "scaler.npz"),
+                }
+            },
+            indent=2,
+        )
+    )
+    os.utime(newer_local_run, (2_000_000_000, 2_000_000_000))
+
+    window.current_project = project
+    window.current_subject = subject
+    window.current_session_ui = ui_session
+    window.session_dir_input.setText(str(session_dir))
+
+    monkeypatch.setattr(ui_mod, "session_backend_id", lambda timestamp=None: "20250101_000011")
+
+    window._autofill_dependent_paths_from_session_dir()
+
+    infer_fields = window.fields["infer"]
+    assert infer_fields["model_path"].text().endswith(
+        "20260319_075520/finger_action_model.pt"
+    )
+    assert infer_fields["scaler_path"].text().endswith("20260319_075520/scaler.npz")
+    assert "20260403_grouptrial_rest050" not in infer_fields["model_path"].text()
+
+
 def test_prepare_live_infer_launch_prefers_step7_session_field_over_global_session(
     window, monkeypatch: pytest.MonkeyPatch
 ):

@@ -6929,23 +6929,31 @@ class MainWindow(QMainWindow):
         session_dir = self._resolve_infer_contract_session_dir(
             subject_id_override=subject_id
         )
-        run_dir = resolve_latest_run_dir(session_dir) if session_dir else None
-        if not run_dir:
+        _run_id, model_path, scaler_path = (
+            self._resolve_latest_model_artifacts(
+                subject_dir, session_dir_override=session_dir, subject_id_override=subject_id
+            )
+            if session_dir
+            else (None, None, None)
+        )
+        if not model_path and not scaler_path:
             return
         infer_model_widget = self.fields.get("infer", {}).get("model_path")
         infer_scaler_widget = self.fields.get("infer", {}).get("scaler_path")
-        self._maybe_autofill_text(
-            infer_model_widget,
-            str(run_dir / "finger_action_model.pt"),
-            key="infer.model_path",
-            legacy_values={"finger_action_model.pt", "models/finger_action_model.pt"},
-        )
-        self._maybe_autofill_text(
-            infer_scaler_widget,
-            str(run_dir / "scaler.npz"),
-            key="infer.scaler_path",
-            legacy_values={"scaler.npz"},
-        )
+        if model_path is not None:
+            self._maybe_autofill_text(
+                infer_model_widget,
+                str(model_path),
+                key="infer.model_path",
+                legacy_values={"finger_action_model.pt", "models/finger_action_model.pt"},
+            )
+        if scaler_path is not None:
+            self._maybe_autofill_text(
+                infer_scaler_widget,
+                str(scaler_path),
+                key="infer.scaler_path",
+                legacy_values={"scaler.npz"},
+            )
 
     def _select_subject(self, subject_id: str) -> None:
         if subject_id == "-" or not subject_id:
@@ -7390,6 +7398,12 @@ class MainWindow(QMainWindow):
         train_session = self._resolve_effective_session_dir(step_id="train")
         infer_session = self._resolve_infer_contract_session_dir()
         live_review_session = self._resolve_live_review_session_dir()
+        infer_subject = self._infer_subject_override() or self.current_subject
+        infer_subject_dir = (
+            subject_root(self.current_project, infer_subject)
+            if self.current_project and infer_subject
+            else None
+        )
 
         train_source = None
         if train_session and train_session.exists():
@@ -7417,22 +7431,39 @@ class MainWindow(QMainWindow):
         infer_scaler_widget = self.fields.get("infer", {}).get("scaler_path")
         infer_out_dir_widget = self.fields.get("infer", {}).get("out_dir")
 
-        run_dir = resolve_latest_run_dir(infer_session)
-        if run_dir:
-            model_path = str(run_dir / "finger_action_model.pt")
-            scaler_path = str(run_dir / "scaler.npz")
-            self._maybe_autofill_text(
-                infer_model_widget,
-                model_path,
-                key="infer.model_path",
-                legacy_values={"finger_action_model.pt", "models/finger_action_model.pt"},
+        if infer_subject_dir is not None:
+            _run_id, model_path, scaler_path = self._resolve_latest_model_artifacts(
+                infer_subject_dir, session_dir_override=infer_session
             )
-            self._maybe_autofill_text(
-                infer_scaler_widget,
-                scaler_path,
-                key="infer.scaler_path",
-                legacy_values={"scaler.npz"},
-            )
+        else:
+            run_dir = resolve_latest_run_dir(infer_session)
+            model_path = run_dir / "finger_action_model.pt" if run_dir else None
+            scaler_path = run_dir / "scaler.npz" if run_dir else None
+        if model_path is not None or scaler_path is not None:
+            model_legacy_values = {"finger_action_model.pt", "models/finger_action_model.pt"}
+            scaler_legacy_values = {"scaler.npz"}
+            if self._is_session_model_artifact_text(
+                infer_model_widget, infer_session, "finger_action_model.pt"
+            ):
+                model_legacy_values.add(infer_model_widget.text().strip())
+            if self._is_session_model_artifact_text(
+                infer_scaler_widget, infer_session, "scaler.npz"
+            ):
+                scaler_legacy_values.add(infer_scaler_widget.text().strip())
+            if model_path is not None:
+                self._maybe_autofill_text(
+                    infer_model_widget,
+                    str(model_path),
+                    key="infer.model_path",
+                    legacy_values=model_legacy_values,
+                )
+            if scaler_path is not None:
+                self._maybe_autofill_text(
+                    infer_scaler_widget,
+                    str(scaler_path),
+                    key="infer.scaler_path",
+                    legacy_values=scaler_legacy_values,
+                )
         default_live_out_dir = self._default_live_infer_out_dir(infer_session)
         self._maybe_autofill_text(
             infer_out_dir_widget,
@@ -7447,6 +7478,30 @@ class MainWindow(QMainWindow):
         processed_dir = SessionLayout(session_dir).processed_dir
         candidate = processed_dir / f"live_infer_{session_backend_id()}"
         return next_available_path(candidate)
+
+    def _is_session_model_artifact_text(
+        self, widget: Optional[QLineEdit], session_dir: Path, filename: str
+    ) -> bool:
+        if not isinstance(widget, QLineEdit):
+            return False
+        return self._is_session_model_artifact_value(widget.text(), session_dir, filename)
+
+    def _is_session_model_artifact_value(
+        self, value: Any, session_dir: Path, filename: str
+    ) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path.cwd() / candidate
+        try:
+            resolved = candidate.resolve()
+            models_root = (session_dir / "processed" / "models").resolve()
+            resolved.relative_to(models_root)
+        except Exception:
+            return False
+        return resolved.name == filename
 
     def _autofill_topomap_paths(self, session_dir: Path) -> None:
         fields = self.fields.get("topomaps", {})
@@ -7802,6 +7857,12 @@ class MainWindow(QMainWindow):
         subject_id_override: Optional[str] = None,
     ) -> Tuple[Optional[str], Optional[Path], Optional[Path]]:
         """Resolve latest (exp_hash, model_path, scaler_path) for the selected subject."""
+        winning = self._resolve_winning_model_artifacts(
+            subject_dir, session_dir_override=session_dir_override
+        )
+        if winning[1] is not None and winning[2] is not None:
+            return winning
+
         # Preferred: session-local model runs (sessions/<id>/processed/models/<run_id>/)
         sdir = session_dir_override or self._resolve_session_dir_for_current(subject_dir)
         if sdir:
@@ -7858,6 +7919,61 @@ class MainWindow(QMainWindow):
         model_path = run_dir / "finger_action_model.pt"
         scaler_path = run_dir / "scaler.npz"
         return exp_hash, (model_path if model_path.exists() else None), (scaler_path if scaler_path.exists() else None)
+
+    def _resolve_winning_model_artifacts(
+        self,
+        subject_dir: Path,
+        *,
+        session_dir_override: Optional[Path] = None,
+    ) -> Tuple[Optional[str], Optional[Path], Optional[Path]]:
+        config_path = subject_dir / "winning_model" / "configs" / "infer.json"
+        if not config_path.exists():
+            return None, None, None
+        try:
+            _payload, settings = load_step7_config(config_path)
+        except Exception:
+            return None, None, None
+
+        def _resolve_config_value(value: Any) -> Optional[Path]:
+            text = str(value or "").strip()
+            if not text:
+                return None
+            candidate = Path(text).expanduser()
+            if candidate.is_absolute():
+                return candidate.resolve() if candidate.exists() else candidate
+            roots = [Path.cwd(), self.repo_root, config_path.parent]
+            seen: set[Path] = set()
+            for root in roots:
+                try:
+                    resolved = (root / candidate).resolve()
+                except Exception:
+                    continue
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                if resolved.exists():
+                    return resolved
+            return (self.repo_root / candidate).resolve()
+
+        configured_session = _resolve_config_value(
+            settings.get("session_dir") or settings.get("deployment_session_dir")
+        )
+        if session_dir_override is not None and configured_session is not None:
+            requested = Path(session_dir_override).expanduser()
+            try:
+                requested = requested.resolve()
+            except Exception:
+                pass
+            if configured_session != requested:
+                return None, None, None
+
+        model_path = _resolve_config_value(settings.get("model_path"))
+        scaler_path = _resolve_config_value(settings.get("scaler_path"))
+        if model_path is None or scaler_path is None:
+            return None, None, None
+        if not model_path.exists() or not scaler_path.exists():
+            return None, None, None
+        return model_path.parent.name, model_path, scaler_path
 
     def _update_resume_ui(self) -> None:
         if not hasattr(self, "resume_status_label") or not hasattr(
@@ -8698,12 +8814,18 @@ class MainWindow(QMainWindow):
             session_dir_override=infer_session_dir,
             subject_id_override=subject_for_step,
         )
-        if model_path and _uses_placeholder_path(
-            settings.get("model_path"), "finger_action_model.pt"
+        if model_path and (
+            _uses_placeholder_path(settings.get("model_path"), "finger_action_model.pt")
+            or self._is_session_model_artifact_value(
+                settings.get("model_path"), infer_session_dir, "finger_action_model.pt"
+            )
         ):
             settings["model_path"] = str(model_path)
-        if scaler_path and _uses_placeholder_path(
-            settings.get("scaler_path"), "scaler.npz"
+        if scaler_path and (
+            _uses_placeholder_path(settings.get("scaler_path"), "scaler.npz")
+            or self._is_session_model_artifact_value(
+                settings.get("scaler_path"), infer_session_dir, "scaler.npz"
+            )
         ):
             settings["scaler_path"] = str(scaler_path)
         expected_labels, expected_labels_source = self._resolve_live_expected_labels(

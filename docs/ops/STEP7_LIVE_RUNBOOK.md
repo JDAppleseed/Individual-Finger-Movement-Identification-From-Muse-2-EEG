@@ -8,17 +8,27 @@ This is the fail-closed, auditable manual flow for a real Step 7 live inference 
 
 Legacy compare/tuning sessions and superseded Step 7 outputs for `2-M16` are archived under `Projects/2-M16/subjects/2-M16/archive/step7/`. Keep them for reference only; they are not part of the active live workflow.
 
+Normal live work should be launched through `eeglab_wrapper_ui.py` from the `muse311` environment:
+
+```bash
+conda activate muse311
+python3 eeglab_wrapper_ui.py
+```
+
+The UI runs Step 7 with the same interpreter that launched the UI. This avoids mixing the Muse/LSL/PySide runtime with another Python environment.
+
 ## Pinned Inputs
 
 - Config: `Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json`
 - Session dir: `Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2`
-- Deployment bundle: model, scaler, and temperature scaling resolved from the pinned config and runtime manifest
+- Deployment bundle: March 19 run `20260319_075520`; model, scaler, and temperature scaling resolve from the pinned config and runtime manifest
 - Live stream identity: set `LSL_SOURCE_ID` to the exact headset you want
 - Output dir: use a fresh `processed/live_infer_<run_tag>` directory every run
 
 ## UI Notes
 
 - On the Step 7 page, the Step 7 `Session dir` field is the authoritative launch/preflight session.
+- For `2-M16`, the UI should resolve `finger_action_model.pt` and `scaler.npz` under `processed/models/20260319_075520/`.
 - Do not assume the main session selector overrides a pinned Step 7 session.
 - Step 7b resolves the latest live output under that Step 7 session and prefers fresh `live_infer_<run_tag>` directories over bare or legacy names.
 - `Show Step 1-style live EEG plot` is enabled by default so Step 7 starts with the same 4-channel stream-health view used in Step 1. Disable it only when you explicitly want the leanest live loop.

@@ -38,6 +38,15 @@ python3 scripts/diagnose_env.py
 
 Use commands from the repository root.
 
+For live Muse collection, live inference, or the full operator workflow, use the Python 3.11 lab environment instead:
+
+```bash
+conda activate muse311
+python3 eeglab_wrapper_ui.py
+```
+
+The UI starts child pipeline steps with its own interpreter, so launching the UI from `muse311` keeps recording, extraction, training, evaluation, and Step 7 live inference in the same environment.
+
 ## Validate Source Sessions
 
 ```bash
@@ -161,6 +170,7 @@ Metrics from `winning_model/session_report/eval_manifest.json`:
 Selection note:
 - `20260403_grouptrial_rest050` wins the offline holdout and event-level leaderboard.
 - `20260319_075520` is the public/deployment model because it wins cleaned pseudo-live would-send precision (`93.32%` vs `80.06%`) and false REST actuation (`0.12%` vs `6.74%`).
+- For live `2-M16` inference, use `Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json`; it pins the March 19 model/scaler and tuned Step 7 postprocess settings.
 - See `docs/2M16_MODEL_SELECTION_AUDIT.md` for the concrete ranking table and diagnosis.
 
 Smoke-test the deployable artifacts:

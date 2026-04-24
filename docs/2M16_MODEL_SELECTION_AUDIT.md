@@ -18,6 +18,13 @@ For research experiments:
 - Offline holdout and event-level scores are valid targets.
 - A future model should keep the April 3 offline gains while beating March 19 on pseudo-live precision and false REST actuation.
 
+## Model Roles
+
+| Model | Wins | Loses | Justification |
+| --- | --- | --- | --- |
+| `20260319_075520` | Would-send precision, false REST actuation, REST TPR, action ECE, cleaned pseudo-live committed joint | Offline holdout action/joint/finger accuracy, event-level action/joint/finger accuracy, would-send recall | Use this as the public live-control model because avoiding false actuation matters more than maximizing offline recall for a deployed robot-hand claim. |
+| `20260403_grouptrial_rest050` | Offline holdout action/joint/finger accuracy, event-level action/joint/finger accuracy, would-send recall | Would-send precision, false REST actuation, REST TPR, action ECE | Keep this as an offline research benchmark because it proves training can improve decoding, but it needs safer gating before it should control the public deployment story. |
+
 ## Head-To-Head
 
 | Metric | `20260319_075520` | `20260403_grouptrial_rest050` | Winner |

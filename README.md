@@ -16,6 +16,15 @@ source .venv/bin/activate
 python3 scripts/diagnose_env.py
 ```
 
+For lab/operator runs, launch the UI from the Python 3.11 environment used for Muse and PySide tooling:
+
+```bash
+conda activate muse311
+python3 eeglab_wrapper_ui.py
+```
+
+The UI launches pipeline subprocesses with the same interpreter that launched the UI. If the UI starts inside `muse311`, Step 1 recording, Step 1b extraction, Step 2 training, Step 3 evaluation, and Step 7 live inference run inside `muse311` too.
+
 Run the reference sanity checks:
 
 ```bash
@@ -32,7 +41,7 @@ python3 tools/smoke_inference.py \
 
 Then choose a path:
 - Use the published reference bundle: `docs/2M16_QUICKSTART.md`
-- Run the full UI workflow: `python3 eeglab_wrapper_ui.py`
+- Run the full UI workflow: `conda activate muse311 && python3 eeglab_wrapper_ui.py`
 - Record and train a new subject from CLI: follow the step map below
 - Prepare live inference: `docs/ops/STEP7_LIVE_RUNBOOK.md`
 
@@ -104,6 +113,8 @@ It includes:
 - `winning_model/` configs, model artifacts, figures, reports, and manifests.
 
 The April 3 run `20260403_grouptrial_rest050` remains documented as an offline benchmark, but it is not the featured deployment model because the March 19 checkpoint wins the public safety metrics: `93.32%` would-send precision and `0.12%` false REST actuation on the cleaned pseudo-live corpus.
+
+For `2-M16` live inference, the authoritative UI/Step 7 config is `Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json`. It pins the March 19 model and scaler, enables the tuned postprocess family, and should be run from the `muse311` UI environment.
 
 Use it to verify your environment, compare model changes, and understand the expected artifact layout:
 

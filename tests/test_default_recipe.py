@@ -69,8 +69,8 @@ def test_config_templates_match_canonical_recipe():
     assert infer["REQUIRE_EXACTLY_4_CHANNELS"] is True
     assert infer["LIVE_EEG_PLOT_ENABLED"] is True
     assert infer["parity_capture_enabled"] is True
-    assert infer["parity_capture_max_windows"] == 64
-    assert infer["parity_capture_flush_every"] == 8
+    assert infer["parity_capture_max_windows"] == 128
+    assert infer["parity_capture_flush_every"] == 1
     assert infer["window_sec"] == LIVE_INFER_RECIPE_DEFAULTS["window_sec"]
     assert infer["hop_sec"] == LIVE_INFER_RECIPE_DEFAULTS["hop_sec"]
     assert (
@@ -91,7 +91,10 @@ def test_config_templates_match_canonical_recipe():
         EVAL_RECIPE_DEFAULTS["threshold_applicability"]
         == CANONICAL_DEPLOYMENT_APPLICABILITY_THRESHOLD
     )
-    assert LIVE_INFER_RECIPE_DEFAULTS["threshold_applicability"] == 0.0
+    assert (
+        LIVE_INFER_RECIPE_DEFAULTS["threshold_applicability"]
+        == CANONICAL_DEPLOYMENT_APPLICABILITY_THRESHOLD
+    )
 
 
 def test_runtime_defaults_match_canonical_recipe():

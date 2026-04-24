@@ -328,22 +328,22 @@ def test_live_infer_defaults_match_best_live_profile():
     config_defaults = default_infer_settings()
 
     assert PostprocessSettings().finger_mode == "raw"
-    assert PostprocessSettings().threshold_action == pytest.approx(0.0)
-    assert PostprocessSettings().threshold_finger == pytest.approx(0.0)
-    assert PostprocessSettings().smoothing_enabled is False
-    assert defaults["postprocess"] is False
+    assert PostprocessSettings().threshold_action == pytest.approx(0.05)
+    assert PostprocessSettings().threshold_finger == pytest.approx(0.2)
+    assert PostprocessSettings().smoothing_enabled is True
+    assert defaults["postprocess"] is True
     assert defaults["finger_mode"] == "raw"
     assert defaults["LIVE_EEG_PLOT_ENABLED"] is True
     assert defaults["window_sec"] == pytest.approx(0.25)
     assert defaults["hop_sec"] == pytest.approx(0.05)
     assert defaults["latency_threshold_ms"] == pytest.approx(750.0)
     assert defaults["smoothing_method"] == "ema"
-    assert defaults["smoothing_enabled"] is False
-    assert defaults["smoothing_window"] == 1
+    assert defaults["smoothing_enabled"] is True
+    assert defaults["smoothing_window"] == 5
     assert defaults["hysteresis_enabled"] is False
     assert defaults["hysteresis_frames"] == 3
-    assert defaults["threshold_action"] == pytest.approx(0.0)
-    assert defaults["threshold_finger"] == pytest.approx(0.0)
+    assert defaults["threshold_action"] == pytest.approx(0.05)
+    assert defaults["threshold_finger"] == pytest.approx(0.2)
     assert defaults["threshold_applicability"] == pytest.approx(
         LIVE_INFER_RECIPE_DEFAULTS["threshold_applicability"]
     )
@@ -363,25 +363,25 @@ def test_live_infer_defaults_match_best_live_profile():
     assert defaults["serial_port"] is None
     assert defaults["serial_baud"] == 9600
     assert defaults["actuation_min_prob"] == pytest.approx(0.2)
-    assert defaults["actuation_stability"] == 2
-    assert defaults["actuation_cooldown_ms"] == 0
+    assert defaults["actuation_stability"] == 3
+    assert defaults["actuation_cooldown_ms"] == 250
     assert defaults["actuation_repeat_ms"] == 100
     assert defaults["actuation_min_speed"] == pytest.approx(0.5)
-    assert defaults["modulate_actuation_speed"] is False
+    assert defaults["modulate_actuation_speed"] is True
     assert defaults["actuation_speed_gamma"] == pytest.approx(1.0)
-    assert config_defaults["postprocess"] is False
+    assert config_defaults["postprocess"] is True
     assert config_defaults["finger_mode"] == "raw"
     assert config_defaults["LIVE_EEG_PLOT_ENABLED"] is True
     assert config_defaults["window_sec"] == pytest.approx(0.25)
     assert config_defaults["hop_sec"] == pytest.approx(0.05)
     assert config_defaults["latency_threshold_ms"] == pytest.approx(750.0)
     assert config_defaults["smoothing_method"] == "ema"
-    assert config_defaults["smoothing_enabled"] is False
-    assert config_defaults["smoothing_window"] == 1
+    assert config_defaults["smoothing_enabled"] is True
+    assert config_defaults["smoothing_window"] == 5
     assert config_defaults["hysteresis_enabled"] is False
     assert config_defaults["hysteresis_frames"] == 3
-    assert config_defaults["threshold_action"] == pytest.approx(0.0)
-    assert config_defaults["threshold_finger"] == pytest.approx(0.0)
+    assert config_defaults["threshold_action"] == pytest.approx(0.05)
+    assert config_defaults["threshold_finger"] == pytest.approx(0.2)
     assert config_defaults["threshold_applicability"] == pytest.approx(
         LIVE_INFER_RECIPE_DEFAULTS["threshold_applicability"]
     )
@@ -401,11 +401,11 @@ def test_live_infer_defaults_match_best_live_profile():
     assert config_defaults["serial_port"] is None
     assert config_defaults["serial_baud"] == 9600
     assert config_defaults["actuation_min_prob"] == pytest.approx(0.2)
-    assert config_defaults["actuation_stability"] == 2
-    assert config_defaults["actuation_cooldown_ms"] == 0
+    assert config_defaults["actuation_stability"] == 3
+    assert config_defaults["actuation_cooldown_ms"] == 250
     assert config_defaults["actuation_repeat_ms"] == 100
     assert config_defaults["actuation_min_speed"] == pytest.approx(0.5)
-    assert config_defaults["modulate_actuation_speed"] is False
+    assert config_defaults["modulate_actuation_speed"] is True
     assert config_defaults["actuation_speed_gamma"] == pytest.approx(1.0)
 
 
@@ -524,32 +524,33 @@ def test_active_winning_step7_config_uses_audited_gate_values() -> None:
         / "config"
         / "infer.json"
     )
-    archived_config = (
-        repo_root
-        / "Projects"
-        / "2-M16"
-        / "subjects"
-        / "2-M16"
-        / "archive"
-        / "step7"
-        / "config_snapshots"
-        / "original_subject_config"
-        / "infer.json"
-    )
-
     _, active_settings = load_step7_config(active_config)
     _, mirror_settings = load_step7_config(ui_mirror)
-    _, archived_settings = load_step7_config(archived_config)
     runtime_config = build_step7_replay_runtime_config(active_settings)
 
-    assert active_settings["actuation_min_prob"] == pytest.approx(0.0)
-    assert mirror_settings["actuation_min_prob"] == pytest.approx(0.0)
-    assert archived_settings["actuation_min_prob"] == pytest.approx(0.24)
-    assert active_settings["actuation_stability"] == 2
+    assert active_settings["model_path"].endswith(
+        "20260319_075520/finger_action_model.pt"
+    )
+    assert active_settings["scaler_path"].endswith("20260319_075520/scaler.npz")
+    assert "20260403" not in active_settings["model_path"]
+    assert mirror_settings["model_path"] == active_settings["model_path"]
+    assert mirror_settings["scaler_path"] == active_settings["scaler_path"]
+    assert active_settings["actuation_min_prob"] == pytest.approx(0.2)
+    assert mirror_settings["actuation_min_prob"] == pytest.approx(0.2)
+    assert active_settings["actuation_stability"] == 3
     assert active_settings["actuation_repeat_ms"] == 100
-    assert active_settings["actuation_cooldown_ms"] == 0
-    assert active_settings["postprocess"] is False
-    assert runtime_config.actuation_min_prob == pytest.approx(0.0)
+    assert active_settings["actuation_cooldown_ms"] == 250
+    assert active_settings["modulate_actuation_speed"] is True
+    assert active_settings["postprocess"] is True
+    assert active_settings["smoothing_enabled"] is True
+    assert active_settings["smoothing_method"] == "ema"
+    assert active_settings["smoothing_window"] == 5
+    assert active_settings["threshold_action"] == pytest.approx(0.05)
+    assert active_settings["threshold_finger"] == pytest.approx(0.2)
+    assert active_settings["threshold_applicability"] == pytest.approx(0.4)
+    assert runtime_config.actuation_min_prob == pytest.approx(0.2)
+    assert runtime_config.actuation_stability == 3
+    assert runtime_config.actuation_cooldown_ms == 250
 
 
 class _DummyMCModel(torch.nn.Module):
