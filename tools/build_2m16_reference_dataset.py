@@ -27,10 +27,6 @@ DEFAULT_OUT = (
     / "processed"
     / "eeg_windows.npz"
 )
-PATH_PREFIXES = (
-    str(REPO_ROOT) + "/",
-    "/Users/oliverbuchanan/Desktop/ISEF/Individual-Finger-Movement-Identification-From-Muse-2-EEG/",
-)
 DROP_SCALAR_MISMATCH_KEYS = {"features_path", "events_path"}
 
 
@@ -43,10 +39,19 @@ def _sha256_file(path: Path) -> str:
 
 
 def _repo_relative_text(value: str) -> str:
-    out = str(value)
-    for prefix in PATH_PREFIXES:
-        out = out.replace(prefix, "")
-    return out
+    text = str(value)
+    normalized = text.replace("\\", "/")
+    repo_root = str(REPO_ROOT).replace("\\", "/").rstrip("/") + "/"
+    if normalized.startswith(repo_root):
+        return normalized[len(repo_root):]
+
+    # Public artifacts can carry metadata from another checkout. Strip any
+    # absolute prefix ending at this repository directory without naming users.
+    repo_marker = f"/{REPO_ROOT.name}/"
+    marker_index = normalized.find(repo_marker)
+    if marker_index >= 0:
+        return normalized[marker_index + len(repo_marker):]
+    return text
 
 
 def _sanitize_array(arr: np.ndarray) -> np.ndarray:

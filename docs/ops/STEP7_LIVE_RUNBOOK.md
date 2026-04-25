@@ -8,14 +8,14 @@ This is the fail-closed, auditable manual flow for a real Step 7 live inference 
 
 Legacy compare/tuning sessions and superseded Step 7 outputs for `2-M16` are archived under `Projects/2-M16/subjects/2-M16/archive/step7/`. Keep them for reference only; they are not part of the active live workflow.
 
-Normal live work should be launched through `eeglab_wrapper_ui.py` from the `muse311` environment:
+Normal live work should be launched through `eeglab_wrapper_ui.py` from the same Python 3.11/3.12 environment used for Muse, LSL, PySide, and the pipeline:
 
 ```bash
-conda activate muse311
+source .venv/bin/activate
 python3 eeglab_wrapper_ui.py
 ```
 
-The UI runs Step 7 with the same interpreter that launched the UI. This avoids mixing the Muse/LSL/PySide runtime with another Python environment.
+If you prefer conda, activate your own Python 3.11/3.12 environment before launching the UI. The UI runs Step 7 with the same interpreter that launched the UI. This avoids mixing the Muse/LSL/PySide runtime with another Python environment.
 
 ## Pinned Inputs
 

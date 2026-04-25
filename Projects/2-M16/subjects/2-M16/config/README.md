@@ -10,6 +10,6 @@ Published configs:
 - `pseudo_live.json`: offline replay config skeleton without the full historical replay logs.
 - `step1b.json`: extraction settings for rebuilding source-session windows.
 
-For a decisive live run, launch `eeglab_wrapper_ui.py` from `muse311`, use `../winning_model/configs/infer.json`, and follow `../../../../../docs/ops/STEP7_LIVE_RUNBOOK.md`. The pinned live model is `processed/models/20260319_075520/finger_action_model.pt`; `20260403_grouptrial_rest050` is documented only as an offline benchmark.
+For a decisive live run, launch `eeglab_wrapper_ui.py` from the same Python 3.11/3.12 environment used for Muse, LSL, PySide, and the pipeline; use `../winning_model/configs/infer.json`; and follow `../../../../../docs/ops/STEP7_LIVE_RUNBOOK.md`. The pinned live model is `processed/models/20260319_075520/finger_action_model.pt`; `20260403_grouptrial_rest050` is documented only as an offline benchmark.
 
 Configs not listed above are local or exploratory and are intentionally not part of the published bundle.

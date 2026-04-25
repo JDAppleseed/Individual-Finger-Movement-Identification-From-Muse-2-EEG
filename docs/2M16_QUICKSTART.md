@@ -38,14 +38,14 @@ python3 scripts/diagnose_env.py
 
 Use commands from the repository root.
 
-For live Muse collection, live inference, or the full operator workflow, use the Python 3.11 lab environment instead:
+For live Muse collection, live inference, or the full operator workflow, use one Python 3.11/3.12 environment for Muse, LSL, PySide, and the pipeline:
 
 ```bash
-conda activate muse311
+source .venv/bin/activate
 python3 eeglab_wrapper_ui.py
 ```
 
-The UI starts child pipeline steps with its own interpreter, so launching the UI from `muse311` keeps recording, extraction, training, evaluation, and Step 7 live inference in the same environment.
+If you prefer conda, activate your own Python 3.11/3.12 environment before launching the UI. The UI starts child pipeline steps with its own interpreter, so recording, extraction, training, evaluation, and Step 7 live inference stay in the same environment.
 
 ## Validate Source Sessions
 

@@ -23,6 +23,24 @@ def _load_module(relative_path: str, name: str):
     return module
 
 
+def test_reference_dataset_path_sanitizer_strips_any_checkout_root():
+    mod = _load_module(
+        "tools/build_2m16_reference_dataset.py",
+        "build_2m16_reference_dataset_test",
+    )
+    repo_name = Path(__file__).resolve().parents[1].name
+
+    local_path = mod.REPO_ROOT / "Projects" / "2-M16" / "artifact.npz"
+    other_checkout = (
+        f"/home/example/work/{repo_name}/Projects/2-M16/subjects/2-M16/"
+        "sessions/source/processed/eeg_windows.npz"
+    )
+
+    assert mod._repo_relative_text(str(local_path)) == "Projects/2-M16/artifact.npz"
+    assert mod._repo_relative_text(other_checkout).startswith("Projects/2-M16/")
+    assert mod._repo_relative_text("Projects/2-M16/artifact.npz") == "Projects/2-M16/artifact.npz"
+
+
 def test_pseudo_live_replay_asserts_deployment_invariant():
     mod = _load_module("tools/pseudo_live_replay.py", "pseudo_live_replay_test")
 

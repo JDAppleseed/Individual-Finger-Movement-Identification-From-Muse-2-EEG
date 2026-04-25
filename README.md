@@ -16,14 +16,14 @@ source .venv/bin/activate
 python3 scripts/diagnose_env.py
 ```
 
-For lab/operator runs, launch the UI from the Python 3.11 environment used for Muse and PySide tooling:
+For lab/operator runs, launch the UI from the same Python 3.11/3.12 environment used for Muse, LSL, and PySide tooling:
 
 ```bash
-conda activate muse311
+source .venv/bin/activate
 python3 eeglab_wrapper_ui.py
 ```
 
-The UI launches pipeline subprocesses with the same interpreter that launched the UI. If the UI starts inside `muse311`, Step 1 recording, Step 1b extraction, Step 2 training, Step 3 evaluation, and Step 7 live inference run inside `muse311` too.
+If you maintain a conda environment instead, activate that environment before launching the UI. The UI launches pipeline subprocesses with the same interpreter that launched the UI, so Step 1 recording, Step 1b extraction, Step 2 training, Step 3 evaluation, and Step 7 live inference stay in one runtime.
 
 Run the reference sanity checks:
 
@@ -41,7 +41,7 @@ python3 tools/smoke_inference.py \
 
 Then choose a path:
 - Use the published reference bundle: `docs/2M16_QUICKSTART.md`
-- Run the full UI workflow: `conda activate muse311 && python3 eeglab_wrapper_ui.py`
+- Run the full UI workflow: `source .venv/bin/activate && python3 eeglab_wrapper_ui.py`
 - Record and train a new subject from CLI: follow the step map below
 - Prepare live inference: `docs/ops/STEP7_LIVE_RUNBOOK.md`
 
@@ -114,7 +114,7 @@ It includes:
 
 The April 3 run `20260403_grouptrial_rest050` remains documented as an offline benchmark, but it is not the featured deployment model because the March 19 checkpoint wins the public safety metrics: `93.32%` would-send precision and `0.12%` false REST actuation on the cleaned pseudo-live corpus.
 
-For `2-M16` live inference, the authoritative UI/Step 7 config is `Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json`. It pins the March 19 model and scaler, enables the tuned postprocess family, and should be run from the `muse311` UI environment.
+For `2-M16` live inference, the authoritative UI/Step 7 config is `Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json`. It pins the March 19 model and scaler, enables the tuned postprocess family, and should be run from the same Python 3.11/3.12 environment used for Muse, LSL, and PySide.
 
 Use it to verify your environment, compare model changes, and understand the expected artifact layout:
 
@@ -200,6 +200,12 @@ Keep changes measurable. Every model or pipeline claim should point to a config,
 
 Use GitHub issues and pull requests for public, reproducible improvements to code, configs, docs, tests, reports, and model recipes.
 
+Before opening a pull request:
+- run `python3 -m compileall -q .` and `python3 -m pytest -q`, or state exactly what could not be run
+- keep paths in configs, manifests, reports, and docs repo-relative
+- do not commit local virtualenvs, logs, generated runs, or raw subject data unless they are part of an intentionally curated public bundle
+- keep changes measurable: model or pipeline claims should point to a config, dataset/session path, run directory, and evaluation manifest
+
 For model changes:
 - include the training/eval config, dataset or session path, run directory, and evaluation manifest
 - compare against the current public `2-M16` deployment run when making deployment claims
@@ -266,5 +272,6 @@ License summary:
 - Non-commercial research, education, nonprofit, charity, humanitarian, and public-interest use is allowed.
 - Any use, modification, integration, deployment, or published work must remain public-source and must publish changes at no charge.
 - For-profit commercial use requires prior written approval from Jonathan Davanzo.
+- This is a custom public-source research license, not an MIT/Apache/BSD-style license.
 
 See `LICENSE` for the full terms that govern use and redistribution.
