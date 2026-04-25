@@ -196,6 +196,21 @@ Good community research contributions include:
 
 Keep changes measurable. Every model or pipeline claim should point to a config, dataset, run directory, and evaluation manifest.
 
+## Contributions And Contact
+
+Use GitHub issues and pull requests for public, reproducible improvements to code, configs, docs, tests, reports, and model recipes.
+
+For model changes:
+- include the training/eval config, dataset or session path, run directory, and evaluation manifest
+- compare against the current public `2-M16` deployment run when making deployment claims
+- label results as research or offline improvements unless they pass the public replacement gate in `docs/2M16_MODEL_SELECTION_AUDIT.md`
+
+Use the contact page at `https://alphahand.org/contact` instead of a public PR for:
+- commercial or closed-source permission requests
+- private collaboration proposals
+- human-subject data release or consent questions
+- safety-sensitive disclosures or anything else that should not start in a public repo thread
+
 ## Validation Before Publishing
 
 Run the focused checks for this documentation/artifact bundle:
