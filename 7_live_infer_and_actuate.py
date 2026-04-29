@@ -2860,6 +2860,13 @@ def _build_live_prediction_summary(
         if runtime_manifest_path is not None and runtime_manifest_path.exists()
         else {}
     )
+    runtime_actuation = {}
+    if isinstance(runtime_manifest, dict):
+        runtime_section = runtime_manifest.get("runtime")
+        if isinstance(runtime_section, dict):
+            actuation_section = runtime_section.get("actuation")
+            if isinstance(actuation_section, dict):
+                runtime_actuation = dict(actuation_section)
     dropped_window_reason_counter = _counter_with_max(
         collections.Counter(
             str(row.get("drop_reason") or "none")
@@ -2912,6 +2919,12 @@ def _build_live_prediction_summary(
     if not records:
         payload = {
             "record_count": 0,
+            "actuation_enabled": (
+                bool(runtime_actuation.get("enabled"))
+                if "enabled" in runtime_actuation
+                else None
+            ),
+            "actuation_runtime": runtime_actuation,
             "candidate_window_count": candidate_window_count_value,
             "accepted_window_count": accepted_window_count_value,
             "dropped_window_reason_counts": _stringify_counter(
@@ -2999,64 +3012,79 @@ def _build_live_prediction_summary(
 
     summary.update(
         {
-        "raw_action_counts": _stringify_counter(
-            collections.Counter(row.get("raw_top_action_id") for row in records)
-        ),
-        "raw_finger_counts": _stringify_counter(
-            collections.Counter(row.get("raw_top_finger_id") for row in records)
-        ),
-        "committed_action_counts": _stringify_counter(
-            collections.Counter(int(row.get("committed_action_id", 0) or 0) for row in records)
-        ),
-        "committed_finger_counts": _stringify_counter(
-            collections.Counter(int(row.get("committed_finger_id", 0) or 0) for row in records)
-        ),
-        "actuation_sent_pair_counts": _stringify_counter(
-            collections.Counter(_pair_key(fid, aid) for fid, aid in sent_pairs)
-        ),
-        "actuation_suppressed_counts": _stringify_counter(
-            collections.Counter(
-                str(row.get("actuation_suppressed_reason") or "none")
-                for row in records
-            )
-        ),
-        "actuation_vote_reason_counts": _stringify_counter(
-            collections.Counter(str(row.get("actuation_vote_reason") or "none") for row in records)
-        ),
-        "window_quality_bad_count": int(
-            sum(bool(row.get("window_quality_bad")) for row in records)
-        ),
-        "quality_bad_reason_counts": _stringify_counter(
-            collections.Counter(str(row.get("quality_bad_reason") or "none") for row in records)
-        ),
-        "masked_window_count": int(
-            sum(bool(row.get("masked_channel_ids")) for row in records)
-        ),
-        "masked_channel_counts": _stringify_counter(masked_channel_counts),
-        "actuation_sent_pair_transition_rate": float(
-            sent_transitions / max(1, len(sent_pairs) - 1)
-        ),
-        "longest_committed_non_rest_segments": segments[:10],
-        "candidate_window_count": int(candidate_window_count_value),
-        "accepted_window_count": int(accepted_window_count_value),
-        "dropped_window_reason_counts": _stringify_counter(
-            dropped_window_reason_counter
-        ),
-        "dropped_windows": int(dropped_windows),
-        "dropped_nonfinite_samples": int(dropped_nonfinite_samples),
-        "dropped_nonfinite_windows": int(dropped_nonfinite_windows),
-        "segment_break_count": int(segment_break_count_value),
-        "segment_break_reason_counts": _stringify_counter(
-            segment_break_reason_counter
-        ),
-        "raw_channel_stats": _compute_raw_channel_stats(
-            raw_dir,
-            runtime_manifest_path=runtime_manifest_path,
-        ),
-        "runtime_manifest_path": (
-            str(runtime_manifest_path) if runtime_manifest_path is not None else None
-        ),
-        "reconciliation": reconciliation,
+            "actuation_enabled": (
+                bool(runtime_actuation.get("enabled"))
+                if "enabled" in runtime_actuation
+                else None
+            ),
+            "actuation_runtime": runtime_actuation,
+            "raw_action_counts": _stringify_counter(
+                collections.Counter(row.get("raw_top_action_id") for row in records)
+            ),
+            "raw_finger_counts": _stringify_counter(
+                collections.Counter(row.get("raw_top_finger_id") for row in records)
+            ),
+            "committed_action_counts": _stringify_counter(
+                collections.Counter(
+                    int(row.get("committed_action_id", 0) or 0) for row in records
+                )
+            ),
+            "committed_finger_counts": _stringify_counter(
+                collections.Counter(
+                    int(row.get("committed_finger_id", 0) or 0) for row in records
+                )
+            ),
+            "actuation_sent_pair_counts": _stringify_counter(
+                collections.Counter(_pair_key(fid, aid) for fid, aid in sent_pairs)
+            ),
+            "actuation_suppressed_counts": _stringify_counter(
+                collections.Counter(
+                    str(row.get("actuation_suppressed_reason") or "none")
+                    for row in records
+                )
+            ),
+            "actuation_vote_reason_counts": _stringify_counter(
+                collections.Counter(
+                    str(row.get("actuation_vote_reason") or "none")
+                    for row in records
+                )
+            ),
+            "window_quality_bad_count": int(
+                sum(bool(row.get("window_quality_bad")) for row in records)
+            ),
+            "quality_bad_reason_counts": _stringify_counter(
+                collections.Counter(
+                    str(row.get("quality_bad_reason") or "none") for row in records
+                )
+            ),
+            "masked_window_count": int(
+                sum(bool(row.get("masked_channel_ids")) for row in records)
+            ),
+            "masked_channel_counts": _stringify_counter(masked_channel_counts),
+            "actuation_sent_pair_transition_rate": float(
+                sent_transitions / max(1, len(sent_pairs) - 1)
+            ),
+            "longest_committed_non_rest_segments": segments[:10],
+            "candidate_window_count": int(candidate_window_count_value),
+            "accepted_window_count": int(accepted_window_count_value),
+            "dropped_window_reason_counts": _stringify_counter(
+                dropped_window_reason_counter
+            ),
+            "dropped_windows": int(dropped_windows),
+            "dropped_nonfinite_samples": int(dropped_nonfinite_samples),
+            "dropped_nonfinite_windows": int(dropped_nonfinite_windows),
+            "segment_break_count": int(segment_break_count_value),
+            "segment_break_reason_counts": _stringify_counter(
+                segment_break_reason_counter
+            ),
+            "raw_channel_stats": _compute_raw_channel_stats(
+                raw_dir,
+                runtime_manifest_path=runtime_manifest_path,
+            ),
+            "runtime_manifest_path": (
+                str(runtime_manifest_path) if runtime_manifest_path is not None else None
+            ),
+            "reconciliation": reconciliation,
         }
     )
     summary.update(_build_non_rest_flow_summary(records))

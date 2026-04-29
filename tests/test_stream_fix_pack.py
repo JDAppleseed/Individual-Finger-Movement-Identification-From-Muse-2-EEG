@@ -99,6 +99,27 @@ def test_label_check_uses_expected_channels():
     assert "channel_count_mismatch" in status["reason"]
 
 
+def test_keyboard_event_pair_rejects_open_close_without_finger():
+    module = _load_stream_module()
+
+    assert (
+        module._normalize_keyboard_event_pair(module.ACTION_OPEN, module.FINGER_NONE)
+        is None
+    )
+    assert (
+        module._normalize_keyboard_event_pair(module.ACTION_CLOSE, module.FINGER_NONE)
+        is None
+    )
+    assert module._normalize_keyboard_event_pair(module.ACTION_REST, module.FINGER_THUMB) == (
+        module.ACTION_REST,
+        module.FINGER_NONE,
+    )
+    assert module._normalize_keyboard_event_pair(module.ACTION_OPEN, module.FINGER_THUMB) == (
+        module.ACTION_OPEN,
+        module.FINGER_THUMB,
+    )
+
+
 def test_startup_defers_failed_writers_until_health_decision(tmp_path):
     module = _load_stream_module()
     module.failed_writers.close_failed_files()

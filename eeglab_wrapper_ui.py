@@ -8680,6 +8680,11 @@ class MainWindow(QMainWindow):
             self._append_log(
                 f"[launcher] Step 1 LSL_SOURCE_ID={connector_source_id or '-'}"
             )
+            if settings.get("EVENT_MARKING_ENABLED", True):
+                self._append_log(
+                    "[launcher] Step 1 keyboard event capture is global; select a "
+                    "finger with 1-5 before marking open/close."
+                )
 
         self.runner.start(sys.executable, args, cwd=cwd, env=launch_env)
 
@@ -8797,6 +8802,23 @@ class MainWindow(QMainWindow):
             settings["out_dir"] = str(Path(raw_out_dir).expanduser())
 
         settings["subject_id"] = subject_for_step
+        base_config_path = resolve_subject_step7_config_path(subject_dir)
+        base_settings: Dict[str, Any] = {}
+        if base_config_path.exists():
+            try:
+                _, base_settings = load_step7_config(base_config_path)
+            except Exception as exc:
+                self._append_log(
+                    f"⚠️ Failed to load base Step 7 config {base_config_path}: {exc}"
+                )
+        config_resolution_warnings: list[str] = []
+        if (
+            base_settings.get("enable_actuation") is True
+            and not bool(settings.get("enable_actuation"))
+        ):
+            config_resolution_warnings.append(
+                "canonical_enable_actuation_overridden_false"
+            )
 
         def _uses_placeholder_path(value: Optional[str], filename: str) -> bool:
             if not value:
@@ -8847,20 +8869,16 @@ class MainWindow(QMainWindow):
             return None
         for warning in validation.warnings:
             self._append_log(f"⚠️ {warning}")
+        if "canonical_enable_actuation_overridden_false" in config_resolution_warnings:
+            self._append_log(
+                "⚠️ Step 7 actuation is enabled in the canonical config but disabled "
+                "in the UI runtime state; this launch will log predictions only."
+            )
 
         if settings.get("enable_actuation") and not self._confirm_actuation():
             self._append_log("Actuation confirmation cancelled; run aborted.")
             return None
 
-        base_config_path = resolve_subject_step7_config_path(subject_dir)
-        base_settings: Dict[str, Any] = {}
-        if base_config_path.exists():
-            try:
-                _, base_settings = load_step7_config(base_config_path)
-            except Exception as exc:
-                self._append_log(
-                    f"⚠️ Failed to load base Step 7 config {base_config_path}: {exc}"
-                )
         session_id_value = self.current_session_ui or "UNKNOWN"
         if infer_session_dir is not None:
             session_id_value = infer_session_dir.name
@@ -8883,6 +8901,7 @@ class MainWindow(QMainWindow):
                 "ui_runtime_state",
                 "explicit_cli_overrides",
             ],
+            "warnings": list(config_resolution_warnings),
         }
         config_path = Path(str(settings["out_dir"])) / "step7_launch_config.json"
         live_mod = _load_live_infer_ui_module(self.repo_root)
@@ -8925,6 +8944,9 @@ class MainWindow(QMainWindow):
         config_payload["settings"] = dict(settings)
         config_payload["config_resolution"]["runtime_override_keys"] = sorted(
             diff_step7_settings(base_settings, settings).keys()
+        )
+        config_payload["config_resolution"]["warnings"] = list(
+            config_resolution_warnings
         )
         write_json(config_path, config_payload)
 
@@ -8998,6 +9020,12 @@ class MainWindow(QMainWindow):
         command = " ".join(
             shlex.quote(part) for part in [sys.executable, *launch.args] if str(part)
         )
+        resolution_warnings = set(
+            launch.config_payload.get("config_resolution", {}).get("warnings", [])
+        )
+        actuation_text = f"Actuation: {bool(launch.settings.get('enable_actuation'))}"
+        if "canonical_enable_actuation_overridden_false" in resolution_warnings:
+            actuation_text += " (disabled by UI runtime override; canonical config is enabled)"
         lines = [
             f"Config: {launch.config_path}",
             f"Base config: {launch.base_config_path or '-'}",
@@ -9015,7 +9043,7 @@ class MainWindow(QMainWindow):
             f"Latency policy: {launch.settings.get('latency_policy')} @ {launch.settings.get('latency_threshold_ms')} ms",
             f"Parity capture: enabled={bool(launch.settings.get('parity_capture_enabled'))} max_windows={launch.settings.get('parity_capture_max_windows')} flush_every={launch.settings.get('parity_capture_flush_every')}",
             f"no_file_io: {bool(launch.settings.get('no_file_io'))}",
-            f"Actuation: {bool(launch.settings.get('enable_actuation'))}",
+            actuation_text,
             "",
             "Actual launch command:",
             command,

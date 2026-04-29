@@ -286,7 +286,9 @@ def test_prepare_live_infer_launch_freezes_source_and_session_artifacts(
     infer_fields["deployment_session_dir"].setText(str(session_dir))
     infer_fields["out_dir"].setText("")
 
-    monkeypatch.setattr(ui_mod, "session_backend_id", lambda timestamp=None: "20250101_000010")
+    monkeypatch.setattr(
+        ui_mod, "session_backend_id", lambda timestamp=None: "20250101_000010"
+    )
 
     launch = window._prepare_live_infer_launch(window.scripts["live_infer"])
 
@@ -311,6 +313,59 @@ def test_prepare_live_infer_launch_freezes_source_and_session_artifacts(
     assert "--scaler-path" in launch.args
     assert "--out-dir" in launch.args
     assert "captured-source-123" in launch.args
+
+
+def test_prepare_live_infer_launch_warns_when_ui_disables_canonical_actuation(
+    window, monkeypatch: pytest.MonkeyPatch
+):
+    project = "Demo"
+    subject = "S01"
+    backend_session = "20250101_000000"
+    ui_session = f"{subject}_{backend_session}"
+    subject_dir = Path("Projects") / project / "subjects" / subject
+    session_dir = subject_dir / "sessions" / ui_session
+    run_dir = session_dir / "processed" / "models" / "run_001"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "finger_action_model.pt").write_text("model")
+    (run_dir / "scaler.npz").write_text("scaler")
+    (run_dir / "temperature_scaling.json").write_text("{}")
+    canonical_config_path = subject_dir / "config" / "infer.json"
+    canonical_config_path.parent.mkdir(parents=True, exist_ok=True)
+    canonical_config_path.write_text(
+        json.dumps({"settings": {"enable_actuation": True}}, indent=2)
+    )
+
+    window.current_project = project
+    window.current_subject = subject
+    window.current_session_backend = backend_session
+    window.current_session_ui = ui_session
+    window.session_dir_input.setText(str(session_dir))
+    window.live_stream_name = "Muse2-EEG"
+    window.live_stream_type = "EEG"
+    window.live_lsl_source_id = "captured-source-123"
+
+    infer_fields = window.fields["infer"]
+    infer_fields["stream_name"].setText("Muse2-EEG")
+    infer_fields["stream_type"].setText("EEG")
+    infer_fields["deployment_session_dir"].setText(str(session_dir))
+    infer_fields["out_dir"].setText("")
+    infer_fields["enable_actuation"].setChecked(False)
+
+    monkeypatch.setattr(ui_mod, "session_backend_id", lambda timestamp=None: "20250101_000010")
+
+    launch = window._prepare_live_infer_launch(window.scripts["live_infer"])
+
+    assert launch is not None
+    assert launch.settings["enable_actuation"] is False
+    assert (
+        "canonical_enable_actuation_overridden_false"
+        in launch.config_payload["config_resolution"]["warnings"]
+    )
+    assert any(
+        "canonical config but disabled in the UI runtime state" in line
+        for line in window.log_entries
+    )
+    assert "canonical config is enabled" in window._format_live_launch_preview(launch)
 
 
 def test_prepare_live_infer_launch_refreshes_autofilled_out_dir_for_new_launch_action(

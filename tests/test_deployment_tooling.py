@@ -343,6 +343,13 @@ def test_live_prediction_summary_includes_full_runtime_metrics(tmp_path: Path):
                     "temperature_path": str(tmp_path / "temperature_scaling.json"),
                     "temperature_sha256": "temphash",
                 },
+                "runtime": {
+                    "actuation": {
+                        "enabled": True,
+                        "actuation_min_prob": 0.2,
+                        "actuation_stability": 3,
+                    },
+                },
             }
         )
     )
@@ -383,6 +390,8 @@ def test_live_prediction_summary_includes_full_runtime_metrics(tmp_path: Path):
     assert summary["segment_break_reason_counts"]["stream_gap"] == 1
     assert summary["stream_resolution"]["requested_source_id"] == "fresh-id"
     assert summary["artifact_provenance"]["model_sha256"] == "modelhash"
+    assert summary["actuation_enabled"] is True
+    assert summary["actuation_runtime"]["actuation_stability"] == 3
     assert summary["runtime_manifest_path"] == str(runtime_manifest_path)
     assert "segment_break_count_vs_segment_break_log" in summary["reconciliation"]["mismatches"]
     assert summary["raw_channel_stats"]["flagged_nonfinite_rows"] == 1

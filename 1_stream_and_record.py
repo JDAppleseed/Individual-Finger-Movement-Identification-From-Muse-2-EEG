@@ -160,6 +160,16 @@ class EventPayload:
     json_payload: Dict[str, Any]
 
 
+def _normalize_keyboard_event_pair(action_id: int, finger_id: int) -> Optional[Tuple[int, int]]:
+    action_id = int(action_id)
+    finger_id = int(finger_id)
+    if action_id == int(ACTION_REST):
+        return int(ACTION_REST), int(FINGER_NONE)
+    if not is_valid_action_finger(action_id, finger_id):
+        return None
+    return action_id, finger_id
+
+
 class EventRecorder:
     def __init__(self, writer: csv.writer, lock: threading.Lock) -> None:
         self._writer = writer
@@ -1937,11 +1947,17 @@ def _run_recording(
     ) -> None:
         nonlocal events_received
         duration_s = max(0.0, float(duration_s))
-        if not is_valid_action_finger(int(action_id), int(finger_id)):
-            # Fail safe: coerce invalid combos to REST/NONE.
-            action_id = int(ACTION_REST)
-            finger_id = int(FINGER_NONE)
-            event_type = "rest"
+        normalized_pair = _normalize_keyboard_event_pair(action_id, finger_id)
+        if normalized_pair is None:
+            logger.warning(
+                "[event] dropped invalid mark type=%s action_id=%s finger_id=%s; "
+                "select finger 1-5 before marking open/close, or press r for rest",
+                str(event_type),
+                int(action_id),
+                int(finger_id),
+            )
+            return
+        action_id, finger_id = normalized_pair
         md = {
             "duration_s": float(duration_s),
             "action_id": int(action_id),
@@ -1986,8 +2002,15 @@ def _run_recording(
         onset_s, lsl_ts_mono, clamped = now
         action_id = int(current_action_id)
         finger_id = int(current_finger_id)
-        if action_id == int(ACTION_REST):
-            finger_id = int(FINGER_NONE)
+        normalized_pair = _normalize_keyboard_event_pair(action_id, finger_id)
+        if normalized_pair is None:
+            logger.warning(
+                "[event] mark ignored: action_id=%s has no selected finger; "
+                "press 1-5 before marking open/close, or press r for rest",
+                int(action_id),
+            )
+            return
+        action_id, finger_id = normalized_pair
         override = pending_override_type
         event_type = (
             str(override) if override else event_type_for(int(action_id), int(finger_id))
