@@ -649,8 +649,12 @@ def _classify_distribution_match(
     rms_ratios = _rms_ratios(live_rms, offline_rms)
     finite_ratios = [float(value) for value in rms_ratios if value is not None and np.isfinite(value)]
     median_rms_ratio = float(np.median(finite_ratios)) if finite_ratios else None
+    min_rms_ratio = float(np.min(finite_ratios)) if finite_ratios else None
+    max_rms_ratio = float(np.max(finite_ratios)) if finite_ratios else None
     low_channels = int(sum(float(value) < 0.75 for value in finite_ratios))
+    severe_low_channels = int(sum(float(value) < 0.55 for value in finite_ratios))
     high_channels = int(sum(float(value) > 1.35 for value in finite_ratios))
+    severe_high_channels = int(sum(float(value) > 1.75 for value in finite_ratios))
     quality_bad_rate = relaxed_stats.get("quality_bad_rate")
     masked_window_rate = relaxed_stats.get("masked_window_rate")
     accepted_rate = float(relaxed_stats.get("accepted_rate", 0.0) or 0.0)
@@ -682,13 +686,17 @@ def _classify_distribution_match(
         verdict = "catastrophic"
         reason = "Prepared live-window amplitude is grossly outside the offline model-input range."
         catastrophic = True
-    elif median_rms_ratio is not None and low_channels >= 2 and float(median_rms_ratio) < 0.78:
+    elif median_rms_ratio is not None and (
+        (low_channels >= 2 and float(median_rms_ratio) < 0.85)
+        or (severe_low_channels >= 1 and low_channels >= 2)
+    ):
         verdict = "shifted_low_amplitude"
         reason = "Prepared live-window amplitude is materially quieter than the offline reference on multiple channels."
     elif (
         median_rms_ratio is not None
         and (
             (high_channels >= 2 and float(median_rms_ratio) > 1.25)
+            or (severe_high_channels >= 1 and high_channels >= 2)
             or (
                 quality_bad_rate is not None
                 and float(quality_bad_rate) >= 0.20
@@ -715,6 +723,10 @@ def _classify_distribution_match(
         ),
         "per_channel_rms_ratio": rms_ratios,
         "median_rms_ratio": median_rms_ratio,
+        "min_rms_ratio": min_rms_ratio,
+        "max_rms_ratio": max_rms_ratio,
+        "low_rms_channel_count": low_channels,
+        "high_rms_channel_count": high_channels,
         "spectral_distance_mean_abs": spectral_distance,
         "prepared_total_clip_mean_live": (
             float(live_clip) if live_clip is not None else None

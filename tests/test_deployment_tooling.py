@@ -548,6 +548,39 @@ def test_live_preflight_distribution_probe_assessment_shifted_low_amplitude():
     assert compact["verdict"] == "shifted_low_amplitude"
 
 
+def test_live_raw_distribution_flags_channel_local_low_amplitude():
+    mod = _load_module(
+        "tools/analyze_live_raw_inputs.py",
+        "live_raw_distribution_channel_low",
+    )
+
+    report = mod._classify_distribution_match(
+        relaxed_stats={
+            "accepted_count": 20,
+            "accepted_rate": 1.0,
+            "quality_bad_rate": 0.0,
+            "masked_window_rate": 0.0,
+            "recovered_vs_strict_count": 0,
+            "prepared_summary": {
+                "prepared_rms_mean": [0.45, 0.90, 0.95, 0.70],
+                "prepared_total_clip_mean": 0.0,
+                "spectral_proxies": {},
+            },
+        },
+        strict_stats={"accepted_rate": 1.0},
+        offline_reference={
+            "prepared_rms_mean": [1.0, 1.0, 1.0, 1.0],
+            "prepared_total_clip_mean": 0.0,
+            "spectral_proxies": {},
+        },
+        decisive=True,
+    )
+
+    assert report["verdict"] == "shifted_low_amplitude"
+    assert report["min_rms_ratio"] == pytest.approx(0.45)
+    assert report["low_rms_channel_count"] == 2
+
+
 def test_live_preflight_distribution_probe_assessment_catastrophic():
     mod = _load_module("tools/live_preflight.py", "live_preflight_assess_noisy")
 

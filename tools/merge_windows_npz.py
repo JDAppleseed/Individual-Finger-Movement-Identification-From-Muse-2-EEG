@@ -13,7 +13,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from utils.sequence_data import load_sequence_npz
 
-DROP_SCALAR_MISMATCH_KEYS = {"features_path", "events_path"}
+DROP_SCALAR_MISMATCH_KEYS = {"config", "features_path", "events_path"}
 
 
 def _is_per_window(v, n: int) -> bool:

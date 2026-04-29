@@ -167,6 +167,21 @@ def _load_json_file(path: Path) -> dict[str, Any]:
     return settings
 
 
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
+
+
 def _build_runtime_config(
     *,
     infer_settings: dict[str, Any],

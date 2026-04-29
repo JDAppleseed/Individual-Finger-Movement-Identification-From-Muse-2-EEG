@@ -575,10 +575,13 @@ def _load_train_config(run_dir: Path) -> Dict[str, Any]:
 
 
 def _resolve_temperature_path(run_dir: Path, train_cfg: Dict[str, Any]) -> Path:
+    local_temperature_path = run_dir / "temperature_scaling.json"
     candidate = train_cfg.get("save_temperature_path")
     if candidate:
-        return Path(str(candidate)).expanduser()
-    return run_dir / "temperature_scaling.json"
+        candidate_path = Path(str(candidate)).expanduser()
+        if candidate_path.exists():
+            return candidate_path
+    return local_temperature_path
 
 
 def _format_label_counts(values: np.ndarray, name_map: Optional[dict] = None):

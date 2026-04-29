@@ -110,11 +110,15 @@ def load_train_config(run_dir: Path) -> dict:
 
 
 def resolve_temperature_path(run_dir: Path) -> Path:
+    run_dir = Path(run_dir).expanduser().resolve()
+    local_temperature_path = run_dir / "temperature_scaling.json"
     train_cfg = load_train_config(Path(run_dir))
     candidate = train_cfg.get("save_temperature_path")
     if candidate:
-        return Path(str(candidate)).expanduser()
-    return Path(run_dir).expanduser().resolve() / "temperature_scaling.json"
+        candidate_path = Path(str(candidate)).expanduser()
+        if candidate_path.exists():
+            return candidate_path
+    return local_temperature_path
 
 
 def get_deployment_model_info(run_dir: Path) -> dict[str, Any]:

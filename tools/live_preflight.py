@@ -383,6 +383,9 @@ def _assess_distribution_probe(report: dict[str, Any]) -> tuple[list[str], list[
             float(quality_bad_rate) if quality_bad_rate is not None else None
         ),
         "median_rms_ratio": distribution_match.get("median_rms_ratio"),
+        "min_rms_ratio": distribution_match.get("min_rms_ratio"),
+        "max_rms_ratio": distribution_match.get("max_rms_ratio"),
+        "per_channel_rms_ratio": distribution_match.get("per_channel_rms_ratio"),
         "recovered_vs_strict_count": distribution_match.get("recovered_vs_strict_count"),
     }
     return errors, warnings, compact
