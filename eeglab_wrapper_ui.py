@@ -2436,13 +2436,14 @@ class MainWindow(QMainWindow):
             QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
         )
         session_dock.setMinimumWidth(260)
-        self.addDockWidget(Qt.RightDockWidgetArea, session_dock)
+        self.addDockWidget(Qt.LeftDockWidgetArea, session_dock)
 
         self.resizeDocks(
-            [event_dock, model_dock, session_dock],
-            [320, 320, 320],
+            [event_dock, model_dock],
+            [320, 320],
             Qt.Vertical,
         )
+        self.resizeDocks([stream_dock, session_dock], [320, 320], Qt.Vertical)
 
     def _build_model_views_widget(self) -> QWidget:
         widget = QWidget()
