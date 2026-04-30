@@ -4977,7 +4977,7 @@ class MainWindow(QMainWindow):
 
         advanced_group = QGroupBox("Advanced")
         advanced_group.setCheckable(True)
-        advanced_group.setChecked(False)
+        advanced_group.setChecked(True)
         adv_layout = QFormLayout()
         self._populate_advanced_fields(step_id, adv_layout)
         advanced_group.setLayout(adv_layout)
@@ -7104,16 +7104,16 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout(container)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(5)
-        text_label = QLabel(label)
-        text_label.setMinimumWidth(130)
-        text_label.setWordWrap(True)
-        row.addWidget(text_label, 1)
         help_text = self._config_help_text(key, fallback)
         if help_text:
             info = self._make_info_button(f"{label} Config", help_text)
             info.setFixedSize(18, 18)
             info.setToolTip("Explain this config")
             row.addWidget(info, 0, Qt.AlignTop)
+        text_label = QLabel(label)
+        text_label.setMinimumWidth(130)
+        text_label.setWordWrap(True)
+        row.addWidget(text_label, 1)
         return container
 
     def _add_explained_form_row(
