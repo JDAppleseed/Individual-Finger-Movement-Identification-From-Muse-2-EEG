@@ -1041,10 +1041,11 @@ QToolButton#InfoButton {
   background: rgb(80, 100, 130);
   color: white;
   border: 1px solid #8ba0c7;
-  border-radius: 7px;
-  padding: 0px 4px;
-  min-width: 14px;
-  min-height: 14px;
+  border-radius: 6px;
+  padding: 0px;
+  min-width: 12px;
+  min-height: 12px;
+  font-size: 10px;
   font-weight: 700;
 }
 QToolButton#InfoButton:hover { background: rgb(110, 130, 170); }
@@ -2261,6 +2262,7 @@ class MainWindow(QMainWindow):
         self.log_console = OutlinePlainTextEdit()
         self.log_console.setReadOnly(True)
         self.log_console.setMaximumBlockCount(10000)
+        self.log_console.setMinimumHeight(280)
         container = QWidget()
         container.setObjectName("BottomBar")
         layout = QVBoxLayout(container)
@@ -2286,7 +2288,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.log_console)
         dock = QDockWidget("Log Console", self)
         dock.setWidget(self._wrap_scroll(container, "BottomBar"))
+        dock.setMinimumHeight(330)
         self.addDockWidget(Qt.BottomDockWidgetArea, dock)
+        self.resizeDocks([dock], [330], Qt.Vertical)
 
     def _build_control_docks(self) -> None:
         self.stream_status_dock = QLabel("Stream status: idle")
@@ -2338,55 +2342,8 @@ class MainWindow(QMainWindow):
         stream_dock.setMinimumWidth(260)
         self.addDockWidget(Qt.LeftDockWidgetArea, stream_dock)
 
-        pipeline_widget = QWidget()
-        pipeline_widget.setObjectName("Sidebar")
-        pipeline_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        pipeline_layout = QVBoxLayout(pipeline_widget)
-        pipeline_header = QLabel("Pipeline Controls")
-        self._apply_text_outline_effect(pipeline_header)
-        pipeline_layout.addWidget(pipeline_header)
-        run_step1_btn = QPushButton("Run Record (Lossless)")
-        run_step1_btn.clicked.connect(lambda: self._run_step("step1", "step1"))
-        pipeline_layout.addWidget(run_step1_btn)
-        open_events_btn = QPushButton("Open Events: Mark/Edit (Optional)")
-        open_events_btn.clicked.connect(lambda: self.workflow_list.setCurrentRow(WORKFLOW_ROWS["event_tools"]))
-        pipeline_layout.addWidget(open_events_btn)
-        validate_btn = QPushButton("Validate Session")
-        validate_btn.clicked.connect(self._run_validate_session)
-        pipeline_layout.addWidget(validate_btn)
-        run_step1b_btn = QPushButton("Run Extract Windows")
-        run_step1b_btn.clicked.connect(lambda: self._run_step("step1b", "step1b"))
-        pipeline_layout.addWidget(run_step1b_btn)
-        run_topomaps_btn = QPushButton("Run Dataset Topomaps")
-        run_topomaps_btn.clicked.connect(lambda: self._run_step("topomaps", "topomaps"))
-        pipeline_layout.addWidget(run_topomaps_btn)
-        run_train_btn = QPushButton("Run Train Model")
-        run_train_btn.clicked.connect(lambda: self._run_step("train", "train"))
-        pipeline_layout.addWidget(run_train_btn)
-        run_eval_btn = QPushButton("Run Evaluate")
-        run_eval_btn.clicked.connect(self._run_evaluate_all)
-        pipeline_layout.addWidget(run_eval_btn)
-        run_infer_btn = QPushButton("Run Live Infer + Actuate")
-        run_infer_btn.clicked.connect(lambda: self._run_step("infer", "live_infer"))
-        pipeline_layout.addWidget(run_infer_btn)
-        open_live_review_btn = QPushButton("Run Review Live Predictions")
-        open_live_review_btn.clicked.connect(
-            lambda: self._run_step("live_review", "live_review")
-        )
-        pipeline_layout.addWidget(open_live_review_btn)
-        self.dry_run_checkbox = QCheckBox("Dry run (print CLI only)")
-        pipeline_layout.addWidget(self.dry_run_checkbox)
-        stop_btn = QPushButton("Stop Active Run")
-        stop_btn.clicked.connect(self._stop_process)
-        pipeline_layout.addWidget(stop_btn)
-        pipeline_layout.addStretch(1)
-        pipeline_dock = QDockWidget("Pipeline", self)
-        pipeline_dock.setWidget(self._wrap_scroll(pipeline_widget, "Sidebar"))
-        pipeline_dock.setFeatures(
-            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
-        )
-        pipeline_dock.setMinimumWidth(260)
-        self.addDockWidget(Qt.LeftDockWidgetArea, pipeline_dock)
+        self.dry_run_checkbox = QCheckBox("Dry run (print CLI only)", self)
+        self.dry_run_checkbox.setVisible(False)
 
         event_widget = QWidget()
         event_widget.setObjectName("Sidebar")
@@ -7107,9 +7064,9 @@ class MainWindow(QMainWindow):
         help_text = self._config_help_text(key, fallback)
         if help_text:
             info = self._make_info_button(f"{label} Config", help_text)
-            info.setFixedSize(18, 18)
+            info.setFixedSize(14, 14)
             info.setToolTip("Explain this config")
-            row.addWidget(info, 0, Qt.AlignTop)
+            row.addWidget(info, 0, Qt.AlignVCenter)
         text_label = QLabel(label)
         text_label.setMinimumWidth(130)
         text_label.setWordWrap(True)
