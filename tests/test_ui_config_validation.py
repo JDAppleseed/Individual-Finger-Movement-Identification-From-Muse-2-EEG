@@ -1,4 +1,4 @@
-from app.config_model import default_infer_settings
+from app.config_model import default_infer_settings, default_pseudo_live_settings
 from app.ui_config_validation import validate_step_settings
 
 
@@ -25,6 +25,20 @@ def test_live_infer_best_defaults_validate():
     result = validate_step_settings("infer", default_infer_settings())
     assert result.ok is True
     assert not result.errors
+
+
+def test_pseudo_live_validation_covers_latency_mode():
+    settings = default_pseudo_live_settings()
+    settings["session_dir"] = "sessions/example"
+    settings["target_session_dirs"] = ["sessions/example"]
+    result = validate_step_settings("evaluate_pseudo_live", settings)
+    assert result.ok is True
+    assert not result.errors
+
+    settings["latency_mode"] = "fixed"
+    settings["fixed_latency_ms"] = None
+    result = validate_step_settings("evaluate_pseudo_live", settings)
+    assert any("fixed_latency_ms is required" in err for err in result.errors)
 
 
 def test_train_record_disallows_actuation():

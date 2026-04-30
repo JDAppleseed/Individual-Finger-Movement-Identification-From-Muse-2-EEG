@@ -34,6 +34,7 @@ STEP_SCRIPTS = {
     "evaluate": "3_evaluate_model.py",
     "evaluate_deepchecks": "3b_deepchecks_evaluate.py",
     "evaluate_figures": "3c_live_paper_figures.py",
+    "evaluate_pseudo_live": "tools/pseudo_live_replay.py",
     "evaluate_reports": "4_generate_reports.py",
     "live_infer": "7_live_infer_and_actuate.py",
     "live_review": "tools/analyze_live_predictions.py",

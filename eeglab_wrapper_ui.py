@@ -83,6 +83,7 @@ from app.config_model import (
     default_infer_settings,
     default_live_review_settings,
     default_preprocess_settings,
+    default_pseudo_live_settings,
     default_step1_settings,
     default_step1b_settings,
     default_topomap_settings,
@@ -279,6 +280,13 @@ def _scale_replay_preview_speed(speed_scalar: Optional[float]) -> Optional[float
 
 def _replay_rest_preview_commands() -> list[tuple[int, int, Optional[float]]]:
     return [(finger_id, 0, None) for finger_id in range(1, 6)]
+
+
+def _split_multivalue_text(text: Optional[str]) -> list[str]:
+    if not text:
+        return []
+    parts = re.split(r"[\n,;]+", str(text))
+    return [part.strip() for part in parts if part.strip()]
 
 
 def _estimate_replay_auto_interval_ms(
@@ -837,14 +845,26 @@ TOOLTIPS: Dict[str, str] = {
     "summary_json_out": "Optional JSON summary output path for topomap suite mode.",
     "raw_dir": "Session root for raw recording.",
     "session_id": "Session ID for raw recording.",
+    "allow_gaps": "Allow Step 1b to retain windows with timing gaps and mark them in metadata.",
+    "allow_gap_interp": "Interpolate across short timing gaps when allow_gaps is enabled.",
+    "gap_interp_max_s": "Maximum gap duration in seconds that Step 1b may interpolate.",
+    "allow_partial": "Allow partial Step 1 sessions by skipping strict manifest validation.",
+    "ignore_misalignment": "Continue when events extend outside the available signal range.",
+    "seed": "Random seed for deterministic training splits or Step 1b REST subsampling.",
+    "rest_policy": "How Step 1b converts unlabeled windows into REST labels.",
+    "REST_SUBSAMPLE_PROB": "Probability of retaining eligible REST windows during Step 1b extraction.",
+    "REST_MAX_WINDOWS": "Optional cap on retained REST windows; blank disables the cap.",
     "finger_weights": "Per-finger loss weights (CSV or JSON). Example: 1,1,1,1,1,0.4 or {\"pinky\":0.4}",
-    "loss_action_weight": "Weight applied to the finger loss term.",
+    "loss_action_weight": "Legacy CLI name for the finger-head loss weight. It scales finger loss relative to action loss.",
     "rest_weight": "Class weight for REST actions (0 = ignore).",
     "action_weights": "Per-action loss weights in REST,OPEN,CLOSE order (CSV or JSON). Overrides rest_weight when set.",
     "rest_balance_mode": "How REST windows are reweighted across source sessions during training.",
+    "active_finger_head": "Train the winning-model active-finger head (THUMB..PINKY) and let REST come from the action head.",
     "rest_finger_loss_weight": "Additional finger-head loss weight applied on REST windows toward NONE.",
     "finger_applicability_head": "Train a binary head that predicts whether a finger label is meaningful on the current window.",
     "applicability_loss_weight": "Weight applied to the binary finger-applicability loss term.",
+    "amp_mode": "Mixed precision mode for training/evaluation. Keep off for reproducibility unless benchmarking.",
+    "aux_rest_session_policy": "How auxiliary pure-REST sessions are used during Step 2 splitting/training.",
     "test_size": "Fraction of windows held out for testing.",
     "split_mode": "Split strategy (group_trial or holdout_session).",
     "calibration_size": "Fraction of the training split reserved for post-hoc temperature scaling (0 disables).",
@@ -858,6 +878,14 @@ TOOLTIPS: Dict[str, str] = {
     "pin_memory": "Pin DataLoader memory (useful for CUDA).",
     "save_preds": "Output path for test predictions.",
     "save_temperature": "Output path for fitted post-hoc temperature scaling parameters.",
+    "target_session_dirs": "Pseudo-live replay target sessions. Use one session directory per line; blank uses the selected session.",
+    "infer_config": "Step 7 infer.json used to source postprocess and actuation settings for pseudo-live replay.",
+    "latency_mode": "Pseudo-live latency mode (ignore, compute, fixed).",
+    "fixed_latency_ms": "Fixed latency used when latency_mode is fixed.",
+    "output_dir": "Optional pseudo-live output directory override.",
+    "reset_on_trial_change": "Reset pseudo-live postprocessing and actuation state when trial_id changes.",
+    "deterministic": "Use deterministic pseudo-live replay settings.",
+    "benchmark_label": "Optional label recorded in pseudo-live replay manifests.",
     "pred_log": "Prediction log (JSONL) to analyze. Leave blank to use the latest Step 7 log under the selected session.",
     "out_json": "Output JSON summary path for live prediction review.",
     "segments_csv": "Output CSV of predicted state segments.",
@@ -865,6 +893,104 @@ TOOLTIPS: Dict[str, str] = {
     "video_offset_s": "Video offset applied to exported segment timestamps for manual review.",
     "short_segment_sec": "Duration threshold used to flag short actuatable bursts in the live review summary.",
     "run_dir": "Explicit output directory for training run.",
+}
+
+CONFIG_EXPLANATIONS: Dict[str, str] = {
+    "loss_action_weight": (
+        "This is the finger-head loss weight despite the legacy CLI flag name "
+        "`--loss-action-weight`. It scales finger prediction loss relative to action "
+        "loss. It does not set REST/OPEN/CLOSE class weights."
+    ),
+    "rest_weight": (
+        "Shortcut for the REST class weight inside the action loss. It is used only "
+        "when `action_weights` is blank. If `action_weights` is set, Step 2 uses that "
+        "full REST,OPEN,CLOSE vector and ignores this scalar."
+    ),
+    "action_weights": (
+        "Optional per-action class weights in REST,OPEN,CLOSE order. This is the most "
+        "explicit action-class weighting control and overrides `rest_weight`. It is "
+        "separate from finger loss and finger class weights."
+    ),
+    "finger_weights": (
+        "Optional per-finger class weights for the finger head. These affect "
+        "THUMB..PINKY finger learning and do not change action-class weights."
+    ),
+    "rest_finger_loss_weight": (
+        "Extra finger-head loss on REST windows toward NONE for the legacy 6-class "
+        "finger head. With the winning `active_finger_head` default enabled, REST is "
+        "handled by the action/applicability heads and this value is ignored."
+    ),
+    "active_finger_head": (
+        "Winning-model default. The finger head predicts active fingers only "
+        "(THUMB..PINKY); REST is represented by the action head and applicability "
+        "head. This avoids conflicting REST-as-a-finger labels."
+    ),
+    "finger_applicability_head": (
+        "Adds a binary head that learns whether a finger label is meaningful for a "
+        "window. It helps keep REST decisions from producing active-finger commits."
+    ),
+    "applicability_loss_weight": (
+        "Loss weight for the binary finger-applicability head. It is independent of "
+        "action class weights and finger class weights."
+    ),
+    "threshold_applicability": (
+        "Applicability probability threshold recorded with the run or used during "
+        "evaluation/live postprocessing. Train artifacts keep the historical 0.50; "
+        "deployment/evaluation defaults use the current 0.40 unless overridden."
+    ),
+    "rest_balance_mode": (
+        "Controls how REST windows are rebalanced during training. It changes sampling "
+        "mass, not the action-loss class weights."
+    ),
+    "aux_rest_session_policy": (
+        "Controls how pure quiet-REST sessions enter train/test/calibration splits. It "
+        "does not override `rest_weight`, `action_weights`, or `rest_balance_mode`."
+    ),
+    "non_rest_only": (
+        "Drops REST windows from training. When enabled, REST weighting and auxiliary "
+        "REST-session settings no longer affect the trained split in the usual way."
+    ),
+    "test_size": "Fraction of labeled windows held out for test evaluation.",
+    "calibration_size": (
+        "Fraction of the training split held out for temperature scaling. This is not "
+        "part of the final training batches."
+    ),
+    "split_mode": (
+        "Controls leakage boundaries for train/test splitting. The default "
+        "`group_trial` keeps windows from the same trial/event group together."
+    ),
+    "allow_gaps": (
+        "Allows Step 1b to keep windows with timing gaps and annotate them. Leave off "
+        "for strict readiness unless you are rescuing known partial data."
+    ),
+    "allow_gap_interp": (
+        "Only applies when `allow_gaps` is enabled. Short gaps up to "
+        "`gap_interp_max_s` can be interpolated instead of dropping the affected window."
+    ),
+    "gap_interp_max_s": "Maximum gap length Step 1b may interpolate when gap interpolation is enabled.",
+    "rest_policy": (
+        "Step 1b REST labeling policy. `label_gated` is the canonical mode: OPEN/CLOSE "
+        "events with finger NONE are treated as invalid instead of becoming fake labels."
+    ),
+    "REST_SUBSAMPLE_PROB": (
+        "Probability of retaining eligible REST windows during extraction. The current "
+        "default keeps all eligible REST windows."
+    ),
+    "REST_MAX_WINDOWS": "Optional cap on retained REST windows after subsampling. Blank means no cap.",
+    "target_session_dirs": (
+        "Pseudo-live replay target sessions. Each session is replayed as if Step 7 were "
+        "seeing its windows live; outputs stay separate from the offline evaluation stack."
+    ),
+    "latency_mode": (
+        "Pseudo-live latency policy. `ignore` reproduces model/postprocess behavior "
+        "without latency gating, `compute` estimates timing from windows, and `fixed` "
+        "uses the fixed latency value below."
+    ),
+    "fixed_latency_ms": "Required only when pseudo-live latency mode is `fixed`.",
+    "infer_config": (
+        "Step 7 infer.json used to source postprocess and actuation settings for replay. "
+        "Use the winning-model infer config when reproducing published behavior."
+    ),
 }
 
 EEGLAB_STYLE = """
@@ -1016,6 +1142,45 @@ QPushButton {
 }
 QPushButton:hover { background: rgb(130, 150, 190); }
 QPushButton:disabled { background: rgb(105, 120, 150); color: rgba(255,255,255,180); }
+"""
+
+DROPDOWN_PANEL_STYLE = """
+QMenu {
+  background: rgb(238, 243, 250);
+  color: rgb(26, 38, 58);
+  border: 1px solid #9aacc6;
+}
+QScrollArea,
+QScrollArea::viewport,
+QWidget#DropdownPanel {
+  background: rgb(238, 243, 250);
+}
+QWidget#DropdownPanel QLabel,
+QWidget#DropdownPanel QCheckBox,
+QWidget#DropdownPanel QRadioButton {
+  color: rgb(26, 38, 58);
+  font-weight: 600;
+}
+QWidget#DropdownPanel QLineEdit,
+QWidget#DropdownPanel QComboBox,
+QWidget#DropdownPanel QSpinBox,
+QWidget#DropdownPanel QDoubleSpinBox,
+QWidget#DropdownPanel QPlainTextEdit,
+QWidget#DropdownPanel QTextEdit {
+  background: rgb(252, 253, 255);
+  color: rgb(26, 38, 58);
+  border: 1px solid #9aacc6;
+  border-radius: 6px;
+  padding: 4px 6px;
+  selection-background-color: rgb(110, 130, 170);
+  selection-color: white;
+}
+QWidget#DropdownPanel QComboBox QAbstractItemView {
+  background: rgb(252, 253, 255);
+  color: rgb(26, 38, 58);
+  selection-background-color: rgb(110, 130, 170);
+  selection-color: white;
+}
 """
 
 _BATT_RE = re.compile(r"(?:BATTERY|Battery)\s*[:=]\s*(\d{1,3})\s*%?", re.IGNORECASE)
@@ -1731,6 +1896,18 @@ class MainWindow(QMainWindow):
                 ArgSpec("target_fs", "--target-fs", "float", "Target resample rate."),
                 ArgSpec("allow_gaps", "--allow-gaps", "bool", "Allow gaps in windows."),
                 ArgSpec(
+                    "allow_gap_interp",
+                    "--allow-gap-interp",
+                    "bool",
+                    "Interpolate across small gaps when allowed.",
+                ),
+                ArgSpec(
+                    "gap_interp_max_s",
+                    "--gap-interp-max-s",
+                    "float",
+                    "Maximum gap duration to interpolate.",
+                ),
+                ArgSpec(
                     "allow_partial",
                     "--allow-partial",
                     "bool",
@@ -1743,6 +1920,12 @@ class MainWindow(QMainWindow):
                     "Continue if events are out of range.",
                 ),
                 ArgSpec("seed", "--seed", "int", "Seed for REST subsampling."),
+                ArgSpec(
+                    "rest_policy",
+                    "--rest-policy",
+                    "text",
+                    "REST handling policy.",
+                ),
             ],
             "topomaps": [
                 ArgSpec(
@@ -1788,19 +1971,14 @@ class MainWindow(QMainWindow):
                 ArgSpec("device", "--device", "text", "Training device (auto/cpu/cuda/mps)."),
                 ArgSpec("num_workers", "--num-workers", "int", "DataLoader workers."),
                 ArgSpec("pin_memory", "--pin-memory", "bool", "Pin DataLoader memory."),
+                ArgSpec("amp_mode", "--amp-mode", "text", "Mixed precision mode (off/float16)."),
                 ArgSpec(
                     "loss_action_weight",
                     "--loss-action-weight",
                     "float",
-                    "Action loss weight.",
+                    "Finger loss weight.",
                 ),
                 ArgSpec("rest_weight", "--rest-weight", "float", "REST class weight."),
-                ArgSpec(
-                    "action_weights",
-                    "--action-weights",
-                    "text",
-                    "Per-action loss weights (REST,OPEN,CLOSE; CSV/JSON).",
-                ),
                 ArgSpec(
                     "rest_balance_mode",
                     "--rest-balance-mode",
@@ -1808,10 +1986,16 @@ class MainWindow(QMainWindow):
                     "REST reweighting mode (none, session_equalized, core_event_equalized).",
                 ),
                 ArgSpec(
-                    "rest_finger_loss_weight",
-                    "--rest-finger-loss-weight",
-                    "float",
-                    "Additional finger loss on REST windows toward NONE.",
+                    "aux_rest_session_policy",
+                    "--aux-rest-session-policy",
+                    "text",
+                    "How auxiliary pure-REST sessions are used.",
+                ),
+                ArgSpec(
+                    "active_finger_head",
+                    "--active-finger-head",
+                    "bool",
+                    "Train active-finger head.",
                 ),
                 ArgSpec(
                     "finger_weights",
@@ -1820,12 +2004,36 @@ class MainWindow(QMainWindow):
                     "Per-finger loss weights (CSV/JSON).",
                 ),
                 ArgSpec(
+                    "finger_applicability_head",
+                    "--finger-applicability-head",
+                    "bool",
+                    "Train finger applicability head.",
+                ),
+                ArgSpec(
+                    "applicability_loss_weight",
+                    "--applicability-loss-weight",
+                    "float",
+                    "Applicability-head loss weight.",
+                ),
+                ArgSpec(
+                    "threshold_applicability",
+                    "--threshold-applicability",
+                    "float",
+                    "Applicability threshold recorded in train metadata.",
+                ),
+                ArgSpec(
                     "window_preprocess",
                     "--window-preprocess",
                     "text",
                     "Window preprocessing (none, center, center_detrend).",
                 ),
                 ArgSpec("test_size", "--test-size", "float", "Test split fraction."),
+                ArgSpec(
+                    "calibration_size",
+                    "--calibration-size",
+                    "float",
+                    "Calibration holdout fraction.",
+                ),
                 ArgSpec(
                     "split_mode",
                     "--split-mode",
@@ -1860,6 +2068,7 @@ class MainWindow(QMainWindow):
                 ArgSpec("save_model", "--save-model", "text", "Model output path."),
                 ArgSpec("save_scaler", "--save-scaler", "text", "Scaler output path."),
                 ArgSpec("save_preds", "--save-preds", "text", "Predictions output path."),
+                ArgSpec("save_temperature", "--save-temperature", "text", "Temperature scaling output path."),
             ],
         }
 
@@ -1901,10 +2110,16 @@ class MainWindow(QMainWindow):
         button.setObjectName("DropdownButton")
         button.setText(title)
         button.setPopupMode(QToolButton.InstantPopup)
+        panel.setObjectName("DropdownPanel")
+        _append_stylesheet(panel, DROPDOWN_PANEL_STYLE)
         menu = QMenu(button)
         menu.setMinimumWidth(360)
+        menu.setStyleSheet(DROPDOWN_PANEL_STYLE)
         action = QWidgetAction(menu)
         scroll = QScrollArea()
+        scroll.setObjectName("DropdownPanel")
+        scroll.viewport().setObjectName("DropdownPanel")
+        scroll.setStyleSheet(DROPDOWN_PANEL_STYLE)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -3221,6 +3436,9 @@ class MainWindow(QMainWindow):
                 session_dir = str(resolved)
         context = f"Project: {project} | Subject: {subject} | Session: {session}\nSession dir: {session_dir}"
         self.eval_context_label.setText(context)
+        pseudo_label = getattr(self, "pseudo_live_context_label", None)
+        if isinstance(pseudo_label, QLabel):
+            pseudo_label.setText(context)
 
     def _wire_status_updates(self) -> None:
         for step_id in ("step1", "infer"):
@@ -3661,12 +3879,16 @@ class MainWindow(QMainWindow):
         )
         header_row.addStretch(1)
         layout.addLayout(header_row)
+        tabs = QTabWidget()
+
+        offline_tab = QWidget()
+        offline_layout = QVBoxLayout(offline_tab)
         note = QLabel(
-            "Run evaluation on the selected session. Recommended order: Step 3 → 3b "
+            "Run offline evaluation on the selected session. Recommended order: Step 3 → 3b "
             "→ 3c → 4. Outputs write under `sessions/<id>/processed/` by default."
         )
         note.setWordWrap(True)
-        layout.addWidget(note)
+        offline_layout.addWidget(note)
 
         target_box = QGroupBox("Evaluation Target")
         target_layout = QFormLayout(target_box)
@@ -3690,20 +3912,29 @@ class MainWindow(QMainWindow):
                     "Use Validate Session selection or browse here."
                 )
             target_layout.addRow("Session Dir (recommended)", session_widget)
-        layout.addWidget(target_box)
+        offline_layout.addWidget(target_box)
 
         full_btn_row = QHBoxLayout()
         full_btn = QPushButton("Run Full Evaluation (3 → 3b → 3c → 4)")
         full_btn.clicked.connect(self._run_evaluate_all)
         full_btn_row.addWidget(full_btn)
         full_btn_row.addStretch(1)
-        layout.addLayout(full_btn_row)
+        offline_layout.addLayout(full_btn_row)
 
-        layout.addWidget(self._build_eval_step3_box())
-        layout.addWidget(self._build_eval_deepchecks_box())
-        layout.addWidget(self._build_eval_figures_box())
-        layout.addWidget(self._build_eval_reports_box())
-        layout.addStretch(1)
+        offline_layout.addWidget(self._build_eval_step3_box())
+        offline_layout.addWidget(self._build_eval_deepchecks_box())
+        offline_layout.addWidget(self._build_eval_figures_box())
+        offline_layout.addWidget(self._build_eval_reports_box())
+        offline_layout.addStretch(1)
+
+        pseudo_tab = QWidget()
+        pseudo_layout = QVBoxLayout(pseudo_tab)
+        pseudo_layout.addWidget(self._build_eval_pseudo_live_box())
+        pseudo_layout.addStretch(1)
+
+        tabs.addTab(offline_tab, "Offline Evaluation")
+        tabs.addTab(pseudo_tab, "Pseudo-Live Replay")
+        layout.addWidget(tabs)
         self._refresh_eval_context()
         return page
 
@@ -4074,6 +4305,178 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_row)
         if "evaluate_reports" not in self.scripts:
             run_btn.setEnabled(False)
+        return box
+
+    def _build_eval_pseudo_live_box(self) -> QWidget:
+        box = QGroupBox("Pseudo-Live Inference Replay (tools/pseudo_live_replay.py)")
+        layout = QVBoxLayout(box)
+        defaults = default_pseudo_live_settings()
+        desc = QLabel(
+            "Replay Step 7-style inference and postprocessing on recorded windows without hardware. "
+            "This keeps pseudo-live metrics separate from the offline Step 3/3b/3c report stack."
+        )
+        desc.setWordWrap(True)
+        desc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        desc_row = QHBoxLayout()
+        desc_row.addWidget(desc)
+        desc_row.addWidget(
+            self._make_info_button(
+                "Pseudo-Live Replay",
+                "Uses a trained run, a Step 7 infer.json, and one or more target "
+                "sessions to produce predictions.jsonl, live_prediction_summary.json, "
+                "predicted_segments.csv, and replay_manifest.json under "
+                "`processed/pseudo_live/<run_id>/` unless an output directory is set.",
+            )
+        )
+        desc_row.addStretch(1)
+        layout.addLayout(desc_row)
+
+        self.eval_fields.setdefault("evaluate_pseudo_live", {})
+        fields = self.eval_fields["evaluate_pseudo_live"]
+        form = QFormLayout()
+
+        self.pseudo_live_context_label = QLabel("")
+        self.pseudo_live_context_label.setWordWrap(True)
+        form.addRow("Current selection", self.pseudo_live_context_label)
+
+        def _add_line(
+            key: str,
+            label: str,
+            *,
+            placeholder: str = "",
+            browse: Optional[str] = None,
+        ) -> OutlineLineEdit:
+            line = OutlineLineEdit()
+            value = defaults.get(key)
+            line.setText("" if value is None else str(value))
+            if placeholder:
+                line.setPlaceholderText(placeholder)
+            self._apply_tooltip(line, key)
+            if browse:
+                btn = QPushButton("Browse")
+                if browse == "dir":
+                    btn.clicked.connect(lambda: self._browse_dir(line, label))
+                else:
+                    btn.clicked.connect(
+                        lambda: self._browse_path(
+                            line,
+                            "JSON (*.json);;All Files (*)",
+                            label,
+                            mode="open",
+                        )
+                    )
+                row = QWidget()
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.addWidget(line)
+                row_layout.addWidget(btn)
+                self._add_explained_form_row(form, key, label, row)
+            else:
+                self._add_explained_form_row(form, key, label, line)
+            fields[key] = line
+            return line
+
+        _add_line(
+            "session_dir",
+            "Source session dir",
+            placeholder="Selected session unless overridden",
+            browse="dir",
+        )
+        _add_line(
+            "run_dir",
+            "Model run dir",
+            placeholder="Latest selected-session run unless overridden",
+            browse="dir",
+        )
+
+        targets = OutlinePlainTextEdit()
+        targets.setPlaceholderText(
+            "One target session directory per line; blank replays the selected session"
+        )
+        targets.setMaximumHeight(92)
+        self._apply_tooltip(targets, "target_session_dirs")
+        self._add_explained_form_row(
+            form, "target_session_dirs", "Target session dirs", targets
+        )
+        fields["target_session_dirs"] = targets
+
+        _add_line(
+            "infer_config",
+            "Step 7 infer.json",
+            placeholder="Subject config/infer.json or winning_model/configs/infer.json",
+            browse="file",
+        )
+        _add_line(
+            "output_dir",
+            "Output dir",
+            placeholder="Default: target session processed/pseudo_live/<run_id>",
+            browse="dir",
+        )
+
+        latency_mode = QComboBox()
+        latency_mode.addItems(["ignore", "compute", "fixed"])
+        latency_mode.setCurrentText(str(defaults.get("latency_mode", "ignore")))
+        self._apply_tooltip(latency_mode, "latency_mode")
+        self._add_explained_form_row(form, "latency_mode", "Latency mode", latency_mode)
+        fields["latency_mode"] = latency_mode
+
+        fixed_latency_ms = OutlineDoubleSpinBox()
+        fixed_latency_ms.setRange(0.0, 600_000.0)
+        fixed_latency_ms.setDecimals(2)
+        fixed_latency_ms.setSingleStep(10.0)
+        fixed_latency_ms.setSpecialValueText("Only when fixed")
+        fixed_latency_ms.setValue(float(defaults.get("fixed_latency_ms") or 0.0))
+        self._apply_tooltip(fixed_latency_ms, "fixed_latency_ms")
+        self._add_explained_form_row(
+            form, "fixed_latency_ms", "Fixed latency (ms)", fixed_latency_ms
+        )
+        fields["fixed_latency_ms"] = fixed_latency_ms
+
+        def _sync_fixed_latency_state(text: str) -> None:
+            fixed_latency_ms.setEnabled(text == "fixed")
+
+        latency_mode.currentTextChanged.connect(_sync_fixed_latency_state)
+        _sync_fixed_latency_state(latency_mode.currentText())
+
+        device = QComboBox()
+        device.addItems(["auto", "cpu", "cuda", "mps"])
+        device.setCurrentText(str(defaults.get("device", "auto")))
+        self._add_explained_form_row(form, "device", "Device", device)
+        fields["device"] = device
+
+        benchmark_label = OutlineLineEdit()
+        benchmark_label.setText(str(defaults.get("benchmark_label", "")))
+        self._apply_tooltip(benchmark_label, "benchmark_label")
+        self._add_explained_form_row(
+            form, "benchmark_label", "Benchmark label", benchmark_label
+        )
+        fields["benchmark_label"] = benchmark_label
+
+        reset_on_trial_change = QCheckBox("Reset state when trial changes")
+        reset_on_trial_change.setChecked(bool(defaults.get("reset_on_trial_change", True)))
+        self._apply_tooltip(reset_on_trial_change, "reset_on_trial_change")
+        self._add_explained_form_row(
+            form, "reset_on_trial_change", "Reset policy", reset_on_trial_change
+        )
+        fields["reset_on_trial_change"] = reset_on_trial_change
+
+        deterministic = QCheckBox("Deterministic replay")
+        deterministic.setChecked(bool(defaults.get("deterministic", True)))
+        self._apply_tooltip(deterministic, "deterministic")
+        self._add_explained_form_row(form, "deterministic", "Determinism", deterministic)
+        fields["deterministic"] = deterministic
+
+        layout.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        run_btn = QPushButton("Run Pseudo-Live Replay")
+        run_btn.clicked.connect(lambda: self._run_eval_script("evaluate_pseudo_live"))
+        btn_row.addWidget(run_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+        if "evaluate_pseudo_live" not in self.scripts:
+            run_btn.setEnabled(False)
+        self._autofill_pseudo_live_paths()
         return box
 
     def _build_step1_page(self) -> QWidget:
@@ -4644,9 +5047,8 @@ class MainWindow(QMainWindow):
         for key in sorted(fields.keys()):
             source_widget = fields[key]
             proxy = self._clone_bound_widget(source_widget, key)
-            label = QLabel(self._friendly_label(step_id, key))
-            label.setMinimumWidth(160)
-            label.setWordWrap(True)
+            label = self._form_label_with_info(self._friendly_label(step_id, key), key)
+            label.setMinimumWidth(180)
             layout.addRow(label, proxy)
         return panel
 
@@ -4666,7 +5068,10 @@ class MainWindow(QMainWindow):
                     widget.setChecked(source_widget.isChecked())
                     widget.toggled.connect(source_widget.setChecked)
                     source_widget.toggled.connect(widget.setChecked)
-                layout.addRow(QLabel(spec.flag), widget)
+                layout.addRow(
+                    self._form_label_with_info(spec.flag, spec.name, spec.description),
+                    widget,
+                )
                 self.step_arg_widgets[step_id][spec.name] = widget
                 continue
 
@@ -4685,7 +5090,10 @@ class MainWindow(QMainWindow):
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.addWidget(include_cb)
             row_layout.addWidget(widget)
-            layout.addRow(QLabel(spec.flag), row)
+            layout.addRow(
+                self._form_label_with_info(spec.flag, spec.name, spec.description),
+                row,
+            )
             self.step_arg_widgets[step_id][spec.name] = widget
         return panel
 
@@ -4738,6 +5146,17 @@ class MainWindow(QMainWindow):
             )
             self._apply_tooltip(target, key)
             return target
+        if isinstance(source_widget, QPlainTextEdit):
+            target = OutlinePlainTextEdit()
+            target.setPlainText(source_widget.toPlainText())
+            target.textChanged.connect(
+                lambda: self._sync_text_edit(source_widget, target.toPlainText())
+            )
+            source_widget.textChanged.connect(
+                lambda: self._sync_text_edit(target, source_widget.toPlainText())
+            )
+            self._apply_tooltip(target, key)
+            return target
         if isinstance(source_widget, QTextEdit):
             target = OutlineTextEdit()
             target.setPlainText(source_widget.toPlainText())
@@ -4787,7 +5206,9 @@ class MainWindow(QMainWindow):
         widget.setText(text)
         widget.blockSignals(False)
 
-    def _sync_text_edit(self, widget: QTextEdit, text: str) -> None:
+    def _sync_text_edit(self, widget: QWidget, text: str) -> None:
+        if not isinstance(widget, (QPlainTextEdit, QTextEdit)):
+            return
         if widget.toPlainText() == text:
             return
         widget.blockSignals(True)
@@ -5082,6 +5503,24 @@ class MainWindow(QMainWindow):
             )
             self._add_checkbox(step_id, form, "allow_gaps", "Allow gaps", defaults)
             self._add_checkbox(
+                step_id,
+                form,
+                "allow_gap_interp",
+                "Interpolate small gaps",
+                defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "gap_interp_max_s",
+                "Gap interp max (s)",
+                defaults,
+                0,
+                1,
+                is_float=True,
+                decimals=3,
+            )
+            self._add_checkbox(
                 step_id, form, "allow_partial", "Allow partial sessions", defaults
             )
             self._add_checkbox(
@@ -5126,11 +5565,19 @@ class MainWindow(QMainWindow):
             )
         elif step_id == "train":
             self.train_session_dir_input = OutlineLineEdit()
-            self.train_session_dir_input.setPlaceholderText("")
+            session_default = defaults.get("session_dir", "")
+            self.train_session_dir_input.setText(
+                "" if session_default is None else str(session_default)
+            )
+            self.train_session_dir_input.setPlaceholderText(
+                "Use selected session unless overridden"
+            )
+            self._apply_tooltip(self.train_session_dir_input, "session_dir")
             self.train_session_dir_input.textChanged.connect(
                 self._on_train_session_dir_changed
             )
             form.addRow("Session Dir (Step 2 override)", self.train_session_dir_input)
+            self.fields[step_id]["session_dir"] = self.train_session_dir_input
             self._add_file_picker(
                 step_id,
                 form,
@@ -5894,16 +6341,6 @@ class MainWindow(QMainWindow):
             )
         elif step_id == "step1b":
             self._add_spin(
-                step_id,
-                form,
-                "WINDOW_SEC_DEFAULT",
-                "Window sec (default)",
-                defaults,
-                0,
-                10,
-                is_float=True,
-            )
-            self._add_spin(
                 step_id, form, "STEP_SEC", "Step sec", defaults, 0, 10, is_float=True
             )
             self._add_spin(
@@ -5933,10 +6370,37 @@ class MainWindow(QMainWindow):
             self._add_choice_dropdown(
                 step_id,
                 form,
-                "REST_POLICY",
+                "rest_policy",
                 "REST policy",
                 defaults,
                 ["label_gated", "rest_by_exclusion"],
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "seed",
+                "REST subsample seed",
+                defaults,
+                0,
+                1_000_000,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "REST_SUBSAMPLE_PROB",
+                "REST subsample probability",
+                defaults,
+                0,
+                1,
+                is_float=True,
+                decimals=3,
+            )
+            self._add_text(
+                step_id,
+                form,
+                "REST_MAX_WINDOWS",
+                "REST max windows",
+                defaults,
             )
             self._add_spin(
                 step_id,
@@ -6060,6 +6524,14 @@ class MainWindow(QMainWindow):
             )
         elif step_id == "train":
             self._add_spin(step_id, form, "seed", "Seed", defaults, 0, 1_000_000)
+            self._add_choice_dropdown(
+                step_id,
+                form,
+                "amp_mode",
+                "AMP mode",
+                defaults,
+                ["off", "float16"],
+            )
             self._add_spin(
                 step_id,
                 form,
@@ -6080,22 +6552,12 @@ class MainWindow(QMainWindow):
                 10,
                 is_float=True,
             )
-            self._add_text(
+            self._add_checkbox(
                 step_id,
                 form,
-                "action_weights",
-                "Action weights (CSV/JSON)",
+                "active_finger_head",
+                "Active finger head",
                 defaults,
-            )
-            self._add_spin(
-                step_id,
-                form,
-                "rest_finger_loss_weight",
-                "REST finger loss weight",
-                defaults,
-                0,
-                10,
-                is_float=True,
             )
             self._add_checkbox(
                 step_id,
@@ -6128,6 +6590,14 @@ class MainWindow(QMainWindow):
                 "REST balance mode",
                 defaults,
                 ["none", "session_equalized", "core_event_equalized"],
+            )
+            self._add_choice_dropdown(
+                step_id,
+                form,
+                "aux_rest_session_policy",
+                "Aux REST session policy",
+                defaults,
+                ["none", "auto_train_only", "train_mixed_rest_test_aux_rest"],
             )
             self._add_spin(
                 step_id,
@@ -6286,6 +6756,7 @@ class MainWindow(QMainWindow):
                     "LEGACY_RAW_FILE",
                     "REST_SUBSAMPLE_PROB",
                     "REST_SUBSAMPLE_SEED",
+                    "rest_policy",
                     "SEED",
                     "SOURCE_FS_DEFAULT",
                     "TARGET_FS_DEFAULT",
@@ -6486,14 +6957,15 @@ class MainWindow(QMainWindow):
                 "save_model": "Save model",
                 "save_scaler": "Save scaler",
                 "seed": "Seed",
+                "amp_mode": "AMP mode",
                 "loss_action_weight": "Finger loss weight",
                 "rest_weight": "REST class weight",
-                "action_weights": "Action weights (CSV/JSON)",
-                "rest_finger_loss_weight": "REST finger loss weight",
+                "active_finger_head": "Active finger head",
                 "finger_applicability_head": "Finger applicability head",
                 "applicability_loss_weight": "Applicability loss weight",
                 "finger_weights": "Finger weights (CSV/JSON)",
                 "rest_balance_mode": "REST balance mode",
+                "aux_rest_session_policy": "Aux REST session policy",
                 "test_size": "Test split size",
                 "calibration_size": "Calibration holdout",
                 "threshold_applicability": "Applicability threshold",
@@ -6577,17 +7049,20 @@ class MainWindow(QMainWindow):
                 "subject_id": "Subject ID",
                 "target_fs": "Target FS",
                 "allow_gaps": "Allow gaps",
+                "allow_gap_interp": "Interpolate small gaps",
+                "gap_interp_max_s": "Gap interp max (s)",
                 "allow_partial": "Allow partial sessions",
                 "ignore_misalignment": "Ignore misalignment",
                 "WINDOW_SEC": "Window sec",
-                "WINDOW_SEC_DEFAULT": "Window sec (default)",
                 "STEP_SEC": "Step sec",
                 "PAD_SEC": "Pad sec",
                 "GAP_THRESHOLD_SEC": "Gap threshold",
                 "DEDUP_POLICY": "Dedupe policy",
                 "INTERPOLATION_POLICY": "Interpolation policy",
                 "LABEL_GATED": "Label gated (OPEN/CLOSE+NONE invalid)",
-                "REST_POLICY": "REST policy",
+                "rest_policy": "REST policy",
+                "REST_SUBSAMPLE_PROB": "REST subsample probability",
+                "REST_MAX_WINDOWS": "REST max windows",
                 "KEEP_BASELINE_REST_EVENTS": "Keep baseline rest",
                 "MIN_OVERLAP_RATIO": "Min overlap ratio",
                 "GUARD_BAND_SEC": "Guard band sec",
@@ -6617,6 +7092,40 @@ class MainWindow(QMainWindow):
             return labels.get(key, key)
         return key
 
+    def _config_help_text(
+        self, key: str, fallback: Optional[str] = None
+    ) -> Optional[str]:
+        return CONFIG_EXPLANATIONS.get(key) or TOOLTIPS.get(key) or fallback
+
+    def _form_label_with_info(
+        self, label: str, key: str, fallback: Optional[str] = None
+    ) -> QWidget:
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(5)
+        text_label = QLabel(label)
+        text_label.setMinimumWidth(130)
+        text_label.setWordWrap(True)
+        row.addWidget(text_label, 1)
+        help_text = self._config_help_text(key, fallback)
+        if help_text:
+            info = self._make_info_button(f"{label} Config", help_text)
+            info.setFixedSize(18, 18)
+            info.setToolTip("Explain this config")
+            row.addWidget(info, 0, Qt.AlignTop)
+        return container
+
+    def _add_explained_form_row(
+        self,
+        form: QFormLayout,
+        key: str,
+        label: str,
+        field: QWidget,
+        fallback: Optional[str] = None,
+    ) -> None:
+        form.addRow(self._form_label_with_info(label, key, fallback), field)
+
     def _add_checkbox(
         self,
         step_id: str,
@@ -6628,7 +7137,7 @@ class MainWindow(QMainWindow):
         cb = QCheckBox()
         cb.setChecked(bool(defaults.get(key, False)))
         self._apply_tooltip(cb, key)
-        form.addRow(label, cb)
+        self._add_explained_form_row(form, key, label, cb)
         self.fields[step_id][key] = cb
 
     def _add_spin(
@@ -6659,7 +7168,7 @@ class MainWindow(QMainWindow):
             box.setValue(int(defaults.get(key, 0) or 0))
         box.setEnabled(not read_only)
         self._apply_tooltip(box, key)
-        form.addRow(label, box)
+        self._add_explained_form_row(form, key, label, box)
         self.fields[step_id][key] = box
 
     def _add_text(
@@ -6676,7 +7185,7 @@ class MainWindow(QMainWindow):
         line.setText("" if val is None else str(val))
         line.setReadOnly(read_only)
         self._apply_tooltip(line, key)
-        form.addRow(label, line)
+        self._add_explained_form_row(form, key, label, line)
         self.fields[step_id][key] = line
 
     def _add_dir_picker(
@@ -6699,7 +7208,7 @@ class MainWindow(QMainWindow):
         container = QWidget()
         container.setLayout(row)
         self._apply_tooltip(line, key)
-        form.addRow(label, container)
+        self._add_explained_form_row(form, key, label, container)
         self.fields[step_id][key] = line
 
     def _add_file_picker(
@@ -6724,7 +7233,7 @@ class MainWindow(QMainWindow):
         container = QWidget()
         container.setLayout(row)
         self._apply_tooltip(line, key)
-        form.addRow(label, container)
+        self._add_explained_form_row(form, key, label, container)
         self.fields[step_id][key] = line
 
     def _add_slider(
@@ -6741,7 +7250,7 @@ class MainWindow(QMainWindow):
         val = float(defaults.get(key, 0.0) or 0.0)
         slider = FloatSlider(min_val, max_val, val, decimals=decimals, parent=self)
         self._apply_tooltip(slider, key)
-        form.addRow(label, slider)
+        self._add_explained_form_row(form, key, label, slider)
         self.fields[step_id][key] = slider
 
     def _add_int_dropdown(
@@ -6763,7 +7272,7 @@ class MainWindow(QMainWindow):
                 combo.addItem(str(default))
             combo.setCurrentText(str(default))
         self._apply_tooltip(combo, key)
-        form.addRow(label, combo)
+        self._add_explained_form_row(form, key, label, combo)
         self.fields[step_id][key] = combo
 
     def _add_choice_dropdown(
@@ -6799,7 +7308,7 @@ class MainWindow(QMainWindow):
         if value_type:
             combo.setProperty("value_type", value_type)
         self._apply_tooltip(combo, key)
-        form.addRow(label, combo)
+        self._add_explained_form_row(form, key, label, combo)
         self.fields[step_id][key] = combo
 
     def _add_timebase_dropdown(
@@ -6817,7 +7326,7 @@ class MainWindow(QMainWindow):
         )
         combo.setEnabled(False)
         self._apply_tooltip(combo, key)
-        form.addRow(label, combo)
+        self._add_explained_form_row(form, key, label, combo)
         self.fields[step_id][key] = combo
 
     def _add_editable_combo(
@@ -6839,7 +7348,7 @@ class MainWindow(QMainWindow):
                 combo.addItem(str(default))
             combo.setCurrentText(str(default))
         self._apply_tooltip(combo, key)
-        form.addRow(label, combo)
+        self._add_explained_form_row(form, key, label, combo)
         self.fields[step_id][key] = combo
 
     def _apply_tooltip(
@@ -6966,6 +7475,7 @@ class MainWindow(QMainWindow):
             self._ensure_default_configs(subject_dir)
         self._auto_select_latest_session_for_subject()
         self._auto_fill_paths()
+        self._autofill_pseudo_live_paths()
         if self.current_project:
             subject_dir = subject_root(self.current_project, subject_id)
             self._load_saved_step_settings(subject_dir, "infer")
@@ -6997,6 +7507,14 @@ class MainWindow(QMainWindow):
         if isinstance(widget, QLineEdit):
             widget.blockSignals(True)
             widget.setText("" if value is None else str(value))
+            widget.blockSignals(False)
+            return
+        if isinstance(widget, QPlainTextEdit):
+            widget.blockSignals(True)
+            if isinstance(value, (list, tuple)):
+                widget.setPlainText("\n".join(str(item) for item in value))
+            else:
+                widget.setPlainText("" if value is None else str(value))
             widget.blockSignals(False)
             return
         if isinstance(widget, QTextEdit):
@@ -7116,6 +7634,7 @@ class MainWindow(QMainWindow):
             "evaluate": default_evaluate_settings(),
             "evaluate_deepchecks": default_evaluate_deepchecks_settings(),
             "evaluate_figures": default_evaluate_figures_settings(),
+            "evaluate_pseudo_live": default_pseudo_live_settings(),
             "infer": default_infer_settings(),
             "live_review": default_live_review_settings(),
             "export": default_export_settings(),
@@ -7196,6 +7715,7 @@ class MainWindow(QMainWindow):
             str(latest_features) if latest_features else str(features_dir)
         )
         self._update_resume_ui()
+        self._autofill_pseudo_live_paths(session_dir)
         self._autofill_replay_paths()
 
     def _latest_subject_file(self, base: Path, pattern: str) -> Optional[Path]:
@@ -7343,6 +7863,25 @@ class MainWindow(QMainWindow):
         if current == value:
             self._auto_field_values[key] = value
 
+    def _maybe_autofill_plain_text(
+        self,
+        widget: Optional[QWidget],
+        value: str,
+        *,
+        key: str,
+        legacy_values: set[str],
+    ) -> None:
+        if not isinstance(widget, (QPlainTextEdit, QTextEdit)):
+            return
+        current = widget.toPlainText().strip()
+        previous_auto = self._auto_field_values.get(key)
+        if should_replace_autofilled_text(current, previous_auto, legacy_values):
+            widget.setPlainText(value)
+            self._auto_field_values[key] = value
+            return
+        if current == value:
+            self._auto_field_values[key] = value
+
     def _auto_select_latest_session_for_subject(self) -> None:
         if not self.current_project or not self.current_subject:
             return
@@ -7398,6 +7937,7 @@ class MainWindow(QMainWindow):
         train_session = self._resolve_effective_session_dir(step_id="train")
         infer_session = self._resolve_infer_contract_session_dir()
         live_review_session = self._resolve_live_review_session_dir()
+        self._autofill_pseudo_live_paths(global_session)
         infer_subject = self._infer_subject_override() or self.current_subject
         infer_subject_dir = (
             subject_root(self.current_project, infer_subject)
@@ -7579,6 +8119,61 @@ class MainWindow(QMainWindow):
                 str(path),
                 key=f"live_review.{key}",
                 legacy_values={path.name},
+            )
+
+    def _default_infer_config_for_current(self) -> Optional[Path]:
+        if not self.current_project or not self.current_subject:
+            return None
+        subject_dir = subject_root(self.current_project, self.current_subject)
+        config_path = resolve_subject_step7_config_path(subject_dir)
+        if config_path.exists():
+            return config_path
+        fallback = subject_dir / "config" / "infer.json"
+        if fallback.exists():
+            return fallback
+        return config_path
+
+    def _autofill_pseudo_live_paths(
+        self, session_dir: Optional[Path] = None
+    ) -> None:
+        fields = self.eval_fields.get("evaluate_pseudo_live", {})
+        if not fields:
+            return
+        if session_dir is None:
+            session_dir = self._resolve_effective_session_dir(step_id=None)
+        if session_dir is not None:
+            session_widget = fields.get("session_dir")
+            self._maybe_autofill_text(
+                session_widget,
+                str(session_dir),
+                key="evaluate_pseudo_live.session_dir",
+                legacy_values={""},
+            )
+            target_widget = fields.get("target_session_dirs")
+            self._maybe_autofill_plain_text(
+                target_widget,
+                str(session_dir),
+                key="evaluate_pseudo_live.target_session_dirs",
+                legacy_values={""},
+            )
+            run_dir = resolve_latest_run_dir(session_dir) if session_dir.exists() else None
+            if run_dir is not None:
+                run_widget = fields.get("run_dir")
+                self._maybe_autofill_text(
+                    run_widget,
+                    str(run_dir),
+                    key="evaluate_pseudo_live.run_dir",
+                    legacy_values={""},
+                )
+
+        infer_config = self._default_infer_config_for_current()
+        if infer_config is not None:
+            infer_widget = fields.get("infer_config")
+            self._maybe_autofill_text(
+                infer_widget,
+                str(infer_config),
+                key="evaluate_pseudo_live.infer_config",
+                legacy_values={""},
             )
 
     def _autofill_replay_paths(
@@ -8468,8 +9063,6 @@ class MainWindow(QMainWindow):
             session_dir_value = str(session_dir_path) if session_dir_path else ""
             if session_dir_value:
                 settings["session_dir"] = session_dir_value
-            if settings.get("WINDOW_SEC") is not None:
-                settings["WINDOW_SEC_DEFAULT"] = settings.get("WINDOW_SEC")
             # Legacy mode: only guess CSV paths when no session_dir is provided.
             if not session_dir_value:
                 if not settings.get("features"):
@@ -9574,6 +10167,21 @@ class MainWindow(QMainWindow):
         if step_id == "train":
             if defaults.get("hop_seconds") == 0.0:
                 defaults["hop_seconds"] = None
+            defaults.pop("action_weights", None)
+            defaults.pop("rest_finger_loss_weight", None)
+        if step_id == "step1b":
+            if defaults.get("rest_policy") is None and defaults.get("REST_POLICY") is not None:
+                defaults["rest_policy"] = defaults.get("REST_POLICY")
+            if defaults.get("seed") is None:
+                defaults["seed"] = defaults.get("REST_SUBSAMPLE_SEED")
+            defaults.pop("REST_POLICY", None)
+            defaults.pop("WINDOW_SEC_DEFAULT", None)
+            defaults.pop("SOURCE_FS_DEFAULT", None)
+            defaults.pop("TARGET_FS_DEFAULT", None)
+            defaults.pop("REST_SUBSAMPLE_SEED", None)
+            rest_max = defaults.get("REST_MAX_WINDOWS")
+            if rest_max in ("", "None", "none"):
+                defaults["REST_MAX_WINDOWS"] = None
         if "REQUIRED_LSL_LABELS" in defaults:
             defaults["REQUIRED_LSL_LABELS"] = self._parse_label_field(
                 defaults.get("REQUIRED_LSL_LABELS")
@@ -9780,12 +10388,30 @@ class MainWindow(QMainWindow):
                         "overridden model artifacts.",
                     )
 
+        if script_key == "evaluate_pseudo_live":
+            pseudo_settings = self._collect_pseudo_live_eval_settings(session_dir)
+            validation = validate_step_settings("evaluate_pseudo_live", pseudo_settings)
+            if not validation.ok:
+                self._show_warning_message("Invalid Settings", "\n".join(validation.errors))
+                return False
+            for warning in validation.warnings:
+                self._append_log(f"⚠️ {warning}")
+            infer_config_text = str(pseudo_settings.get("infer_config") or "").strip()
+            infer_config = Path(infer_config_text).expanduser() if infer_config_text else None
+            if infer_config is None or not infer_config.exists():
+                self._show_warning_message(
+                    "Infer Config Required",
+                    "Pseudo-live replay needs a Step 7 infer.json. Select a subject "
+                    "with config/infer.json or browse to a winning_model/configs/infer.json.",
+                )
+                return False
+
         args = [str(script_info.path)]
 
         # Preferred: session_dir contract (scripts auto-resolve latest run under processed/models)
-        if session_dir:
+        if session_dir and script_key != "evaluate_pseudo_live":
             args += ["--session-dir", str(session_dir)]
-        args += self._collect_eval_args(script_key)
+        args += self._collect_eval_args(script_key, default_session_dir=session_dir)
         env_overrides = self._collect_eval_env(script_key)
 
         self.active_step = script_key
@@ -9823,7 +10449,78 @@ class MainWindow(QMainWindow):
             args.extend([spec.flag, str(value)])
         return args
 
-    def _collect_eval_args(self, script_key: str) -> list[str]:
+    def _collect_pseudo_live_eval_settings(
+        self, default_session_dir: Optional[Path] = None
+    ) -> Dict[str, Any]:
+        settings = default_pseudo_live_settings()
+        fields = self.eval_fields.get("evaluate_pseudo_live", {})
+
+        def _text_value(key: str) -> Optional[str]:
+            widget = fields.get(key)
+            if isinstance(widget, QLineEdit):
+                text = widget.text().strip()
+                return text or None
+            if isinstance(widget, (QPlainTextEdit, QTextEdit)):
+                text = widget.toPlainText().strip()
+                return text or None
+            return None
+
+        def _combo_value(key: str) -> Optional[str]:
+            widget = fields.get(key)
+            if isinstance(widget, QComboBox):
+                text = widget.currentText().strip()
+                return text or None
+            return None
+
+        def _is_checked(key: str, default: bool) -> bool:
+            widget = fields.get(key)
+            if isinstance(widget, QCheckBox):
+                return bool(widget.isChecked())
+            return bool(default)
+
+        if default_session_dir is None and self.current_project and self.current_subject:
+            default_session_dir = self._resolve_session_dir_for_current(
+                subject_root(self.current_project, self.current_subject)
+            )
+
+        session_dir = _text_value("session_dir")
+        if not session_dir and default_session_dir is not None:
+            session_dir = str(default_session_dir)
+        settings["session_dir"] = session_dir
+        settings["run_dir"] = _text_value("run_dir")
+        settings["target_session_dirs"] = _split_multivalue_text(
+            _text_value("target_session_dirs")
+        )
+        if not settings["target_session_dirs"] and default_session_dir is not None:
+            settings["target_session_dirs"] = [str(default_session_dir)]
+
+        infer_config = _text_value("infer_config")
+        if not infer_config:
+            default_infer_config = self._default_infer_config_for_current()
+            infer_config = str(default_infer_config) if default_infer_config else None
+        settings["infer_config"] = infer_config
+        settings["output_dir"] = _text_value("output_dir")
+
+        latency_mode = _combo_value("latency_mode") or str(settings["latency_mode"])
+        settings["latency_mode"] = latency_mode
+        fixed_widget = fields.get("fixed_latency_ms")
+        if isinstance(fixed_widget, QDoubleSpinBox):
+            settings["fixed_latency_ms"] = (
+                float(fixed_widget.value()) if latency_mode == "fixed" else None
+            )
+        settings["device"] = _combo_value("device") or str(settings["device"])
+        settings["benchmark_label"] = _text_value("benchmark_label")
+        settings["reset_on_trial_change"] = _is_checked(
+            "reset_on_trial_change", bool(settings["reset_on_trial_change"])
+        )
+        settings["deterministic"] = _is_checked(
+            "deterministic", bool(settings["deterministic"])
+        )
+        return settings
+
+    def _collect_eval_args(
+        self, script_key: str, *, default_session_dir: Optional[Path] = None
+    ) -> list[str]:
         args: list[str] = []
         fields = self.eval_fields.get(script_key, {})
 
@@ -9840,7 +10537,7 @@ class MainWindow(QMainWindow):
             if isinstance(widget, QLineEdit):
                 text = widget.text().strip()
                 return text or None
-            if isinstance(widget, QTextEdit):
+            if isinstance(widget, (QPlainTextEdit, QTextEdit)):
                 text = widget.toPlainText().strip()
                 return text or None
             return None
@@ -9859,7 +10556,7 @@ class MainWindow(QMainWindow):
             if isinstance(widget, QLineEdit):
                 text = widget.text().strip()
                 return text or None
-            if isinstance(widget, QTextEdit):
+            if isinstance(widget, (QPlainTextEdit, QTextEdit)):
                 text = widget.toPlainText().strip()
                 return text or None
             return None
@@ -9974,6 +10671,34 @@ class MainWindow(QMainWindow):
             subject_id = _text_value("subject_id")
             if subject_id:
                 args += ["--subject-id", subject_id]
+        elif script_key == "evaluate_pseudo_live":
+            settings = self._collect_pseudo_live_eval_settings(default_session_dir)
+            if settings.get("run_dir"):
+                args += ["--run-dir", str(settings["run_dir"])]
+            if settings.get("session_dir"):
+                args += ["--session-dir", str(settings["session_dir"])]
+            for target in settings.get("target_session_dirs") or []:
+                args += ["--target-session-dir", str(target)]
+            if settings.get("infer_config"):
+                args += ["--infer-config", str(settings["infer_config"])]
+            latency_mode = str(settings.get("latency_mode") or "ignore")
+            args += ["--latency-mode", latency_mode]
+            if latency_mode == "fixed" and settings.get("fixed_latency_ms") is not None:
+                args += ["--fixed-latency-ms", f"{float(settings['fixed_latency_ms']):.2f}"]
+            if settings.get("output_dir"):
+                args += ["--output-dir", str(settings["output_dir"])]
+            if settings.get("reset_on_trial_change"):
+                args.append("--reset-on-trial-change")
+            else:
+                args.append("--no-reset-on-trial-change")
+            if settings.get("deterministic"):
+                args.append("--deterministic")
+            else:
+                args.append("--no-deterministic")
+            if settings.get("device"):
+                args += ["--device", str(settings["device"])]
+            if settings.get("benchmark_label"):
+                args += ["--benchmark-label", str(settings["benchmark_label"])]
         return args
 
     def _collect_eval_env(self, script_key: str) -> Dict[str, str]:
@@ -9996,6 +10721,9 @@ class MainWindow(QMainWindow):
             return int(widget.value())
         if isinstance(widget, QLineEdit):
             text = widget.text().strip()
+            return text if text else None
+        if isinstance(widget, QPlainTextEdit):
+            text = widget.toPlainText().strip()
             return text if text else None
         if isinstance(widget, QTextEdit):
             text = widget.toPlainText().strip()

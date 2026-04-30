@@ -9,6 +9,7 @@ from typing import Any, Dict
 from utils.default_recipe import (
     ARTIFACT_DEFAULTS,
     EVAL_RECIPE_DEFAULTS,
+    PSEUDO_LIVE_RECIPE_DEFAULTS,
     TRAIN_RECIPE_DEFAULTS,
     WINDOW_EXTRACTION_DEFAULTS,
 )
@@ -124,22 +125,24 @@ def default_step1b_settings() -> Dict[str, Any]:
         "subject_id": None,
         "target_fs": DEFAULT_TARGET_FS,
         "allow_gaps": False,
+        "allow_gap_interp": bool(WINDOW_EXTRACTION_DEFAULTS["allow_gap_interp"]),
+        "gap_interp_max_s": float(WINDOW_EXTRACTION_DEFAULTS["gap_interp_max_s"]),
         "allow_partial": False,
         "ignore_misalignment": False,
+        "seed": int(WINDOW_EXTRACTION_DEFAULTS["rest_subsample_seed"]),
+        "rest_policy": str(WINDOW_EXTRACTION_DEFAULTS["rest_policy"]),
         "WINDOW_SEC": float(WINDOW_EXTRACTION_DEFAULTS["window_sec"]),
-        "SOURCE_FS_DEFAULT": 256,
-        "TARGET_FS_DEFAULT": DEFAULT_TARGET_FS,
-        "WINDOW_SEC_DEFAULT": float(WINDOW_EXTRACTION_DEFAULTS["window_sec"]),
         "STEP_SEC": float(WINDOW_EXTRACTION_DEFAULTS["step_sec"]),
         "PAD_SEC": float(WINDOW_EXTRACTION_DEFAULTS["pad_sec"]),
         "GAP_THRESHOLD_SEC": float(WINDOW_EXTRACTION_DEFAULTS["gap_threshold_sec"]),
         "DEDUP_POLICY": str(WINDOW_EXTRACTION_DEFAULTS["dedupe_policy"]),
         "INTERPOLATION_POLICY": str(WINDOW_EXTRACTION_DEFAULTS["interpolation_policy"]),
         "LABEL_GATED": True,
-        "REST_POLICY": str(WINDOW_EXTRACTION_DEFAULTS["rest_policy"]),
         "KEEP_BASELINE_REST_EVENTS": int(
             WINDOW_EXTRACTION_DEFAULTS["keep_baseline_rest_events"]
         ),
+        "REST_SUBSAMPLE_PROB": float(WINDOW_EXTRACTION_DEFAULTS["rest_subsample_prob"]),
+        "REST_MAX_WINDOWS": WINDOW_EXTRACTION_DEFAULTS["rest_max_windows"],
         "MIN_OVERLAP_RATIO": float(WINDOW_EXTRACTION_DEFAULTS["min_overlap_ratio"]),
         "GUARD_BAND_SEC": float(WINDOW_EXTRACTION_DEFAULTS["guard_band_sec"]),
         "ARTIFACT_MIN_OVERLAP_FRAC": float(
@@ -152,21 +155,21 @@ def default_step1b_settings() -> Dict[str, Any]:
 
 def default_train_settings() -> Dict[str, Any]:
     return {
+        "session_dir": None,
         "npz": str(ARTIFACT_DEFAULTS["windows_npz"]),
         "subject_id": None,
         "epochs": int(TRAIN_RECIPE_DEFAULTS["epochs"]),
         "batch_size": int(TRAIN_RECIPE_DEFAULTS["batch_size"]),
         "lr": float(TRAIN_RECIPE_DEFAULTS["lr"]),
         "seed": int(TRAIN_RECIPE_DEFAULTS["seed"]),
+        "amp_mode": str(TRAIN_RECIPE_DEFAULTS["amp_mode"]),
         "loss_action_weight": float(TRAIN_RECIPE_DEFAULTS["loss_action_weight"]),
         "rest_weight": float(TRAIN_RECIPE_DEFAULTS["rest_weight"]),
-        "action_weights": TRAIN_RECIPE_DEFAULTS["action_weights"],
         "rest_balance_mode": str(TRAIN_RECIPE_DEFAULTS["rest_balance_mode"]),
         "active_finger_head": bool(TRAIN_RECIPE_DEFAULTS["active_finger_head"]),
         "finger_applicability_head": bool(
             TRAIN_RECIPE_DEFAULTS["finger_applicability_head"]
         ),
-        "rest_finger_loss_weight": float(TRAIN_RECIPE_DEFAULTS["rest_finger_loss_weight"]),
         "applicability_loss_weight": float(TRAIN_RECIPE_DEFAULTS["applicability_loss_weight"]),
         "finger_weights": TRAIN_RECIPE_DEFAULTS["finger_weights"],
         "window_preprocess": str(TRAIN_RECIPE_DEFAULTS["window_preprocess"]),
@@ -238,6 +241,24 @@ def default_evaluate_figures_settings() -> Dict[str, Any]:
         "amp_mode": "off",
         "mc_samples": 30,
         "seed": 42,
+    }
+
+
+def default_pseudo_live_settings() -> Dict[str, Any]:
+    return {
+        "run_dir": None,
+        "session_dir": None,
+        "target_session_dirs": [],
+        "infer_config": None,
+        "latency_mode": str(PSEUDO_LIVE_RECIPE_DEFAULTS["latency_mode"]),
+        "fixed_latency_ms": PSEUDO_LIVE_RECIPE_DEFAULTS["fixed_latency_ms"],
+        "output_dir": None,
+        "reset_on_trial_change": bool(
+            PSEUDO_LIVE_RECIPE_DEFAULTS["reset_on_trial_change"]
+        ),
+        "deterministic": bool(PSEUDO_LIVE_RECIPE_DEFAULTS["deterministic"]),
+        "device": "auto",
+        "benchmark_label": "current_checkpoint_replay",
     }
 
 

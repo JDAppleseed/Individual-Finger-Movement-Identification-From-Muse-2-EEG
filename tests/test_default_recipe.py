@@ -5,6 +5,7 @@ from pathlib import Path
 from app.config_model import (
     default_evaluate_settings,
     default_infer_settings,
+    default_pseudo_live_settings,
     default_step1b_settings,
     default_train_settings,
 )
@@ -14,6 +15,7 @@ from utils.default_recipe import (
     EVAL_RECIPE_DEFAULTS,
     HISTORICAL_TRAIN_ARTIFACT_APPLICABILITY_THRESHOLD,
     LIVE_INFER_RECIPE_DEFAULTS,
+    PSEUDO_LIVE_RECIPE_DEFAULTS,
     TRAIN_RECIPE_DEFAULTS,
     WINDOW_EXTRACTION_DEFAULTS,
 )
@@ -39,12 +41,26 @@ def test_config_templates_match_canonical_recipe():
     assert step1b["STEP_SEC"] == WINDOW_EXTRACTION_DEFAULTS["step_sec"]
     assert step1b["PAD_SEC"] == WINDOW_EXTRACTION_DEFAULTS["pad_sec"]
     assert step1b["GAP_THRESHOLD_SEC"] == WINDOW_EXTRACTION_DEFAULTS["gap_threshold_sec"]
-    assert step1b["REST_POLICY"] == WINDOW_EXTRACTION_DEFAULTS["rest_policy"]
+    assert step1b["allow_gap_interp"] == WINDOW_EXTRACTION_DEFAULTS["allow_gap_interp"]
+    assert step1b["gap_interp_max_s"] == WINDOW_EXTRACTION_DEFAULTS["gap_interp_max_s"]
+    assert step1b["rest_policy"] == WINDOW_EXTRACTION_DEFAULTS["rest_policy"]
+    assert step1b["seed"] == WINDOW_EXTRACTION_DEFAULTS["rest_subsample_seed"]
+    assert step1b["REST_SUBSAMPLE_PROB"] == WINDOW_EXTRACTION_DEFAULTS["rest_subsample_prob"]
+    assert step1b["REST_MAX_WINDOWS"] == WINDOW_EXTRACTION_DEFAULTS["rest_max_windows"]
+    assert "REST_POLICY" not in step1b
+    assert "WINDOW_SEC_DEFAULT" not in step1b
 
     train = default_train_settings()
     assert train["subject_id"] is None
     assert train["npz"] == ARTIFACT_DEFAULTS["windows_npz"]
     assert train["seed"] == TRAIN_RECIPE_DEFAULTS["seed"]
+    assert train["amp_mode"] == TRAIN_RECIPE_DEFAULTS["amp_mode"]
+    assert train["rest_weight"] == 1.0
+    assert TRAIN_RECIPE_DEFAULTS["action_weights"] is None
+    assert "action_weights" not in train
+    assert "rest_finger_loss_weight" not in train
+    assert train["test_size"] == 0.2
+    assert train["calibration_size"] == 0.1
     assert train["rest_balance_mode"] == TRAIN_RECIPE_DEFAULTS["rest_balance_mode"]
     assert train["aux_rest_session_policy"] == TRAIN_RECIPE_DEFAULTS["aux_rest_session_policy"]
     assert train["threshold_applicability"] == TRAIN_RECIPE_DEFAULTS["threshold_applicability"]
@@ -95,6 +111,13 @@ def test_config_templates_match_canonical_recipe():
         LIVE_INFER_RECIPE_DEFAULTS["threshold_applicability"]
         == CANONICAL_DEPLOYMENT_APPLICABILITY_THRESHOLD
     )
+
+    pseudo_live = default_pseudo_live_settings()
+    assert pseudo_live["latency_mode"] == PSEUDO_LIVE_RECIPE_DEFAULTS["latency_mode"]
+    assert pseudo_live["fixed_latency_ms"] == PSEUDO_LIVE_RECIPE_DEFAULTS["fixed_latency_ms"]
+    assert pseudo_live["reset_on_trial_change"] is True
+    assert pseudo_live["deterministic"] is True
+    assert pseudo_live["benchmark_label"] == "current_checkpoint_replay"
 
 
 def test_runtime_defaults_match_canonical_recipe():

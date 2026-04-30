@@ -242,9 +242,11 @@ def validate_train(settings: Dict[str, Any]) -> ValidationResult:
             errors.append(
                 "rest_balance_mode must be 'none', 'session_equalized', or 'core_event_equalized'."
             )
+    rest_finger_loss_weight = None
     if "rest_finger_loss_weight" in settings:
         try:
-            if float(settings.get("rest_finger_loss_weight")) < 0.0:
+            rest_finger_loss_weight = float(settings.get("rest_finger_loss_weight"))
+            if rest_finger_loss_weight < 0.0:
                 errors.append("rest_finger_loss_weight must be >= 0.")
         except Exception:
             errors.append("rest_finger_loss_weight must be numeric.")
@@ -256,7 +258,11 @@ def validate_train(settings: Dict[str, Any]) -> ValidationResult:
             errors.append("applicability_loss_weight must be numeric.")
     if "threshold_applicability" in settings:
         _validate_unit_interval(settings, "threshold_applicability", errors)
-    if "action_weights" in settings and settings.get("action_weights") not in {None, "", "none", "null"}:
+    has_action_weights = (
+        "action_weights" in settings
+        and settings.get("action_weights") not in {None, "", "none", "null"}
+    )
+    if has_action_weights:
         raw = settings.get("action_weights")
         try:
             if isinstance(raw, str) and raw.strip().startswith(("[", "{")):
@@ -271,6 +277,16 @@ def validate_train(settings: Dict[str, Any]) -> ValidationResult:
                 errors.append("action_weights must contain exactly 3 values for REST, OPEN, CLOSE.")
         except Exception:
             errors.append("action_weights must be parseable as CSV/JSON with 3 values.")
+    if has_action_weights and "rest_weight" in settings:
+        warnings.append("action_weights is set, so Step 2 ignores rest_weight.")
+    if settings.get("active_finger_head") is True and rest_finger_loss_weight:
+        warnings.append(
+            "rest_finger_loss_weight is ignored when active_finger_head is enabled."
+        )
+    if settings.get("non_rest_only"):
+        warnings.append(
+            "non_rest_only removes REST windows; REST class weighting and auxiliary REST-session policy have little or no effect."
+        )
     if "window_preprocess" in settings:
         value = str(settings.get("window_preprocess"))
         if value not in {"none", "center", "center_detrend"}:
@@ -316,6 +332,34 @@ def validate_topomaps(settings: Dict[str, Any]) -> ValidationResult:
     return ValidationResult(ok=not errors, errors=errors, warnings=warnings)
 
 
+def validate_pseudo_live(settings: Dict[str, Any]) -> ValidationResult:
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    if "latency_mode" in settings:
+        value = str(settings.get("latency_mode"))
+        if value not in {"ignore", "compute", "fixed"}:
+            errors.append("latency_mode must be 'ignore', 'compute', or 'fixed'.")
+        if value == "fixed" and settings.get("fixed_latency_ms") is None:
+            errors.append("fixed_latency_ms is required when latency_mode is 'fixed'.")
+    if settings.get("fixed_latency_ms") is not None:
+        _validate_float_min(settings, "fixed_latency_ms", 0.0, errors)
+    for key in ("reset_on_trial_change", "deterministic"):
+        _validate_bool(settings, key, errors)
+    targets = settings.get("target_session_dirs")
+    if targets not in (None, "") and not isinstance(targets, (list, tuple)):
+        errors.append("target_session_dirs must be a list of session directories.")
+    if not settings.get("session_dir") and not settings.get("run_dir"):
+        warnings.append(
+            "Pseudo-live replay needs session_dir or run_dir; the UI will use the selected session when available."
+        )
+    if not targets:
+        warnings.append(
+            "target_session_dirs is blank; the UI will replay the selected session by default."
+        )
+    return ValidationResult(ok=not errors, errors=errors, warnings=warnings)
+
+
 def validate_step_settings(step_id: str, settings: Dict[str, Any]) -> ValidationResult:
     if step_id == "step1":
         return validate_train_record(settings)
@@ -325,6 +369,8 @@ def validate_step_settings(step_id: str, settings: Dict[str, Any]) -> Validation
         return validate_topomaps(settings)
     if step_id == "infer":
         return validate_live_infer(settings)
+    if step_id == "evaluate_pseudo_live":
+        return validate_pseudo_live(settings)
     errors: List[str] = []
     warnings: List[str] = []
     if "ENABLE_ACTUATION" in settings:
