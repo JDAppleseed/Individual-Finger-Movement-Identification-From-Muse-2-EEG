@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QGridLayout,
     QPlainTextEdit,
     QProxyStyle,
     QGraphicsDropShadowEffect,
@@ -3507,7 +3508,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         header_row = QHBoxLayout()
         header = QLabel("Projects & Subjects")
-        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        header.setStyleSheet("font-weight: 700; font-size: 16px;")
         header_row.addWidget(header)
         header_row.addWidget(
             self._make_info_button(
@@ -3583,7 +3584,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         header_row = QHBoxLayout()
         header = QLabel("Stream Setup")
-        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        header.setStyleSheet("font-weight: 700; font-size: 16px;")
         header_row.addWidget(header)
         header_row.addWidget(
             self._make_info_button(
@@ -3615,7 +3616,13 @@ class MainWindow(QMainWindow):
         self.connector_stream_page = QLabel("LSL stream: -")
         self.connector_log_page = QLabel("Last connector log: -")
         self.connector_log_page.setWordWrap(True)
-        connector_layout.addRow("Stream name", self.stream_name_input)
+        self._add_explained_form_row(
+            connector_layout,
+            "stream_name",
+            "Stream name",
+            self.stream_name_input,
+            "Name used for the Muse LSL stream. Leave automatic unless you need to target a specific stream name.",
+        )
         connector_layout.addRow("Controls", connector_buttons_widget)
         connector_layout.addRow(self.connector_status_page)
         connector_layout.addRow(self.connector_device_page)
@@ -3623,6 +3630,8 @@ class MainWindow(QMainWindow):
         connector_layout.addRow(self.connector_log_page)
         layout.addWidget(connector_box)
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        form.setFormAlignment(Qt.AlignHCenter | Qt.AlignTop)
 
         self.input_source = QComboBox()
         self.input_source.addItems(["Muse 2 (LSL)", "Any LSL Stream", "CSV Offline"])
@@ -3650,10 +3659,34 @@ class MainWindow(QMainWindow):
         self.test_btn = QPushButton("Test Connection")
         self.test_btn.clicked.connect(self._test_lsl)
 
-        form.addRow("Input Source", self.input_source)
-        form.addRow("LSL Stream", self.lsl_combo)
-        form.addRow("CSV Offline", csv_widget)
-        form.addRow("Sampling Rate", self.sample_rate_display)
+        self._add_explained_form_row(
+            form,
+            "input_source",
+            "Input Source",
+            self.input_source,
+            "Choose whether to use the Muse 2 LSL stream, any detected LSL stream, or a CSV file for offline checks.",
+        )
+        self._add_explained_form_row(
+            form,
+            "lsl_stream",
+            "LSL Stream",
+            self.lsl_combo,
+            "Detected LSL stream to use when the input source is LSL.",
+        )
+        self._add_explained_form_row(
+            form,
+            "csv_offline",
+            "CSV Offline",
+            csv_widget,
+            "CSV file used when running connection checks without a live LSL stream.",
+        )
+        self._add_explained_form_row(
+            form,
+            "sampling_rate",
+            "Sampling Rate",
+            self.sample_rate_display,
+            "Detected sampling rate for the selected stream or offline source.",
+        )
         layout.addLayout(form)
 
         btn_row = QHBoxLayout()
@@ -3686,7 +3719,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         header_row = QHBoxLayout()
         header = QLabel("Pipeline Overview")
-        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        header.setStyleSheet("font-weight: 700; font-size: 16px;")
         header_row.addWidget(header)
         header_row.addWidget(
             self._make_info_button(
@@ -3732,7 +3765,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         header_row = QHBoxLayout()
         header = QLabel("Validate Session (Tool)")
-        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        header.setStyleSheet("font-weight: 700; font-size: 16px;")
         header_row.addWidget(header)
         header_row.addWidget(
             self._make_info_button(
@@ -3826,7 +3859,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         header_row = QHBoxLayout()
         header = QLabel("Step 3+: Evaluate / Reports")
-        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        header.setStyleSheet("font-weight: 700; font-size: 16px;")
         header_row.addWidget(header)
         header_row.addWidget(
             self._make_info_button(
@@ -4457,7 +4490,7 @@ class MainWindow(QMainWindow):
 
         header_row = QHBoxLayout()
         header = QLabel("Events: Mark/Edit (Optional)")
-        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        header.setStyleSheet("font-weight: 700; font-size: 16px;")
         header_row.addWidget(header)
         header_row.addWidget(
             self._make_info_button(
@@ -4477,6 +4510,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(note)
 
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        form.setFormAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.event_session_dir_override = OutlineLineEdit()
         self.event_session_dir_override.setPlaceholderText(
             "Optional override for the auto-selected session"
@@ -4496,15 +4531,35 @@ class MainWindow(QMainWindow):
         event_session_row.addWidget(event_session_btn)
         event_session_widget = QWidget()
         event_session_widget.setLayout(event_session_row)
-        form.addRow("Session Dir Override", event_session_widget)
+        self._add_explained_form_row(
+            form,
+            "event_session_dir_override",
+            "Session Dir Override",
+            event_session_widget,
+            "Optional session directory to review instead of the currently selected session.",
+        )
         self.event_features_path = OutlineLineEdit()
         self.event_events_path = OutlineLineEdit()
-        form.addRow("Legacy Features CSV", self.event_features_path)
-        form.addRow("Events JSONL", self.event_events_path)
+        self._add_explained_form_row(
+            form,
+            "event_features_path",
+            "Legacy Features CSV",
+            self.event_features_path,
+            "Optional legacy features CSV for older event review workflows.",
+        )
+        self._add_explained_form_row(
+            form,
+            "event_events_path",
+            "Events JSONL",
+            self.event_events_path,
+            "Optional events JSONL path for event review or validation.",
+        )
         layout.addLayout(form)
 
         advanced = QGroupBox("Validation Options")
         adv_layout = QFormLayout(advanced)
+        adv_layout.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        adv_layout.setFormAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.event_apply_fix = QCheckBox()
         self.event_strict = QCheckBox()
         self.event_json_report = OutlineLineEdit()
@@ -4523,22 +4578,40 @@ class MainWindow(QMainWindow):
         json_row.addWidget(json_btn)
         json_widget = QWidget()
         json_widget.setLayout(json_row)
-        adv_layout.addRow("Apply fixes", self.event_apply_fix)
-        adv_layout.addRow("Strict mode", self.event_strict)
-        adv_layout.addRow("JSON report", json_widget)
+        self._add_explained_form_row(
+            adv_layout,
+            "event_apply_fix",
+            "Apply fixes",
+            self.event_apply_fix,
+            "Allow validation to apply safe event file repairs where supported.",
+        )
+        self._add_explained_form_row(
+            adv_layout,
+            "event_strict",
+            "Strict mode",
+            self.event_strict,
+            "Treat validation warnings as failures for stricter review.",
+        )
+        self._add_explained_form_row(
+            adv_layout,
+            "event_json_report",
+            "JSON report",
+            json_widget,
+            "Optional path for a machine-readable event validation report.",
+        )
         layout.addWidget(advanced)
 
-        btn_row = QHBoxLayout()
+        btn_grid = QGridLayout()
         review_btn = QPushButton("Launch Event Review (5_review_events.py)")
         review_btn.clicked.connect(self._run_event_review)
         validate_btn = QPushButton("Validate Events (5_validate_events.py)")
         validate_btn.clicked.connect(self._run_event_validate)
-        finalize_btn = QPushButton("Finalize Save & Close")
+        finalize_btn = QPushButton("Finalize Save and Close")
         finalize_btn.clicked.connect(self._finalize_event_review)
-        btn_row.addWidget(review_btn)
-        btn_row.addWidget(validate_btn)
-        btn_row.addWidget(finalize_btn)
-        layout.addLayout(btn_row)
+        btn_grid.addWidget(review_btn, 0, 0)
+        btn_grid.addWidget(validate_btn, 0, 1)
+        btn_grid.addWidget(finalize_btn, 1, 0, 1, 2)
+        layout.addLayout(btn_grid)
 
         self._build_checklist("event_tools", layout)
         layout.addStretch(1)
@@ -4683,7 +4756,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         header_row = QHBoxLayout()
         header = QLabel("Export")
-        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        header.setStyleSheet("font-weight: 700; font-size: 16px;")
         header_row.addWidget(header)
         header_row.addWidget(
             self._make_info_button(
@@ -4875,7 +4948,7 @@ class MainWindow(QMainWindow):
         description = self._step_description(step_id)
         header_row = QHBoxLayout()
         header = QLabel(title)
-        header.setStyleSheet("font-weight: 600; font-size: 16px;")
+        header.setStyleSheet("font-weight: 700; font-size: 16px;")
         header_row.addWidget(header)
         if description:
             header_row.addWidget(self._make_info_button(title, description))
@@ -4918,6 +4991,8 @@ class MainWindow(QMainWindow):
         self.defaults[step_id] = defaults
 
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        form.setFormAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self._populate_basic_fields(step_id, form)
         layout.addLayout(form)
 
@@ -4937,6 +5012,8 @@ class MainWindow(QMainWindow):
         advanced_group.setCheckable(True)
         advanced_group.setChecked(True)
         adv_layout = QFormLayout()
+        adv_layout.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        adv_layout.setFormAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self._populate_advanced_fields(step_id, adv_layout)
         advanced_group.setLayout(adv_layout)
         layout.addWidget(advanced_group)
@@ -5231,7 +5308,13 @@ class MainWindow(QMainWindow):
             infer_subject_combo.setCurrentText("(current)")
             infer_subject_combo.currentTextChanged.connect(self._on_infer_subject_changed)
             self._apply_tooltip(infer_subject_combo, "infer_subject_override")
-            form.addRow("Inference subject", infer_subject_combo)
+            self._add_explained_form_row(
+                form,
+                "infer_subject_override",
+                "Inference subject",
+                infer_subject_combo,
+                "Select the subject configuration to use for Step 7 live inference. `(current)` uses the loaded session subject.",
+            )
             self.fields[step_id]["infer_subject_override"] = infer_subject_combo
             self.infer_subject_combo = infer_subject_combo
             self._add_file_picker(
@@ -5295,7 +5378,13 @@ class MainWindow(QMainWindow):
             device = QComboBox()
             device.addItems(["auto", "cpu", "cuda", "mps"])
             device.setCurrentText(str(defaults.get("device", "auto")))
-            form.addRow("Device", device)
+            self._add_explained_form_row(
+                form,
+                "device",
+                "Device",
+                device,
+                "Select the inference runtime device. `auto` chooses the best available backend.",
+            )
             self.fields[step_id]["device"] = device
             self._add_checkbox(
                 step_id,
@@ -7062,14 +7151,17 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout(container)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(5)
-        help_text = self._config_help_text(key, fallback)
-        if help_text:
-            info = self._make_info_button(f"{label} Config", help_text)
-            info.setFixedSize(14, 14)
-            info.setToolTip("Explain this config")
-            row.addWidget(info, 0, Qt.AlignVCenter)
+        help_text = self._config_help_text(
+            key,
+            fallback
+            or f"{label} controls this page option. Use the default unless you know this run needs a different value.",
+        )
+        info = self._make_info_button(f"{label} Config", help_text)
+        info.setFixedSize(14, 14)
+        info.setToolTip("Explain this config")
+        row.addWidget(info, 0, Qt.AlignVCenter)
         text_label = QLabel(label)
-        text_label.setMinimumWidth(130)
+        text_label.setMinimumWidth(150)
         text_label.setWordWrap(True)
         row.addWidget(text_label, 1)
         return container
