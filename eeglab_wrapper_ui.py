@@ -2262,7 +2262,7 @@ class MainWindow(QMainWindow):
         self.log_console = OutlinePlainTextEdit()
         self.log_console.setReadOnly(True)
         self.log_console.setMaximumBlockCount(10000)
-        self.log_console.setMinimumHeight(280)
+        self.log_console.setMinimumHeight(140)
         container = QWidget()
         container.setObjectName("BottomBar")
         layout = QVBoxLayout(container)
@@ -2288,9 +2288,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.log_console)
         dock = QDockWidget("Log Console", self)
         dock.setWidget(self._wrap_scroll(container, "BottomBar"))
-        dock.setMinimumHeight(330)
+        dock.setMinimumHeight(190)
         self.addDockWidget(Qt.BottomDockWidgetArea, dock)
-        self.resizeDocks([dock], [330], Qt.Vertical)
+        self.resizeDocks([dock], [190], Qt.Vertical)
 
     def _build_control_docks(self) -> None:
         self.stream_status_dock = QLabel("Stream status: idle")
