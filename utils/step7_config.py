@@ -42,6 +42,18 @@ def default_step7_settings() -> dict[str, Any]:
         "enable_actuation": bool(LIVE_INFER_RECIPE_DEFAULTS["enable_actuation"]),
         "serial_port": LIVE_INFER_RECIPE_DEFAULTS["serial_port"],
         "serial_baud": int(LIVE_INFER_RECIPE_DEFAULTS["serial_baud"]),
+        "force_no_serial": bool(LIVE_INFER_RECIPE_DEFAULTS["force_no_serial"]),
+        "serial_write_timeout_s": float(
+            LIVE_INFER_RECIPE_DEFAULTS["serial_write_timeout_s"]
+        ),
+        "serial_max_hz": float(LIVE_INFER_RECIPE_DEFAULTS["serial_max_hz"]),
+        "serial_settle_s": float(LIVE_INFER_RECIPE_DEFAULTS["serial_settle_s"]),
+        "serial_movement_warmup_enabled": bool(
+            LIVE_INFER_RECIPE_DEFAULTS["serial_movement_warmup_enabled"]
+        ),
+        "lsl_acquirer_queue_max_chunks": int(
+            LIVE_INFER_RECIPE_DEFAULTS["lsl_acquirer_queue_max_chunks"]
+        ),
         "bluetooth_target": LIVE_INFER_RECIPE_DEFAULTS["bluetooth_target"],
         "no_file_io": bool(LIVE_INFER_RECIPE_DEFAULTS["no_file_io"]),
         "actuation_min_prob": float(LIVE_INFER_RECIPE_DEFAULTS["actuation_min_prob"]),

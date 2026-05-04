@@ -113,6 +113,12 @@ LIVE_INFER_RECIPE_DEFAULTS: Dict[str, Any] = {
     "enable_actuation": False,
     "serial_port": None,
     "serial_baud": 9600,
+    "force_no_serial": False,
+    "serial_write_timeout_s": 0.03,
+    "serial_max_hz": 10.0,
+    "serial_settle_s": 1.2,
+    "serial_movement_warmup_enabled": False,
+    "lsl_acquirer_queue_max_chunks": 32,
     "bluetooth_target": None,
     "no_file_io": False,
     "postprocess": True,
@@ -151,7 +157,7 @@ LIVE_INFER_RECIPE_DEFAULTS: Dict[str, Any] = {
     "uncertainty_weight": 0.5,
     "parity_capture_enabled": True,
     "parity_capture_max_windows": 128,
-    "parity_capture_flush_every": 1,
+    "parity_capture_flush_every": 25,
 }
 
 PSEUDO_LIVE_RECIPE_DEFAULTS: Dict[str, Any] = {

@@ -28,8 +28,11 @@ import collections
 import json
 import logging
 import os
+import queue
 import sys
+import threading
 import time
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Collection, Deque, Optional, Sequence, Tuple
@@ -182,7 +185,7 @@ class SerialHandActuator:
         self.write_timeout = write_timeout
         self.ser = None
 
-    def open(self) -> None:
+    def open(self, *, settle_s: float = 1.2) -> None:
         self.ser = self._serial_mod.Serial(
             self.port,
             self.baud,
@@ -190,7 +193,8 @@ class SerialHandActuator:
             write_timeout=self.write_timeout,
         )
         # Give Arduino time to reset after opening USB serial
-        time.sleep(1.2)
+        if float(settle_s) > 0.0:
+            time.sleep(float(settle_s))
 
     def close(self) -> None:
         try:
@@ -261,6 +265,508 @@ def _safe_send_actuation(
         return False
 
 
+class RuntimeEventLogger:
+    """Thread-safe JSONL runtime event writer with last-event attribution."""
+
+    def __init__(self, path: Optional[Path]) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._handle = None
+        self._last_event: Optional[dict[str, Any]] = None
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._handle = path.open("a", encoding="utf-8")
+
+    def event(self, name: str, **details: Any) -> dict[str, Any]:
+        payload = {
+            "monotonic_s": float(time.monotonic()),
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            "event": str(name),
+            "thread": threading.current_thread().name,
+            "details": details or {},
+        }
+        with self._lock:
+            self._last_event = dict(payload)
+            if self._handle is not None:
+                self._handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
+                self._handle.flush()
+        return payload
+
+    def last_event(self) -> Optional[dict[str, Any]]:
+        with self._lock:
+            return dict(self._last_event) if self._last_event is not None else None
+
+    def close(self) -> None:
+        with self._lock:
+            if self._handle is not None:
+                self._handle.flush()
+                self._handle.close()
+                self._handle = None
+
+
+@dataclass(frozen=True)
+class SerialCommand:
+    finger_id: int
+    action_id: int
+    speed_scalar: Optional[float]
+    watchdog: bool = False
+    submitted_mono_s: float = 0.0
+
+
+class SerialActuationWorker:
+    """Async, bounded serial writer; serial failures disable actuation only."""
+
+    def __init__(
+        self,
+        *,
+        port: str,
+        baud: int,
+        write_timeout_s: float,
+        max_hz: float,
+        settle_s: float,
+        event_logger: Optional[RuntimeEventLogger] = None,
+    ) -> None:
+        self.port = str(port)
+        self.baud = int(baud)
+        self.write_timeout_s = max(0.001, float(write_timeout_s))
+        self.max_hz = max(0.001, float(max_hz))
+        self.settle_s = max(0.0, float(settle_s))
+        self.event_logger = event_logger
+        self._queue: queue.Queue[SerialCommand] = queue.Queue(maxsize=1)
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._actuator: Optional[SerialHandActuator] = None
+        self._lock = threading.Lock()
+        self._disabled_reason: Optional[str] = None
+        self._opened_successfully = False
+        self._last_submitted_key: Optional[tuple[int, int]] = None
+        self._last_written_key: Optional[tuple[int, int]] = None
+        self._last_write_mono_s = 0.0
+        self._first_write_logged = False
+        self.write_count = 0
+        self.max_write_duration_s = 0.0
+        self.failure_count = 0
+        self.queued_count = 0
+        self.queue_drop_count = 0
+        self.duplicate_suppressed_count = 0
+        self.rate_limit_sleep_count = 0
+        self.max_queue_depth = 0
+
+    def open_startup(self) -> bool:
+        open_start_s = time.monotonic()
+        if self.event_logger is not None:
+            self.event_logger.event(
+                "serial_open_begin",
+                port=self.port,
+                baud=int(self.baud),
+                write_timeout_s=float(self.write_timeout_s),
+            )
+        try:
+            actuator = SerialHandActuator(
+                self.port,
+                baud=int(self.baud),
+                write_timeout=float(self.write_timeout_s),
+            )
+            actuator.open(settle_s=0.0)
+            if self.event_logger is not None:
+                self.event_logger.event(
+                    "serial_open_success",
+                    port=self.port,
+                    baud=int(self.baud),
+                    duration_s=float(time.monotonic() - open_start_s),
+                )
+            settle_start_s = time.monotonic()
+            if self.event_logger is not None:
+                self.event_logger.event("serial_settle_begin", settle_s=float(self.settle_s))
+            if self.settle_s > 0.0:
+                time.sleep(float(self.settle_s))
+            if self.event_logger is not None:
+                self.event_logger.event(
+                    "serial_settle_end",
+                    settle_s=float(self.settle_s),
+                    duration_s=float(time.monotonic() - settle_start_s),
+                )
+        except Exception as exc:
+            self._disable(f"serial_open_failure: {exc}")
+            if self.event_logger is not None:
+                self.event_logger.event(
+                    "serial_open_failure",
+                    port=self.port,
+                    baud=int(self.baud),
+                    error=str(exc),
+                    duration_s=float(time.monotonic() - open_start_s),
+                )
+            logger.warning("Actuation disabled: failed to open serial port %s: %s", self.port, exc)
+            return False
+        self._actuator = actuator
+        with self._lock:
+            self._opened_successfully = True
+        return True
+
+    def warmup(self) -> None:
+        if self._actuator is None or self.disabled_reason is not None:
+            return
+        warmup_start_s = time.monotonic()
+        if self.event_logger is not None:
+            self.event_logger.event("serial_warmup_begin", port=self.port)
+        try:
+            _warmup_actuation(self._actuator)
+        except Exception as exc:
+            self._disable(f"serial_warmup_failure: {exc}")
+            logger.warning("Actuation disabled: serial warmup failed: %s", exc)
+        finally:
+            if self.event_logger is not None:
+                self.event_logger.event(
+                    "serial_warmup_end",
+                    port=self.port,
+                    disabled_reason=self.disabled_reason,
+                    duration_s=float(time.monotonic() - warmup_start_s),
+                )
+
+    def start(self) -> None:
+        if self._actuator is None or self.disabled_reason is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name="SerialActuationWorker",
+            daemon=True,
+        )
+        self._thread.start()
+
+    @property
+    def disabled_reason(self) -> Optional[str]:
+        with self._lock:
+            return self._disabled_reason
+
+    @property
+    def is_enabled(self) -> bool:
+        return self.disabled_reason is None and self._actuator is not None
+
+    def submit(
+        self,
+        *,
+        finger_id: int,
+        action_id: int,
+        speed_scalar: Optional[float] = None,
+        watchdog: bool = False,
+    ) -> bool:
+        if not self.is_enabled:
+            return False
+        command = SerialCommand(
+            finger_id=int(finger_id),
+            action_id=int(action_id),
+            speed_scalar=(None if speed_scalar is None else float(speed_scalar)),
+            watchdog=bool(watchdog),
+            submitted_mono_s=float(time.monotonic()),
+        )
+        key = (int(command.finger_id), int(command.action_id))
+        with self._lock:
+            if not command.watchdog and key == self._last_submitted_key:
+                self.duplicate_suppressed_count += 1
+                return False
+            self._last_submitted_key = key
+        while True:
+            try:
+                self._queue.put_nowait(command)
+                with self._lock:
+                    self.queued_count += 1
+                    self.max_queue_depth = max(self.max_queue_depth, self._queue.qsize())
+                return True
+            except queue.Full:
+                try:
+                    self._queue.get_nowait()
+                    with self._lock:
+                        self.queue_drop_count += 1
+                except queue.Empty:
+                    continue
+
+    def _run(self) -> None:
+        min_interval_s = 1.0 / float(self.max_hz)
+        while not self._stop_event.is_set():
+            try:
+                command = self._queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if not self.is_enabled:
+                continue
+            if (
+                not command.watchdog
+                and self._last_written_key
+                == (int(command.finger_id), int(command.action_id))
+            ):
+                with self._lock:
+                    self.duplicate_suppressed_count += 1
+                continue
+            elapsed = time.monotonic() - float(self._last_write_mono_s)
+            if self._last_write_mono_s > 0.0 and elapsed < min_interval_s:
+                with self._lock:
+                    self.rate_limit_sleep_count += 1
+                if self._stop_event.wait(min_interval_s - elapsed):
+                    break
+            actuator = self._actuator
+            if actuator is None:
+                self._disable("serial_actuator_missing")
+                continue
+            write_start = time.monotonic()
+            try:
+                actuator.send(
+                    int(command.finger_id),
+                    int(command.action_id),
+                    command.speed_scalar,
+                )
+            except Exception as exc:
+                duration_s = time.monotonic() - write_start
+                self._record_write_duration(duration_s)
+                self._disable(f"serial_write_failure: {exc}")
+                if self.event_logger is not None:
+                    self.event_logger.event(
+                        "serial_write_failure",
+                        port=self.port,
+                        error=str(exc),
+                        duration_s=float(duration_s),
+                    )
+                logger.warning("Actuation disabled: serial write failed: %s", exc)
+                continue
+            write_end = time.monotonic()
+            duration_s = write_end - write_start
+            self._record_write_duration(duration_s)
+            with self._lock:
+                self.write_count += 1
+                self._last_written_key = (int(command.finger_id), int(command.action_id))
+                self._last_write_mono_s = float(write_end)
+            if not self._first_write_logged:
+                self._first_write_logged = True
+                if self.event_logger is not None:
+                    self.event_logger.event(
+                        "first_serial_write",
+                        port=self.port,
+                        finger_id=int(command.finger_id),
+                        action_id=int(command.action_id),
+                        watchdog=bool(command.watchdog),
+                        duration_s=float(duration_s),
+                    )
+            slow_threshold_s = max(0.05, float(self.write_timeout_s) * 2.0)
+            if duration_s >= slow_threshold_s and self.event_logger is not None:
+                self.event_logger.event(
+                    "serial_write_slow",
+                    port=self.port,
+                    duration_s=float(duration_s),
+                    threshold_s=float(slow_threshold_s),
+                    write_timeout_s=float(self.write_timeout_s),
+                )
+
+    def _record_write_duration(self, duration_s: float) -> None:
+        with self._lock:
+            self.max_write_duration_s = max(
+                float(self.max_write_duration_s), float(duration_s)
+            )
+
+    def _disable(self, reason: str) -> None:
+        actuator = None
+        with self._lock:
+            if self._disabled_reason is None:
+                self._disabled_reason = str(reason)
+                self.failure_count += 1
+            actuator = self._actuator
+            self._actuator = None
+        if self.event_logger is not None:
+            self.event_logger.event("serial_disabled", reason=str(reason), port=self.port)
+        if actuator is not None:
+            try:
+                actuator.close()
+            except Exception:
+                pass
+
+    def stop(self, timeout_s: float = 1.0) -> None:
+        self._stop_event.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=max(0.0, float(timeout_s)))
+        actuator = self._actuator
+        self._actuator = None
+        if actuator is not None:
+            try:
+                actuator.close()
+            except Exception:
+                pass
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "serial_write_count": int(self.write_count),
+                "serial_max_write_duration_s": float(self.max_write_duration_s),
+                "serial_failure_count": int(self.failure_count),
+                "serial_queue_queued_count": int(self.queued_count),
+                "serial_queue_drop_count": int(self.queue_drop_count),
+                "serial_duplicate_suppressed_count": int(self.duplicate_suppressed_count),
+                "serial_rate_limit_sleep_count": int(self.rate_limit_sleep_count),
+                "serial_queue_max_depth": int(self.max_queue_depth),
+                "serial_enabled_effective": bool(
+                    self._disabled_reason is None and self._opened_successfully
+                ),
+                "serial_disabled_reason": self._disabled_reason,
+                "serial_port": self.port,
+                "serial_baud": int(self.baud),
+                "serial_write_timeout_s": float(self.write_timeout_s),
+                "serial_max_hz": float(self.max_hz),
+            }
+
+
+@dataclass(frozen=True)
+class LslChunk:
+    samples: list[Any]
+    timestamps: list[float]
+    received_mono_s: float
+
+
+class LiveLslAcquirer:
+    """Dedicated LSL puller that keeps acquisition independent of downstream work."""
+
+    def __init__(
+        self,
+        inlet: Any,
+        *,
+        max_samples: int = 64,
+        queue_max_chunks: int = 32,
+        empty_sleep_s: float = 0.001,
+        event_logger: Optional[RuntimeEventLogger] = None,
+    ) -> None:
+        self.inlet = inlet
+        self.max_samples = max(1, int(max_samples))
+        self.empty_sleep_s = max(0.0, float(empty_sleep_s))
+        self.event_logger = event_logger
+        self._queue: queue.Queue[LslChunk] = queue.Queue(
+            maxsize=max(1, int(queue_max_chunks))
+        )
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._exception: Optional[BaseException] = None
+        self._first_sample_logged = False
+        self._last_success_mono_s: Optional[float] = None
+        self.max_lsl_pull_gap_s = 0.0
+        self.empty_pull_count = 0
+        self.nonempty_pull_count = 0
+        self.chunk_count = 0
+        self.chunk_size_min: Optional[int] = None
+        self.chunk_size_max = 0
+        self.chunk_size_sum = 0
+        self.queue_max_depth = 0
+        self.queue_dropped_chunks = 0
+        self.queue_dropped_samples = 0
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._run,
+            name="LiveLslAcquirer",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                chunk, timestamps = self.inlet.pull_chunk(
+                    timeout=0.0,
+                    max_samples=int(self.max_samples),
+                )
+                received_mono = time.monotonic()
+                if not timestamps:
+                    with self._lock:
+                        self.empty_pull_count += 1
+                    if self.empty_sleep_s > 0.0:
+                        self._stop_event.wait(self.empty_sleep_s)
+                    continue
+                item = LslChunk(
+                    samples=list(chunk),
+                    timestamps=[float(ts) for ts in timestamps],
+                    received_mono_s=float(received_mono),
+                )
+                self._record_nonempty_pull(item)
+                self._enqueue_latest(item)
+        except BaseException as exc:
+            with self._lock:
+                self._exception = exc
+
+    def _record_nonempty_pull(self, item: LslChunk) -> None:
+        size = int(len(item.timestamps))
+        with self._lock:
+            if self._last_success_mono_s is not None:
+                gap_s = float(item.received_mono_s) - float(self._last_success_mono_s)
+                self.max_lsl_pull_gap_s = max(float(self.max_lsl_pull_gap_s), gap_s)
+            self._last_success_mono_s = float(item.received_mono_s)
+            self.nonempty_pull_count += 1
+            self.chunk_count += 1
+            self.chunk_size_min = (
+                size if self.chunk_size_min is None else min(int(self.chunk_size_min), size)
+            )
+            self.chunk_size_max = max(int(self.chunk_size_max), size)
+            self.chunk_size_sum += size
+        if not self._first_sample_logged:
+            self._first_sample_logged = True
+            if self.event_logger is not None:
+                self.event_logger.event(
+                    "lsl_first_sample",
+                    chunk_size=int(size),
+                    received_mono_s=float(item.received_mono_s),
+                )
+
+    def _enqueue_latest(self, item: LslChunk) -> None:
+        while True:
+            try:
+                self._queue.put_nowait(item)
+                with self._lock:
+                    self.queue_max_depth = max(self.queue_max_depth, self._queue.qsize())
+                return
+            except queue.Full:
+                try:
+                    dropped = self._queue.get_nowait()
+                    with self._lock:
+                        self.queue_dropped_chunks += 1
+                        self.queue_dropped_samples += int(len(dropped.timestamps))
+                except queue.Empty:
+                    continue
+
+    def drain(self, max_chunks: int = 128) -> list[LslChunk]:
+        items: list[LslChunk] = []
+        for _ in range(max(1, int(max_chunks))):
+            try:
+                items.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        return items
+
+    def raise_if_failed(self) -> None:
+        with self._lock:
+            exc = self._exception
+        if exc is not None:
+            raise RuntimeError(f"Live LSL acquisition failed: {exc}") from exc
+
+    def stop(self, timeout_s: float = 1.0) -> None:
+        self._stop_event.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=max(0.0, float(timeout_s)))
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            mean = (
+                float(self.chunk_size_sum) / float(self.chunk_count)
+                if self.chunk_count
+                else 0.0
+            )
+            return {
+                "max_lsl_pull_gap_s": float(self.max_lsl_pull_gap_s),
+                "chunk_size_min": (
+                    int(self.chunk_size_min) if self.chunk_size_min is not None else 0
+                ),
+                "chunk_size_max": int(self.chunk_size_max),
+                "chunk_size_mean": float(mean),
+                "chunk_count": int(self.chunk_count),
+                "empty_pull_count": int(self.empty_pull_count),
+                "nonempty_pull_count": int(self.nonempty_pull_count),
+                "acquirer_queue_max_depth": int(self.queue_max_depth),
+                "acquirer_queue_dropped_chunks": int(self.queue_dropped_chunks),
+                "acquirer_queue_dropped_samples": int(self.queue_dropped_samples),
+            }
 # -------------------- Helpers --------------------
 
 def ensure_dir(path: str) -> None:
@@ -1235,6 +1741,48 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         help="Serial baud rate. Must match the Arduino sketch.",
     )
     actuation_group.add_argument(
+        "--force-no-serial",
+        "--force_no_serial",
+        dest="force_no_serial",
+        action="store_true",
+        help="Disable all serial imports, scans, opens, and workers even if actuation is enabled.",
+    )
+    actuation_group.add_argument(
+        "--serial-write-timeout-s",
+        "--serial_write_timeout_s",
+        dest="serial_write_timeout_s",
+        type=float,
+        help="Finite serial write timeout in seconds.",
+    )
+    actuation_group.add_argument(
+        "--serial-max-hz",
+        "--serial_max_hz",
+        dest="serial_max_hz",
+        type=float,
+        help="Maximum asynchronous serial command write rate.",
+    )
+    actuation_group.add_argument(
+        "--serial-settle-s",
+        "--serial_settle_s",
+        dest="serial_settle_s",
+        type=float,
+        help="Seconds to wait after opening serial before LSL acquisition starts.",
+    )
+    actuation_group.add_argument(
+        "--serial-movement-warmup-enabled",
+        "--serial_movement_warmup_enabled",
+        dest="serial_movement_warmup_enabled",
+        action="store_true",
+        help="Opt in to the visible open/close/rest serial warmup before LSL acquisition.",
+    )
+    actuation_group.add_argument(
+        "--lsl-acquirer-queue-max-chunks",
+        "--lsl_acquirer_queue_max_chunks",
+        dest="lsl_acquirer_queue_max_chunks",
+        type=int,
+        help="Maximum number of LSL chunks buffered between the acquirer thread and live loop.",
+    )
+    actuation_group.add_argument(
         "--actuation-min-prob",
         "--actuation_min_prob",
         dest="actuation_min_prob",
@@ -1988,6 +2536,86 @@ def _autodetect_serial_port() -> str:
         "Unable to auto-detect Arduino serial port. "
         f"Available ports: {available}. Pass --serial_port explicitly if needed."
     )
+
+
+def _initialize_serial_actuation(
+    args: argparse.Namespace,
+    config_settings: dict[str, Any],
+    *,
+    event_logger: Optional[RuntimeEventLogger] = None,
+) -> Optional[SerialActuationWorker]:
+    if not bool(getattr(args, "enable_actuation", False)):
+        if event_logger is not None:
+            event_logger.event("serial_disabled", reason="enable_actuation_false")
+        return None
+    if bool(getattr(args, "force_no_serial", False)):
+        if event_logger is not None:
+            event_logger.event("serial_disabled", reason="force_no_serial")
+        logger.info("Actuation disabled by force_no_serial=true.")
+        return None
+
+    serial_port = str(
+        getattr(args, "serial_port", None) or config_settings.get("serial_port") or ""
+    ).strip()
+    if serial_port:
+        logger.info("Actuation serial port pinned: %s", serial_port)
+    else:
+        scan_start_s = time.monotonic()
+        if event_logger is not None:
+            event_logger.event("serial_scan_begin")
+        try:
+            serial_port = str(_autodetect_serial_port())
+        except Exception as exc:
+            if event_logger is not None:
+                event_logger.event(
+                    "serial_scan_end",
+                    success=False,
+                    error=str(exc),
+                    duration_s=float(time.monotonic() - scan_start_s),
+                )
+                event_logger.event("serial_disabled", reason=f"serial_autodetect_failure: {exc}")
+            logger.warning("Actuation disabled: serial auto-detect failed: %s", exc)
+            return None
+        if event_logger is not None:
+            event_logger.event(
+                "serial_scan_end",
+                success=True,
+                port=serial_port,
+                duration_s=float(time.monotonic() - scan_start_s),
+            )
+        logger.info("Actuation serial port auto-detected: %s", serial_port)
+
+    worker = SerialActuationWorker(
+        port=str(serial_port),
+        baud=int(getattr(args, "serial_baud", 9600)),
+        write_timeout_s=float(getattr(args, "serial_write_timeout_s", 0.03)),
+        max_hz=float(getattr(args, "serial_max_hz", 10.0)),
+        settle_s=float(getattr(args, "serial_settle_s", 1.2)),
+        event_logger=event_logger,
+    )
+    if not worker.open_startup():
+        return worker
+    if bool(getattr(args, "serial_movement_warmup_enabled", False)):
+        worker.warmup()
+        if not worker.is_enabled:
+            return worker
+    elif event_logger is not None:
+        event_logger.event("serial_warmup_begin", enabled=False, reason="disabled")
+        event_logger.event(
+            "serial_warmup_end",
+            enabled=False,
+            reason="disabled",
+            duration_s=0.0,
+        )
+    worker.start()
+    logger.info(
+        "Actuation enabled via async serial worker port=%s baud=%s max_hz=%.2f write_timeout_s=%.3f",
+        serial_port,
+        int(getattr(args, "serial_baud", 9600)),
+        float(getattr(args, "serial_max_hz", 10.0)),
+        float(getattr(args, "serial_write_timeout_s", 0.03)),
+    )
+    return worker
 
 
 def _resolve_lsl_inlet(
@@ -3419,6 +4047,18 @@ def main() -> int:
     if int(args.parity_capture_flush_every) < 1:
         print("parity_capture_flush_every must be >= 1.")
         return 2
+    if float(args.serial_write_timeout_s) <= 0.0:
+        print("serial_write_timeout_s must be > 0.")
+        return 2
+    if float(args.serial_max_hz) <= 0.0:
+        print("serial_max_hz must be > 0.")
+        return 2
+    if float(args.serial_settle_s) < 0.0:
+        print("serial_settle_s must be >= 0.")
+        return 2
+    if int(args.lsl_acquirer_queue_max_chunks) < 1:
+        print("lsl_acquirer_queue_max_chunks must be >= 1.")
+        return 2
 
     print(f"Session selection source: {selection_source}")
     if explicit_overrides:
@@ -3482,6 +4122,8 @@ def main() -> int:
     pred_log_count = 0
     runtime_manifest_path: Optional[Path] = None
     runtime_manifest: dict[str, Any] = {}
+    runtime_event_path: Optional[Path] = None
+    runtime_event_logger: Optional[RuntimeEventLogger] = None
     window_audit_path: Optional[Path] = None
     window_audit_log = None
     window_audit_flush_every = 50
@@ -3509,6 +4151,7 @@ def main() -> int:
     if not no_file_io:
         pred_log_path = args.pred_log or str(Path(out_dir) / "predictions.jsonl")
         runtime_manifest_path = Path(out_dir) / "live_runtime_manifest.json"
+        runtime_event_path = Path(out_dir) / "runtime_events.jsonl"
         window_audit_path = Path(out_dir) / "window_audit.jsonl"
         segment_break_path = Path(out_dir) / "segment_breaks.jsonl"
         summary_path = Path(out_dir) / "live_prediction_summary.json"
@@ -3647,6 +4290,13 @@ def main() -> int:
             },
             "actuation": {
                 "enabled": bool(args.enable_actuation),
+                "force_no_serial": bool(args.force_no_serial),
+                "serial_write_timeout_s": float(args.serial_write_timeout_s),
+                "serial_max_hz": float(args.serial_max_hz),
+                "serial_settle_s": float(args.serial_settle_s),
+                "serial_movement_warmup_enabled": bool(
+                    args.serial_movement_warmup_enabled
+                ),
                 "actuation_min_prob": float(args.actuation_min_prob),
                 "actuation_stability": int(args.actuation_stability),
                 "actuation_cooldown_ms": int(args.actuation_cooldown_ms),
@@ -3660,10 +4310,35 @@ def main() -> int:
                 "max_windows": int(args.parity_capture_max_windows),
                 "flush_every": int(args.parity_capture_flush_every),
             },
+            "transport": {
+                "actuation_transport_async": True,
+                "lsl_acquirer_queue_max_chunks": int(
+                    args.lsl_acquirer_queue_max_chunks
+                ),
+                "max_lsl_pull_gap_s": 0.0,
+                "last_event_before_gap": None,
+                "chunk_size_min": 0,
+                "chunk_size_max": 0,
+                "chunk_size_mean": 0.0,
+                "chunk_count": 0,
+                "empty_pull_count": 0,
+                "nonempty_pull_count": 0,
+                "acquirer_queue_max_depth": 0,
+                "acquirer_queue_dropped_chunks": 0,
+                "acquirer_queue_dropped_samples": 0,
+                "serial_write_count": 0,
+                "serial_max_write_duration_s": 0.0,
+                "serial_failure_count": 0,
+                "serial_enabled_effective": False,
+                "serial_disabled_reason": None,
+            },
         },
         "outputs": {
             "log_path": None if no_file_io else str(Path(out_dir) / "live_infer.log"),
             "prediction_log_path": str(pred_log_path) if pred_log_path is not None else None,
+            "runtime_events_path": (
+                str(runtime_event_path) if runtime_event_path is not None else None
+            ),
             "window_audit_path": (
                 str(window_audit_path) if window_audit_path is not None else None
             ),
@@ -3684,6 +4359,7 @@ def main() -> int:
             ),
         },
     }
+    runtime_event_logger = RuntimeEventLogger(runtime_event_path)
 
     def _write_runtime_manifest() -> None:
         if runtime_manifest_path is None:
@@ -3790,7 +4466,24 @@ def main() -> int:
         )
     _write_runtime_manifest()
 
+    serial_worker: Optional[SerialActuationWorker] = _initialize_serial_actuation(
+        args,
+        config_settings,
+        event_logger=runtime_event_logger,
+    )
+    if serial_worker is not None:
+        runtime_manifest["runtime"]["transport"].update(serial_worker.stats())
+        _write_runtime_manifest()
+
     try:
+        lsl_resolve_start_s = time.monotonic()
+        runtime_event_logger.event(
+            "lsl_resolve_begin",
+            stream_name=str(lsl_name),
+            stream_type=str(lsl_type),
+            timeout_s=float(lsl_resolve_timeout_s),
+            source_id=str(lsl_source_id or ""),
+        )
         lsl_result = _resolve_lsl_inlet(
             lsl_name,
             lsl_type,
@@ -3798,6 +4491,11 @@ def main() -> int:
             cli_source_id=cli_lsl_source_id,
             env_source_id=env_lsl_source_id,
             config_source_id=config_lsl_source_id,
+        )
+        runtime_event_logger.event(
+            "lsl_resolve_success",
+            resolution=dict(lsl_result.resolution),
+            duration_s=float(time.monotonic() - lsl_resolve_start_s),
         )
     except Exception as exc:
         _persist_manifest_error("lsl_resolution_error", exc)
@@ -3935,21 +4633,18 @@ def main() -> int:
     else:
         logger.info("Raw recording disabled (no_file_io).")
 
-    # Serial actuator
-    actuator: Optional[SerialHandActuator] = None
-    if args.enable_actuation:
-        try:
-            serial_port = args.serial_port or config_settings.get("serial_port")
-            if not serial_port:
-                serial_port = _autodetect_serial_port()
-                logger.info("Actuation serial port auto-detected: %s", serial_port)
-            actuator = SerialHandActuator(str(serial_port), baud=args.serial_baud)
-            actuator.open()
-            logger.info("Actuation enabled via serial port %s @ %s baud", serial_port, args.serial_baud)
-            _warmup_actuation(actuator)
-        except Exception as exc:
-            _persist_manifest_error("actuator_init_error", exc)
-            raise
+    lsl_acquirer = LiveLslAcquirer(
+        inlet,
+        max_samples=64,
+        queue_max_chunks=int(args.lsl_acquirer_queue_max_chunks),
+        event_logger=runtime_event_logger,
+    )
+    lsl_acquirer.start()
+    runtime_event_logger.event(
+        "live_loop_begin",
+        lsl_acquirer_queue_max_chunks=int(args.lsl_acquirer_queue_max_chunks),
+        serial_enabled=bool(serial_worker is not None and serial_worker.is_enabled),
+    )
 
     # Live buffers
     from collections import deque
@@ -4027,163 +4722,180 @@ def main() -> int:
 
     try:
         while True:
-            # Pull a chunk from LSL
-            chunk, timestamps = inlet.pull_chunk(timeout=0.0, max_samples=64)
-            if timestamps:
-                for sample, lsl_ts in zip(chunk, timestamps):
-                    sample_mono = time.monotonic()
-                    latest_sample_mono = float(sample_mono)
-                    last_stream_time_before_sample = float(latest_stream_time_s)
-                    prev_lsl_before = prev_lsl_mono
-                    (
-                        time_s,
-                        lsl_ts_mono,
-                        clamped,
-                        stream_origin_mono,
-                        stream_origin_lsl,
-                        prev_lsl_mono,
-                    ) = _resolve_live_sample_time(
-                        lsl_ts=float(lsl_ts),
-                        sample_mono=float(sample_mono),
-                        stream_origin_mono=stream_origin_mono,
-                        stream_origin_lsl=stream_origin_lsl,
-                        prev_lsl_mono=prev_lsl_mono,
-                    )
-                    segment_break_reason: Optional[str] = None
-                    segment_break_delta_s: Optional[float] = None
-                    raw_lsl_ts = float(lsl_ts)
-                    if (
-                        np.isfinite(raw_lsl_ts)
-                        and prev_lsl_before is not None
-                        and raw_lsl_ts < float(prev_lsl_before)
+            lsl_acquirer.raise_if_failed()
+            acquired_chunks = lsl_acquirer.drain(max_chunks=128)
+            if acquired_chunks:
+                for acquired_chunk in acquired_chunks:
+                    for sample, lsl_ts in zip(
+                        acquired_chunk.samples, acquired_chunk.timestamps
                     ):
-                        backwards_delta_s = float(prev_lsl_before - raw_lsl_ts)
-                        if backwards_delta_s > 0.010 and should_segment_break_backwards(
-                            backwards_events_mono,
-                            float(sample_mono),
-                            hard_backwards=backwards_delta_s >= 0.200,
+                        sample_mono = float(acquired_chunk.received_mono_s)
+                        latest_sample_mono = float(sample_mono)
+                        last_stream_time_before_sample = float(latest_stream_time_s)
+                        prev_lsl_before = prev_lsl_mono
+                        (
+                            time_s,
+                            lsl_ts_mono,
+                            clamped,
+                            stream_origin_mono,
+                            stream_origin_lsl,
+                            prev_lsl_mono,
+                        ) = _resolve_live_sample_time(
+                            lsl_ts=float(lsl_ts),
+                            sample_mono=float(sample_mono),
+                            stream_origin_mono=stream_origin_mono,
+                            stream_origin_lsl=stream_origin_lsl,
+                            prev_lsl_mono=prev_lsl_mono,
+                        )
+                        segment_break_reason: Optional[str] = None
+                        segment_break_delta_s: Optional[float] = None
+                        raw_lsl_ts = float(lsl_ts)
+                        if (
+                            np.isfinite(raw_lsl_ts)
+                            and prev_lsl_before is not None
+                            and raw_lsl_ts < float(prev_lsl_before)
                         ):
-                            segment_break_reason = "backwards_lsl"
-                            segment_break_delta_s = float(backwards_delta_s)
-                            time_s = float(last_stream_time_before_sample)
-                            stream_origin_lsl = float(raw_lsl_ts) - float(time_s)
-                            stream_origin_mono = float(sample_mono) - float(time_s)
-                            prev_lsl_mono = float(raw_lsl_ts)
-                            lsl_ts_mono = float(raw_lsl_ts)
-                    if (
-                        segment_break_reason is None
-                        and last_buffer_time_s is not None
-                        and float(time_s) > float(last_buffer_time_s)
-                        and is_gap(
-                            float(time_s) - float(last_buffer_time_s),
-                            1.0 / float(args.target_fs),
-                        )
-                    ):
-                        segment_break_reason = "stream_gap"
-                        segment_break_delta_s = float(time_s) - float(last_buffer_time_s)
-                    if segment_break_reason is not None:
-                        segment_break_reason_counts[str(segment_break_reason)] += 1
-                        buffer_len_before = int(len(buffer))
-                        actuation_history_len_before = int(len(actuation_history))
-                        post_state_frames_before = int(post_state.frames_in_state)
-                        post_action_len_before = int(len(post_state.action_ids))
-                        segment_id += 1
-                        segment_break_count += 1
-                        if segment_break_log is not None:
-                            write_jsonl_row(
-                                segment_break_log,
-                                {
-                                    "ts_utc": time.time(),
-                                    "reason": str(segment_break_reason),
-                                    "delta_s": segment_break_delta_s,
-                                    "new_segment_id": int(segment_id),
-                                    "stream_time_s": float(time_s),
-                                    "raw_lsl_ts": raw_lsl_ts,
-                                    "prev_lsl_ts": prev_lsl_before,
-                                    "buffer_len_before": buffer_len_before,
-                                    "actuation_history_len_before": actuation_history_len_before,
-                                    "post_state_frames_before": post_state_frames_before,
-                                    "post_state_action_len_before": post_action_len_before,
-                                    "next_window_start_s_before": float(next_window_start_s),
-                                },
+                            backwards_delta_s = float(prev_lsl_before - raw_lsl_ts)
+                            if backwards_delta_s > 0.010 and should_segment_break_backwards(
+                                backwards_events_mono,
+                                float(sample_mono),
+                                hard_backwards=backwards_delta_s >= 0.200,
+                            ):
+                                segment_break_reason = "backwards_lsl"
+                                segment_break_delta_s = float(backwards_delta_s)
+                                time_s = float(last_stream_time_before_sample)
+                                stream_origin_lsl = float(raw_lsl_ts) - float(time_s)
+                                stream_origin_mono = float(sample_mono) - float(time_s)
+                                prev_lsl_mono = float(raw_lsl_ts)
+                                lsl_ts_mono = float(raw_lsl_ts)
+                        if (
+                            segment_break_reason is None
+                            and last_buffer_time_s is not None
+                            and float(time_s) > float(last_buffer_time_s)
+                            and is_gap(
+                                float(time_s) - float(last_buffer_time_s),
+                                1.0 / float(args.target_fs),
                             )
-                            segment_break_log_count += 1
-                            if segment_break_log_count % segment_break_flush_every == 0:
-                                segment_break_log.flush()
-                        buffer.clear()
-                        latency_window.clear()
-                        actuation_history.clear()
-                        actuation_command_shaper.reset()
-                        post_state.reset()
-                        last_sent = None
-                        last_send_ts = 0.0
-                        next_window_start_s = float(time_s)
-                        last_buffer_time_s = None
-                        backwards_events_mono.clear()
-                        logger.warning(
-                            "Live stream segment break reason=%s new_segment_id=%s stream_time_s=%.3f raw_lsl_ts=%s prev_lsl_ts=%s",
-                            segment_break_reason,
-                            int(segment_id),
-                            float(time_s),
-                            raw_lsl_ts,
-                            prev_lsl_before,
-                        )
-                    latest_stream_time_s = max(float(latest_stream_time_s), float(time_s))
-                    vec = np.asarray(sample, dtype=np.float32)
-                    if channel_reorder is not None and vec.ndim == 1:
-                        vec = vec[np.asarray(channel_reorder, dtype=np.int64)]
-                    if live_eeg_plot_runtime is not None:
-                        live_eeg_plot_runtime.append_sample(
-                            sample_index=int(live_eeg_plot_sample_seq),
-                            now_s=float(time_s),
-                            sample=vec,
-                        )
-                        if not live_eeg_plot_runtime.plot_start_requested:
-                            live_eeg_plot_runtime.request_start()
-                        live_eeg_plot_sample_seq += 1
-                    sample_flags = 0
-                    if not np.all(np.isfinite(vec)):
-                        sample_flags |= RAW_FLAG_NONFINITE
-                        dropped_nonfinite_samples += 1
-
-                    # Persist raw packets (optional)
-                    if record_raw and session_writer is not None:
-                        raw_buffer.append(
-                            Packet(
-                                seq=sample_seq,
-                                lsl_ts_raw=lsl_ts,
-                                lsl_ts_mono=lsl_ts_mono,
-                                local_ts=time.time(),
-                                sample=np.asarray(sample, dtype=float),
-                                flags=sample_flags,
-                                segment_id=int(segment_id),
-                                clamped=clamped,
-                                raw_path=None,
-                                segment_break_reason=segment_break_reason,
+                        ):
+                            segment_break_reason = "stream_gap"
+                            segment_break_delta_s = float(time_s) - float(last_buffer_time_s)
+                        if segment_break_reason is not None:
+                            if str(segment_break_reason) == "stream_gap":
+                                last_event_before_gap = runtime_event_logger.last_event()
+                                runtime_manifest["runtime"]["transport"][
+                                    "last_event_before_gap"
+                                ] = last_event_before_gap
+                                runtime_event_logger.event(
+                                    "stream_gap_detected",
+                                    delta_s=segment_break_delta_s,
+                                    raw_lsl_ts=raw_lsl_ts,
+                                    prev_lsl_ts=prev_lsl_before,
+                                    last_event_before_gap=last_event_before_gap,
+                                )
+                            segment_break_reason_counts[str(segment_break_reason)] += 1
+                            buffer_len_before = int(len(buffer))
+                            actuation_history_len_before = int(len(actuation_history))
+                            post_state_frames_before = int(post_state.frames_in_state)
+                            post_action_len_before = int(len(post_state.action_ids))
+                            segment_id += 1
+                            segment_break_count += 1
+                            if segment_break_log is not None:
+                                write_jsonl_row(
+                                    segment_break_log,
+                                    {
+                                        "ts_utc": time.time(),
+                                        "reason": str(segment_break_reason),
+                                        "delta_s": segment_break_delta_s,
+                                        "new_segment_id": int(segment_id),
+                                        "stream_time_s": float(time_s),
+                                        "raw_lsl_ts": raw_lsl_ts,
+                                        "prev_lsl_ts": prev_lsl_before,
+                                        "buffer_len_before": buffer_len_before,
+                                        "actuation_history_len_before": actuation_history_len_before,
+                                        "post_state_frames_before": post_state_frames_before,
+                                        "post_state_action_len_before": post_action_len_before,
+                                        "next_window_start_s_before": float(next_window_start_s),
+                                    },
+                                )
+                                segment_break_log_count += 1
+                                if segment_break_log_count % segment_break_flush_every == 0:
+                                    segment_break_log.flush()
+                            buffer.clear()
+                            latency_window.clear()
+                            actuation_history.clear()
+                            actuation_command_shaper.reset()
+                            post_state.reset()
+                            last_sent = None
+                            last_send_ts = 0.0
+                            next_window_start_s = float(time_s)
+                            last_buffer_time_s = None
+                            backwards_events_mono.clear()
+                            logger.warning(
+                                "Live stream segment break reason=%s new_segment_id=%s stream_time_s=%.3f raw_lsl_ts=%s prev_lsl_ts=%s",
+                                segment_break_reason,
+                                int(segment_id),
+                                float(time_s),
+                                raw_lsl_ts,
+                                prev_lsl_before,
                             )
-                        )
-                        sample_seq += 1
-                        if len(raw_buffer) >= raw_flush_size:
-                            session_writer.append_packets(raw_buffer)
-                            raw_buffer = []
+                        latest_stream_time_s = max(float(latest_stream_time_s), float(time_s))
+                        vec = np.asarray(sample, dtype=np.float32)
+                        if channel_reorder is not None and vec.ndim == 1:
+                            vec = vec[np.asarray(channel_reorder, dtype=np.int64)]
+                        if live_eeg_plot_runtime is not None:
+                            live_eeg_plot_runtime.append_sample(
+                                sample_index=int(live_eeg_plot_sample_seq),
+                                now_s=float(time_s),
+                                sample=vec,
+                            )
+                            if not live_eeg_plot_runtime.plot_start_requested:
+                                live_eeg_plot_runtime.request_start()
+                            live_eeg_plot_sample_seq += 1
+                        sample_flags = 0
+                        if not np.all(np.isfinite(vec)):
+                            sample_flags |= RAW_FLAG_NONFINITE
+                            dropped_nonfinite_samples += 1
 
-                    if sample_flags & RAW_FLAG_NONFINITE:
-                        continue
+                        # Persist raw packets (optional)
+                        if record_raw and session_writer is not None:
+                            raw_buffer.append(
+                                Packet(
+                                    seq=sample_seq,
+                                    lsl_ts_raw=lsl_ts,
+                                    lsl_ts_mono=lsl_ts_mono,
+                                    local_ts=time.time(),
+                                    sample=np.asarray(sample, dtype=float),
+                                    flags=sample_flags,
+                                    segment_id=int(segment_id),
+                                    clamped=clamped,
+                                    raw_path=None,
+                                    segment_break_reason=segment_break_reason,
+                                )
+                            )
+                            sample_seq += 1
+                            if len(raw_buffer) >= raw_flush_size:
+                                session_writer.append_packets(raw_buffer)
+                                raw_buffer = []
 
-                    if (
-                        last_buffer_time_s is not None
-                        and float(time_s) <= float(last_buffer_time_s)
-                    ):
+                        if sample_flags & RAW_FLAG_NONFINITE:
+                            continue
+
+                        if (
+                            last_buffer_time_s is not None
+                            and float(time_s) <= float(last_buffer_time_s)
+                        ):
+                            actuation_command_shaper.note_valid(
+                                timebase_ms=int(round(float(sample_mono) * 1000.0))
+                            )
+                            continue
+
+                        buffer.append((time_s, vec))
+                        last_buffer_time_s = float(time_s)
                         actuation_command_shaper.note_valid(
                             timebase_ms=int(round(float(sample_mono) * 1000.0))
                         )
-                        continue
-
-                    buffer.append((time_s, vec))
-                    last_buffer_time_s = float(time_s)
-                    actuation_command_shaper.note_valid(
-                        timebase_ms=int(round(float(sample_mono) * 1000.0))
-                    )
+            else:
+                time.sleep(0.001)
 
             if live_eeg_plot_runtime is not None:
                 live_eeg_plot_runtime.check_startup_timeout(time.monotonic(), logger)
@@ -4510,7 +5222,7 @@ def main() -> int:
                 p95_latency = float(np.percentile(latency_window, 95)) if latency_window else float(latency_ms)
 
                 if _is_noop_decision(decision.finger_id, decision.action_id):
-                    logger.info(
+                    logger.debug(
                         "PREDICT NO-OP finger=%s action=%s joint_prob=%.3f model_raw_finger=%s post_bias_finger=%s raw_action=%s reason=%s quality_bad=%s masked=%s latency_ms=%.1f dropped_windows=%s",
                         decision.finger_id,
                         decision.action_id,
@@ -4525,7 +5237,7 @@ def main() -> int:
                         dropped_windows,
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         "PREDICT ACTUATABLE finger=%s action=%s joint_prob=%.3f model_raw_finger=%s post_bias_finger=%s raw_action=%s reason=%s quality_bad=%s masked=%s latency_ms=%.1f dropped_windows=%s",
                         decision.finger_id,
                         decision.action_id,
@@ -4575,10 +5287,15 @@ def main() -> int:
                     if latency_policy == "warn"
                     else _latency_gate_passed(latency_ms, float(args.latency_threshold_ms))
                 )
-                if args.enable_actuation and actuator is not None:
+                serial_actuation_ready = bool(
+                    args.enable_actuation
+                    and serial_worker is not None
+                    and serial_worker.is_enabled
+                )
+                if serial_actuation_ready:
                     if quality.window_quality_bad:
                         actuation_suppressed_reason = "quality_gate"
-                        logger.info(
+                        logger.debug(
                             "Actuation suppressed by quality gate reason=%s bad_channels=%s masked_channels=%s total_clipped_frac=%.3f",
                             quality.quality_bad_reason or "quality_gate",
                             list(quality.bad_channel_ids),
@@ -4587,14 +5304,14 @@ def main() -> int:
                         )
                     elif not actuation_latency_gate_ok:
                         actuation_suppressed_reason = "latency_gate"
-                        logger.info(
+                        logger.debug(
                             "Actuation suppressed by latency gate latency_ms=%.1f threshold_ms=%.1f",
                             latency_ms,
                             float(args.latency_threshold_ms),
                         )
                     elif not finger_gate_ok:
                         actuation_suppressed_reason = "finger_gate"
-                        logger.info(
+                        logger.debug(
                             "Actuation suppressed by finger gate finger=%s finger_conf=%.3f threshold=%.3f",
                             decision.finger_id,
                             float(decision_info.get("finger_conf", 0.0)),
@@ -4602,7 +5319,7 @@ def main() -> int:
                         )
                     elif not applicability_gate_ok:
                         actuation_suppressed_reason = "applicability_gate"
-                        logger.info(
+                        logger.debug(
                             "Actuation suppressed by applicability gate action=%s finger=%s applicability_prob=%.3f threshold=%.3f",
                             decision.action_id,
                             decision.finger_id,
@@ -4615,14 +5332,14 @@ def main() -> int:
                         actuation_suppressed_reason = str(
                             actuation_vote.get("reason", "noop")
                         )
-                        logger.info(
+                        logger.debug(
                             "NO-OP decision suppressed (finger=%s action=%s)",
                             voted_decision.finger_id,
                             voted_decision.action_id,
                         )
                     elif not uncertainty_gate_ok:
                         actuation_suppressed_reason = "uncertainty_gate"
-                        logger.info(
+                        logger.debug(
                             "Actuation suppressed by uncertainty gate action_conf=%.3f adaptive_threshold=%.3f action_unc=%.4f",
                             float(decision_info.get("action_conf", 0.0)),
                             float(inference_result.get("adaptive_threshold", 0.0)),
@@ -4670,11 +5387,12 @@ def main() -> int:
                             repeat_same_ms=int(args.actuation_repeat_ms),
                         ):
                             send_start = time.monotonic()
-                            send_ok = _safe_send_actuation(
-                                actuator,
+                            assert serial_worker is not None
+                            send_ok = serial_worker.submit(
                                 finger_id=actuation_decision.finger_id,
                                 action_id=actuation_decision.action_id,
                                 speed_scalar=actuation_speed_scalar,
+                                watchdog=False,
                             )
                             send_end = time.monotonic()
                             if send_ok:
@@ -4683,8 +5401,8 @@ def main() -> int:
                                 actuation_sent = True
                                 actuation_latency_ms = (send_end - window_center_mono) * 1000.0
                                 actuation_decision_delay_ms = (send_start - now) * 1000.0
-                                logger.info(
-                                    "ACTUATE sent finger=%s action=%s prob=%.3f speed=%.3f prediction_latency_ms=%.1f actuation_latency_ms=%.1f decision_to_send_ms=%.1f",
+                                logger.debug(
+                                    "ACTUATE queued finger=%s action=%s prob=%.3f speed=%.3f prediction_latency_ms=%.1f enqueue_latency_ms=%.1f decision_to_enqueue_ms=%.1f",
                                     actuation_decision.finger_id,
                                     actuation_decision.action_id,
                                     voted_decision.prob,
@@ -4694,8 +5412,7 @@ def main() -> int:
                                     actuation_decision_delay_ms,
                                 )
                             else:
-                                actuator = None
-                                actuation_suppressed_reason = "actuator_error"
+                                actuation_suppressed_reason = "serial_worker_rejected"
                         else:
                             actuation_suppressed_reason = "cooldown_or_duplicate"
 
@@ -4918,17 +5635,21 @@ def main() -> int:
 
                 next_window_start_s += args.hop_sec
 
-            if args.enable_actuation and actuator is not None:
+            if (
+                args.enable_actuation
+                and serial_worker is not None
+                and serial_worker.is_enabled
+            ):
                 watchdog_now_ms = int(round(time.monotonic() * 1000.0))
                 watchdog_command = actuation_command_shaper.watchdog_command(
                     timebase_ms=watchdog_now_ms
                 )
                 if watchdog_command is not None:
-                    if _safe_send_actuation(
-                        actuator,
+                    if serial_worker.submit(
                         finger_id=int(watchdog_command.finger_id),
                         action_id=int(watchdog_command.action_id),
                         speed_scalar=float(watchdog_command.speed_scalar),
+                        watchdog=True,
                     ):
                         last_sent = (
                             int(watchdog_command.finger_id),
@@ -4939,8 +5660,6 @@ def main() -> int:
                             "Actuation watchdog sent REST due to stalled valid input watchdog_ms=%s",
                             int(actuation_command_shaper.config.watchdog_ms),
                         )
-                    else:
-                        actuator = None
 
             # periodic status log
             now = time.monotonic()
@@ -4987,6 +5706,15 @@ def main() -> int:
         raise
     finally:
         cleanup_errors: list[str] = []
+        try:
+            lsl_acquirer.stop()
+        except Exception as exc:
+            cleanup_errors.append(f"lsl_acquirer_stop_error: {exc}")
+        if serial_worker is not None:
+            try:
+                serial_worker.stop()
+            except Exception as exc:
+                cleanup_errors.append(f"serial_worker_stop_error: {exc}")
         if live_eeg_plot_runtime is not None:
             try:
                 live_eeg_plot_runtime.stop()
@@ -5141,11 +5869,6 @@ def main() -> int:
                     parity_report_path,
                     exc,
                 )
-        if actuator is not None:
-            try:
-                actuator.close()
-            except Exception as exc:
-                cleanup_errors.append(f"actuator_close_error: {exc}")
         if cleanup_errors:
             logger.error("Cleanup errors: %s", cleanup_errors)
         if not no_file_io:
@@ -5195,6 +5918,42 @@ def main() -> int:
         elif required_output_errors:
             post_run_exit_code = 2
         if runtime_manifest_path is not None and runtime_manifest:
+            transport_metrics = runtime_manifest["runtime"].setdefault("transport", {})
+            try:
+                transport_metrics.update(lsl_acquirer.stats())
+            except Exception as exc:
+                cleanup_errors.append(f"lsl_acquirer_stats_error: {exc}")
+            if serial_worker is not None:
+                try:
+                    transport_metrics.update(serial_worker.stats())
+                except Exception as exc:
+                    cleanup_errors.append(f"serial_worker_stats_error: {exc}")
+            else:
+                transport_metrics.update(
+                    {
+                        "serial_write_count": 0,
+                        "serial_max_write_duration_s": 0.0,
+                        "serial_failure_count": 0,
+                        "serial_enabled_effective": False,
+                        "serial_disabled_reason": (
+                            "enable_actuation_false"
+                            if not bool(args.enable_actuation)
+                            else (
+                                "force_no_serial"
+                                if bool(args.force_no_serial)
+                                else "serial_unavailable"
+                            )
+                        ),
+                    }
+                )
+            try:
+                runtime_event_logger.event(
+                    "shutdown",
+                    reason=str(final_termination_reason),
+                    transport=dict(transport_metrics),
+                )
+            except Exception as exc:
+                cleanup_errors.append(f"runtime_event_shutdown_log_error: {exc}")
             finalization_payload = {
                 "finalized_at": now_utc_iso(),
                 "termination_reason": final_termination_reason,
@@ -5274,6 +6033,10 @@ def main() -> int:
                 finalization_payload["output_hashes"] = output_hashes
             runtime_manifest["finalization"] = finalization_payload
             write_json(runtime_manifest_path, runtime_manifest)
+        try:
+            runtime_event_logger.close()
+        except Exception:
+            pass
 
     return int(post_run_exit_code)
 

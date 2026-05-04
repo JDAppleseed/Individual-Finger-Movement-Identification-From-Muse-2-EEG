@@ -1718,6 +1718,42 @@ class MainWindow(QMainWindow):
                     "Serial baud rate for actuation.",
                 ),
                 ArgSpec(
+                    "force_no_serial",
+                    "--force-no-serial",
+                    "bool",
+                    "Disable all serial scans, opens, imports, and workers.",
+                ),
+                ArgSpec(
+                    "serial_write_timeout_s",
+                    "--serial-write-timeout-s",
+                    "float",
+                    "Finite serial write timeout in seconds.",
+                ),
+                ArgSpec(
+                    "serial_max_hz",
+                    "--serial-max-hz",
+                    "float",
+                    "Maximum async serial command write rate.",
+                ),
+                ArgSpec(
+                    "serial_settle_s",
+                    "--serial-settle-s",
+                    "float",
+                    "Settle time after serial open before LSL acquisition.",
+                ),
+                ArgSpec(
+                    "serial_movement_warmup_enabled",
+                    "--serial-movement-warmup-enabled",
+                    "bool",
+                    "Opt in to visible hand movement warmup.",
+                ),
+                ArgSpec(
+                    "lsl_acquirer_queue_max_chunks",
+                    "--lsl-acquirer-queue-max-chunks",
+                    "int",
+                    "Bounded chunk queue between LSL acquisition and inference.",
+                ),
+                ArgSpec(
                     "actuation_min_prob",
                     "--actuation-min-prob",
                     "float",
@@ -2898,9 +2934,28 @@ class MainWindow(QMainWindow):
         self._last_replay_preview_index = None
         return self._replay_runtime_records
 
+    def _replay_hand_preview_serial_block_reason(self) -> Optional[str]:
+        if self._live_ready_gate_active:
+            return "live_ready_gate_active"
+        if self.live_preflight_runner.is_running():
+            return "live_preflight_active"
+        if self.runner.is_running() and self.active_step == "infer":
+            return "step7_live_inference_active"
+        if self.muse_connector.is_running():
+            return "muse_connector_active"
+        return None
+
     def _ensure_replay_hand_actuator(self) -> Any:
         if self._replay_hand_actuator is not None:
             return self._replay_hand_actuator
+        block_reason = self._replay_hand_preview_serial_block_reason()
+        if block_reason is not None:
+            message = (
+                "Replay hand preview serial access is blocked while live Step 7 "
+                f"transport is active ({block_reason})."
+            )
+            self._append_log(message)
+            raise RuntimeError(message)
         live_mod = _load_live_infer_ui_module(self.repo_root)
         infer_settings = self._collect_settings("infer")
         serial_port = str(infer_settings.get("serial_port") or "").strip()
@@ -3302,6 +3357,11 @@ class MainWindow(QMainWindow):
         for key in (
             "serial_port",
             "serial_baud",
+            "force_no_serial",
+            "serial_write_timeout_s",
+            "serial_max_hz",
+            "serial_settle_s",
+            "serial_movement_warmup_enabled",
             "actuation_min_prob",
             "actuation_stability",
             "actuation_cooldown_ms",
@@ -6039,6 +6099,15 @@ class MainWindow(QMainWindow):
                 10,
                 is_float=True,
             )
+            self._add_spin(
+                step_id,
+                form,
+                "lsl_acquirer_queue_max_chunks",
+                "LSL acquirer queue max chunks",
+                defaults,
+                1,
+                4096,
+            )
             self._add_text(
                 step_id, form, "bluetooth_target", "Bluetooth target", defaults
             )
@@ -6051,6 +6120,53 @@ class MainWindow(QMainWindow):
                 defaults,
                 1,
                 1000000,
+            )
+            self._add_checkbox(
+                step_id,
+                form,
+                "force_no_serial",
+                "Force no serial",
+                defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "serial_write_timeout_s",
+                "Serial write timeout (s)",
+                defaults,
+                0.001,
+                10,
+                is_float=True,
+                decimals=3,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "serial_max_hz",
+                "Serial max Hz",
+                defaults,
+                0.001,
+                1000,
+                is_float=True,
+                decimals=3,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "serial_settle_s",
+                "Serial settle (s)",
+                defaults,
+                0,
+                30,
+                is_float=True,
+                decimals=3,
+            )
+            self._add_checkbox(
+                step_id,
+                form,
+                "serial_movement_warmup_enabled",
+                "Serial movement warmup",
+                defaults,
             )
             self._add_slider(
                 step_id,
@@ -6109,6 +6225,7 @@ class MainWindow(QMainWindow):
                 10,
                 is_float=True,
             )
+            self._sync_infer_actuation_controls()
             self._add_text(step_id, form, "subject_id", "Subject ID", defaults)
             self._add_text(step_id, form, "session_id", "Session ID", defaults)
             self._add_dir_picker(

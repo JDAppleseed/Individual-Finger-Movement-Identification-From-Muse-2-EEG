@@ -86,7 +86,13 @@ def test_config_templates_match_canonical_recipe():
     assert infer["LIVE_EEG_PLOT_ENABLED"] is True
     assert infer["parity_capture_enabled"] is True
     assert infer["parity_capture_max_windows"] == 128
-    assert infer["parity_capture_flush_every"] == 1
+    assert infer["parity_capture_flush_every"] == 25
+    assert infer["force_no_serial"] is False
+    assert infer["serial_write_timeout_s"] == 0.03
+    assert infer["serial_max_hz"] == 10.0
+    assert infer["serial_settle_s"] == 1.2
+    assert infer["serial_movement_warmup_enabled"] is False
+    assert infer["lsl_acquirer_queue_max_chunks"] == 32
     assert infer["window_sec"] == LIVE_INFER_RECIPE_DEFAULTS["window_sec"]
     assert infer["hop_sec"] == LIVE_INFER_RECIPE_DEFAULTS["hop_sec"]
     assert (

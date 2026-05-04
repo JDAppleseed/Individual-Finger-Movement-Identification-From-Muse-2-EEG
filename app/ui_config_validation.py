@@ -117,6 +117,8 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
     for key in (
         "LIVE_EEG_PLOT_ENABLED",
         "enable_actuation",
+        "force_no_serial",
+        "serial_movement_warmup_enabled",
         "modulate_actuation_speed",
         "use_inference_engine",
         "postprocess",
@@ -139,6 +141,7 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         "actuation_stability",
         "parity_capture_max_windows",
         "parity_capture_flush_every",
+        "lsl_acquirer_queue_max_chunks",
     ):
         _validate_int_min(settings, key, 1, errors)
     for key in ("actuation_cooldown_ms", "actuation_repeat_ms"):
@@ -163,8 +166,18 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         "bad_channel_abs_p95_z",
         "rest_bias_strength",
         "LSL_RESOLVE_TIMEOUT",
+        "serial_write_timeout_s",
+        "serial_max_hz",
     ):
         _validate_float_min(settings, key, 0.0, errors)
+    _validate_float_min(settings, "serial_settle_s", 0.0, errors)
+    for key in ("serial_write_timeout_s", "serial_max_hz"):
+        if key in settings:
+            try:
+                if float(settings.get(key)) <= 0.0:
+                    errors.append(f"{key} must be > 0.")
+            except Exception:
+                pass
     for key in ("bad_channel_clipped_frac", "bad_window_clipped_frac"):
         _validate_unit_interval(settings, key, errors)
     _validate_int_min(settings, "bad_window_max_masked_channels", 0, errors)

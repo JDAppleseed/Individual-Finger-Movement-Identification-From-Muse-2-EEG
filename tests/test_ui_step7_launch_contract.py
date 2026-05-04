@@ -56,6 +56,21 @@ def test_infer_step_arg_specs_do_not_expose_project_name_override(window):
     assert all(spec.name != "project_name" for spec in infer_specs)
 
 
+def test_infer_transport_isolation_settings_are_ui_visible(window):
+    expected = {
+        "force_no_serial",
+        "serial_write_timeout_s",
+        "serial_max_hz",
+        "serial_settle_s",
+        "serial_movement_warmup_enabled",
+        "lsl_acquirer_queue_max_chunks",
+    }
+    assert expected.issubset(set(window.fields["infer"]))
+    assert expected.issubset(
+        {spec.name for spec in window._build_step_arg_specs()["infer"]}
+    )
+
+
 def test_ui_label_field_parsing_matches_canonical_step7_defaults(window):
     parsed = window._parse_label_field("['tp9', \"af7\", 'AF8', 'tp10']")
 
@@ -248,6 +263,47 @@ def test_replay_preview_does_not_resend_same_active_target(window):
 
     assert actuator.calls == [(2, 1, pytest.approx(0.4))]
     assert model_views is not None
+
+
+def test_replay_hand_preview_blocks_serial_while_live_transport_active(
+    window, monkeypatch: pytest.MonkeyPatch
+):
+    def fail_load(*args, **kwargs):
+        raise AssertionError("live module must not load or touch serial")
+
+    monkeypatch.setattr(ui_mod, "_load_live_infer_ui_module", fail_load)
+
+    scenarios = [
+        ("ready_gate", lambda: setattr(window, "_live_ready_gate_active", True)),
+        (
+            "preflight",
+            lambda: monkeypatch.setattr(
+                window.live_preflight_runner, "is_running", lambda: True
+            ),
+        ),
+        (
+            "step7",
+            lambda: (
+                setattr(window, "active_step", "infer"),
+                monkeypatch.setattr(window.runner, "is_running", lambda: True),
+            ),
+        ),
+        (
+            "muse_connector",
+            lambda: monkeypatch.setattr(window.muse_connector, "is_running", lambda: True),
+        ),
+    ]
+
+    for _label, activate in scenarios:
+        window._replay_hand_actuator = None
+        window._live_ready_gate_active = False
+        window.active_step = None
+        monkeypatch.setattr(window.runner, "is_running", lambda: False)
+        monkeypatch.setattr(window.live_preflight_runner, "is_running", lambda: False)
+        monkeypatch.setattr(window.muse_connector, "is_running", lambda: False)
+        activate()
+        with pytest.raises(RuntimeError, match="Replay hand preview serial access is blocked"):
+            window._ensure_replay_hand_actuator()
 
 
 def test_prepare_live_infer_launch_freezes_source_and_session_artifacts(

@@ -1,7 +1,10 @@
 import importlib.util
 import json
+import builtins
+import time
 from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -1006,6 +1009,268 @@ def test_choose_auto_serial_port_rejects_system_console_ports():
     )
 
     assert chosen is None
+
+
+def _serial_args(**overrides):
+    values = {
+        "enable_actuation": True,
+        "force_no_serial": False,
+        "serial_port": None,
+        "serial_baud": 9600,
+        "serial_write_timeout_s": 0.03,
+        "serial_max_hz": 10.0,
+        "serial_settle_s": 0.0,
+        "serial_movement_warmup_enabled": False,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+class _FakeSerialActuator:
+    instances = []
+
+    def __init__(self, port, baud=9600, write_timeout=0.2):
+        self.port = port
+        self.baud = baud
+        self.write_timeout = write_timeout
+        self.open_calls = []
+        self.sent = []
+        self.closed = False
+        self.__class__.instances.append(self)
+
+    def open(self, *, settle_s=1.2):
+        self.open_calls.append(settle_s)
+
+    def close(self):
+        self.closed = True
+
+    def send(self, finger_id, action_id, speed_scalar=None):
+        self.sent.append((finger_id, action_id, speed_scalar, time.monotonic()))
+
+
+def test_initialize_serial_true_no_serial_modes_do_not_import_or_touch_pyserial(monkeypatch):
+    mod = _load_live_module()
+
+    def fail_autodetect():
+        raise AssertionError("serial autodetect must not run")
+
+    class _FailSerial:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("SerialHandActuator must not be constructed")
+
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "serial" or str(name).startswith("serial."):
+            raise AssertionError("pyserial must not be imported")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    monkeypatch.setattr(mod, "_autodetect_serial_port", fail_autodetect)
+    monkeypatch.setattr(mod, "SerialHandActuator", _FailSerial)
+
+    assert (
+        mod._initialize_serial_actuation(
+            _serial_args(enable_actuation=False),
+            {},
+            event_logger=mod.RuntimeEventLogger(None),
+        )
+        is None
+    )
+    assert (
+        mod._initialize_serial_actuation(
+            _serial_args(force_no_serial=True),
+            {},
+            event_logger=mod.RuntimeEventLogger(None),
+        )
+        is None
+    )
+
+
+def test_initialize_serial_pinned_port_bypasses_autodetect(monkeypatch):
+    mod = _load_live_module()
+    _FakeSerialActuator.instances = []
+    monkeypatch.setattr(
+        mod,
+        "_autodetect_serial_port",
+        lambda: (_ for _ in ()).throw(AssertionError("autodetect must not run")),
+    )
+    monkeypatch.setattr(mod, "SerialHandActuator", _FakeSerialActuator)
+
+    worker = mod._initialize_serial_actuation(
+        _serial_args(serial_port="/dev/cu.usbmodem1101"),
+        {},
+        event_logger=mod.RuntimeEventLogger(None),
+    )
+    try:
+        assert worker is not None
+        assert worker.is_enabled
+        assert _FakeSerialActuator.instances[0].port == "/dev/cu.usbmodem1101"
+        assert _FakeSerialActuator.instances[0].open_calls == [0.0]
+    finally:
+        if worker is not None:
+            worker.stop()
+
+
+def test_initialize_serial_autodetects_once_at_startup_only(monkeypatch):
+    mod = _load_live_module()
+    _FakeSerialActuator.instances = []
+    calls = {"autodetect": 0}
+
+    def autodetect():
+        calls["autodetect"] += 1
+        return "/dev/cu.usbmodem2201"
+
+    monkeypatch.setattr(mod, "_autodetect_serial_port", autodetect)
+    monkeypatch.setattr(mod, "SerialHandActuator", _FakeSerialActuator)
+
+    worker = mod._initialize_serial_actuation(
+        _serial_args(serial_port=None),
+        {},
+        event_logger=mod.RuntimeEventLogger(None),
+    )
+    try:
+        assert worker is not None
+        assert calls["autodetect"] == 1
+        worker.submit(finger_id=1, action_id=1, speed_scalar=0.5)
+        worker.submit(finger_id=2, action_id=2, speed_scalar=0.5)
+        time.sleep(0.03)
+        assert calls["autodetect"] == 1
+    finally:
+        if worker is not None:
+            worker.stop()
+
+
+def test_serial_worker_drops_stale_commands_and_suppresses_duplicates():
+    mod = _load_live_module()
+    worker = mod.SerialActuationWorker(
+        port="/dev/fake",
+        baud=9600,
+        write_timeout_s=0.03,
+        max_hz=1000.0,
+        settle_s=0.0,
+        event_logger=mod.RuntimeEventLogger(None),
+    )
+    worker._actuator = _FakeSerialActuator("/dev/fake")
+
+    assert worker.submit(finger_id=1, action_id=1, speed_scalar=0.4)
+    assert not worker.submit(finger_id=1, action_id=1, speed_scalar=0.4)
+    assert worker.submit(finger_id=2, action_id=1, speed_scalar=0.4)
+    stats = worker.stats()
+    assert stats["serial_duplicate_suppressed_count"] == 1
+    assert stats["serial_queue_drop_count"] == 1
+
+
+def test_serial_worker_rate_limits_and_records_duration():
+    mod = _load_live_module()
+
+    class _SlowActuator(_FakeSerialActuator):
+        def send(self, finger_id, action_id, speed_scalar=None):
+            time.sleep(0.01)
+            super().send(finger_id, action_id, speed_scalar)
+
+    worker = mod.SerialActuationWorker(
+        port="/dev/fake",
+        baud=9600,
+        write_timeout_s=0.03,
+        max_hz=20.0,
+        settle_s=0.0,
+        event_logger=mod.RuntimeEventLogger(None),
+    )
+    actuator = _SlowActuator("/dev/fake")
+    worker._actuator = actuator
+    worker.start()
+    try:
+        assert worker.submit(finger_id=1, action_id=1, speed_scalar=0.4)
+        while worker.stats()["serial_write_count"] < 1:
+            time.sleep(0.005)
+        assert worker.submit(finger_id=2, action_id=1, speed_scalar=0.4)
+        deadline = time.monotonic() + 1.0
+        while worker.stats()["serial_write_count"] < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        stats = worker.stats()
+        assert stats["serial_write_count"] == 2
+        assert stats["serial_max_write_duration_s"] >= 0.009
+        assert actuator.sent[1][3] - actuator.sent[0][3] >= 0.045
+    finally:
+        worker.stop()
+
+
+def test_serial_worker_disables_on_failure_without_raising():
+    mod = _load_live_module()
+
+    class _FailingActuator(_FakeSerialActuator):
+        def send(self, finger_id, action_id, speed_scalar=None):
+            raise TimeoutError("blocked serial write")
+
+    worker = mod.SerialActuationWorker(
+        port="/dev/fake",
+        baud=9600,
+        write_timeout_s=0.03,
+        max_hz=1000.0,
+        settle_s=0.0,
+        event_logger=mod.RuntimeEventLogger(None),
+    )
+    worker._actuator = _FailingActuator("/dev/fake")
+    worker.start()
+    try:
+        assert worker.submit(finger_id=1, action_id=1, speed_scalar=0.4)
+        deadline = time.monotonic() + 1.0
+        while worker.stats()["serial_failure_count"] < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        stats = worker.stats()
+        assert stats["serial_failure_count"] == 1
+        assert not stats["serial_enabled_effective"]
+        assert "serial_write_failure" in str(stats["serial_disabled_reason"])
+    finally:
+        worker.stop()
+
+
+def test_lsl_acquirer_keeps_pulling_while_serial_worker_blocks():
+    mod = _load_live_module()
+
+    class _FakeInlet:
+        def __init__(self):
+            self.timestamp = 0.0
+
+        def pull_chunk(self, timeout=0.0, max_samples=64):
+            time.sleep(0.002)
+            self.timestamp += 1.0 / 256.0
+            return [[0.0, 0.0, 0.0, 0.0]], [self.timestamp]
+
+    class _BlockingActuator(_FakeSerialActuator):
+        def send(self, finger_id, action_id, speed_scalar=None):
+            time.sleep(0.12)
+            super().send(finger_id, action_id, speed_scalar)
+
+    acquirer = mod.LiveLslAcquirer(
+        _FakeInlet(),
+        max_samples=64,
+        queue_max_chunks=2,
+        event_logger=mod.RuntimeEventLogger(None),
+    )
+    worker = mod.SerialActuationWorker(
+        port="/dev/fake",
+        baud=9600,
+        write_timeout_s=0.03,
+        max_hz=1000.0,
+        settle_s=0.0,
+        event_logger=mod.RuntimeEventLogger(None),
+    )
+    worker._actuator = _BlockingActuator("/dev/fake")
+    acquirer.start()
+    worker.start()
+    try:
+        assert worker.submit(finger_id=1, action_id=1, speed_scalar=0.4)
+        time.sleep(0.18)
+        stats = acquirer.stats()
+        assert stats["nonempty_pull_count"] >= 20
+        assert stats["max_lsl_pull_gap_s"] < 0.03
+        assert stats["acquirer_queue_dropped_chunks"] > 0
+        assert stats["acquirer_queue_dropped_samples"] > 0
+    finally:
+        worker.stop()
+        acquirer.stop()
 
 
 def test_main_uses_config_model_override_with_session_dir(tmp_path, monkeypatch):
