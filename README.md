@@ -112,7 +112,7 @@ It includes:
 - Featured deployment run `20260319_075520`.
 - `winning_model/` configs, model artifacts, figures, reports, and manifests.
 
-The April 3 run `20260403_grouptrial_rest050` remains documented as an offline benchmark, but it is not the featured deployment model because the March 19 checkpoint wins the public safety metrics: `93.32%` would-send precision and `0.12%` false REST actuation on the cleaned pseudo-live corpus.
+The April 3 run `20260403_grouptrial_rest050` remains documented as an offline benchmark, but it is not the featured deployment model because the March 19 checkpoint wins the deployment-safety selection audit. Under the current per-finger actuation path, the featured run reports `95.37%` would-send precision, `0.25%` false REST actuation, and `91.11%` event hit rate on the cleaned pseudo-live corpus. Window-level send recall is reported as throughput, not classifier accuracy.
 
 For `2-M16` live inference, the authoritative UI/Step 7 config is `Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json`. It pins the March 19 model and scaler, enables the tuned postprocess family, and should be run from the same Python 3.11/3.12 environment used for Muse, LSL, and PySide.
 
@@ -123,6 +123,7 @@ python3 tools/build_2m16_reference_dataset.py --check-only
 ```
 
 Detailed inventory and hashes are in `Projects/2-M16/subjects/2-M16/PUBLISHED_ARTIFACTS.md`.
+Website-facing metrics are staged in `docs/public_metrics_2m16_current.json`.
 
 ## Train A Baseline On The Reference Dataset
 

@@ -13,3 +13,12 @@ Source: internal Design Spec Rev A PDF (not committed in this repo)
 - "Servo bus: regulated 8.0 V constant-performance rail." (p.1)
 - "Thermal: ... skin-contact surfaces target <= 40-42 C." (p.1)
 - "Thermal: ... fail-safe to reduce compute power or disable actuation on over-temp or pump failure." (p.8)
+
+## Operational clarification
+
+- Actuation cooldown is a per-finger actuator hold interval, not a global hand lockout.
+- A finger should keep the last commanded position during its hold interval unless a later command to the same finger supersedes it after the cooldown.
+- Commands to other fingers may be emitted during that interval, subject only to serial throughput and the target finger's own cooldown.
+- The Arduino receiver must enforce the same per-finger hold behavior. Its servo updates should be non-blocking so one finger's movement does not prevent the controller from accepting another finger command.
+- The current host default allows up to 20 serial commands/s, matching the 50 ms live inference hop. The model gate remains more conservative than that ceiling; the serial ceiling should not be interpreted as a target actuation rate.
+- Window-level would-send recall is not an accuracy metric. It is affected by hop size, stability gates, duplicate suppression, cooldown, and whether repeated windows should generate repeated hardware commands. Report event-level hit rate and first-command latency alongside window-level send recall for usability claims.

@@ -20,13 +20,15 @@ Featured deployment run:
 - Action accuracy: `89.79%`
 - Joint action+finger accuracy: `84.66%`
 - Non-REST finger accuracy: `85.96%` from the evaluation manifest, with `87.01%` in the saved model-card test metric.
-- Cleaned pseudo-live would-send precision: `93.32%`
-- Cleaned pseudo-live false REST actuation: `0.12%`
+- Current per-finger pseudo-live would-send precision: `95.37%`
+- Current per-finger pseudo-live false REST actuation: `0.25%`
+- Current per-finger pseudo-live event hit rate: `91.11%`
 
 Model-selection note:
 - `20260403_grouptrial_rest050` wins the offline holdout and event-level scores.
 - `20260319_075520` is the public/deployment model because it wins would-send precision, false REST actuation, holdout REST TPR, and action calibration.
-- See `../../../../docs/2M16_MODEL_SELECTION_AUDIT.md` for the ranking table.
+- Window-level send recall is a throughput metric, not classifier accuracy. For website updates, use `../../../../docs/public_metrics_2m16_current.json`.
+- See `../../../../docs/2M16_MODEL_SELECTION_AUDIT.md` for the historical ranking table.
 
 Label rule:
 - `REST` pairs only with `NONE`.

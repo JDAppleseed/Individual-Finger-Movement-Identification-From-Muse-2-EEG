@@ -89,7 +89,7 @@ def test_config_templates_match_canonical_recipe():
     assert infer["parity_capture_flush_every"] == 25
     assert infer["force_no_serial"] is False
     assert infer["serial_write_timeout_s"] == 0.03
-    assert infer["serial_max_hz"] == 10.0
+    assert infer["serial_max_hz"] == 20.0
     assert infer["serial_settle_s"] == 1.2
     assert infer["serial_movement_warmup_enabled"] is False
     assert infer["lsl_acquirer_queue_max_chunks"] == 32

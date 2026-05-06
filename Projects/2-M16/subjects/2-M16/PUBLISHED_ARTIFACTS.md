@@ -94,7 +94,7 @@ Expected final dataset:
 
 Featured deployment run ID: `20260319_075520`
 
-This run is the public/deployment model after the April 24 model-selection audit. The April 3 run `20260403_grouptrial_rest050` wins the offline holdout and event-level scores, but March 19 is safer for public deployment claims: `93.32%` cleaned pseudo-live would-send precision and `0.12%` false REST actuation. See `../../../../docs/2M16_MODEL_SELECTION_AUDIT.md` for the ranking table.
+This run is the public/deployment model after the April 24 model-selection audit. The April 3 run `20260403_grouptrial_rest050` wins the offline holdout and event-level scores, but March 19 is safer for public deployment claims. With the current per-finger command path, report `95.37%` would-send precision, `0.25%` false REST actuation, and `91.11%` event hit rate; `docs/public_metrics_2m16_current.json` is the website-facing metrics source. See `../../../../docs/2M16_MODEL_SELECTION_AUDIT.md` for the historical ranking table.
 
 | Path | Bytes | SHA256 |
 | --- | ---: | --- |

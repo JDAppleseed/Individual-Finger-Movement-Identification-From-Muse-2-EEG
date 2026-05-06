@@ -8,7 +8,7 @@
   "source_report_dir": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/reports/20260319_075520",
   "source_repo_report": "Projects/2-M16/subjects/2-M16/winning_model/repo_report/report.html",
   "source_replay_dirs": [],
-  "comparison_note": "April 3 wins offline holdout/event-level scores, but March 19 is displayed and published as the deployment model because it wins would-send precision and false REST actuation.",
+  "comparison_note": "April 3 wins offline holdout/event-level scores, but March 19 is displayed and published as the deployment model because it wins the deployment-safety selection audit. Current per-finger reporting is staged in docs/public_metrics_2m16_current.json.",
   "copied_artifacts": {
     "configs_dir": "configs",
     "model_run_dir": "model_run",

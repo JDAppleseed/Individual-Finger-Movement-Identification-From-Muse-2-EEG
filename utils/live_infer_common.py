@@ -554,6 +554,8 @@ def debounced_should_send(
     current_time_ms: float,
     cooldown_ms: int,
     repeat_same_ms: int = 0,
+    last_send_time_by_finger_ms: Optional[Dict[int, float]] = None,
+    last_send_time_by_key_ms: Optional[Dict[Tuple[int, int], float]] = None,
 ) -> bool:
     if decision.prob <= 0.0:
         return False
@@ -561,12 +563,35 @@ def debounced_should_send(
         return False
     if int(stable_count) < int(required_stability):
         return False
-    if last_send_time_ms is None:
+
+    key = (int(decision.finger_id), int(decision.action_id))
+    finger_id = int(decision.finger_id)
+
+    if last_send_time_by_key_ms is not None:
+        key_last_send = last_send_time_by_key_ms.get(key)
+    elif last_sent is not None and key == (int(last_sent[0]), int(last_sent[1])):
+        key_last_send = last_send_time_ms
+    else:
+        key_last_send = None
+
+    if key_last_send is None:
+        elapsed_same_key_ms = float("inf")
+    else:
+        elapsed_same_key_ms = float(current_time_ms) - float(key_last_send)
+    if key_last_send is not None:
+        return elapsed_same_key_ms >= float(max(0, int(repeat_same_ms)))
+
+    if last_send_time_by_finger_ms is not None:
+        finger_last_send = last_send_time_by_finger_ms.get(finger_id)
+    elif last_sent is not None and int(last_sent[0]) == finger_id:
+        finger_last_send = last_send_time_ms
+    else:
+        finger_last_send = None
+
+    if finger_last_send is None:
         elapsed_ms = float("inf")
     else:
-        elapsed_ms = float(current_time_ms) - float(last_send_time_ms)
-    if last_sent is not None and (decision.finger_id, decision.action_id) == last_sent:
-        return elapsed_ms >= float(max(0, int(repeat_same_ms)))
+        elapsed_ms = float(current_time_ms) - float(finger_last_send)
     if elapsed_ms < float(cooldown_ms):
         return False
     return True
@@ -828,6 +853,8 @@ def replay_ordered_windows(
     records: List[Dict[str, Any]] = []
     last_sent: Optional[Tuple[int, int]] = None
     last_send_time_ms: Optional[float] = None
+    last_send_time_by_finger_ms: Dict[int, float] = {}
+    last_send_time_by_key_ms: Dict[Tuple[int, int], float] = {}
     last_trial: Optional[int] = None
 
     n = int(len(X))
@@ -842,6 +869,8 @@ def replay_ordered_windows(
                 actuation_command_shaper.reset()
                 last_sent = None
                 last_send_time_ms = None
+                last_send_time_by_finger_ms.clear()
+                last_send_time_by_key_ms.clear()
                 last_trial = current_trial
 
         loop_start = time.perf_counter()
@@ -1009,9 +1038,13 @@ def replay_ordered_windows(
                 current_time_ms=current_time_ms,
                 cooldown_ms=int(runtime_config.actuation_cooldown_ms),
                 repeat_same_ms=int(runtime_config.actuation_repeat_ms),
+                last_send_time_by_finger_ms=last_send_time_by_finger_ms,
+                last_send_time_by_key_ms=last_send_time_by_key_ms,
             ):
                 last_sent = actuation_key
                 last_send_time_ms = current_time_ms
+                last_send_time_by_finger_ms[int(actuation_decision.finger_id)] = current_time_ms
+                last_send_time_by_key_ms[actuation_key] = current_time_ms
                 actuation_sent = True
                 actuation_decision_delay_ms = 0.0
             else:
@@ -1264,9 +1297,18 @@ def _first_match_latency_summary(
     true_action: np.ndarray,
 ) -> Dict[str, Any]:
     if event_ids is None:
-        return {"count": 0, "mean": None, "median": None, "p95": None, "miss_count": 0}
+        return {
+            "count": 0,
+            "event_count": 0,
+            "hit_rate": None,
+            "mean": None,
+            "median": None,
+            "p95": None,
+            "miss_count": 0,
+        }
     latencies: List[float] = []
     miss_count = 0
+    event_count = 0
     keys_seen = set()
     for idx in range(len(event_ids)):
         if int(true_action[idx]) == int(ACTION_REST):
@@ -1279,6 +1321,7 @@ def _first_match_latency_summary(
         if key in keys_seen:
             continue
         keys_seen.add(key)
+        event_count += 1
         event_mask = (
             (np.asarray(event_ids, dtype=np.int64) == event_id)
             & (np.asarray(true_action, dtype=np.int64) != int(ACTION_REST))
@@ -1304,7 +1347,9 @@ def _first_match_latency_summary(
         first_detect = float(np.min(detected))
         latencies.append(float(first_detect - onset_s))
     out = _series_summary(latencies)
+    out["event_count"] = int(event_count)
     out["miss_count"] = int(miss_count)
+    out["hit_rate"] = float(len(latencies) / event_count) if event_count else None
     return out
 
 
@@ -1376,6 +1421,11 @@ def compute_replay_metrics(
     positive_send_mask = actuation_sent & (
         (actuation_action != int(ACTION_REST)) & (actuation_finger != 0)
     )
+    would_send_correct_count = int(np.sum(would_send_match))
+    would_send_positive_count = int(np.sum(positive_send_mask))
+    true_non_rest_window_count = int(np.sum(non_rest_mask))
+    true_rest_window_count = int(np.sum(rest_mask))
+    false_actuation_rest_count = int(np.sum(actuation_sent & rest_mask))
     sent_action_effective = np.where(
         actuation_sent, actuation_action, int(ACTION_REST)
     ).astype(np.int64)
@@ -1439,20 +1489,25 @@ def compute_replay_metrics(
         if np.any(non_rest_mask)
         else None,
         "would_send_window_precision_non_rest": float(
-            np.sum(would_send_match) / np.sum(positive_send_mask)
+            would_send_correct_count / would_send_positive_count
         )
-        if np.any(positive_send_mask)
+        if would_send_positive_count
         else None,
         "would_send_window_recall_non_rest": float(
-            np.sum(would_send_match) / np.sum(non_rest_mask)
+            would_send_correct_count / true_non_rest_window_count
         )
-        if np.any(non_rest_mask)
+        if true_non_rest_window_count
         else None,
         "false_actuation_rate_rest": float(
-            np.sum(actuation_sent & rest_mask) / np.sum(rest_mask)
+            false_actuation_rest_count / true_rest_window_count
         )
-        if np.any(rest_mask)
+        if true_rest_window_count
         else None,
+        "would_send_correct_non_rest_window_count": would_send_correct_count,
+        "would_send_positive_window_count": would_send_positive_count,
+        "true_non_rest_window_count": true_non_rest_window_count,
+        "true_rest_window_count": true_rest_window_count,
+        "false_actuation_rest_window_count": false_actuation_rest_count,
         "non_rest_none_count": int(pair_diag["committed_non_rest_none_count"]),
         "committed_non_rest_none_count": int(pair_diag["committed_non_rest_none_count"]),
         "committed_non_rest_none_rate": pair_diag["committed_non_rest_none_rate"],

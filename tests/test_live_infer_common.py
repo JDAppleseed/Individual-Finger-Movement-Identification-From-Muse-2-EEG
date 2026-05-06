@@ -9,6 +9,7 @@ from utils.live_infer_common import (
     resolve_actuation_candidate,
     sanitize_live_window,
 )
+from utils.command_shaper import CommandShaper, CommandShaperConfig
 
 
 def test_debounced_should_send_respects_cooldown_and_repeat() -> None:
@@ -47,7 +48,7 @@ def test_debounced_should_send_respects_cooldown_and_repeat() -> None:
         repeat_same_ms=500,
     )
 
-    assert not debounced_should_send(
+    assert debounced_should_send(
         decision,
         last_sent=(3, 1),
         stable_count=1,
@@ -57,6 +58,89 @@ def test_debounced_should_send_respects_cooldown_and_repeat() -> None:
         cooldown_ms=250,
         repeat_same_ms=500,
     )
+
+    assert not debounced_should_send(
+        decision,
+        last_sent=(1, 1),
+        stable_count=1,
+        required_stability=1,
+        last_send_time_ms=900.0,
+        current_time_ms=1_000.0,
+        cooldown_ms=250,
+        repeat_same_ms=500,
+    )
+
+
+def test_debounced_should_send_tracks_per_finger_cooldown() -> None:
+    decision = ActuationDecision(finger_id=2, action_id=1, prob=0.9)
+
+    assert debounced_should_send(
+        decision,
+        last_sent=(1, 2),
+        stable_count=1,
+        required_stability=1,
+        last_send_time_ms=950.0,
+        current_time_ms=1_000.0,
+        cooldown_ms=250,
+        repeat_same_ms=500,
+        last_send_time_by_finger_ms={1: 950.0},
+        last_send_time_by_key_ms={(1, 2): 950.0},
+    )
+
+    assert not debounced_should_send(
+        decision,
+        last_sent=(2, 2),
+        stable_count=1,
+        required_stability=1,
+        last_send_time_ms=950.0,
+        current_time_ms=1_000.0,
+        cooldown_ms=250,
+        repeat_same_ms=500,
+        last_send_time_by_finger_ms={2: 950.0},
+        last_send_time_by_key_ms={(2, 2): 950.0},
+    )
+
+
+def test_command_shaper_hold_is_per_finger_not_global() -> None:
+    shaper = CommandShaper(CommandShaperConfig(base_conf_thresh=0.2, hold_ms=250))
+    first = shaper.shape(
+        action_id=1,
+        finger_id=1,
+        action_conf=0.9,
+        timestamp_stream_ms=0,
+        timebase_ms=0,
+    )
+    second = shaper.shape(
+        action_id=2,
+        finger_id=2,
+        action_conf=0.9,
+        timestamp_stream_ms=50,
+        timebase_ms=50,
+    )
+
+    assert (first.finger_id, first.action_id) == (1, 1)
+    assert (second.finger_id, second.action_id) == (2, 2)
+
+
+def test_command_shaper_hold_still_blocks_same_finger_reversal() -> None:
+    shaper = CommandShaper(CommandShaperConfig(base_conf_thresh=0.2, hold_ms=250))
+    first = shaper.shape(
+        action_id=1,
+        finger_id=1,
+        action_conf=0.9,
+        timestamp_stream_ms=0,
+        timebase_ms=0,
+    )
+    second = shaper.shape(
+        action_id=2,
+        finger_id=1,
+        action_conf=0.9,
+        timestamp_stream_ms=50,
+        timebase_ms=50,
+    )
+
+    assert (first.finger_id, first.action_id) == (1, 1)
+    assert (second.finger_id, second.action_id) == (1, 1)
 
 
 def test_resolve_actuation_candidate_requires_stable_exact_nonzero_pair() -> None:
@@ -171,6 +255,11 @@ def test_compute_replay_metrics_reports_active_finger_behavior() -> None:
     assert metrics["would_send_window_precision_non_rest"] == 1.0
     assert metrics["would_send_window_recall_non_rest"] == 1.0
     assert metrics["false_actuation_rate_rest"] == 0.0
+    assert metrics["would_send_correct_non_rest_window_count"] == 2
+    assert metrics["would_send_positive_window_count"] == 2
+    assert metrics["true_non_rest_window_count"] == 2
+    assert metrics["true_rest_window_count"] == 1
+    assert metrics["false_actuation_rest_window_count"] == 0
     assert metrics["non_rest_none_count"] == 0
     assert metrics["committed_non_rest_none_count"] == 0
     assert metrics["committed_rest_non_none_count"] == 0
@@ -180,6 +269,8 @@ def test_compute_replay_metrics_reports_active_finger_behavior() -> None:
     assert metrics["applicability_fn_rate_on_true_non_rest"] == 0.0
     assert metrics["action_applicability_disagreement_rate"] == 0.0
     assert metrics["deployment_pair_invariant_ok"] is True
+    assert metrics["would_send_first_onset_latency_s"]["event_count"] == 1
+    assert metrics["would_send_first_onset_latency_s"]["hit_rate"] == 1.0
     assert metrics["committed_segment_overlap"]["truth_segment_count"] == 1
 
 

@@ -69,7 +69,7 @@
     "scaler_path": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260319_075520/scaler.npz",
     "lsl_acquirer_queue_max_chunks": 32,
     "serial_baud": 9600,
-    "serial_max_hz": 10.0,
+    "serial_max_hz": 20.0,
     "serial_movement_warmup_enabled": false,
     "serial_port": null,
     "serial_settle_s": 1.2,

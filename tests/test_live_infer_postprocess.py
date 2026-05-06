@@ -1018,7 +1018,7 @@ def _serial_args(**overrides):
         "serial_port": None,
         "serial_baud": 9600,
         "serial_write_timeout_s": 0.03,
-        "serial_max_hz": 10.0,
+        "serial_max_hz": 20.0,
         "serial_settle_s": 0.0,
         "serial_movement_warmup_enabled": False,
     }

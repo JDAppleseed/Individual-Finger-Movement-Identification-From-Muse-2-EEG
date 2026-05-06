@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-05-06",
+  "subject_id": "2-M16",
+  "featured_run_id": "20260319_075520",
+  "dataset_session_id": "combined_20260319_081200_pruned_rest_events_0_1_2",
+  "source_paths": {
+    "model_run": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/20260319_075520",
+    "deployment_config": "Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json",
+    "actuation_tuning_notes": "docs/2M16_ACTUATION_TUNING_2026-05-06.md",
+    "model_selection_audit": "docs/2M16_MODEL_SELECTION_AUDIT.md"
+  },
+  "offline_holdout": {
+    "action_accuracy": 0.8979,
+    "joint_action_finger_accuracy": 0.8466,
+    "non_rest_finger_accuracy": 0.8596,
+    "rest_true_positive_rate": 0.9837,
+    "rest_precision": 0.8011,
+    "action_ece": 0.0232,
+    "non_rest_finger_ece": 0.0273,
+    "test_window_count": 2301,
+    "test_non_rest_window_count": 1994,
+    "test_rest_window_count": 307
+  },
+  "event_level_offline": {
+    "action_accuracy": 0.9256,
+    "joint_action_finger_accuracy": 0.8760,
+    "non_rest_finger_accuracy": 0.9068
+  },
+  "actuation_replay_current": {
+    "variant": "baseline_per_finger",
+    "behavior": "3-window stability, 250 ms per-finger cooldown/hold, 100 ms same-command repeat gate, 20 Hz serial ceiling",
+    "committed_action_accuracy": 0.9149995982967783,
+    "committed_joint_action_finger_accuracy": 0.8642243110789749,
+    "committed_non_rest_finger_accuracy": 0.8551229712237379,
+    "would_send_window_precision_non_rest": 0.95367027677497,
+    "would_send_window_recall_non_rest": 0.315642736234193,
+    "false_actuation_rate_rest": 0.0024958402662229617,
+    "event_hit_rate": 0.9110738255033557,
+    "event_count": 596,
+    "event_miss_count": 53,
+    "first_hit_latency_s_median": 0.08277487499981362,
+    "first_hit_latency_s_p95": 0.37742324169371383,
+    "sent_window_count": 3324,
+    "correct_sent_non_rest_window_count": 3170,
+    "true_non_rest_window_count": 10043,
+    "true_rest_window_count": 2404,
+    "false_actuation_rest_window_count": 6,
+    "deployment_pair_invariant_ok": true
+  },
+  "actuation_replay_historical_audit": {
+    "note": "Historical global-cooldown model-selection numbers retained only for the April 24 model-selection audit.",
+    "would_send_window_precision_non_rest": 0.9332,
+    "would_send_window_recall_non_rest": 0.1057,
+    "false_actuation_rate_rest": 0.0012
+  },
+  "public_reporting_guidance": [
+    "Report window-level send recall as throughput, not classifier accuracy.",
+    "Pair actuation precision and false REST actuation with event hit rate and first-command latency.",
+    "Keep the March 19 checkpoint as the featured public deployment model until a replacement matches or improves deployment safety."
+  ]
+}

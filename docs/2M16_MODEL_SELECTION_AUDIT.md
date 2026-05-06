@@ -4,6 +4,8 @@ Date: 2026-04-24
 
 Decision: use `20260319_075520` as the public `2-M16` deployment model and keep `20260403_grouptrial_rest050` as an offline benchmark.
 
+Update, 2026-05-06: the actuation cooldown implementation now treats cooldown as a per-finger hold interval rather than a global hand lockout. The historical cleaned pseudo-live rows below remain useful for the original model-selection decision, but current responsiveness reporting should use the per-finger replay sweep in `docs/2M16_ACTUATION_TUNING_2026-05-06.md` and should pair window-level send recall with event-level hit rate and first-command latency. The website-facing current metrics are staged in `docs/public_metrics_2m16_current.json`: `95.37%` would-send precision, `31.56%` window-level send recall, `0.25%` false REST actuation, `91.11%` event hit rate, and `82 ms` median first-hit latency for the recommended `baseline_per_finger` behavior.
+
 The April 3 model is stronger on the standard holdout and event-level checks. It should not be the main displayed deployment model because its cleaned pseudo-live would-send precision and REST safety are worse.
 
 ## Ranking Policy

@@ -10,6 +10,8 @@ Strict rule: do not invent numbers. All quantitative claims come from:
   - Projects/**/sessions/*/run_meta.json
   - Projects/**/sessions/*/events/events.jsonl
   - Projects/**/processed/reports/<run_id>/*.png
+  - Projects/**/winning_model/session_report/eval_manifest.json
+  - docs/2M16_MODEL_SELECTION_AUDIT.md
 
 Outputs:
   - paper_artifacts/paper_stats.json (machine-readable)
@@ -292,6 +294,9 @@ def _load_featured_bundle() -> Dict[str, Any]:
 
     model_metrics_path = winning_root / "model_run" / "metrics.json"
     eval_manifest_path = winning_root / "session_report" / "eval_manifest.json"
+    infer_config_path = winning_root / "configs" / "infer.json"
+    audit_path = REPO_ROOT / "docs" / "2M16_MODEL_SELECTION_AUDIT.md"
+    public_metrics_path = REPO_ROOT / "docs" / "public_metrics_2m16_current.json"
 
     source_session_dir = manifest.get("source_session_dir")
     replay_manifest_path = None
@@ -310,6 +315,9 @@ def _load_featured_bundle() -> Dict[str, Any]:
         "manifest": manifest,
         "model_metrics": _load_json(model_metrics_path) if model_metrics_path.exists() else {},
         "eval_manifest": _load_json(eval_manifest_path) if eval_manifest_path.exists() else {},
+        "infer_config": _load_json(infer_config_path) if infer_config_path.exists() else {},
+        "audit_text": audit_path.read_text(encoding="utf-8") if audit_path.exists() else "",
+        "public_metrics": _load_json(public_metrics_path) if public_metrics_path.exists() else {},
         "replay_manifest": _load_json(replay_manifest_path) if replay_manifest_path and replay_manifest_path.exists() else {},
         "replay_manifest_path": str(replay_manifest_path) if replay_manifest_path and replay_manifest_path.exists() else None,
     }
@@ -493,13 +501,69 @@ def _run_rank_key(run: RunMetrics) -> Tuple[float, float, int, int, str, str]:
     )
 
 
+def _featured_manifest_key() -> Optional[Tuple[str, str, str]]:
+    featured = _load_featured_bundle()
+    manifest = featured.get("manifest") or {}
+    subject_id = manifest.get("subject_id")
+    source_session_dir = manifest.get("source_session_dir")
+    source_run_dir = manifest.get("source_run_dir")
+    if not subject_id or not source_session_dir or not source_run_dir:
+        return None
+
+    session_path = Path(str(source_session_dir))
+    if not session_path.is_absolute():
+        session_path = REPO_ROOT / session_path
+    return (
+        str(subject_id),
+        _repo_rel(session_path),
+        Path(str(source_run_dir)).name,
+    )
+
+
+def _is_featured_manifest_run(run: RunMetrics, key: Optional[Tuple[str, str, str]] = None) -> bool:
+    key = key if key is not None else _featured_manifest_key()
+    if key is None:
+        return False
+    subject_id, session_dir_rel, run_id = key
+    return (
+        run.subject_id == subject_id
+        and run.session_dir_rel == session_dir_rel
+        and run.run_id == run_id
+    )
+
+
 def _select_best_runs_per_subject(runs: List[RunMetrics]) -> List[RunMetrics]:
     best_by_subject: Dict[str, RunMetrics] = {}
+    featured_key = _featured_manifest_key()
     for run in runs:
+        if _is_featured_manifest_run(run, featured_key):
+            best_by_subject[run.subject_id] = run
+            continue
         current = best_by_subject.get(run.subject_id)
+        if current is not None and _is_featured_manifest_run(current, featured_key):
+            continue
         if current is None or _run_rank_key(run) > _run_rank_key(current):
             best_by_subject[run.subject_id] = run
     return sorted(best_by_subject.values(), key=lambda x: (x.subject_id, x.session_id, x.run_id))
+
+
+def _featured_run(runs: List[RunMetrics]) -> Optional[RunMetrics]:
+    if not runs:
+        return None
+    featured_key = _featured_manifest_key()
+    for run in runs:
+        if _is_featured_manifest_run(run, featured_key):
+            return run
+    return max(runs, key=_run_rank_key)
+
+
+def _runs_featured_first(runs: List[RunMetrics]) -> List[RunMetrics]:
+    featured = _featured_run(runs)
+    others = sorted(
+        [r for r in runs if r is not featured],
+        key=lambda x: (x.subject_id, x.session_id, x.run_id),
+    )
+    return ([featured] if featured is not None else []) + others
 
 
 def _copy_figure(src: Path, dest_stem: str) -> str:
@@ -748,6 +812,142 @@ def _summarize_replay_predictions(replay_manifest: Dict[str, Any], replay_manife
         "positive_send_windows": int(positive_send_windows),
         "correct_send_windows": int(correct_send_windows),
         "false_actuation_rest_count": int(false_actuation_rest_count),
+    }
+
+
+def _eval_ranking_value(eval_manifest: Dict[str, Any], metric: str, column: str = "march19") -> Optional[float]:
+    audit = eval_manifest.get("model_selection_audit") or {}
+    for row in audit.get("rankings") or []:
+        if row.get("metric") == metric and row.get(column) is not None:
+            try:
+                return float(row[column])
+            except Exception:
+                return None
+    return None
+
+
+def _audit_percent(text: str, label: str, column: int = 0) -> Optional[float]:
+    """
+    Extract one percentage from docs/2M16_MODEL_SELECTION_AUDIT.md.
+    column=0 selects the March 19 cell, column=1 selects the April 3 cell.
+    """
+    for line in text.splitlines():
+        if label not in line:
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        metric_cells = cells[1:3]
+        if column >= len(metric_cells):
+            return None
+        match = re.search(r"([0-9]+(?:\.[0-9]+)?)\\?%", metric_cells[column])
+        if match:
+            return float(match.group(1)) / 100.0
+    return None
+
+
+def _eval_action_label_count(eval_manifest: Dict[str, Any], label_id: int) -> Optional[int]:
+    counts = ((eval_manifest.get("dataset") or {}).get("label_counts") or {}).get("action") or {}
+    if isinstance(counts, str):
+        pattern = rf"\({int(label_id)}\)\s*=\s*([0-9]+)"
+        match = re.search(pattern, counts)
+        if match:
+            return int(match.group(1))
+        return None
+    if not isinstance(counts, dict):
+        return None
+    for key, value in counts.items():
+        if re.search(rf"\b{int(label_id)}\b", str(key)):
+            try:
+                return int(value)
+            except Exception:
+                return None
+    return None
+
+
+def _featured_replay_audit_metrics(featured: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    """
+    Canonical public deployment replay metrics for the featured 2-M16 checkpoint.
+
+    Prefer the current website-facing per-finger command metrics when present.
+    Fall back to the historical April 24 model-selection audit so older bundles
+    still build reproducibly.
+    """
+    current = ((featured.get("public_metrics") or {}).get("actuation_replay_current") or {})
+    if current:
+        return {
+            "committed_action_acc": current.get("committed_action_accuracy"),
+            "committed_joint_acc": current.get("committed_joint_action_finger_accuracy"),
+            "would_send_window_precision_non_rest": current.get(
+                "would_send_window_precision_non_rest"
+            ),
+            "would_send_window_recall_non_rest": current.get(
+                "would_send_window_recall_non_rest"
+            ),
+            "false_actuation_rate_rest": current.get("false_actuation_rate_rest"),
+            "rest_windows": current.get("true_rest_window_count"),
+            "non_rest_windows": current.get("true_non_rest_window_count"),
+            "positive_send_windows": current.get("sent_window_count"),
+            "correct_send_windows": current.get("correct_sent_non_rest_window_count"),
+            "false_actuation_rest_count": current.get("false_actuation_rest_window_count"),
+            "event_hit_rate": current.get("event_hit_rate"),
+            "event_count": current.get("event_count"),
+            "event_miss_count": current.get("event_miss_count"),
+            "latency_median_s": current.get("first_hit_latency_s_median"),
+            "latency_p95_s": current.get("first_hit_latency_s_p95"),
+        }
+
+    eval_manifest = featured.get("eval_manifest") or {}
+    audit_text = str(featured.get("audit_text") or "")
+    split = ((eval_manifest.get("split") or {}).get("auxiliary_rest_sessions") or {})
+
+    precision = _eval_ranking_value(
+        eval_manifest,
+        "deployment_would_send_precision_non_rest",
+    )
+    false_rate = _eval_ranking_value(
+        eval_manifest,
+        "deployment_false_rest_actuation_rate",
+    )
+    recall = _audit_percent(audit_text, "Cleaned pseudo-live would-send recall", column=0)
+    if precision is None:
+        precision = _audit_percent(audit_text, "Cleaned pseudo-live would-send precision", column=0)
+    if false_rate is None:
+        false_rate = _audit_percent(audit_text, "Cleaned pseudo-live false REST actuation", column=0)
+
+    non_rest_windows = split.get("core_non_rest_count")
+    try:
+        non_rest_windows = int(non_rest_windows) if non_rest_windows is not None else None
+    except Exception:
+        non_rest_windows = None
+    rest_windows = _eval_action_label_count(eval_manifest, 0)
+
+    correct_send_windows = None
+    positive_send_windows = None
+    false_actuation_count = None
+    if recall is not None and non_rest_windows is not None:
+        correct_send_windows = int(round(float(recall) * int(non_rest_windows)))
+    if correct_send_windows is not None and precision is not None and float(precision) > 0:
+        positive_send_windows = int(round(float(correct_send_windows) / float(precision)))
+    if false_rate is not None and rest_windows is not None:
+        false_actuation_count = int(round(float(false_rate) * int(rest_windows)))
+
+    return {
+        "committed_action_acc": _audit_percent(audit_text, "Cleaned pseudo-live committed joint", column=0),
+        "committed_joint_acc": _audit_percent(audit_text, "Cleaned pseudo-live committed joint", column=0),
+        "would_send_window_precision_non_rest": precision,
+        "would_send_window_recall_non_rest": recall,
+        "false_actuation_rate_rest": false_rate,
+        "rest_windows": rest_windows,
+        "non_rest_windows": non_rest_windows,
+        "positive_send_windows": positive_send_windows,
+        "correct_send_windows": correct_send_windows,
+        "false_actuation_rest_count": false_actuation_count,
+        "event_hit_rate": None,
+        "event_count": None,
+        "event_miss_count": None,
+        "latency_median_s": None,
+        "latency_p95_s": None,
     }
 
 
@@ -1065,9 +1265,10 @@ def _write_finger_accuracy_bar_chart(runs: List[RunMetrics]) -> str:
     fig, ax = plt.subplots(figsize=(7.6, 4.3), dpi=220)
     colors = ["#1f77b4", "#d95f02", "#2ca02c", "#7f7f7f"]
 
-    for idx, run in enumerate(runs):
+    ordered_runs = _runs_featured_first(runs)
+    for idx, run in enumerate(ordered_runs):
         values = [100.0 * float(run.test_finger_acc_by_class_non_rest.get(str(fid), float("nan"))) for fid in finger_ids]
-        offset = (idx - (len(runs) - 1) / 2.0) * width
+        offset = (idx - (len(ordered_runs) - 1) / 2.0) * width
         bars = ax.bar(
             x + offset,
             values,
@@ -1387,6 +1588,112 @@ def _write_raw_windowing_figure(runs: List[RunMetrics]) -> Optional[str]:
     return str(out_path.relative_to(REPO_ROOT))
 
 
+def _write_featured_psd_figure(runs: List[RunMetrics]) -> Optional[str]:
+    featured = _featured_run(runs)
+    if featured is None:
+        return None
+
+    session_dir = _session_dir_from_rel(featured.session_dir_rel)
+    npz_path = session_dir / "processed" / "eeg_windows.npz"
+    if not npz_path.exists():
+        return None
+
+    try:
+        data = np.load(npz_path, allow_pickle=True)
+        X = np.asarray(data["X"], dtype=np.float64)
+        y_action = np.asarray(data["y_action"]).astype(int).reshape(-1)
+        fs = float(np.asarray(data["target_fs"]).item()) if "target_fs" in data else 256.0
+        channel_names = (
+            [str(v) for v in np.asarray(data["channel_names"]).reshape(-1).tolist()]
+            if "channel_names" in data
+            else [f"Ch {i + 1}" for i in range(X.shape[-1])]
+        )
+
+        clean_mask = np.ones(y_action.shape, dtype=bool)
+        if "artifact_flag" in data:
+            clean_mask &= np.asarray(data["artifact_flag"]).astype(int).reshape(-1) == 0
+        if "gap_flag" in data:
+            clean_mask &= np.asarray(data["gap_flag"]).astype(int).reshape(-1) == 0
+
+        rest_idx = np.where(clean_mask & (y_action == 0))[0]
+        active_idx = np.where(clean_mask & (y_action != 0))[0]
+        if rest_idx.size == 0 or active_idx.size == 0:
+            return None
+
+        rng = np.random.default_rng(17)
+        n_sample = 750
+        if rest_idx.size > n_sample:
+            rest_idx = np.sort(rng.choice(rest_idx, size=n_sample, replace=False))
+        if active_idx.size > n_sample:
+            active_idx = np.sort(rng.choice(active_idx, size=n_sample, replace=False))
+
+        def _mean_psd(indices: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+            xs = X[indices]
+            xs = xs - xs.mean(axis=1, keepdims=True)
+            window = np.hanning(xs.shape[1]).astype(np.float64).reshape(1, -1, 1)
+            scale = fs * float(np.sum(window.reshape(-1) ** 2))
+            fft = np.fft.rfft(xs * window, axis=1)
+            psd = (np.abs(fft) ** 2) / max(scale, 1e-12)
+            freqs = np.fft.rfftfreq(xs.shape[1], d=1.0 / fs)
+            return freqs, psd.mean(axis=0)
+
+        freqs, rest_psd = _mean_psd(rest_idx)
+        _, active_psd = _mean_psd(active_idx)
+        band = (freqs >= 1.0) & (freqs <= 45.0)
+
+        fig, ax = plt.subplots(figsize=(7.2, 4.2), dpi=220)
+        colors = ["#1f77b4", "#d95f02", "#2ca02c", "#7f7f7f"]
+        for ch in range(min(X.shape[-1], len(channel_names))):
+            color = colors[ch % len(colors)]
+            ax.semilogy(
+                freqs[band],
+                active_psd[band, ch] + 1e-12,
+                color=color,
+                linewidth=1.2,
+                label=f"{channel_names[ch]} active",
+            )
+            ax.semilogy(
+                freqs[band],
+                rest_psd[band, ch] + 1e-12,
+                color=color,
+                linewidth=1.0,
+                linestyle="--",
+                alpha=0.72,
+                label=f"{channel_names[ch]} REST",
+            )
+
+        ax.axvspan(8.0, 13.0, color="#d8e8f7", alpha=0.45, lw=0.0)
+        ax.axvspan(13.0, 30.0, color="#f6dfc9", alpha=0.28, lw=0.0)
+        ax.text(10.5, 0.98, "mu", transform=ax.get_xaxis_transform(), ha="center", va="top", fontsize=7.4)
+        ax.text(21.5, 0.98, "beta", transform=ax.get_xaxis_transform(), ha="center", va="top", fontsize=7.4)
+        ax.set_xlim(1.0, 45.0)
+        ax.set_xlabel("Frequency (Hz)")
+        ax.set_ylabel("Mean PSD (a.u./Hz)")
+        ax.grid(linestyle=":", linewidth=0.6, alpha=0.55)
+        ax.set_axisbelow(True)
+        ax.legend(frameon=False, fontsize=6.4, ncol=2, loc="upper right")
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        ax.text(
+            0.02,
+            0.03,
+            f"2-M16 clean windows: REST n={rest_idx.size}, active n={active_idx.size}",
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=7.1,
+            bbox=dict(boxstyle="round,pad=0.16", facecolor="white", edgecolor="#bbbbbb", linewidth=0.5, alpha=0.92),
+        )
+
+        out_path = FIG_DIR / "featured_psd_rest_active.png"
+        fig.tight_layout()
+        fig.savefig(out_path, bbox_inches="tight")
+        plt.close(fig)
+        return str(out_path.relative_to(REPO_ROOT))
+    except Exception:
+        return None
+
+
 def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo_sha: str) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     featured = _load_featured_bundle()
@@ -1516,12 +1823,14 @@ def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo
         lines.append(r"\newcommand{\BlockIdUniqueMin}{\textit{n/a}}" + "\n")
         lines.append(r"\newcommand{\BlockIdUniqueMax}{\textit{n/a}}" + "\n")
 
+    featured_run = _featured_run(runs)
     featured_metrics = ((featured.get("model_metrics") or {}).get("test") or {})
     featured_eval = ((featured.get("eval_manifest") or {}).get("metrics") or {})
-    featured_replay = ((featured.get("replay_manifest") or {}).get("replay_metrics") or {})
-    featured_replay_summary = ((featured.get("replay_manifest") or {}).get("summary") or {})
-    featured_runtime = ((featured.get("replay_manifest") or {}).get("runtime_config") or {})
-    replay_prediction_counts = _summarize_replay_predictions(
+    featured_replay = _featured_replay_audit_metrics(featured)
+    featured_runtime = ((featured.get("infer_config") or {}).get("settings") or {})
+    if not featured_runtime:
+        featured_runtime = ((featured.get("replay_manifest") or {}).get("runtime_config") or {})
+    legacy_replay_prediction_counts = _summarize_replay_predictions(
         featured.get("replay_manifest") or {},
         Path(str(featured.get("replay_manifest_path"))) if featured.get("replay_manifest_path") else None,
     )
@@ -1556,16 +1865,41 @@ def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo
     _macro_percent("FeaturedFingerAcc", featured_eval.get("finger_acc_non_rest") or featured_metrics.get("finger_acc_non_rest"))
     _macro_count("FeaturedNTest", featured_metrics.get("n_test"))
     _macro_count("FeaturedNNonRest", featured_metrics.get("n_test_non_rest"))
+    _macro_count(
+        "FeaturedNRest",
+        int(featured_run.test_action_counts.get("0", 0)) if featured_run is not None else None,
+    )
     _macro_percent("FeaturedJointAcc", featured_eval.get("joint_acc"))
     _macro_percent("FeaturedReplayCommittedActionAcc", featured_replay.get("committed_action_acc"))
+    _macro_percent("FeaturedReplayCommittedJointAcc", featured_replay.get("committed_joint_acc"))
     _macro_percent("FeaturedReplayPrecision", featured_replay.get("would_send_window_precision_non_rest"))
     _macro_percent("FeaturedReplayRecall", featured_replay.get("would_send_window_recall_non_rest"))
     _macro_percent("FeaturedFalseActuationRateRest", featured_replay.get("false_actuation_rate_rest"))
-    _macro_count("FeaturedReplayRestWindows", replay_prediction_counts.get("rest_windows"))
-    _macro_count("FeaturedReplayNonRestWindows", replay_prediction_counts.get("non_rest_windows"))
-    _macro_count("FeaturedReplayPositiveSendWindows", replay_prediction_counts.get("positive_send_windows"))
-    _macro_count("FeaturedReplayCorrectSendWindows", replay_prediction_counts.get("correct_send_windows"))
-    _macro_count("FeaturedReplayFalseActuationCount", replay_prediction_counts.get("false_actuation_rest_count"))
+    _macro_percent("FeaturedReplayEventHitRate", featured_replay.get("event_hit_rate"))
+    _macro_count(
+        "FeaturedReplayRestWindows",
+        featured_replay.get("rest_windows") or legacy_replay_prediction_counts.get("rest_windows"),
+    )
+    _macro_count(
+        "FeaturedReplayNonRestWindows",
+        featured_replay.get("non_rest_windows") or legacy_replay_prediction_counts.get("non_rest_windows"),
+    )
+    _macro_count(
+        "FeaturedReplayPositiveSendWindows",
+        featured_replay.get("positive_send_windows") or legacy_replay_prediction_counts.get("positive_send_windows"),
+    )
+    _macro_count(
+        "FeaturedReplayCorrectSendWindows",
+        featured_replay.get("correct_send_windows") or legacy_replay_prediction_counts.get("correct_send_windows"),
+    )
+    _macro_count(
+        "FeaturedReplayFalseActuationCount",
+        featured_replay.get("false_actuation_rest_count")
+        if featured_replay.get("false_actuation_rest_count") is not None
+        else legacy_replay_prediction_counts.get("false_actuation_rest_count"),
+    )
+    _macro_count("FeaturedReplayEventCount", featured_replay.get("event_count"))
+    _macro_count("FeaturedReplayEventMissCount", featured_replay.get("event_miss_count"))
     _macro_count("FeaturedActuationStabilityWindows", featured_runtime.get("actuation_stability"))
     stability_ms = None
     if featured_runtime.get("actuation_stability") is not None and featured_runtime.get("hop_sec") is not None:
@@ -1574,10 +1908,20 @@ def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo
     _macro_number("FeaturedActionECE", featured_eval.get("action_ece"))
     _macro_number("FeaturedFingerECE", featured_eval.get("finger_ece_non_rest"))
     _macro_number(
-        "FeaturedReplayLatencyMeanMs",
-        ((featured_replay_summary.get("latency_ms") or {}).get("mean")),
-        digits=1,
+        "FeaturedReplayLatencyMedianMs",
+        1000.0 * float(featured_replay.get("latency_median_s"))
+        if featured_replay.get("latency_median_s") is not None
+        else None,
+        digits=0,
     )
+    _macro_number(
+        "FeaturedReplayLatencyPNinetyFiveMs",
+        1000.0 * float(featured_replay.get("latency_p95_s"))
+        if featured_replay.get("latency_p95_s") is not None
+        else None,
+        digits=0,
+    )
+    _macro_number("FeaturedReplayLatencyMeanMs", None, digits=1)
     _macro_count("FeaturedDerivedSourceN", featured_prov.get("filter_source_n"))
     _macro_count("FeaturedDerivedRemovedN", featured_prov.get("filter_removed_n"))
     _macro_count("FeaturedDerivedKeptN", featured_prov.get("filter_kept_n"))
@@ -1587,7 +1931,7 @@ def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo
 
 def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], session_meta: Dict[str, Any]) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    sorted_runs = sorted(runs, key=lambda x: (x.subject_id, x.session_id, x.run_id))
+    sorted_runs = _runs_featured_first(runs)
     raw_session_role: Dict[str, str] = {}
     role_rank = {"recorded": 0, "core": 1, "aux_rest": 2, "supporting": 3}
     for run in sorted_runs:
@@ -1624,7 +1968,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     # Performance table per run
     perf_lines: List[str] = []
     perf_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n\\setlength{\\tabcolsep}{3pt}\n")
-    perf_lines.append("\\caption{Representative subject-specific runs with held-out performance and calibration. Finger accuracy is computed with the deployment-consistent action-conditioned decode path on true non-REST windows.}\n")
+    perf_lines.append("\\caption{Featured 2-M16 run with supporting preliminary 1-M16 result. Finger accuracy is computed with the deployment-consistent action-conditioned decode path on true non-REST windows.}\n")
     perf_lines.append("\\label{tab:perf}\n")
     perf_lines.append("\\resizebox{\\textwidth}{!}{%\n")
     perf_lines.append("\\begin{tabular}{llp{0.28\\textwidth}rrrrrrrr}\n\\toprule\n")
@@ -1652,7 +1996,15 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
             f"{_format_pct(action_acc, 2)} & {a_ci} & {_format_pct(finger_acc, 2)} & {f_ci} & "
             f"{_format_num(r.test_action_ece, 4)} & {_format_num(r.test_finger_ece_non_rest, 4)} \\\\\n"
         )
-    perf_lines.append("\\bottomrule\n\\end{tabular}%\n}\n\\end{table*}\n\n")
+    perf_lines.append("\\bottomrule\n\\end{tabular}%\n}\n")
+    perf_lines.append(
+        "\\vspace{0.25em}\n"
+        "\\begin{minipage}{0.98\\textwidth}\\footnotesize "
+        "Note: 2-M16 is the featured public deployment checkpoint. "
+        "1-M16 is an archived preliminary single-session result from a different dataset construction and is not a controlled between-subject comparator."
+        "\\end{minipage}\n"
+    )
+    perf_lines.append("\\end{table*}\n\n")
 
     # Dataset / windowing table per session
     dataset_rows: Dict[Tuple[str, str], RunMetrics] = {}
@@ -1911,33 +2263,27 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
 
 def _write_figures(runs: List[RunMetrics]) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    featured = _featured_run(runs)
     _write_finger_accuracy_bar_chart(runs)
     _write_featured_provenance_figure(runs)
     _write_raw_windowing_figure(runs)
+    _write_featured_psd_figure(runs)
 
     lines: List[str] = []
     lines.append("% AUTO-GENERATED by scripts/build_paper_artifacts.py. DO NOT EDIT BY HAND.\n")
 
-    for r in sorted(runs, key=lambda x: (x.subject_id, x.session_id, x.run_id)):
+    for r in ([featured] if featured is not None else []):
         if not any([r.fig_action_confusion, r.fig_finger_confusion, r.fig_reliability, r.fig_scatter]):
             continue
         lines.append("\\begin{figure*}[t]\n\\centering\n")
-        # 2x2 grid using minipages (IEEE-friendly, no extra packages required)
-        def inc(path: Optional[str], caption: str) -> str:
-            if not path:
-                return (
-                    "\\begin{minipage}[b]{0.49\\linewidth}\\centering\n"
-                    "\\fbox{\\parbox[c][0.28\\textheight][c]{0.95\\linewidth}{\\centering\\textit{Figure not available in current run artifacts.}}}\n"
-                    + "\\\\"
-                    + "\\footnotesize "
-                    + caption
-                    + "\n\\end{minipage}\n"
-                )
+        # Grid using minipages (IEEE-friendly, no extra packages required).
+        # Only include panels that are present in the archived run artifacts.
+        def inc(path: str, caption: str, width: str = "0.49\\linewidth") -> str:
             safe_path = path.replace("\\", "/")
             if not safe_path.startswith("../"):
                 safe_path = f"../{safe_path}"
             return (
-                "\\begin{minipage}[b]{0.49\\linewidth}\\centering\n"
+                f"\\begin{{minipage}}[b]{{{width}}}\\centering\n"
                 + f"\\includegraphics[width=\\linewidth]{{{safe_path}}}\n"
                 + "\\\\"
                 + "\\footnotesize "
@@ -1946,15 +2292,20 @@ def _write_figures(runs: List[RunMetrics]) -> None:
             )
 
         subj = _latex_escape(_display_subject_id(r.subject_id))
-        lines.append(inc(r.fig_action_confusion, f"(a) Action confusion matrix ({subj})."))
-        lines.append(inc(r.fig_finger_confusion, f"(b) Finger confusion matrix ({subj})."))
-        lines.append("\\\\[0.5em]\n")
-        lines.append(inc(r.fig_reliability, f"(c) Reliability / calibration summary ({subj})."))
-        lines.append(inc(r.fig_scatter, f"(d) MC-dropout action confidence-uncertainty plot ({subj})."))
-        if r == max(runs, key=_run_rank_key):
-            fig_caption = f"Representative evaluation figures for the featured {subj} run."
-        else:
-            fig_caption = f"Representative evaluation figures for {subj}."
+        panel_specs: List[Tuple[Optional[str], str]] = [
+            (r.fig_action_confusion, f"Action confusion matrix ({subj})."),
+            (r.fig_finger_confusion, f"Finger confusion matrix ({subj})."),
+            (r.fig_reliability, f"Reliability / calibration summary ({subj})."),
+            (r.fig_scatter, f"MC-dropout action confidence-uncertainty plot ({subj})."),
+        ]
+        panels = [(path, caption) for path, caption in panel_specs if path]
+        for idx, (path, caption) in enumerate(panels):
+            letter = chr(ord("a") + idx)
+            width = "0.65\\linewidth" if len(panels) == 1 else "0.49\\linewidth"
+            lines.append(inc(str(path), f"({letter}) {caption}", width=width))
+            if idx % 2 == 1 and idx != len(panels) - 1:
+                lines.append("\\\\[0.5em]\n")
+        fig_caption = f"Representative evaluation figures for the featured {subj} run."
         lines.append(f"\\caption{{{fig_caption}}}\n")
         lines.append("\\end{figure*}\n\n")
 

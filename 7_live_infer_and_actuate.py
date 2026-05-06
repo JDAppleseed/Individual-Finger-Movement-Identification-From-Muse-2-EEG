@@ -1759,7 +1759,7 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "--serial_max_hz",
         dest="serial_max_hz",
         type=float,
-        help="Maximum asynchronous serial command write rate.",
+        help="Maximum asynchronous serial command write rate. Default matches the 50 ms live hop.",
     )
     actuation_group.add_argument(
         "--serial-settle-s",
@@ -1802,7 +1802,7 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         dest="actuation_cooldown_ms",
         type=int,
         metavar="MS",
-        help="Minimum time, in milliseconds, between actuation commands.",
+        help="Per-finger hold/cooldown interval in milliseconds; other fingers are not blocked.",
     )
     actuation_group.add_argument(
         "--actuation-repeat-ms",
@@ -1810,7 +1810,7 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         dest="actuation_repeat_ms",
         type=int,
         metavar="MS",
-        help="Milliseconds after which the same stable command may be resent.",
+        help="Milliseconds after which the same finger/action command may be resent.",
     )
     actuation_group.add_argument(
         "--actuation-min-speed",
@@ -2589,7 +2589,13 @@ def _initialize_serial_actuation(
         port=str(serial_port),
         baud=int(getattr(args, "serial_baud", 9600)),
         write_timeout_s=float(getattr(args, "serial_write_timeout_s", 0.03)),
-        max_hz=float(getattr(args, "serial_max_hz", 10.0)),
+        max_hz=float(
+            getattr(
+                args,
+                "serial_max_hz",
+                LIVE_INFER_RECIPE_DEFAULTS["serial_max_hz"],
+            )
+        ),
         settle_s=float(getattr(args, "serial_settle_s", 1.2)),
         event_logger=event_logger,
     )
@@ -2612,7 +2618,13 @@ def _initialize_serial_actuation(
         "Actuation enabled via async serial worker port=%s baud=%s max_hz=%.2f write_timeout_s=%.3f",
         serial_port,
         int(getattr(args, "serial_baud", 9600)),
-        float(getattr(args, "serial_max_hz", 10.0)),
+        float(
+            getattr(
+                args,
+                "serial_max_hz",
+                LIVE_INFER_RECIPE_DEFAULTS["serial_max_hz"],
+            )
+        ),
         float(getattr(args, "serial_write_timeout_s", 0.03)),
     )
     return worker
@@ -3222,11 +3234,26 @@ def _debounced_should_send(
     last_send_ts: float,
     cooldown_ms: int,
     repeat_same_ms: int = 0,
+    last_send_by_finger_ts: Optional[dict[int, float]] = None,
+    last_send_by_key_ts: Optional[dict[Tuple[int, int], float]] = None,
 ) -> bool:
     last_send_time_ms = (
         None if float(last_send_ts) <= 0.0 else float(last_send_ts) * 1000.0
     )
     current_time_ms = float(time.monotonic()) * 1000.0
+    by_finger_ms = (
+        {int(k): float(v) * 1000.0 for k, v in last_send_by_finger_ts.items()}
+        if last_send_by_finger_ts is not None
+        else None
+    )
+    by_key_ms = (
+        {
+            (int(k[0]), int(k[1])): float(v) * 1000.0
+            for k, v in last_send_by_key_ts.items()
+        }
+        if last_send_by_key_ts is not None
+        else None
+    )
     return _shared_debounced_should_send(
         decision,
         last_sent=last_sent,
@@ -3236,6 +3263,8 @@ def _debounced_should_send(
         current_time_ms=current_time_ms,
         cooldown_ms=cooldown_ms,
         repeat_same_ms=repeat_same_ms,
+        last_send_time_by_finger_ms=by_finger_ms,
+        last_send_time_by_key_ms=by_key_ms,
     )
 
 
@@ -4683,6 +4712,8 @@ def main() -> int:
     # Debounce state
     last_sent: Optional[Tuple[int, int]] = None
     last_send_ts = 0.0
+    last_send_by_finger_ts: dict[int, float] = {}
+    last_send_by_key_ts: dict[Tuple[int, int], float] = {}
     sample_seq = 0
     live_eeg_plot_sample_seq = 0
     actuation_history: Deque[ActuationDecision] = deque(
@@ -4827,6 +4858,8 @@ def main() -> int:
                             post_state.reset()
                             last_sent = None
                             last_send_ts = 0.0
+                            last_send_by_finger_ts.clear()
+                            last_send_by_key_ts.clear()
                             next_window_start_s = float(time_s)
                             last_buffer_time_s = None
                             backwards_events_mono.clear()
@@ -5385,6 +5418,8 @@ def main() -> int:
                             last_send_ts=last_send_ts,
                             cooldown_ms=int(args.actuation_cooldown_ms),
                             repeat_same_ms=int(args.actuation_repeat_ms),
+                            last_send_by_finger_ts=last_send_by_finger_ts,
+                            last_send_by_key_ts=last_send_by_key_ts,
                         ):
                             send_start = time.monotonic()
                             assert serial_worker is not None
@@ -5398,6 +5433,8 @@ def main() -> int:
                             if send_ok:
                                 last_sent = actuation_key
                                 last_send_ts = send_end
+                                last_send_by_finger_ts[int(actuation_decision.finger_id)] = send_end
+                                last_send_by_key_ts[actuation_key] = send_end
                                 actuation_sent = True
                                 actuation_latency_ms = (send_end - window_center_mono) * 1000.0
                                 actuation_decision_delay_ms = (send_start - now) * 1000.0
@@ -5656,6 +5693,8 @@ def main() -> int:
                             int(watchdog_command.action_id),
                         )
                         last_send_ts = time.monotonic()
+                        last_send_by_finger_ts.clear()
+                        last_send_by_key_ts.clear()
                         logger.warning(
                             "Actuation watchdog sent REST due to stalled valid input watchdog_ms=%s",
                             int(actuation_command_shaper.config.watchdog_ms),

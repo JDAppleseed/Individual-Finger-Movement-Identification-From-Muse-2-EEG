@@ -9,7 +9,8 @@ Source:
 Selection:
 - `20260319_075520` is the featured public/deployment checkpoint.
 - `20260403_grouptrial_rest050` remains the better offline holdout/event-level benchmark, but it is not the deployment snapshot because its cleaned-corpus would-send precision is lower and its false REST actuation is higher.
-- See `../../../../../docs/2M16_MODEL_SELECTION_AUDIT.md` from the repository root for the comparison table.
+- Current public reporting should use the per-finger command path: `95.37%` would-send precision, `0.25%` false REST actuation, and `91.11%` event hit rate. See `../../../../../docs/public_metrics_2m16_current.json` from the repository root.
+- See `../../../../../docs/2M16_MODEL_SELECTION_AUDIT.md` from the repository root for the historical comparison table.
 
 Published contents:
 - `configs/`: deployment-facing configs for inference and pseudo-live replay setup.

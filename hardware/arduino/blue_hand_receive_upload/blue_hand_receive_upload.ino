@@ -56,7 +56,8 @@
 
 // ------------------------- Config -------------------------
 const long BAUD = 9600;
-// If no valid command arrives within this window, return to midpoint/rest.
+// Per-finger hold interval. A commanded finger returns to midpoint/rest after
+// this many milliseconds without another command for that same finger.
 const unsigned long IDLE_TIMEOUT_MS = 250;
 
 // Servo channel order: thumb, index, middle, ring, pinky, wrist
@@ -75,40 +76,60 @@ static const uint8_t CLOSE_ANGLE[N_SERVOS] = {160, 160, 160, 160, 160,  90};   /
 // ------------------------- State -------------------------
 Servo servos[N_SERVOS];
 uint8_t currentAngle[N_SERVOS];
-unsigned long lastCommandMs = 0;
-bool atRest = false;
+uint8_t targetAngle[N_SERVOS];
+uint8_t stepDelayMsForServo[N_SERVOS];
+unsigned long lastCommandMs[N_SERVOS];
+unsigned long lastStepMs[N_SERVOS];
+bool holdingCommand[N_SERVOS];
 
 // ------------------------- Helpers -------------------------
 void attachServos() {
+  unsigned long now = millis();
   for (uint8_t i = 0; i < N_SERVOS; i++) {
     servos[i].attach(SERVO_PINS[i]);
     uint8_t rest = (uint8_t)((uint16_t)OPEN_ANGLE[i] + (uint16_t)CLOSE_ANGLE[i]) / 2;
     currentAngle[i] = rest;
+    targetAngle[i] = rest;
+    stepDelayMsForServo[i] = 2;
+    lastCommandMs[i] = now;
+    lastStepMs[i] = now;
+    holdingCommand[i] = false;
     servos[i].write(currentAngle[i]);
     delay(50);
   }
-  atRest = true;
 }
 
-void moveServoTo(uint8_t idx, uint8_t target, uint8_t speed_u8 = 255) {
-  if (idx >= N_SERVOS) return;
-  if (currentAngle[idx] == target) return;
+uint8_t restAngle(uint8_t idx) {
+  return (uint8_t)((uint16_t)OPEN_ANGLE[idx] + (uint16_t)CLOSE_ANGLE[idx]) / 2;
+}
 
-  uint8_t current = currentAngle[idx];
+uint8_t speedToStepDelayMs(uint8_t speed_u8) {
+  return (uint8_t)map((long)(255 - speed_u8), 0, 255, 2, 18);
+}
+
+void setServoTarget(uint8_t idx, uint8_t target, uint8_t speed_u8 = 255) {
+  if (idx >= N_SERVOS) return;
+  targetAngle[idx] = target;
+
   if (speed_u8 >= 250) {
     servos[idx].write(target);
     currentAngle[idx] = target;
+    lastStepMs[idx] = millis();
     return;
   }
 
-  unsigned long stepDelayMs = map((long)(255 - speed_u8), 0, 255, 2, 18);
-  int direction = (target > current) ? 1 : -1;
-  while (current != target) {
-    current = (uint8_t)((int)current + direction);
-    servos[idx].write(current);
-    delay(stepDelayMs);
-  }
-  currentAngle[idx] = target;
+  stepDelayMsForServo[idx] = speedToStepDelayMs(speed_u8);
+}
+
+void updateServo(uint8_t idx, unsigned long now) {
+  if (idx >= N_SERVOS) return;
+  if (currentAngle[idx] == targetAngle[idx]) return;
+  if ((now - lastStepMs[idx]) < stepDelayMsForServo[idx]) return;
+
+  int direction = (targetAngle[idx] > currentAngle[idx]) ? 1 : -1;
+  currentAngle[idx] = (uint8_t)((int)currentAngle[idx] + direction);
+  servos[idx].write(currentAngle[idx]);
+  lastStepMs[idx] = now;
 }
 
 void commandFinger(uint8_t finger_id, uint8_t action_id, uint8_t speed_u8 = 255) {
@@ -121,24 +142,22 @@ void commandFinger(uint8_t finger_id, uint8_t action_id, uint8_t speed_u8 = 255)
   auto do_one = [&](uint8_t idx) {
     if (idx >= N_SERVOS) return;
     if (action_id == 0) {
-      uint8_t rest = (uint8_t)((uint16_t)OPEN_ANGLE[idx] + (uint16_t)CLOSE_ANGLE[idx]) / 2;
-      moveServoTo(idx, rest);
+      setServoTarget(idx, restAngle(idx), 255);
+      holdingCommand[idx] = false;
       return;
     }
 
     // action_id 1 or 2: no extra delay, override any pending rest.
     uint8_t target = (action_id == 1) ? OPEN_ANGLE[idx] : CLOSE_ANGLE[idx];
-    moveServoTo(idx, target, speed_u8);
+    setServoTarget(idx, target, speed_u8);
+    lastCommandMs[idx] = millis();
+    holdingCommand[idx] = true;
   };
 
   // Map ids to indices (1..6 -> 0..5)
   if (finger_id >= 1 && finger_id <= 6) {
     do_one((uint8_t)(finger_id - 1));
   }
-
-  // Any valid command resets the idle timer and marks the hand as active.
-  lastCommandMs = millis();
-  atRest = false;
 }
 
 // Parse line formats like "3,2", "3 2", or "3,2,180"
@@ -179,13 +198,13 @@ bool parseCommand(String line, uint8_t &finger_id, uint8_t &action_id, uint8_t &
 // ------------------------- Arduino -------------------------
 void setup() {
   Serial.begin(BAUD);
+  Serial.setTimeout(5);
   attachServos();
-  lastCommandMs = millis();
   Serial.println("uHand Serial Receiver ready (protocol: finger,action[,speed_u8])");
 }
 
 void loop() {
-  if (Serial.available()) {
+  while (Serial.available()) {
     String line = Serial.readStringUntil('\n');
     uint8_t finger_id = 0, action_id = 0, speed_u8 = 255;
     if (parseCommand(line, finger_id, action_id, speed_u8)) {
@@ -193,14 +212,15 @@ void loop() {
     }
   }
 
-  // Safety idle timeout: if no commands arrive, return all servos to rest.
+  // Safety hold timeout: each finger independently returns to rest after its
+  // own command goes stale. Other fingers remain commandable during that hold.
   unsigned long now = millis();
-  if (!atRest && (now - lastCommandMs) >= IDLE_TIMEOUT_MS) {
-    for (uint8_t i = 0; i < N_SERVOS; i++) {
-      uint8_t rest = (uint8_t)((uint16_t)OPEN_ANGLE[i] + (uint16_t)CLOSE_ANGLE[i]) / 2;
-      moveServoTo(i, rest);
+  for (uint8_t i = 0; i < N_SERVOS; i++) {
+    if (holdingCommand[i] && (now - lastCommandMs[i]) >= IDLE_TIMEOUT_MS) {
+      setServoTarget(i, restAngle(i), 255);
+      holdingCommand[i] = false;
     }
-    atRest = true;
+    updateServo(i, now);
   }
 
 }

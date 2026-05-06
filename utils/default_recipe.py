@@ -115,7 +115,7 @@ LIVE_INFER_RECIPE_DEFAULTS: Dict[str, Any] = {
     "serial_baud": 9600,
     "force_no_serial": False,
     "serial_write_timeout_s": 0.03,
-    "serial_max_hz": 10.0,
+    "serial_max_hz": 20.0,
     "serial_settle_s": 1.2,
     "serial_movement_warmup_enabled": False,
     "lsl_acquirer_queue_max_chunks": 32,

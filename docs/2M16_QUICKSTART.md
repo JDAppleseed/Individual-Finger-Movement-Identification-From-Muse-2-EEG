@@ -169,7 +169,8 @@ Metrics from `winning_model/session_report/eval_manifest.json`:
 
 Selection note:
 - `20260403_grouptrial_rest050` wins the offline holdout and event-level leaderboard.
-- `20260319_075520` is the public/deployment model because it wins cleaned pseudo-live would-send precision (`93.32%` vs `80.06%`) and false REST actuation (`0.12%` vs `6.74%`).
+- `20260319_075520` is the public/deployment model because it wins the deployment-safety selection audit. With the current per-finger actuation path, report `95.37%` would-send precision, `0.25%` false REST actuation, and `91.11%` event hit rate; treat window-level send recall as throughput, not classifier accuracy.
+- Website-facing metrics are staged in `docs/public_metrics_2m16_current.json`.
 - For live `2-M16` inference, use `Projects/2-M16/subjects/2-M16/winning_model/configs/infer.json`; it pins the March 19 model/scaler and tuned Step 7 postprocess settings.
 - See `docs/2M16_MODEL_SELECTION_AUDIT.md` for the concrete ranking table and diagnosis.
 

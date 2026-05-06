@@ -121,6 +121,7 @@ class CommandShaper:
                 target_finger = 0
                 speed = 0.0
         if previous_effective_cmd is not None:
+            same_finger = target_finger == previous_effective_cmd.finger_id
             changed = (
                 target_action != previous_effective_cmd.action_id
                 or target_finger != previous_effective_cmd.finger_id
@@ -129,7 +130,7 @@ class CommandShaper:
                 float(self.config.base_conf_thresh)
                 - float(self.config.hold_conf_margin)
             )
-            if changed:
+            if changed and same_finger:
                 last_delta = None
                 if self._last_cmd_timebase_ms is not None:
                     last_delta = timebase_ms - self._last_cmd_timebase_ms
@@ -138,7 +139,7 @@ class CommandShaper:
                     self._hold_until_ms = max(
                         self._hold_until_ms, timebase_ms + int(self.config.hold_ms)
                     )
-            if near_thresh:
+            if near_thresh and same_finger:
                 hold_requested = True
                 self._hold_until_ms = max(
                     self._hold_until_ms, timebase_ms + int(self.config.hold_ms)
