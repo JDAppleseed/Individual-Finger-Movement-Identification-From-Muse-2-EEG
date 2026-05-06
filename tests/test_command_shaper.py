@@ -37,7 +37,28 @@ def test_speed_gamma():
     assert abs(cmd.speed_scalar - 0.25) < 1e-6
 
 
-def test_hold_on_change():
+def test_hold_on_same_finger_change():
+    shaper = CommandShaper(CommandShaperConfig(hold_ms=200))
+    first = shaper.shape(
+        action_id=1,
+        finger_id=2,
+        action_conf=0.9,
+        timestamp_stream_ms=1000,
+        timebase_ms=1000,
+    )
+    second = shaper.shape(
+        action_id=2,
+        finger_id=2,
+        action_conf=0.9,
+        timestamp_stream_ms=1100,
+        timebase_ms=1100,
+    )
+    assert second.action_id == first.action_id
+    assert second.finger_id == first.finger_id
+    assert second.flags & FLAG_HOLD
+
+
+def test_different_finger_change_is_not_held():
     shaper = CommandShaper(CommandShaperConfig(hold_ms=200))
     first = shaper.shape(
         action_id=1,
@@ -53,9 +74,10 @@ def test_hold_on_change():
         timestamp_stream_ms=1100,
         timebase_ms=1100,
     )
-    assert second.action_id == first.action_id
-    assert second.finger_id == first.finger_id
-    assert second.flags & FLAG_HOLD
+    assert second.action_id == 2
+    assert second.finger_id == 3
+    assert not (second.flags & FLAG_HOLD)
+    assert (second.action_id, second.finger_id) != (first.action_id, first.finger_id)
 
 
 def test_speed_override_is_used_and_preserved_across_hold():
@@ -70,7 +92,7 @@ def test_speed_override_is_used_and_preserved_across_hold():
     )
     second = shaper.shape(
         action_id=2,
-        finger_id=3,
+        finger_id=2,
         action_conf=0.95,
         speed_scalar_override=0.2,
         timestamp_stream_ms=1100,
