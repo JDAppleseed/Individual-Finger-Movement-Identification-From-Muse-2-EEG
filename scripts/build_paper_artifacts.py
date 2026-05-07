@@ -193,10 +193,48 @@ def _session_provenance(session_dir: Path) -> Dict[str, Any]:
     }
 
 
+def _source_sessions_from_window_npz(session_dir: Path) -> List[Dict[str, str]]:
+    npz_path = session_dir / "processed" / "eeg_windows.npz"
+    if not npz_path.exists():
+        return []
+
+    try:
+        npz = np.load(npz_path, allow_pickle=True)
+    except Exception:
+        return []
+    if "session_id" not in npz:
+        return []
+
+    session_ids = np.asarray(npz["session_id"]).astype(str).reshape(-1)
+    if session_ids.size == 0:
+        return []
+    y_action = (
+        np.asarray(npz["y_action"]).astype(int).reshape(-1)
+        if "y_action" in npz and np.asarray(npz["y_action"]).size == session_ids.size
+        else np.zeros(session_ids.shape, dtype=int)
+    )
+
+    rows: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for session_id in session_ids.tolist():
+        if session_id in seen:
+            continue
+        seen.add(session_id)
+        mask = session_ids == session_id
+        role = "core" if np.any(y_action[mask] != 0) else "aux_rest"
+        rows.append({"session_id": session_id, "role": role})
+    return rows
+
+
 def _raw_support_sessions_for_run(run: "RunMetrics") -> List[Dict[str, str]]:
-    prov = _session_provenance(_session_dir_from_rel(run.session_dir_rel))
+    session_dir = _session_dir_from_rel(run.session_dir_rel)
+    prov = _session_provenance(session_dir)
     if prov["kind"] == "recorded":
         return [{"session_id": run.session_id, "role": "recorded"}]
+
+    rows_from_windows = _source_sessions_from_window_npz(session_dir)
+    if rows_from_windows:
+        return rows_from_windows
 
     rows: List[Dict[str, str]] = []
     combined_from = list(prov.get("combined_from_sessions") or [])
@@ -204,6 +242,8 @@ def _raw_support_sessions_for_run(run: "RunMetrics") -> List[Dict[str, str]]:
     aux = set(prov.get("aux_rest_sessions") or [])
     if not combined_from and prov.get("filter_source_session"):
         combined_from = [str(prov["filter_source_session"])]
+    if prov.get("filter_session_id") and str(prov["filter_session_id"]) not in combined_from:
+        combined_from.append(str(prov["filter_session_id"]))
 
     for session_id in combined_from:
         role = "supporting"
@@ -522,13 +562,28 @@ def _featured_manifest_key() -> Optional[Tuple[str, str, str]]:
 
 def _is_featured_manifest_run(run: RunMetrics, key: Optional[Tuple[str, str, str]] = None) -> bool:
     key = key if key is not None else _featured_manifest_key()
+    return _is_featured_manifest_parts(
+        run.subject_id,
+        run.session_dir_rel,
+        run.run_id,
+        key=key,
+    )
+
+
+def _is_featured_manifest_parts(
+    subject_id: str,
+    session_dir_rel: str,
+    run_id: str,
+    key: Optional[Tuple[str, str, str]] = None,
+) -> bool:
+    key = key if key is not None else _featured_manifest_key()
     if key is None:
         return False
-    subject_id, session_dir_rel, run_id = key
+    featured_subject_id, featured_session_dir_rel, featured_run_id = key
     return (
-        run.subject_id == subject_id
-        and run.session_dir_rel == session_dir_rel
-        and run.run_id == run_id
+        subject_id == featured_subject_id
+        and session_dir_rel == featured_session_dir_rel
+        and run_id == featured_run_id
     )
 
 
@@ -564,6 +619,11 @@ def _runs_featured_first(runs: List[RunMetrics]) -> List[RunMetrics]:
         key=lambda x: (x.subject_id, x.session_id, x.run_id),
     )
     return ([featured] if featured is not None else []) + others
+
+
+def _session_dir_for_subject_session(subject_id: str, session_id: str) -> Optional[Path]:
+    matches = sorted(PROJECTS_ROOT.glob(f"*/subjects/{subject_id}/sessions/{session_id}"))
+    return matches[0] if matches else None
 
 
 def _copy_figure(src: Path, dest_stem: str) -> str:
@@ -622,6 +682,44 @@ def _find_report_figs(report_dir: Path, run_id: str) -> Dict[str, Optional[Path]
         "reliability": mc_eval,
         "scatter": mc_scatter,
     }
+
+
+def _featured_mc_scatter_source(subject_id: str, session_dir: Path, run_id: str) -> Optional[Path]:
+    session_dir_rel = _repo_rel(session_dir)
+    if not _is_featured_manifest_parts(subject_id, session_dir_rel, run_id):
+        return None
+
+    featured = _load_featured_bundle()
+    manifest = featured.get("manifest") or {}
+    source_session_dir = manifest.get("source_session_dir")
+    if not source_session_dir:
+        return None
+
+    source_session = Path(str(source_session_dir))
+    if not source_session.is_absolute():
+        source_session = REPO_ROOT / source_session
+    session_name = source_session.name
+    report_dir = source_session / "processed" / "reports" / run_id
+
+    candidates: List[Path] = []
+    candidates.append(report_dir / f"mc_scatter_{session_name}.png")
+    candidates.extend(sorted(report_dir.glob("mc_scatter_*.png")) if report_dir.exists() else [])
+    candidates.extend(
+        sorted(
+            PROJECTS_ROOT.glob(
+                f"*/subjects/{subject_id}/archive/**/{session_name}/processed/reports/{run_id}/mc_scatter_*.png"
+            )
+        )
+    )
+
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.exists():
+            return path
+    return None
 
 
 def _resolve_test_indices(preds: Any) -> Optional[np.ndarray]:
@@ -1094,11 +1192,19 @@ def _compute_run_metrics(metrics_path: Path) -> RunMetrics:
     }
 
     # Report figures
-    report_dir = session_dir / "processed" / "reports" / run_id
-    figs = _find_report_figs(report_dir, run_id=run_id)
     subj = str(train_cfg.get("subject_id_filter") or metrics.get("subject_id") or "UNKNOWN")
     # Use the canonical session directory name (avoid embedding absolute paths into filenames).
     sess = str(session_dir.name)
+    report_dir = session_dir / "processed" / "reports" / run_id
+    figs = _find_report_figs(report_dir, run_id=run_id)
+    featured_scatter = _featured_mc_scatter_source(subj, session_dir, run_id)
+    if featured_scatter is not None:
+        figs["scatter"] = featured_scatter
+    elif _is_featured_manifest_parts(subj, session_dir_rel, run_id):
+        raise RuntimeError(
+            "Featured 2-M16 confidence/uncertainty scatter is missing from the archived Step 3c report; "
+            "refusing to regenerate it with a different visual style."
+        )
     stem_base = _safe_slug(f"{subj}__{sess}__{run_id}")
     fig_action = _copy_figure(figs["action"], f"{stem_base}__action_confusion") if figs["action"] else None
     fig_finger = _copy_figure(figs["finger"], f"{stem_base}__finger_confusion") if figs["finger"] else None
@@ -1443,13 +1549,34 @@ def _write_featured_provenance_figure(runs: List[RunMetrics]) -> Optional[str]:
 
 
 def _write_raw_windowing_figure(runs: List[RunMetrics]) -> Optional[str]:
-    source_run = next((r for r in sorted(runs, key=_run_rank_key, reverse=True) if _session_provenance(_session_dir_from_rel(r.session_dir_rel)).get("kind") == "recorded"), None)
-    if source_run is None:
+    featured = _featured_run(runs)
+    if featured is None:
         return None
 
-    session_dir = _session_dir_from_rel(source_run.session_dir_rel)
-    events = _load_event_rows(session_dir)
-    if not events:
+    featured_dir = _session_dir_from_rel(featured.session_dir_rel)
+    prov = _session_provenance(featured_dir)
+    candidate_dirs: List[Path] = []
+    if prov.get("kind") == "recorded":
+        candidate_dirs.append(featured_dir)
+    else:
+        support_rows = sorted(
+            _raw_support_sessions_for_run(featured),
+            key=lambda row: {"core": 0, "recorded": 1, "aux_rest": 2, "supporting": 3}.get(str(row.get("role")), 9),
+        )
+        for row in support_rows:
+            session_dir = _session_dir_for_subject_session(featured.subject_id, str(row.get("session_id")))
+            if session_dir is not None:
+                candidate_dirs.append(session_dir)
+
+    session_dir = None
+    events: List[Dict[str, Any]] = []
+    for candidate in candidate_dirs:
+        candidate_events = _load_event_rows(candidate)
+        if any(int(ev.get("action_id") or 0) != 0 for ev in candidate_events):
+            session_dir = candidate
+            events = candidate_events
+            break
+    if session_dir is None:
         return None
 
     active_event = next((ev for ev in events if int(ev.get("action_id") or 0) != 0 and float(ev.get("duration_s") or 0.0) >= 0.6), None)
@@ -1968,7 +2095,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     # Performance table per run
     perf_lines: List[str] = []
     perf_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n\\setlength{\\tabcolsep}{3pt}\n")
-    perf_lines.append("\\caption{Featured 2-M16 run with supporting preliminary 1-M16 result. Finger accuracy is computed with the deployment-consistent action-conditioned decode path on true non-REST windows.}\n")
+    perf_lines.append("\\caption{Featured 2-M16 deterministic evaluation and calibration summary. Finger accuracy is computed with the deployment-consistent action-conditioned decode path on true non-REST windows.}\n")
     perf_lines.append("\\label{tab:perf}\n")
     perf_lines.append("\\resizebox{\\textwidth}{!}{%\n")
     perf_lines.append("\\begin{tabular}{llp{0.28\\textwidth}rrrrrrrr}\n\\toprule\n")
@@ -1997,13 +2124,6 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
             f"{_format_num(r.test_action_ece, 4)} & {_format_num(r.test_finger_ece_non_rest, 4)} \\\\\n"
         )
     perf_lines.append("\\bottomrule\n\\end{tabular}%\n}\n")
-    perf_lines.append(
-        "\\vspace{0.25em}\n"
-        "\\begin{minipage}{0.98\\textwidth}\\footnotesize "
-        "Note: 2-M16 is the featured public deployment checkpoint. "
-        "1-M16 is an archived preliminary single-session result from a different dataset construction and is not a controlled between-subject comparator."
-        "\\end{minipage}\n"
-    )
     perf_lines.append("\\end{table*}\n\n")
 
     # Dataset / windowing table per session
@@ -2012,7 +2132,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
         dataset_rows.setdefault((r.subject_id, r.session_id), r)
     data_lines: List[str] = []
     data_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n\\setlength{\\tabcolsep}{3pt}\n")
-    data_lines.append("\\caption{Dataset and window extraction summary for the representative datasets reported in this manuscript.}\n")
+    data_lines.append("\\caption{Dataset and window extraction summary for the featured 2-M16 dataset reported in this manuscript.}\n")
     data_lines.append("\\label{tab:dataset}\n")
     data_lines.append("\\resizebox{\\textwidth}{!}{%\n")
     data_lines.append("\\begin{tabular}{lp{0.34\\textwidth}rrrrrr}\n\\toprule\n")
@@ -2134,7 +2254,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     ev_lines: List[str] = []
     ev_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
     ev_lines.append(
-        "\\caption{Raw-session event label counts for the recorded sessions underlying the representative datasets. Role indicates the representative recorded session (Recorded), a movement session merged into a derived dataset (Core), or an auxiliary REST-only session added for REST coverage (Aux REST). Column headers abbreviate thumb/index/middle/ring/pinky open and close events.}\n"
+        "\\caption{Raw-session event label counts for the recorded sessions underlying the featured 2-M16 dataset. Role indicates a movement session merged into the derived dataset (Core) or an auxiliary REST-only session added for REST coverage (Aux REST). Column headers abbreviate thumb/index/middle/ring/pinky open and close events.}\n"
     )
     ev_lines.append("\\label{tab:events}\n")
     ev_lines.append("\\setlength{\\tabcolsep}{4pt}\n")
@@ -2174,7 +2294,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
 
     pc_lines: List[str] = []
     pc_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
-    pc_lines.append("\\caption{Action-class accuracies for the representative manuscript runs.}\n")
+    pc_lines.append("\\caption{Action-class accuracies for the featured 2-M16 run.}\n")
     pc_lines.append("\\label{tab:perclass-action}\n")
     pc_lines.append("\\setlength{\\tabcolsep}{3pt}\n")
     pc_lines.append("\\begin{tabular}{lp{0.30\\textwidth}lrr}\n\\toprule\n")
@@ -2189,7 +2309,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
             )
     pc_lines.append("\\bottomrule\n\\end{tabular}\n\\end{table*}\n\n")
     pc_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
-    pc_lines.append("\\caption{Finger-class accuracies on true non-REST test windows for the representative manuscript runs, using the deployment-consistent action-conditioned finger decode path.}\n")
+    pc_lines.append("\\caption{Finger-class accuracies on true non-REST test windows for the featured 2-M16 run, using the deployment-consistent action-conditioned finger decode path.}\n")
     pc_lines.append("\\label{tab:perclass-finger}\n")
     pc_lines.append("\\setlength{\\tabcolsep}{3pt}\n")
     pc_lines.append("\\begin{tabular}{lp{0.30\\textwidth}lrr}\n\\toprule\n")
@@ -2212,7 +2332,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     # Bootstrap CI table (optional rigor supplement)
     boot_lines: List[str] = []
     boot_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
-    boot_lines.append("\\caption{Bootstrap 95\\% confidence intervals for the representative manuscript runs.}\n")
+    boot_lines.append("\\caption{Bootstrap 95\\% confidence intervals for the featured 2-M16 run.}\n")
     boot_lines.append("\\label{tab:bootci}\n")
     boot_lines.append("\\resizebox{\\textwidth}{!}{%\n")
     boot_lines.append("\\begin{tabular}{llrrrr}\n\\toprule\n")
@@ -2239,7 +2359,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     # Train vs test generalization gaps (from metrics.json train/test blocks)
     gap_lines: List[str] = []
     gap_lines.append("\\begin{table*}[t]\n\\centering\n\\scriptsize\n")
-    gap_lines.append("\\caption{Train--test generalization gaps (percentage points) for the representative manuscript runs.}\n")
+    gap_lines.append("\\caption{Train--test generalization gaps (percentage points) for the featured 2-M16 run.}\n")
     gap_lines.append("\\label{tab:gap}\n")
     gap_lines.append("\\resizebox{\\textwidth}{!}{%\n")
     gap_lines.append("\\begin{tabular}{llrrrrrr}\n\\toprule\n")
@@ -2275,9 +2395,10 @@ def _write_figures(runs: List[RunMetrics]) -> None:
     for r in ([featured] if featured is not None else []):
         if not any([r.fig_action_confusion, r.fig_finger_confusion, r.fig_reliability, r.fig_scatter]):
             continue
-        lines.append("\\begin{figure*}[t]\n\\centering\n")
+
         # Grid using minipages (IEEE-friendly, no extra packages required).
-        # Only include panels that are present in the archived run artifacts.
+        # Keep confusion matrices separate from the confidence/uncertainty
+        # scatter so the featured scatter can retain its archived full-panel look.
         def inc(path: str, caption: str, width: str = "0.49\\linewidth") -> str:
             safe_path = path.replace("\\", "/")
             if not safe_path.startswith("../"):
@@ -2296,18 +2417,33 @@ def _write_figures(runs: List[RunMetrics]) -> None:
             (r.fig_action_confusion, f"Action confusion matrix ({subj})."),
             (r.fig_finger_confusion, f"Finger confusion matrix ({subj})."),
             (r.fig_reliability, f"Reliability / calibration summary ({subj})."),
-            (r.fig_scatter, f"MC-dropout action confidence-uncertainty plot ({subj})."),
         ]
         panels = [(path, caption) for path, caption in panel_specs if path]
-        for idx, (path, caption) in enumerate(panels):
-            letter = chr(ord("a") + idx)
-            width = "0.65\\linewidth" if len(panels) == 1 else "0.49\\linewidth"
-            lines.append(inc(str(path), f"({letter}) {caption}", width=width))
-            if idx % 2 == 1 and idx != len(panels) - 1:
-                lines.append("\\\\[0.5em]\n")
-        fig_caption = f"Representative evaluation figures for the featured {subj} run."
-        lines.append(f"\\caption{{{fig_caption}}}\n")
-        lines.append("\\end{figure*}\n\n")
+        if panels:
+            lines.append("\\begin{figure*}[t]\n\\centering\n")
+            for idx, (path, caption) in enumerate(panels):
+                letter = chr(ord("a") + idx)
+                width = "0.65\\linewidth" if len(panels) == 1 else "0.49\\linewidth"
+                lines.append(inc(str(path), f"({letter}) {caption}", width=width))
+                if idx % 2 == 1 and idx != len(panels) - 1:
+                    lines.append("\\\\[0.5em]\n")
+            fig_caption = f"Representative confusion and calibration figures for the featured {subj} run."
+            lines.append(f"\\caption{{{fig_caption}}}\n")
+            lines.append("\\label{fig:featured-confusion}\n")
+            lines.append("\\end{figure*}\n\n")
+
+        if r.fig_scatter:
+            safe_path = str(r.fig_scatter).replace("\\", "/")
+            if not safe_path.startswith("../"):
+                safe_path = f"../{safe_path}"
+            lines.append("\\begin{figure*}[t]\n\\centering\n")
+            lines.append(f"\\includegraphics[width=0.92\\textwidth]{{{safe_path}}}\n")
+            lines.append(
+                f"\\caption{{Confidence--uncertainty scatter for the featured {subj} run. "
+                "This is the archived Step~3c MC-dropout report artifact included without restyling.}\n"
+            )
+            lines.append("\\label{fig:confidence-uncertainty}\n")
+            lines.append("\\end{figure*}\n\n")
 
     (OUT_DIR / "figures.tex").write_text("".join(lines), encoding="utf-8")
 
@@ -2348,7 +2484,9 @@ def main() -> int:
     for metrics_path in sorted(PROJECTS_ROOT.rglob("processed/models/*/metrics.json")):
         all_run_metrics.append(_compute_run_metrics(metrics_path))
 
-    run_metrics = _select_best_runs_per_subject(all_run_metrics)
+    candidate_run_metrics = _select_best_runs_per_subject(all_run_metrics)
+    featured = _featured_run(candidate_run_metrics) or _featured_run(all_run_metrics)
+    run_metrics = [featured] if featured is not None else candidate_run_metrics[:1]
 
     # Demographics (subject.json)
     demos = _scan_subject_demographics()
