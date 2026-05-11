@@ -2397,8 +2397,8 @@ def _write_figures(runs: List[RunMetrics]) -> None:
             continue
 
         # Grid using minipages (IEEE-friendly, no extra packages required).
-        # Keep confusion matrices separate from the confidence/uncertainty
-        # scatter so the featured scatter can retain its archived full-panel look.
+        # The Step 3c reliability artifact already includes the action and
+        # finger confusion matrices, so do not repeat them as standalone panels.
         def inc(path: str, caption: str, width: str = "0.49\\linewidth") -> str:
             safe_path = path.replace("\\", "/")
             if not safe_path.startswith("../"):
@@ -2413,11 +2413,17 @@ def _write_figures(runs: List[RunMetrics]) -> None:
             )
 
         subj = _latex_escape(_display_subject_id(r.subject_id))
-        panel_specs: List[Tuple[Optional[str], str]] = [
-            (r.fig_action_confusion, f"Action confusion matrix ({subj})."),
-            (r.fig_finger_confusion, f"Finger confusion matrix ({subj})."),
-            (r.fig_reliability, f"Reliability / calibration summary ({subj})."),
-        ]
+        if r.fig_reliability:
+            panel_specs: List[Tuple[Optional[str], str]] = [
+                (r.fig_reliability, f"Step~3c reliability/calibration summary, including action and finger confusion matrices ({subj})."),
+                (r.fig_scatter, f"Supporting MC-dropout confidence--uncertainty view ({subj})."),
+            ]
+        else:
+            panel_specs = [
+                (r.fig_action_confusion, f"Action confusion matrix ({subj})."),
+                (r.fig_finger_confusion, f"Finger confusion matrix ({subj})."),
+                (r.fig_scatter, f"Supporting MC-dropout confidence--uncertainty view ({subj})."),
+            ]
         panels = [(path, caption) for path, caption in panel_specs if path]
         if panels:
             lines.append("\\begin{figure*}[t]\n\\centering\n")
@@ -2427,22 +2433,13 @@ def _write_figures(runs: List[RunMetrics]) -> None:
                 lines.append(inc(str(path), f"({letter}) {caption}", width=width))
                 if idx % 2 == 1 and idx != len(panels) - 1:
                     lines.append("\\\\[0.5em]\n")
-            fig_caption = f"Representative confusion and calibration figures for the featured {subj} run."
-            lines.append(f"\\caption{{{fig_caption}}}\n")
-            lines.append("\\label{fig:featured-confusion}\n")
-            lines.append("\\end{figure*}\n\n")
-
-        if r.fig_scatter:
-            safe_path = str(r.fig_scatter).replace("\\", "/")
-            if not safe_path.startswith("../"):
-                safe_path = f"../{safe_path}"
-            lines.append("\\begin{figure*}[t]\n\\centering\n")
-            lines.append(f"\\includegraphics[width=0.92\\textwidth]{{{safe_path}}}\n")
-            lines.append(
-                f"\\caption{{Confidence--uncertainty scatter for the featured {subj} run. "
-                "This is the archived Step~3c MC-dropout report artifact included without restyling.}\n"
+            fig_caption = (
+                f"Representative Step~3c evaluation figure for the featured {subj} run. "
+                "The composite reliability panel carries the confusion-matrix content; "
+                "the confidence--uncertainty panel is included as supporting evidence for the command gate."
             )
-            lines.append("\\label{fig:confidence-uncertainty}\n")
+            lines.append(f"\\caption{{{fig_caption}}}\n")
+            lines.append("\\label{fig:featured-evaluation}\n")
             lines.append("\\end{figure*}\n\n")
 
     (OUT_DIR / "figures.tex").write_text("".join(lines), encoding="utf-8")

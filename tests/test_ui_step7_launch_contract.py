@@ -265,6 +265,45 @@ def test_replay_preview_does_not_resend_same_active_target(window):
     assert model_views is not None
 
 
+def test_replay_preview_different_active_target_does_not_force_global_rest(window):
+    model_views = window._build_model_views_widget()
+    window.replay_viz = SimpleNamespace(window_start=np.asarray([0.0, 0.05, 0.10]))
+    window._refresh_replay_views = lambda: None
+    window._toggle_replay_hand_preview(True)
+    window.replay_hand_preview_checkbox.setChecked(True)
+
+    class _FakeActuator:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def send(self, finger_id, action_id, speed_scalar=None):
+            self.calls.append((finger_id, action_id, speed_scalar))
+
+    actuator = _FakeActuator()
+    window._ensure_replay_hand_actuator = lambda: actuator
+    window._ensure_replay_runtime_records = lambda: [
+        {
+            "actuation_target_finger_id": 2,
+            "actuation_target_action_id": 1,
+            "actuation_speed_scalar": 0.8,
+        },
+        {
+            "actuation_target_finger_id": 3,
+            "actuation_target_action_id": 2,
+            "actuation_speed_scalar": 0.6,
+        },
+    ]
+
+    window._maybe_send_replay_preview(0)
+    window._maybe_send_replay_preview(1)
+
+    assert actuator.calls == [
+        (2, 1, pytest.approx(0.4)),
+        (3, 2, pytest.approx(0.3)),
+    ]
+    assert model_views is not None
+
+
 def test_replay_hand_preview_blocks_serial_while_live_transport_active(
     window, monkeypatch: pytest.MonkeyPatch
 ):

@@ -27,7 +27,7 @@
       6 = wrist (optional)
 
     action_id:
-      0 = rest (move to midpoint between open/close; delayed 0.5s if coming from open/close)
+      0 = rest (move to midpoint; deferred until any in-progress open/close reaches its endpoint)
       1 = open (no extra delay)
       2 = close (no extra delay)
 
@@ -56,9 +56,9 @@
 
 // ------------------------- Config -------------------------
 const long BAUD = 9600;
-// Per-finger hold interval. A commanded finger returns to midpoint/rest after
-// this many milliseconds without another command for that same finger.
-const unsigned long IDLE_TIMEOUT_MS = 250;
+// A commanded finger must reach its open/close endpoint before it can return to
+// midpoint/rest. This brief settle makes the endpoint physically visible.
+const unsigned long EXTREME_SETTLE_MS = 100;
 
 // Servo channel order: thumb, index, middle, ring, pinky, wrist
 static const uint8_t N_SERVOS = 6;
@@ -78,9 +78,19 @@ Servo servos[N_SERVOS];
 uint8_t currentAngle[N_SERVOS];
 uint8_t targetAngle[N_SERVOS];
 uint8_t stepDelayMsForServo[N_SERVOS];
-unsigned long lastCommandMs[N_SERVOS];
+uint8_t extremeAngle[N_SERVOS];
+unsigned long extremeReachedMs[N_SERVOS];
 unsigned long lastStepMs[N_SERVOS];
-bool holdingCommand[N_SERVOS];
+bool returnToRestQueued[N_SERVOS];
+
+enum MotionPhase {
+  PHASE_RESTING,
+  PHASE_MOVING_TO_EXTREME,
+  PHASE_AT_EXTREME,
+  PHASE_RETURNING_TO_REST
+};
+
+MotionPhase motionPhase[N_SERVOS];
 
 // ------------------------- Helpers -------------------------
 void attachServos() {
@@ -90,10 +100,12 @@ void attachServos() {
     uint8_t rest = (uint8_t)((uint16_t)OPEN_ANGLE[i] + (uint16_t)CLOSE_ANGLE[i]) / 2;
     currentAngle[i] = rest;
     targetAngle[i] = rest;
+    extremeAngle[i] = rest;
     stepDelayMsForServo[i] = 2;
-    lastCommandMs[i] = now;
+    extremeReachedMs[i] = now;
     lastStepMs[i] = now;
-    holdingCommand[i] = false;
+    returnToRestQueued[i] = false;
+    motionPhase[i] = PHASE_RESTING;
     servos[i].write(currentAngle[i]);
     delay(50);
   }
@@ -132,6 +144,61 @@ void updateServo(uint8_t idx, unsigned long now) {
   lastStepMs[idx] = now;
 }
 
+void beginReturnToRest(uint8_t idx) {
+  if (idx >= N_SERVOS) return;
+  setServoTarget(idx, restAngle(idx), 255);
+  returnToRestQueued[idx] = false;
+  motionPhase[idx] = PHASE_RETURNING_TO_REST;
+}
+
+void requestRest(uint8_t idx) {
+  if (idx >= N_SERVOS) return;
+  if (motionPhase[idx] == PHASE_MOVING_TO_EXTREME && currentAngle[idx] != extremeAngle[idx]) {
+    returnToRestQueued[idx] = true;
+    return;
+  }
+  beginReturnToRest(idx);
+}
+
+void beginExtremeMove(uint8_t idx, uint8_t target, uint8_t speed_u8) {
+  if (idx >= N_SERVOS) return;
+  extremeAngle[idx] = target;
+  returnToRestQueued[idx] = true;
+  motionPhase[idx] = PHASE_MOVING_TO_EXTREME;
+  setServoTarget(idx, target, speed_u8);
+}
+
+void updateMotionState(uint8_t idx, unsigned long now) {
+  if (idx >= N_SERVOS) return;
+  updateServo(idx, now);
+
+  if (
+    motionPhase[idx] == PHASE_MOVING_TO_EXTREME
+    && currentAngle[idx] == extremeAngle[idx]
+    && targetAngle[idx] == extremeAngle[idx]
+  ) {
+    motionPhase[idx] = PHASE_AT_EXTREME;
+    extremeReachedMs[idx] = now;
+  }
+
+  if (
+    motionPhase[idx] == PHASE_AT_EXTREME
+    && returnToRestQueued[idx]
+    && (now - extremeReachedMs[idx]) >= EXTREME_SETTLE_MS
+  ) {
+    beginReturnToRest(idx);
+  }
+
+  if (
+    motionPhase[idx] == PHASE_RETURNING_TO_REST
+    && currentAngle[idx] == targetAngle[idx]
+    && targetAngle[idx] == restAngle(idx)
+  ) {
+    motionPhase[idx] = PHASE_RESTING;
+    extremeAngle[idx] = targetAngle[idx];
+  }
+}
+
 void commandFinger(uint8_t finger_id, uint8_t action_id, uint8_t speed_u8 = 255) {
   // action: 0=rest, 1=open, 2=close
   // Invariant: finger_id=0 is NONE and is always a no-op; never actuate hardware.
@@ -142,16 +209,13 @@ void commandFinger(uint8_t finger_id, uint8_t action_id, uint8_t speed_u8 = 255)
   auto do_one = [&](uint8_t idx) {
     if (idx >= N_SERVOS) return;
     if (action_id == 0) {
-      setServoTarget(idx, restAngle(idx), 255);
-      holdingCommand[idx] = false;
+      requestRest(idx);
       return;
     }
 
-    // action_id 1 or 2: no extra delay, override any pending rest.
+    // action_id 1 or 2: drive to the endpoint first; rest can only happen after that.
     uint8_t target = (action_id == 1) ? OPEN_ANGLE[idx] : CLOSE_ANGLE[idx];
-    setServoTarget(idx, target, speed_u8);
-    lastCommandMs[idx] = millis();
-    holdingCommand[idx] = true;
+    beginExtremeMove(idx, target, speed_u8);
   };
 
   // Map ids to indices (1..6 -> 0..5)
@@ -212,15 +276,12 @@ void loop() {
     }
   }
 
-  // Safety hold timeout: each finger independently returns to rest after its
-  // own command goes stale. Other fingers remain commandable during that hold.
+  // Endpoint-gated motion: each finger independently completes its open/close
+  // endpoint before returning to rest. Other fingers remain commandable while
+  // that stroke is in progress.
   unsigned long now = millis();
   for (uint8_t i = 0; i < N_SERVOS; i++) {
-    if (holdingCommand[i] && (now - lastCommandMs[i]) >= IDLE_TIMEOUT_MS) {
-      setServoTarget(i, restAngle(i), 255);
-      holdingCommand[i] = false;
-    }
-    updateServo(i, now);
+    updateMotionState(i, now);
   }
 
 }

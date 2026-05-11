@@ -17,7 +17,8 @@ Source: internal Design Spec Rev A PDF (not committed in this repo)
 ## Operational clarification
 
 - Actuation cooldown is a per-finger actuator hold interval, not a global hand lockout.
-- A finger should keep the last commanded position during its hold interval unless a later command to the same finger supersedes it after the cooldown.
+- A finger should complete the last commanded open/close endpoint before any rest command or timeout can return it to rest.
+- Return-to-rest is owned by the palm controller per finger; UI previews should not issue a full-hand rest before starting a different active finger.
 - Commands to other fingers may be emitted during that interval, subject only to serial throughput and the target finger's own cooldown.
 - The Arduino receiver must enforce the same per-finger hold behavior. Its servo updates should be non-blocking so one finger's movement does not prevent the controller from accepting another finger command.
 - The current host default allows up to 20 serial commands/s, matching the 50 ms live inference hop. The model gate remains more conservative than that ceiling; the serial ceiling should not be interpreted as a target actuation rate.

@@ -3023,11 +3023,9 @@ class MainWindow(QMainWindow):
                 if self._replay_last_active_command is not None:
                     self._send_replay_rest_pose(actuator)
                 return
-            if (
-                self._replay_last_active_command is not None
-                and self._replay_last_active_command != preview_key
-            ):
-                self._send_replay_rest_pose(actuator)
+            # Do not globally rest the hand before a new active target. The
+            # controller owns endpoint-gated return-to-rest per finger, so a
+            # previous finger can finish its stroke while this one starts.
             actuator.send(
                 int(finger_id),
                 int(action_id),
