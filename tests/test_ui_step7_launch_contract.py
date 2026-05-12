@@ -64,6 +64,8 @@ def test_infer_transport_isolation_settings_are_ui_visible(window):
         "serial_settle_s",
         "serial_movement_warmup_enabled",
         "lsl_acquirer_queue_max_chunks",
+        "live_buffer_sec",
+        "live_max_window_lag_s",
     }
     assert expected.issubset(set(window.fields["infer"]))
     assert expected.issubset(

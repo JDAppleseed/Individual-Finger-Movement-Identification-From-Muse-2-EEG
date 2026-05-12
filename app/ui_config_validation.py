@@ -116,6 +116,7 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         )
     for key in (
         "LIVE_EEG_PLOT_ENABLED",
+        "LIVE_PREDICTION_TEXT_ENABLED",
         "enable_actuation",
         "force_no_serial",
         "serial_movement_warmup_enabled",
@@ -168,16 +169,33 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         "LSL_RESOLVE_TIMEOUT",
         "serial_write_timeout_s",
         "serial_max_hz",
+        "LIVE_EEG_PLOT_DISPLAY_FS",
+        "LIVE_EEG_PLOT_FPS",
+        "LIVE_PREDICTION_TEXT_FPS",
+        "live_buffer_sec",
+        "live_max_window_lag_s",
     ):
         _validate_float_min(settings, key, 0.0, errors)
     _validate_float_min(settings, "serial_settle_s", 0.0, errors)
-    for key in ("serial_write_timeout_s", "serial_max_hz"):
+    for key in (
+        "serial_write_timeout_s",
+        "serial_max_hz",
+        "LIVE_EEG_PLOT_DISPLAY_FS",
+        "LIVE_EEG_PLOT_FPS",
+        "live_buffer_sec",
+    ):
         if key in settings:
             try:
                 if float(settings.get(key)) <= 0.0:
                     errors.append(f"{key} must be > 0.")
             except Exception:
                 pass
+    if settings.get("LIVE_PREDICTION_TEXT_ENABLED") and "LIVE_PREDICTION_TEXT_FPS" in settings:
+        try:
+            if float(settings.get("LIVE_PREDICTION_TEXT_FPS")) <= 0.0:
+                errors.append("LIVE_PREDICTION_TEXT_FPS must be > 0.")
+        except Exception:
+            pass
     for key in ("bad_channel_clipped_frac", "bad_window_clipped_frac"):
         _validate_unit_interval(settings, key, errors)
     _validate_int_min(settings, "bad_window_max_masked_channels", 0, errors)

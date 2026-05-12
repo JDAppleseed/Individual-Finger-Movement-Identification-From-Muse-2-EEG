@@ -91,6 +91,8 @@ def test_live_infer_rejects_bad_actuation_and_postprocess_values():
             "serial_max_hz": 0.0,
             "serial_settle_s": -1.0,
             "lsl_acquirer_queue_max_chunks": 0,
+            "live_buffer_sec": 0.0,
+            "live_max_window_lag_s": -0.1,
             "actuation_min_prob": 1.2,
             "actuation_stability": 0,
             "actuation_cooldown_ms": -1,
@@ -116,6 +118,8 @@ def test_live_infer_rejects_bad_actuation_and_postprocess_values():
         "lsl_acquirer_queue_max_chunks must be >= 1." in err
         for err in result.errors
     )
+    assert any("live_buffer_sec must be > 0." in err for err in result.errors)
+    assert any("live_max_window_lag_s must be >= 0.0." in err for err in result.errors)
     assert any("actuation_min_prob must be in [0.0, 1.0]." in err for err in result.errors)
     assert any("actuation_stability must be >= 1." in err for err in result.errors)
     assert any("actuation_cooldown_ms must be >= 0." in err for err in result.errors)

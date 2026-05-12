@@ -16,7 +16,7 @@ from utils.inference import InferenceConfig, InferenceEngine
 from utils.postprocess import PostprocessSettings, PostprocessState
 from utils.runtime_utils import TemperatureScalingState
 from utils.step7_config import build_step7_replay_runtime_config, load_step7_config
-from visualization.live_viz import parse_viz_line
+from visualization.live_viz import parse_prediction_line, parse_viz_line
 
 
 def _load_live_module():
@@ -339,6 +339,8 @@ def test_live_infer_defaults_match_best_live_profile():
     assert defaults["LIVE_EEG_PLOT_ENABLED"] is True
     assert defaults["window_sec"] == pytest.approx(0.25)
     assert defaults["hop_sec"] == pytest.approx(0.05)
+    assert defaults["live_buffer_sec"] == pytest.approx(1.0)
+    assert defaults["live_max_window_lag_s"] == pytest.approx(0.15)
     assert defaults["latency_threshold_ms"] == pytest.approx(750.0)
     assert defaults["smoothing_method"] == "ema"
     assert defaults["smoothing_enabled"] is True
@@ -377,6 +379,8 @@ def test_live_infer_defaults_match_best_live_profile():
     assert config_defaults["LIVE_EEG_PLOT_ENABLED"] is True
     assert config_defaults["window_sec"] == pytest.approx(0.25)
     assert config_defaults["hop_sec"] == pytest.approx(0.05)
+    assert config_defaults["live_buffer_sec"] == pytest.approx(1.0)
+    assert config_defaults["live_max_window_lag_s"] == pytest.approx(0.15)
     assert config_defaults["latency_threshold_ms"] == pytest.approx(750.0)
     assert config_defaults["smoothing_method"] == "ema"
     assert config_defaults["smoothing_enabled"] is True
@@ -799,6 +803,10 @@ def test_parser_accepts_ui_hyphenated_flags():
             "--window-sec",
             "0.5",
             "--allow-drop",
+            "--live-buffer-sec",
+            "6.5",
+            "--live-max-window-lag-s",
+            "0.4",
             "--latency-threshold-ms",
             "333",
         ]
@@ -808,7 +816,27 @@ def test_parser_accepts_ui_hyphenated_flags():
     assert args.enable_actuation is True
     assert np.isclose(args.window_sec, 0.5)
     assert args.allow_drop is True
+    assert np.isclose(args.live_buffer_sec, 6.5)
+    assert np.isclose(args.live_max_window_lag_s, 0.4)
     assert np.isclose(args.latency_threshold_ms, 333.0)
+
+
+def test_live_window_scheduler_fast_forwards_stale_backlog():
+    mod = _load_live_module()
+
+    plan = mod._compute_live_window_fast_forward_plan(
+        next_window_start_s=0.0,
+        latest_stream_time_s=2.0,
+        window_sec=0.25,
+        hop_sec=0.05,
+        earliest_buffer_time_s=1.0,
+        strict_alignment_gap_s=0.02,
+        live_max_window_lag_s=0.50,
+    )
+
+    assert plan.reason == "live_lag_budget_exceeded"
+    assert plan.skipped_windows == 25
+    assert plan.next_window_start_s == pytest.approx(1.25)
 
 
 def test_require_deployable_run_rejects_legacy_finger_head(tmp_path: Path):
@@ -1273,6 +1301,37 @@ def test_lsl_acquirer_keeps_pulling_while_serial_worker_blocks():
         acquirer.stop()
 
 
+def test_lsl_acquirer_drain_recent_drops_stale_consumer_backlog():
+    mod = _load_live_module()
+
+    class _IdleInlet:
+        def pull_chunk(self, timeout=0.0, max_samples=64):
+            return [], []
+
+    acquirer = mod.LiveLslAcquirer(
+        _IdleInlet(),
+        max_samples=64,
+        queue_max_chunks=8,
+        event_logger=mod.RuntimeEventLogger(None),
+    )
+    for idx in range(6):
+        ts = float(idx) * 0.1
+        acquirer._enqueue_latest(
+            mod.LslChunk(
+                samples=[[float(idx), 0.0, 0.0, 0.0]],
+                timestamps=[ts],
+                received_mono_s=ts,
+            )
+        )
+
+    recent = acquirer.drain_recent(retention_s=0.25)
+    stats = acquirer.stats()
+
+    assert [chunk.timestamps[-1] for chunk in recent] == pytest.approx([0.3, 0.4, 0.5])
+    assert stats["consumer_stale_dropped_chunks"] == 3
+    assert stats["consumer_stale_dropped_samples"] == 3
+
+
 def test_main_uses_config_model_override_with_session_dir(tmp_path, monkeypatch):
     mod = _load_live_module()
     session_dir = tmp_path / "live_session"
@@ -1394,6 +1453,55 @@ def test_parse_viz_line_accepts_vizjson():
     assert payload["t"] == 1.25
     assert payload["hidden_mag"] == 0.42
     assert payload["finger_probs"][0][1] == 0.9
+
+
+def test_parse_prediction_line_accepts_predjson():
+    payload = parse_prediction_line(
+        "PREDJSON "
+        '{"committed_action_label":"OPEN","committed_finger_label":"THUMB",'
+        '"target_action_id":1,"target_finger_id":1,"would_send":true}'
+    )
+
+    assert payload is not None
+    assert payload["committed_action_label"] == "OPEN"
+    assert payload["target_finger_id"] == 1
+    assert payload["would_send"] is True
+
+
+def test_live_prediction_text_payload_reports_would_send_without_serial():
+    mod = _load_live_module()
+    decision = mod.ActuationDecision(finger_id=1, action_id=1, prob=0.82)
+    payload = mod._build_live_prediction_text_payload(
+        candidate_index=3,
+        window_end=1.5,
+        decision_info={
+            "committed_action_id": 1,
+            "committed_finger_id": 1,
+            "raw_top_action_id": 1,
+            "raw_top_finger_id": 1,
+            "action_conf": 0.9,
+            "finger_conf": 0.82,
+        },
+        decision=decision,
+        actuation_target_finger_id=1,
+        actuation_target_action_id=1,
+        actuation_speed_scalar=0.65,
+        actuation_vote={"reason": "stable_pair"},
+        latency_ms=80.0,
+        quality_bad=False,
+        finger_gate_ok=True,
+        applicability_gate_ok=True,
+        uncertainty_gate_ok=True,
+        actuation_latency_gate_ok=True,
+        serial_actuation_ready=False,
+        actuation_sent=False,
+        actuation_suppressed_reason=None,
+    )
+
+    assert payload["would_send"] is True
+    assert payload["hand_connected"] is False
+    assert payload["target_finger_label"] == "THUMB"
+    assert payload["target_action_label"] == "OPEN"
 
 
 def test_debounced_should_send_allows_repeat_for_same_command(monkeypatch):

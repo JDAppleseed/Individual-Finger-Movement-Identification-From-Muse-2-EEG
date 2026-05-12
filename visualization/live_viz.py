@@ -57,3 +57,13 @@ def parse_viz_line(line: str) -> Optional[Dict[str, Any]]:
         return payload
     except Exception:
         return None
+
+
+def parse_prediction_line(line: str) -> Optional[Dict[str, Any]]:
+    if not line.startswith("PREDJSON "):
+        return None
+    try:
+        payload = json.loads(line[len("PREDJSON ") :].strip())
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None

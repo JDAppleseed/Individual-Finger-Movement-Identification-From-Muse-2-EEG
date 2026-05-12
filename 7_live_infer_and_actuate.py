@@ -69,6 +69,8 @@ from utils.command_shaper import CommandShaper, CommandShaperConfig
 from utils.default_recipe import LIVE_INFER_RECIPE_DEFAULTS
 from utils.inference import InferenceConfig, InferenceEngine
 from utils.label_schema import (
+    ACTION_NAMES,
+    FINGER_NAMES,
     decode_finger_prediction,
     decode_prediction_pair,
     finger_confidence_for_id,
@@ -145,6 +147,14 @@ class ActuationDecision:
 class LSLResolutionResult:
     inlet: Any
     resolution: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LiveWindowFastForwardPlan:
+    skipped_windows: int
+    next_window_start_s: float
+    reason: Optional[str]
+    target_start_s: Optional[float]
 
 
 @dataclass(frozen=True)
@@ -626,7 +636,7 @@ class LiveLslAcquirer:
         inlet: Any,
         *,
         max_samples: int = 64,
-        queue_max_chunks: int = 32,
+        queue_max_chunks: int = 128,
         empty_sleep_s: float = 0.001,
         event_logger: Optional[RuntimeEventLogger] = None,
     ) -> None:
@@ -634,8 +644,9 @@ class LiveLslAcquirer:
         self.max_samples = max(1, int(max_samples))
         self.empty_sleep_s = max(0.0, float(empty_sleep_s))
         self.event_logger = event_logger
+        self.queue_max_chunks = max(1, int(queue_max_chunks))
         self._queue: queue.Queue[LslChunk] = queue.Queue(
-            maxsize=max(1, int(queue_max_chunks))
+            maxsize=int(self.queue_max_chunks)
         )
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -653,6 +664,8 @@ class LiveLslAcquirer:
         self.queue_max_depth = 0
         self.queue_dropped_chunks = 0
         self.queue_dropped_samples = 0
+        self.consumer_dropped_chunks = 0
+        self.consumer_dropped_samples = 0
 
     def start(self) -> None:
         self._thread = threading.Thread(
@@ -735,6 +748,36 @@ class LiveLslAcquirer:
                 break
         return items
 
+    def drain_recent(self, *, retention_s: float) -> list[LslChunk]:
+        items = self.drain(max_chunks=int(self.queue_max_chunks))
+        if len(items) <= 1:
+            return items
+        try:
+            latest_ts = float(items[-1].timestamps[-1])
+        except Exception:
+            return items
+        if not np.isfinite(latest_ts):
+            return items
+        cutoff = latest_ts - max(0.0, float(retention_s))
+        keep_from = 0
+        for idx, item in enumerate(items):
+            try:
+                item_last_ts = float(item.timestamps[-1])
+            except Exception:
+                continue
+            if np.isfinite(item_last_ts) and item_last_ts >= cutoff:
+                keep_from = idx
+                break
+        if keep_from <= 0:
+            return items
+        dropped = items[:keep_from]
+        with self._lock:
+            self.consumer_dropped_chunks += int(len(dropped))
+            self.consumer_dropped_samples += int(
+                sum(len(item.timestamps) for item in dropped)
+            )
+        return items[keep_from:]
+
     def raise_if_failed(self) -> None:
         with self._lock:
             exc = self._exception
@@ -766,6 +809,8 @@ class LiveLslAcquirer:
                 "acquirer_queue_max_depth": int(self.queue_max_depth),
                 "acquirer_queue_dropped_chunks": int(self.queue_dropped_chunks),
                 "acquirer_queue_dropped_samples": int(self.queue_dropped_samples),
+                "consumer_stale_dropped_chunks": int(self.consumer_dropped_chunks),
+                "consumer_stale_dropped_samples": int(self.consumer_dropped_samples),
             }
 # -------------------- Helpers --------------------
 
@@ -1281,6 +1326,67 @@ def _is_noop_decision(finger_id: int, action_id: int) -> bool:
     return _shared_is_noop_decision(finger_id, action_id)
 
 
+def _compute_live_window_fast_forward_plan(
+    *,
+    next_window_start_s: float,
+    latest_stream_time_s: float,
+    window_sec: float,
+    hop_sec: float,
+    earliest_buffer_time_s: Optional[float],
+    strict_alignment_gap_s: float,
+    live_max_window_lag_s: float,
+) -> LiveWindowFastForwardPlan:
+    next_start = float(next_window_start_s)
+    hop = float(hop_sec)
+    window = float(window_sec)
+    latest = float(latest_stream_time_s)
+    if (
+        hop <= 0.0
+        or window <= 0.0
+        or not np.isfinite(next_start)
+        or not np.isfinite(hop)
+        or not np.isfinite(window)
+        or not np.isfinite(latest)
+    ):
+        return LiveWindowFastForwardPlan(0, next_start, None, None)
+
+    latest_complete_start = latest - window
+    if latest_complete_start <= next_start:
+        return LiveWindowFastForwardPlan(0, next_start, None, None)
+
+    target_start = next_start
+    reason: Optional[str] = None
+    if earliest_buffer_time_s is not None and np.isfinite(float(earliest_buffer_time_s)):
+        buffer_floor = float(earliest_buffer_time_s) - max(0.0, float(strict_alignment_gap_s))
+        if next_start < buffer_floor:
+            target_start = buffer_floor
+            reason = "buffer_stale_fast_forward"
+
+    max_lag = float(live_max_window_lag_s)
+    if np.isfinite(max_lag) and max_lag > 0.0:
+        lag_floor = latest - window - max_lag
+        if next_start < lag_floor and lag_floor >= target_start:
+            target_start = lag_floor
+            reason = "live_lag_budget_exceeded"
+
+    target_start = min(float(target_start), float(latest_complete_start))
+    if target_start <= next_start or reason is None:
+        return LiveWindowFastForwardPlan(0, next_start, None, None)
+
+    skipped = int(np.floor(((target_start - next_start) / hop) + 1e-9))
+    if next_start + skipped * hop < target_start - 1e-9:
+        skipped += 1
+    skipped = max(0, int(skipped))
+    if skipped <= 0:
+        return LiveWindowFastForwardPlan(0, next_start, None, None)
+    return LiveWindowFastForwardPlan(
+        skipped_windows=skipped,
+        next_window_start_s=float(next_start + skipped * hop),
+        reason=reason,
+        target_start_s=float(target_start),
+    )
+
+
 def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
     defaults = {
         **default_step7_settings(),
@@ -1435,6 +1541,25 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         help="Allow dropping work instead of blocking when the live loop falls behind.",
     )
     stream_group.add_argument(
+        "--live-buffer-sec",
+        "--live_buffer_sec",
+        dest="live_buffer_sec",
+        type=float,
+        metavar="SECONDS",
+        help="Seconds of recent live samples retained for inference-window recovery.",
+    )
+    stream_group.add_argument(
+        "--live-max-window-lag-s",
+        "--live_max_window_lag_s",
+        dest="live_max_window_lag_s",
+        type=float,
+        metavar="SECONDS",
+        help=(
+            "Maximum live inference lag behind the newest complete window before "
+            "stale windows are fast-forwarded. Set 0 to disable the lag budget."
+        ),
+    )
+    stream_group.add_argument(
         "--log-every",
         "--log_every",
         dest="log_every",
@@ -1456,6 +1581,45 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         dest="LIVE_EEG_PLOT_ENABLED",
         action="store_false",
         help="Disable the Step 1-style live 4-channel EEG plot during Step 7.",
+    )
+    stream_group.add_argument(
+        "--live-eeg-plot-display-fs",
+        "--live_eeg_plot_display_fs",
+        dest="LIVE_EEG_PLOT_DISPLAY_FS",
+        type=float,
+        metavar="HZ",
+        help="Maximum sample rate forwarded to the Step 7 live EEG plot.",
+    )
+    stream_group.add_argument(
+        "--live-eeg-plot-fps",
+        "--live_eeg_plot_fps",
+        dest="LIVE_EEG_PLOT_FPS",
+        type=float,
+        metavar="HZ",
+        help="Step 7 live EEG plot redraw rate.",
+    )
+    pred_text_group = stream_group.add_mutually_exclusive_group()
+    pred_text_group.add_argument(
+        "--live-prediction-text",
+        "--live_prediction_text",
+        dest="LIVE_PREDICTION_TEXT_ENABLED",
+        action="store_true",
+        help="Emit lightweight live prediction text updates for the Step 7 UI.",
+    )
+    pred_text_group.add_argument(
+        "--no-live-prediction-text",
+        "--no_live_prediction_text",
+        dest="LIVE_PREDICTION_TEXT_ENABLED",
+        action="store_false",
+        help="Disable lightweight live prediction text updates.",
+    )
+    stream_group.add_argument(
+        "--live-prediction-text-fps",
+        "--live_prediction_text_fps",
+        dest="LIVE_PREDICTION_TEXT_FPS",
+        type=float,
+        metavar="HZ",
+        help="Maximum Step 7 live prediction text update rate.",
     )
     stream_group.add_argument(
         "--live-viz",
@@ -2866,6 +3030,92 @@ def _choose_actuation(
     return ActuationDecision(finger_id=pred_finger, action_id=pred_action, prob=conf)
 
 
+def _action_label(action_id: Any) -> str:
+    try:
+        idx = int(action_id)
+    except Exception:
+        idx = 0
+    return str(ACTION_NAMES.get(idx, f"action_{idx}"))
+
+
+def _finger_label(finger_id: Any) -> str:
+    try:
+        idx = int(finger_id)
+    except Exception:
+        idx = 0
+    return str(FINGER_NAMES.get(idx, f"finger_{idx}"))
+
+
+def _build_live_prediction_text_payload(
+    *,
+    candidate_index: int,
+    window_end: float,
+    decision_info: dict[str, Any],
+    decision: ActuationDecision,
+    actuation_target_finger_id: int,
+    actuation_target_action_id: int,
+    actuation_speed_scalar: float,
+    actuation_vote: dict[str, Any],
+    latency_ms: float,
+    quality_bad: bool,
+    finger_gate_ok: bool,
+    applicability_gate_ok: bool,
+    uncertainty_gate_ok: bool,
+    actuation_latency_gate_ok: bool,
+    serial_actuation_ready: bool,
+    actuation_sent: bool,
+    actuation_suppressed_reason: Optional[str],
+) -> dict[str, Any]:
+    target_is_noop = _is_noop_decision(
+        int(actuation_target_finger_id), int(actuation_target_action_id)
+    )
+    would_send = bool(
+        not target_is_noop
+        and not bool(quality_bad)
+        and bool(finger_gate_ok)
+        and bool(applicability_gate_ok)
+        and bool(uncertainty_gate_ok)
+        and bool(actuation_latency_gate_ok)
+    )
+    return {
+        "t": float(window_end),
+        "candidate_index": int(candidate_index),
+        "committed_action_id": int(decision_info.get("committed_action_id", 0)),
+        "committed_action_label": _action_label(
+            decision_info.get("committed_action_id", 0)
+        ),
+        "committed_finger_id": int(decision_info.get("committed_finger_id", 0)),
+        "committed_finger_label": _finger_label(
+            decision_info.get("committed_finger_id", 0)
+        ),
+        "raw_top_action_id": int(decision_info.get("raw_top_action_id", 0)),
+        "raw_top_finger_id": int(decision_info.get("raw_top_finger_id", 0)),
+        "action_conf": float(decision_info.get("action_conf", 0.0)),
+        "finger_conf": float(decision_info.get("finger_conf", 0.0)),
+        "joint_conf": float(decision.prob),
+        "target_action_id": int(actuation_target_action_id),
+        "target_action_label": _action_label(actuation_target_action_id),
+        "target_finger_id": int(actuation_target_finger_id),
+        "target_finger_label": _finger_label(actuation_target_finger_id),
+        "speed_scalar": float(actuation_speed_scalar),
+        "would_send": bool(would_send),
+        "hand_connected": bool(serial_actuation_ready),
+        "actuation_sent": bool(actuation_sent),
+        "suppressed_reason": (
+            str(actuation_suppressed_reason)
+            if actuation_suppressed_reason is not None
+            else None
+        ),
+        "vote_reason": str(actuation_vote.get("reason", "")),
+        "latency_ms": float(latency_ms),
+        "quality_bad": bool(quality_bad),
+        "finger_gate_ok": bool(finger_gate_ok),
+        "applicability_gate_ok": bool(applicability_gate_ok),
+        "uncertainty_gate_ok": bool(uncertainty_gate_ok),
+        "latency_gate_ok": bool(actuation_latency_gate_ok),
+    }
+
+
 def _postprocess_decision(
     action_probs: np.ndarray,
     finger_probs: np.ndarray,
@@ -4088,6 +4338,26 @@ def main() -> int:
     if int(args.lsl_acquirer_queue_max_chunks) < 1:
         print("lsl_acquirer_queue_max_chunks must be >= 1.")
         return 2
+    if float(args.live_buffer_sec) <= 0.0:
+        print("live_buffer_sec must be > 0.")
+        return 2
+    if float(args.live_max_window_lag_s) < 0.0:
+        print("live_max_window_lag_s must be >= 0.")
+        return 2
+    if float(args.LIVE_EEG_PLOT_DISPLAY_FS) <= 0.0:
+        print("LIVE_EEG_PLOT_DISPLAY_FS must be > 0.")
+        return 2
+    if float(args.LIVE_EEG_PLOT_FPS) <= 0.0:
+        print("LIVE_EEG_PLOT_FPS must be > 0.")
+        return 2
+    if (
+        bool(args.LIVE_PREDICTION_TEXT_ENABLED)
+        and float(args.LIVE_PREDICTION_TEXT_FPS) <= 0.0
+    ):
+        print(
+            "LIVE_PREDICTION_TEXT_FPS must be > 0 when live prediction text is enabled."
+        )
+        return 2
 
     print(f"Session selection source: {selection_source}")
     if explicit_overrides:
@@ -4221,6 +4491,18 @@ def main() -> int:
             expected_channel_labels_source,
         )
     live_eeg_plot_enabled = bool(getattr(args, "LIVE_EEG_PLOT_ENABLED", False))
+    live_prediction_text_enabled = bool(
+        getattr(args, "LIVE_PREDICTION_TEXT_ENABLED", True)
+    )
+    live_prediction_text_fps = float(
+        getattr(args, "LIVE_PREDICTION_TEXT_FPS", 0.0) or 0.0
+    )
+    if live_prediction_text_fps <= 0.0:
+        live_prediction_text_enabled = False
+    live_prediction_text_interval = (
+        1.0 / live_prediction_text_fps if live_prediction_text_enabled else 0.0
+    )
+    last_live_prediction_text_emit = 0.0
     live_viz_enabled = bool(getattr(args, "LIVE_VIZ_ENABLED", False))
     live_viz_fps = float(getattr(args, "LIVE_VIZ_FPS", 0.0) or 0.0)
     if live_viz_fps <= 0.0:
@@ -4289,6 +4571,8 @@ def main() -> int:
             "window_sec": float(args.window_sec),
             "hop_sec": float(args.hop_sec),
             "target_fs": float(args.target_fs),
+            "live_buffer_sec": float(args.live_buffer_sec),
+            "live_max_window_lag_s": float(args.live_max_window_lag_s),
             "target_fs_requested": float(target_fs_info.get("requested_target_fs")),
             "target_fs_canonical": target_fs_info.get("canonical_target_fs"),
             "target_fs_adjusted": bool(target_fs_info.get("adjusted")),
@@ -4301,6 +4585,14 @@ def main() -> int:
             "live_quality_enabled": bool(args.live_quality_enabled),
             "live_eeg_plot": {
                 "enabled": bool(live_eeg_plot_enabled),
+                "plot_display_fs": float(
+                    getattr(args, "LIVE_EEG_PLOT_DISPLAY_FS", 32.0)
+                ),
+                "plot_fps": float(getattr(args, "LIVE_EEG_PLOT_FPS", 12.0)),
+            },
+            "live_prediction_text": {
+                "enabled": bool(live_prediction_text_enabled),
+                "fps": float(live_prediction_text_fps),
             },
             "quality_thresholds": {
                 "input_clip_abs_z": float(args.input_clip_abs_z),
@@ -4595,6 +4887,8 @@ def main() -> int:
             channel_labels=plot_channel_labels,
             expected_channels=len(plot_channel_labels),
             title=f"Step 7: Live EEG {subject_id or '-'}",
+            plot_display_fs=float(getattr(args, "LIVE_EEG_PLOT_DISPLAY_FS", 32.0)),
+            plot_fps=float(getattr(args, "LIVE_EEG_PLOT_FPS", 12.0)),
         )
         live_eeg_plot_runtime.start()
         runtime_manifest["runtime"]["live_eeg_plot"] = {
@@ -4677,7 +4971,26 @@ def main() -> int:
 
     # Live buffers
     from collections import deque
-    buffer: Deque[Tuple[float, np.ndarray]] = deque(maxlen=int(max(5, args.window_sec * args.target_fs * 4)))
+    live_buffer_sec = max(
+        float(args.live_buffer_sec),
+        float(args.window_sec) + float(args.live_max_window_lag_s) + 0.25,
+        float(args.window_sec) * 4.0,
+    )
+    live_buffer_max_samples = int(max(5, round(live_buffer_sec * float(args.target_fs))))
+    runtime_manifest["runtime"]["live_buffer_sec_effective"] = float(live_buffer_sec)
+    runtime_manifest["runtime"]["live_buffer_max_samples"] = int(live_buffer_max_samples)
+    runtime_manifest["runtime"]["live_max_window_lag_s_effective"] = float(
+        args.live_max_window_lag_s
+    )
+    runtime_event_logger.event(
+        "live_window_scheduler_config",
+        live_buffer_sec=float(live_buffer_sec),
+        live_buffer_max_samples=int(live_buffer_max_samples),
+        live_max_window_lag_s=float(args.live_max_window_lag_s),
+    )
+    if runtime_manifest_path is not None:
+        _write_runtime_manifest()
+    buffer: Deque[Tuple[float, np.ndarray]] = deque(maxlen=live_buffer_max_samples)
     latency_window: Deque[float] = deque(maxlen=200)
 
     stream_origin_mono: Optional[float] = None
@@ -4693,6 +5006,7 @@ def main() -> int:
     quality_bad_windows = 0
     quality_masked_windows = 0
     alignment_interpolated_windows = 0
+    fast_forwarded_windows = 0
     segment_break_count = 0
     candidate_window_count = 0
     accepted_window_count = 0
@@ -4708,6 +5022,20 @@ def main() -> int:
     alignment_internal_max_gap_s = max(
         float(strict_alignment_gap_s), float(args.alignment_internal_max_gap_s)
     )
+    live_transport_retention_s = max(
+        float(args.window_sec) + (2.0 * float(strict_alignment_gap_s)),
+        float(args.window_sec) + (2.0 * float(args.hop_sec)),
+        float(args.window_sec) + float(args.live_max_window_lag_s),
+    )
+    runtime_manifest["runtime"]["live_transport_retention_s"] = float(
+        live_transport_retention_s
+    )
+    runtime_event_logger.event(
+        "live_transport_retention_config",
+        live_transport_retention_s=float(live_transport_retention_s),
+    )
+    if runtime_manifest_path is not None:
+        _write_runtime_manifest()
 
     # Debounce state
     last_sent: Optional[Tuple[int, int]] = None
@@ -4751,10 +5079,62 @@ def main() -> int:
         if window_audit_count % window_audit_flush_every == 0:
             window_audit_log.flush()
 
+    def _fast_forward_live_windows(
+        plan: LiveWindowFastForwardPlan,
+        *,
+        buffer_sample_count: int,
+        buffer_earliest_s: Optional[float],
+        buffer_latest_s: Optional[float],
+        latest_stream_time_value: float,
+    ) -> None:
+        nonlocal candidate_window_count
+        nonlocal dropped_windows
+        nonlocal fast_forwarded_windows
+        nonlocal next_window_start_s
+        if plan.skipped_windows <= 0 or not plan.reason:
+            return
+        start_before = float(next_window_start_s)
+        for skip_index in range(int(plan.skipped_windows)):
+            window_start = float(next_window_start_s)
+            window_end = float(window_start + args.window_sec)
+            candidate_window_count += 1
+            candidate_index = int(candidate_window_count)
+            dropped_windows += 1
+            fast_forwarded_windows += 1
+            dropped_window_reason_counts[str(plan.reason)] += 1
+            _audit_window(
+                candidate_index=candidate_index,
+                segment_id_value=segment_id,
+                window_start_value=window_start,
+                window_end_value=window_end,
+                status="dropped",
+                drop_reason=str(plan.reason),
+                fast_forwarded=True,
+                fast_forward_skip_index=int(skip_index + 1),
+                fast_forward_skip_total=int(plan.skipped_windows),
+                fast_forward_start_before_s=float(start_before),
+                fast_forward_target_start_s=plan.target_start_s,
+                buffer_sample_count=int(buffer_sample_count),
+                buffer_earliest_s=(
+                    float(buffer_earliest_s) if buffer_earliest_s is not None else None
+                ),
+                buffer_latest_s=(
+                    float(buffer_latest_s) if buffer_latest_s is not None else None
+                ),
+                latest_stream_time_s=float(latest_stream_time_value),
+                scheduler_lag_s=float(max(0.0, latest_stream_time_value - window_end)),
+            )
+            next_window_start_s = float(next_window_start_s + args.hop_sec)
+        next_window_start_s = max(
+            float(next_window_start_s), float(plan.next_window_start_s)
+        )
+
     try:
         while True:
             lsl_acquirer.raise_if_failed()
-            acquired_chunks = lsl_acquirer.drain(max_chunks=128)
+            acquired_chunks = lsl_acquirer.drain_recent(
+                retention_s=float(live_transport_retention_s)
+            )
             if acquired_chunks:
                 for acquired_chunk in acquired_chunks:
                     for sample, lsl_ts in zip(
@@ -4935,14 +5315,34 @@ def main() -> int:
 
             # Infer over available windows
             time_s = float(latest_stream_time_s)
+            if buffer:
+                times = np.asarray([t for t, _ in buffer], dtype=float)
+                values = np.asarray([v for _, v in buffer], dtype=float)
+            else:
+                times = np.asarray([], dtype=float)
+                values = np.asarray([], dtype=float)
+            if times.size >= 2:
+                fast_forward_plan = _compute_live_window_fast_forward_plan(
+                    next_window_start_s=float(next_window_start_s),
+                    latest_stream_time_s=float(time_s),
+                    window_sec=float(args.window_sec),
+                    hop_sec=float(args.hop_sec),
+                    earliest_buffer_time_s=float(times[0]),
+                    strict_alignment_gap_s=float(strict_alignment_gap_s),
+                    live_max_window_lag_s=float(args.live_max_window_lag_s),
+                )
+                _fast_forward_live_windows(
+                    fast_forward_plan,
+                    buffer_sample_count=int(times.size),
+                    buffer_earliest_s=float(times[0]),
+                    buffer_latest_s=float(times[-1]),
+                    latest_stream_time_value=float(time_s),
+                )
             while (next_window_start_s + args.window_sec) <= time_s:
                 candidate_window_count += 1
                 candidate_index = int(candidate_window_count)
                 window_start = next_window_start_s
                 window_end = window_start + args.window_sec
-
-                times = np.array([t for t, _ in buffer], dtype=float)
-                values = np.array([v for _, v in buffer], dtype=float)
 
                 if times.size < 2:
                     dropped_windows += 1
@@ -5453,6 +5853,37 @@ def main() -> int:
                         else:
                             actuation_suppressed_reason = "cooldown_or_duplicate"
 
+                if live_prediction_text_enabled:
+                    prediction_text_now = time.monotonic()
+                    if (
+                        prediction_text_now - last_live_prediction_text_emit
+                    ) >= live_prediction_text_interval:
+                        last_live_prediction_text_emit = prediction_text_now
+                        pred_text_payload = _build_live_prediction_text_payload(
+                            candidate_index=candidate_index,
+                            window_end=float(window_end),
+                            decision_info=decision_info,
+                            decision=decision,
+                            actuation_target_finger_id=actuation_target_finger_id,
+                            actuation_target_action_id=actuation_target_action_id,
+                            actuation_speed_scalar=actuation_speed_scalar,
+                            actuation_vote=actuation_vote,
+                            latency_ms=latency_ms,
+                            quality_bad=bool(quality.window_quality_bad),
+                            finger_gate_ok=finger_gate_ok,
+                            applicability_gate_ok=applicability_gate_ok,
+                            uncertainty_gate_ok=uncertainty_gate_ok,
+                            actuation_latency_gate_ok=actuation_latency_gate_ok,
+                            serial_actuation_ready=serial_actuation_ready,
+                            actuation_sent=actuation_sent,
+                            actuation_suppressed_reason=actuation_suppressed_reason,
+                        )
+                        print(
+                            "PREDJSON "
+                            + json.dumps(pred_text_payload, separators=(",", ":")),
+                            flush=True,
+                        )
+
                 if pred_log is not None:
                     payload = {
                         "ts_utc": time.time(),
@@ -5704,9 +6135,20 @@ def main() -> int:
             now = time.monotonic()
             if now - last_log >= args.log_every:
                 masked_snapshot = _top_counter_snapshot(masked_channel_counts, top_k=2)
+                scheduler_lag_ms = max(
+                    0.0,
+                    (
+                        float(latest_stream_time_s)
+                        - float(args.window_sec)
+                        - float(next_window_start_s)
+                    )
+                    * 1000.0,
+                )
                 logger.info(
-                    "buffer=%s dropped_windows=%s dropped_nonfinite_samples=%s dropped_nonfinite_windows=%s alignment_interpolated_windows=%s quality_bad_windows=%s quality_masked_windows=%s segment_breaks=%s masked_channels=%s rest_bias_ready=%s rest_bias_windows=%s",
+                    "buffer=%s scheduler_lag_ms=%.1f fast_forwarded_windows=%s dropped_windows=%s dropped_nonfinite_samples=%s dropped_nonfinite_windows=%s alignment_interpolated_windows=%s quality_bad_windows=%s quality_masked_windows=%s segment_breaks=%s masked_channels=%s rest_bias_ready=%s rest_bias_windows=%s",
                     len(buffer),
+                    scheduler_lag_ms,
+                    fast_forwarded_windows,
                     dropped_windows,
                     dropped_nonfinite_samples,
                     dropped_nonfinite_windows,
@@ -5921,8 +6363,9 @@ def main() -> int:
             logger.info("Post-run replay: %s", replay_cmd)
             logger.info("Post-run audit: %s", audit_cmd)
         logger.info(
-            "Shutdown complete (reason=%s, dropped_nonfinite_samples=%s, dropped_nonfinite_windows=%s, alignment_interpolated_windows=%s, quality_bad_windows=%s, quality_masked_windows=%s, segment_breaks=%s, masked_channels=%s, rest_bias_ready=%s, rest_bias_windows=%s).",
+            "Shutdown complete (reason=%s, fast_forwarded_windows=%s, dropped_nonfinite_samples=%s, dropped_nonfinite_windows=%s, alignment_interpolated_windows=%s, quality_bad_windows=%s, quality_masked_windows=%s, segment_breaks=%s, masked_channels=%s, rest_bias_ready=%s, rest_bias_windows=%s).",
             termination_reason,
+            int(fast_forwarded_windows),
             dropped_nonfinite_samples,
             dropped_nonfinite_windows,
             alignment_interpolated_windows,
@@ -6006,6 +6449,7 @@ def main() -> int:
                         dropped_window_reason_counts
                     ),
                     "dropped_windows": int(dropped_windows),
+                    "fast_forwarded_windows": int(fast_forwarded_windows),
                     "dropped_nonfinite_samples": int(dropped_nonfinite_samples),
                     "dropped_nonfinite_windows": int(dropped_nonfinite_windows),
                     "alignment_interpolated_windows": int(

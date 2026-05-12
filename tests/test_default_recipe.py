@@ -92,9 +92,14 @@ def test_config_templates_match_canonical_recipe():
     assert infer["serial_max_hz"] == 20.0
     assert infer["serial_settle_s"] == 1.2
     assert infer["serial_movement_warmup_enabled"] is False
-    assert infer["lsl_acquirer_queue_max_chunks"] == 32
+    assert infer["lsl_acquirer_queue_max_chunks"] == 128
     assert infer["window_sec"] == LIVE_INFER_RECIPE_DEFAULTS["window_sec"]
     assert infer["hop_sec"] == LIVE_INFER_RECIPE_DEFAULTS["hop_sec"]
+    assert infer["live_buffer_sec"] == LIVE_INFER_RECIPE_DEFAULTS["live_buffer_sec"]
+    assert (
+        infer["live_max_window_lag_s"]
+        == LIVE_INFER_RECIPE_DEFAULTS["live_max_window_lag_s"]
+    )
     assert (
         infer["alignment_internal_max_gap_s"]
         == LIVE_INFER_RECIPE_DEFAULTS["alignment_internal_max_gap_s"]
@@ -177,6 +182,10 @@ def test_step_entrypoints_consume_canonical_defaults():
     )
     assert live_defaults["window_sec"] == LIVE_INFER_RECIPE_DEFAULTS["window_sec"]
     assert live_defaults["hop_sec"] == LIVE_INFER_RECIPE_DEFAULTS["hop_sec"]
+    assert (
+        live_defaults["live_max_window_lag_s"]
+        == LIVE_INFER_RECIPE_DEFAULTS["live_max_window_lag_s"]
+    )
     assert (
         live_defaults["threshold_applicability"]
         == LIVE_INFER_RECIPE_DEFAULTS["threshold_applicability"]

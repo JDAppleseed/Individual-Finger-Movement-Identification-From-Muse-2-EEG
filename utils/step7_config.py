@@ -27,11 +27,25 @@ def default_step7_settings() -> dict[str, Any]:
         "LIVE_EEG_PLOT_ENABLED": bool(
             LIVE_INFER_RECIPE_DEFAULTS["LIVE_EEG_PLOT_ENABLED"]
         ),
+        "LIVE_EEG_PLOT_DISPLAY_FS": float(
+            LIVE_INFER_RECIPE_DEFAULTS["LIVE_EEG_PLOT_DISPLAY_FS"]
+        ),
+        "LIVE_EEG_PLOT_FPS": float(LIVE_INFER_RECIPE_DEFAULTS["LIVE_EEG_PLOT_FPS"]),
+        "LIVE_PREDICTION_TEXT_ENABLED": bool(
+            LIVE_INFER_RECIPE_DEFAULTS["LIVE_PREDICTION_TEXT_ENABLED"]
+        ),
+        "LIVE_PREDICTION_TEXT_FPS": float(
+            LIVE_INFER_RECIPE_DEFAULTS["LIVE_PREDICTION_TEXT_FPS"]
+        ),
         "LIVE_VIZ_ENABLED": bool(LIVE_INFER_RECIPE_DEFAULTS["LIVE_VIZ_ENABLED"]),
         "LIVE_VIZ_FPS": int(LIVE_INFER_RECIPE_DEFAULTS["LIVE_VIZ_FPS"]),
         "window_sec": float(LIVE_INFER_RECIPE_DEFAULTS["window_sec"]),
         "hop_sec": float(LIVE_INFER_RECIPE_DEFAULTS["hop_sec"]),
         "target_fs": float(LIVE_INFER_RECIPE_DEFAULTS["target_fs"]),
+        "live_buffer_sec": float(LIVE_INFER_RECIPE_DEFAULTS["live_buffer_sec"]),
+        "live_max_window_lag_s": float(
+            LIVE_INFER_RECIPE_DEFAULTS["live_max_window_lag_s"]
+        ),
         "alignment_internal_max_gap_s": float(
             LIVE_INFER_RECIPE_DEFAULTS["alignment_internal_max_gap_s"]
         ),

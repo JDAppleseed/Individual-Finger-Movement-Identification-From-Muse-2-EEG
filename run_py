@@ -11,6 +11,10 @@ if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
   exec "$ROOT_DIR/.venv/bin/python" "$@"
 fi
 
+if [ -x "/opt/miniconda3/envs/muse311/bin/python" ]; then
+  exec "/opt/miniconda3/envs/muse311/bin/python" "$@"
+fi
+
 if command -v python3.11 >/dev/null 2>&1; then
   exec python3.11 "$@"
 fi

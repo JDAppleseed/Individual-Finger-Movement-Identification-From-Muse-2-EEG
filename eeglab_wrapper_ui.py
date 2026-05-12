@@ -143,7 +143,7 @@ from utils.step7_config import (
     load_step7_config,
     resolve_subject_step7_config_path,
 )
-from visualization.live_viz import parse_viz_line
+from visualization.live_viz import parse_prediction_line, parse_viz_line
 from visualization.replay_viz import ReplayVisualizer
 
 try:
@@ -764,6 +764,13 @@ TOOLTIPS: Dict[str, str] = {
     "REQUIRED_LSL_LABELS": "Expected LSL channel labels (case-insensitive).",
     "REQUIRE_EXACTLY_4_CHANNELS": "Require exactly 4 EEG channels from LSL.",
     "LIVE_EEG_PLOT_ENABLED": "Show the same live 4-channel EEG plot used in Step 1 while Step 7 is running.",
+    "LIVE_EEG_PLOT_DISPLAY_FS": "Maximum sample rate forwarded to the Step 7 live EEG plot.",
+    "LIVE_EEG_PLOT_FPS": "Step 7 live EEG plot redraw rate.",
+    "LIVE_PREDICTION_TEXT_ENABLED": (
+        "Show lightweight live prediction text on the Step 7 page even without "
+        "robot-hand hardware."
+    ),
+    "LIVE_PREDICTION_TEXT_FPS": "Step 7 live prediction text update rate (Hz).",
     "LIVE_VIZ_ENABLED": "Send Step 7 live model-view data to the Model Views window.",
     "LIVE_VIZ_FPS": "Step 7 live model-view refresh rate (Hz).",
     "STREAMER_INTERNAL": "Internal streamer enabled.",
@@ -783,6 +790,8 @@ TOOLTIPS: Dict[str, str] = {
     "alignment_internal_max_gap_s": "Maximum internal sample gap tolerated inside a live window before alignment drops it.",
     "hop_sec": "Window hop length in seconds.",
     "target_fs": "Target sample rate for Step 7 live inference.",
+    "live_buffer_sec": "Short retention window for recent samples only; it does not delay actuation.",
+    "live_max_window_lag_s": "Maximum Step 7 scheduler lag before stale windows are skipped to keep actuation current.",
     "allow_drop": "Allow dropping windows in Step 7 live inference.",
     "latency_threshold_ms": "Latency p95 threshold (ms).",
     "latency_policy": "Latency policy when threshold is exceeded.",
@@ -1540,6 +1549,8 @@ class MainWindow(QMainWindow):
         self.live_pred_finger_plot = None
         self.live_pred_action_plot = None
         self.live_pred_label: Optional[QLabel] = None
+        self.step7_live_prediction_label: Optional[QLabel] = None
+        self._latest_live_prediction_payload: Optional[Dict[str, Any]] = None
         self.live_viz_tab_index: Optional[int] = None
         self.live_viz_status_label: Optional[QLabel] = None
         self._latest_live_viz_payload: Optional[Dict[str, Any]] = None
@@ -1686,6 +1697,18 @@ class MainWindow(QMainWindow):
                     "Adaptive threshold weight for action uncertainty.",
                 ),
                 ArgSpec("allow_drop", "--allow-drop", "bool", "Allow dropping windows."),
+                ArgSpec(
+                    "live_buffer_sec",
+                    "--live-buffer-sec",
+                    "float",
+                    "Seconds of recent live samples retained for window recovery.",
+                ),
+                ArgSpec(
+                    "live_max_window_lag_s",
+                    "--live-max-window-lag-s",
+                    "float",
+                    "Fast-forward stale windows once live inference falls this far behind.",
+                ),
                 ArgSpec(
                     "latency_threshold_ms",
                     "--latency-threshold-ms",
@@ -4785,6 +4808,16 @@ class MainWindow(QMainWindow):
         self.live_status_label.setWordWrap(True)
         layout.addWidget(self.live_status_label)
 
+        self.step7_live_prediction_label = QLabel("Live prediction: Step 7 inactive")
+        self.step7_live_prediction_label.setWordWrap(True)
+        self.step7_live_prediction_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        self.step7_live_prediction_label.setStyleSheet(
+            "font-weight: 700; padding: 8px; border: 1px solid rgba(255,255,255,0.22);"
+        )
+        layout.addWidget(self.step7_live_prediction_label)
+
         self.live_launch_summary = QPlainTextEdit()
         self.live_launch_summary.setReadOnly(True)
         self.live_launch_summary.setPlaceholderText(
@@ -5466,12 +5499,71 @@ class MainWindow(QMainWindow):
                     lambda _checked: self._sync_infer_inference_engine_controls()
                 )
             self._add_checkbox(step_id, form, "allow_drop", "Allow drop", defaults)
+            self._add_spin(
+                step_id,
+                form,
+                "live_buffer_sec",
+                "Live sample retention (s)",
+                defaults,
+                0.25,
+                30,
+                is_float=True,
+                decimals=2,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "live_max_window_lag_s",
+                "Max live window lag (s)",
+                defaults,
+                0,
+                5,
+                is_float=True,
+                decimals=2,
+            )
             self._add_checkbox(
                 step_id,
                 form,
                 "LIVE_EEG_PLOT_ENABLED",
                 "Show Step 1-style live EEG plot",
                 defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "LIVE_EEG_PLOT_DISPLAY_FS",
+                "Live EEG plot display FS",
+                defaults,
+                1,
+                512,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "LIVE_EEG_PLOT_FPS",
+                "Live EEG plot FPS",
+                defaults,
+                1,
+                60,
+                is_float=True,
+            )
+            self._add_checkbox(
+                step_id,
+                form,
+                "LIVE_PREDICTION_TEXT_ENABLED",
+                "Show live prediction text",
+                defaults,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "LIVE_PREDICTION_TEXT_FPS",
+                "Live prediction text FPS",
+                defaults,
+                1,
+                20,
+                is_float=True,
             )
             self._add_checkbox(
                 step_id,
@@ -7058,6 +7150,8 @@ class MainWindow(QMainWindow):
                 "uncertainty_base_threshold": "Uncertainty base threshold",
                 "uncertainty_weight": "Uncertainty weight",
                 "allow_drop": "Allow drop",
+                "live_buffer_sec": "Live sample retention (s)",
+                "live_max_window_lag_s": "Max live window lag (s)",
                 "live_quality_enabled": "Live quality enabled",
                 "input_clip_abs_z": "Input clip abs z",
                 "bad_channel_rms_z": "Bad channel RMS z",
@@ -7066,6 +7160,10 @@ class MainWindow(QMainWindow):
                 "bad_window_clipped_frac": "Bad window clipped frac",
                 "bad_window_max_masked_channels": "Bad window max masked channels",
                 "LIVE_EEG_PLOT_ENABLED": "Show Step 1-style live EEG plot",
+                "LIVE_EEG_PLOT_DISPLAY_FS": "Live EEG plot display FS",
+                "LIVE_EEG_PLOT_FPS": "Live EEG plot FPS",
+                "LIVE_PREDICTION_TEXT_ENABLED": "Show live prediction text",
+                "LIVE_PREDICTION_TEXT_FPS": "Live prediction text FPS",
                 "LIVE_VIZ_ENABLED": "Emit Step 7 live model views",
                 "LIVE_VIZ_FPS": "Step 7 live viz FPS",
                 "latency_threshold_ms": "Latency threshold (ms)",
@@ -11507,6 +11605,74 @@ class MainWindow(QMainWindow):
         if hasattr(self, "live_status_label") and self.live_status_label is not None:
             self.live_status_label.setText(text)
 
+    def _format_step7_live_prediction(self, payload: Dict[str, Any]) -> str:
+        def _label(name_key: str, id_key: str) -> str:
+            label = str(payload.get(name_key) or "").strip()
+            if label:
+                return label
+            try:
+                return str(payload.get(id_key))
+            except Exception:
+                return "-"
+
+        def _prob(key: str) -> str:
+            try:
+                return f"{float(payload.get(key, 0.0)):.2f}"
+            except Exception:
+                return "-"
+
+        committed = (
+            f"{_label('committed_finger_label', 'committed_finger_id')} "
+            f"{_label('committed_action_label', 'committed_action_id')}"
+        )
+        target_finger = _label("target_finger_label", "target_finger_id")
+        target_action = _label("target_action_label", "target_action_id")
+        try:
+            target_is_noop = (
+                int(payload.get("target_finger_id", 0) or 0) <= 0
+                or int(payload.get("target_action_id", 0) or 0) <= 0
+            )
+        except Exception:
+            target_is_noop = True
+        if target_is_noop:
+            target = "no hand command"
+        else:
+            target = f"{target_finger} {target_action} @ speed {_prob('speed_scalar')}"
+
+        hand = "connected" if bool(payload.get("hand_connected")) else "not connected"
+        if bool(payload.get("actuation_sent")):
+            status = "sent"
+        elif bool(payload.get("would_send")):
+            status = "would send"
+        else:
+            status = str(
+                payload.get("suppressed_reason")
+                or payload.get("vote_reason")
+                or "pending"
+            )
+        try:
+            latency = f"{float(payload.get('latency_ms', 0.0)):.0f} ms"
+        except Exception:
+            latency = "- ms"
+        return (
+            f"Live prediction: {committed} "
+            f"(action {_prob('action_conf')}, finger {_prob('finger_conf')}) | "
+            f"Hand command: {target} | Hand: {hand} | Status: {status} | "
+            f"Latency: {latency}"
+        )
+
+    def _update_step7_live_prediction(self, payload: Optional[Dict[str, Any]]) -> None:
+        if self.step7_live_prediction_label is None:
+            return
+        if not payload:
+            self.step7_live_prediction_label.setText(
+                "Live prediction: waiting for Step 7"
+            )
+            return
+        self.step7_live_prediction_label.setText(
+            self._format_step7_live_prediction(payload)
+        )
+
     def _confirm_actuation(self) -> bool:
         return (
             self._exec_message_box(
@@ -11631,7 +11797,9 @@ class MainWindow(QMainWindow):
             self.stream_state_label.setText("Stream: running")
         if self.active_step == "infer":
             self._latest_live_viz_payload = None
+            self._latest_live_prediction_payload = None
             self._last_live_viz_mono = 0.0
+            self._update_step7_live_prediction(None)
             self._update_live_status("Live status: Step 7 running")
         self._update_live_viz_status()
         self._set_live_buttons_state()
@@ -11741,6 +11909,11 @@ class MainWindow(QMainWindow):
             label.setText(f"Status: {text}")
 
     def _append_log(self, line: str) -> None:
+        prediction_payload = parse_prediction_line(line)
+        if prediction_payload:
+            self._latest_live_prediction_payload = prediction_payload
+            self._update_step7_live_prediction(prediction_payload)
+            return
         payload = parse_viz_line(line)
         if payload:
             self._latest_live_viz_payload = payload
