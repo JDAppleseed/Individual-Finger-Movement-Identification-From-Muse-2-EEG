@@ -9,6 +9,12 @@ Command:
 python3 tools/channel_ablation_sweep.py --epochs 60 --force --no-skip-existing --keep-going
 ```
 
+Additional temporal-pair run:
+
+```bash
+python3 tools/channel_ablation_sweep.py --epochs 60 --subsets 'TP9+TP10' --keep-going
+```
+
 This first pass uses one seed (`43`) and the featured 2-M16 derived dataset. It
 should be treated as an exploratory subject-specific result until repeated
 across seeds and, for any candidate command-path claim, replayed through the
@@ -58,6 +64,22 @@ classification signal on their own, while AF7 and AF8 perform much closer to a
 weak model. This supports a working hypothesis that the featured 2-M16 model is
 driven primarily by temporal-channel information rather than frontal-channel
 information.
+
+## Temporal-Pair Sufficiency
+
+This run removes both frontal electrodes, AF7 and AF8, and trains/tests only on
+the temporal electrodes TP9 and TP10.
+
+| Channels | Action Acc (%) | Finger Acc Non-REST (%) | Action Drop vs All (pp) | Finger Drop vs All (pp) |
+| --- | ---: | ---: | ---: | ---: |
+| TP9+TP10 | 88.31 | 83.90 | 2.65 | 2.36 |
+
+Initial interpretation: the TP9+TP10 pair preserves most of the full-montage
+performance while using only half the channels. This strengthens the working
+hypothesis that the useful signal in the featured 2-M16 model is concentrated in
+the temporal electrodes. It does not prove AF7/AF8 are useless in general; it
+only shows that this subject-specific retraining ablation did not need them to
+retain most held-out accuracy.
 
 ## Next Validation Steps
 
