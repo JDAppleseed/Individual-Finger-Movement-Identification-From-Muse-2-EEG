@@ -2140,7 +2140,7 @@ def _write_macros(runs: List[RunMetrics], demos: List[SubjectDemographics], repo
 
     lines.append(
         r"\newcommand{\ModelParamCount}{"
-        + (str(param_count) if param_count is not None else r"\textit{n/a}")
+        + (f"{param_count:,}" if param_count is not None else r"\textit{n/a}")
         + r"}"
         + "\n"
     )
@@ -2348,7 +2348,7 @@ def _write_tables(runs: List[RunMetrics], demos: List[SubjectDemographics], sess
     data_lines.append("\\resizebox{\\textwidth}{!}{%\n")
     data_lines.append("\\begin{tabular}{lp{0.34\\textwidth}rrrrrr}\n\\toprule\n")
     data_lines.append(
-        "Subject & Session & $N$ windows & Window (s) & Hop (s) & Mean overlap (\\%) & Artifacts (count) & Gaps (count) \\\\\n\\midrule\n"
+        "Subject & Session & $N$ windows & Window (s) & Hop (s) & Mean overlap (\\%) & Extraction artifact flags & Gap flags \\\\\n\\midrule\n"
     )
     for (_, _), r in dataset_rows.items():
         ov_pct = (float(r.overlap_frac_mean) * 100.0) if r.overlap_frac_mean is not None else None
@@ -2653,9 +2653,9 @@ def _write_figures(runs: List[RunMetrics]) -> None:
                 if idx % 2 == 1 and idx != len(panels) - 1:
                     lines.append("\\\\[0.5em]\n")
             fig_caption = (
-                f"Representative Step~3c evaluation figure for the featured {subj} run. "
-                "The composite reliability panel carries the confusion-matrix content; "
-                "the confidence--uncertainty panel is included as supporting evidence for the command gate."
+                f"Representative Step~3c evaluation outputs for the featured {subj} run. "
+                "The reliability/calibration panel includes action and finger confusion matrices, "
+                "while the confidence--uncertainty panel summarizes MC-dropout behavior across windows."
             )
             lines.append(f"\\caption{{{fig_caption}}}\n")
             lines.append("\\label{fig:featured-evaluation}\n")
