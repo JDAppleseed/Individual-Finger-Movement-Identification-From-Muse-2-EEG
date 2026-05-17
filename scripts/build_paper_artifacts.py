@@ -52,6 +52,11 @@ FIG_DIR = REPO_ROOT / "paper_figures"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from utils.live_eeg_plot import (  # noqa: E402
+    DEFAULT_PLOT_CHANNEL_SPACING_UV,
+    DEFAULT_PLOT_FIXED_YLIM,
+)
+
 
 def _safe_slug(s: str) -> str:
     s = str(s).strip()
@@ -1827,27 +1832,40 @@ def _write_raw_windowing_figure(runs: List[RunMetrics]) -> Optional[str]:
         else float("nan")
     )
 
-    fig = plt.figure(figsize=(7.2, 4.8), dpi=200)
+    # Match the Step 1 live plot semantics as closely as a static paper figure can:
+    # full raw sample resolution, no path simplification, fixed uV scale, and
+    # fixed vertical channel spacing.
+    plt.rcParams["path.simplify"] = False
+    plt.rcParams["agg.path.chunksize"] = 0
+
+    fig = plt.figure(figsize=(7.2, 4.8), dpi=450)
     gs = fig.add_gridspec(2, 1, height_ratios=[3.2, 1.6], hspace=0.18)
     ax = fig.add_subplot(gs[0])
     axw = fig.add_subplot(gs[1], sharex=ax)
 
-    centered = raw_samples - np.median(raw_samples, axis=0, keepdims=True)
-    amp = np.nanpercentile(np.abs(centered), 95, axis=0)
-    amp[~np.isfinite(amp) | (amp < 1.0)] = 1.0
-    spacing = float(np.nanmax(amp) * 2.8)
-    colors = ["#1f77b4", "#d95f02", "#2ca02c", "#7f7f7f"]
-    offsets = np.arange(raw_samples.shape[1])[::-1] * spacing
+    plot_channels = min(raw_samples.shape[1], len(channel_names))
+    spacing = float(DEFAULT_PLOT_CHANNEL_SPACING_UV)
+    fixed_ylim = tuple(float(v) for v in DEFAULT_PLOT_FIXED_YLIM)
+    offsets = np.arange(plot_channels, dtype=float) * spacing
+    colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["#1f77b4"])
 
-    for ch in range(raw_samples.shape[1]):
-        ax.plot(plot_t, centered[:, ch] + offsets[ch], color=colors[ch % len(colors)], linewidth=0.85)
+    for ch in range(plot_channels):
+        ax.plot(
+            plot_t,
+            raw_samples[:, ch] + offsets[ch],
+            color=colors[ch % len(colors)],
+            linewidth=0.9,
+            antialiased=True,
+            solid_capstyle="round",
+            solid_joinstyle="round",
+        )
     event_end_rel = end_s - onset_s
     ax.axvspan(0.0, event_end_rel, color="#f3d36b", alpha=0.28, lw=0.0)
     ax.axvline(0.0, color="#8a5a00", linestyle="--", linewidth=1.0)
     ax.axvline(event_end_rel, color="#8a5a00", linestyle="--", linewidth=1.0)
     ax.text(
         min(0.16, event_end_rel + 0.03),
-        offsets[0] + spacing * 0.48,
+        fixed_ylim[1] + offsets[-1] - spacing * 0.32,
         f"{str(active_event.get('type') or '').replace('_', ' ').title()} event",
         fontsize=7.6,
         ha="left",
@@ -1856,9 +1874,10 @@ def _write_raw_windowing_figure(runs: List[RunMetrics]) -> Optional[str]:
         bbox=dict(boxstyle="round,pad=0.18", facecolor="#fff6d7", edgecolor="none", alpha=0.95),
     )
     ax.set_xlim(view_start - onset_s, view_end - onset_s)
+    ax.set_ylim(fixed_ylim[0] + offsets[0], fixed_ylim[1] + offsets[-1])
     ax.set_yticks(offsets)
-    ax.set_yticklabels(channel_names[: raw_samples.shape[1]])
-    ax.set_ylabel("Muse 2 channel")
+    ax.set_yticklabels(channel_names[:plot_channels])
+    ax.set_ylabel("Amplitude (uV)")
     ax.grid(axis="x", linestyle=":", linewidth=0.6, alpha=0.6)
     ax.text(0.0, 1.03, "(a) Raw recorded segment", transform=ax.transAxes, fontsize=9.5, fontweight="bold", ha="left", va="bottom")
     ax.tick_params(axis="x", labelbottom=False)
