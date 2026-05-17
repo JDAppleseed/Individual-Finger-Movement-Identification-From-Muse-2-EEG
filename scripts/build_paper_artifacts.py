@@ -1587,7 +1587,8 @@ def _load_event_rows(session_dir: Path) -> List[Dict[str, Any]]:
 
 
 def _load_raw_segment_by_local_time(session_dir: Path, local_start: float, local_end: float) -> Tuple[np.ndarray, np.ndarray]:
-    times: List[np.ndarray] = []
+    local_times: List[np.ndarray] = []
+    sample_times: List[np.ndarray] = []
     samples: List[np.ndarray] = []
     raw_dir = session_dir / "raw"
     for shard in sorted(raw_dir.glob("eeg_raw_shard_*.npy")):
@@ -1597,14 +1598,27 @@ def _load_raw_segment_by_local_time(session_dir: Path, local_start: float, local
         mask = (arr["local_ts"] >= local_start) & (arr["local_ts"] <= local_end)
         if not np.any(mask):
             continue
-        times.append(np.asarray(arr["local_ts"][mask], dtype=float))
+        local_times.append(np.asarray(arr["local_ts"][mask], dtype=float))
+        if "lsl_ts_mono" in arr.dtype.names:
+            sample_times.append(np.asarray(arr["lsl_ts_mono"][mask], dtype=float))
+        elif "lsl_ts_raw" in arr.dtype.names:
+            sample_times.append(np.asarray(arr["lsl_ts_raw"][mask], dtype=float))
         samples.append(np.asarray(arr["sample"][mask], dtype=float))
-    if not times or not samples:
+    if not local_times or not samples:
         return np.empty((0,), dtype=float), np.empty((0, 4), dtype=float)
-    t = np.concatenate(times, axis=0)
+    local_t = np.concatenate(local_times, axis=0)
     x = np.concatenate(samples, axis=0)
-    order = np.argsort(t)
-    return t[order], x[order]
+    if sample_times:
+        sample_t = np.concatenate(sample_times, axis=0)
+        order = np.argsort(sample_t)
+        sample_t = sample_t[order]
+        local_t = local_t[order]
+        x = x[order]
+        if np.all(np.isfinite(sample_t)) and np.ptp(sample_t) > 0.0:
+            reconstructed_local_t = local_t[0] + (sample_t - sample_t[0])
+            return reconstructed_local_t, x
+    order = np.argsort(local_t)
+    return local_t[order], x[order]
 
 
 def _write_featured_provenance_figure(runs: List[RunMetrics]) -> Optional[str]:
@@ -1651,10 +1665,38 @@ def _write_featured_provenance_figure(runs: List[RunMetrics]) -> Optional[str]:
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
 
+    support_rows = _raw_support_sessions_for_run(featured)
+    core_sessions = [
+        str(row.get("session_id"))
+        for row in support_rows
+        if str(row.get("role")) in {"core", "recorded"}
+    ]
+    aux_sessions = [
+        str(row.get("session_id"))
+        for row in support_rows
+        if str(row.get("role")) == "aux_rest"
+    ]
+    if len(core_sessions) < 2:
+        core_sessions.extend(str(v) for v in prov.get("core_sessions", []))
+    if not aux_sessions:
+        aux_sessions.extend(str(v) for v in prov.get("aux_rest_sessions", []))
+
     left_boxes = [
-        ("Movement Session 1", _short_session(str((prov.get("core_sessions") or ["unknown"])[0])), "#e8f1fb"),
-        ("Movement Session 2", _short_session(str((prov.get("core_sessions") or ["unknown", "unknown"])[1])), "#e8f1fb"),
-        ("Aux REST Session", _short_session(str((prov.get("aux_rest_sessions") or ["unknown"])[0])), "#eef6e8"),
+        (
+            "Movement Session 1",
+            _short_session(core_sessions[0]) if len(core_sessions) >= 1 else "not available",
+            "#e8f1fb",
+        ),
+        (
+            "Movement Session 2",
+            _short_session(core_sessions[1]) if len(core_sessions) >= 2 else "not available",
+            "#e8f1fb",
+        ),
+        (
+            "Aux REST Session",
+            _short_session(aux_sessions[0]) if aux_sessions else "not available",
+            "#eef6e8",
+        ),
     ]
     left_positions = [(0.03, 0.68), (0.03, 0.40), (0.03, 0.12)]
     for (title, body, face), pos in zip(left_boxes, left_positions):
@@ -1740,14 +1782,15 @@ def _write_raw_windowing_figure(runs: List[RunMetrics]) -> Optional[str]:
     onset_s = float(active_event["onset_s"])
     end_s = float(active_event.get("end_s") or (onset_s + float(active_event.get("duration_s") or 0.0)))
     anchor_local = float(active_event["local_ts"]) - onset_s
-    view_start = max(0.0, onset_s - 0.20)
-    view_end = onset_s + 0.80
+    view_start = max(0.0, onset_s - 0.30)
+    view_end = onset_s + 0.95
     local_start = anchor_local + view_start
     local_end = anchor_local + view_end
     raw_t_local, raw_samples = _load_raw_segment_by_local_time(session_dir, local_start, local_end)
     if raw_t_local.size == 0 or raw_samples.size == 0:
         return None
     raw_t = raw_t_local - anchor_local
+    plot_t = raw_t - onset_s
 
     windows_npz_path = session_dir / "processed" / "eeg_windows.npz"
     if not windows_npz_path.exists():
@@ -1769,15 +1812,20 @@ def _write_raw_windowing_figure(runs: List[RunMetrics]) -> Optional[str]:
     if idx.size == 0:
         return None
     idx = idx[np.argsort(window_start[idx])]
-    if idx.size > 8:
+    if idx.size > 14:
         center = int(np.argmin(np.abs(window_start[idx] - onset_s)))
-        lo = max(0, center - 3)
-        hi = min(idx.size, lo + 8)
+        lo = max(0, center - 5)
+        hi = min(idx.size, lo + 14)
         idx = idx[lo:hi]
     highlight_i = int(np.argmin(np.abs(window_start[idx] - onset_s)))
     h_start = float(window_start[idx[highlight_i]])
     h_end = float(window_end[idx[highlight_i]])
-    next_start = float(window_start[idx[min(highlight_i + 1, idx.size - 1)]])
+    window_len = float(np.median(window_end[idx] - window_start[idx]))
+    hop_len = (
+        float(np.median(np.diff(np.sort(window_start[idx]))))
+        if idx.size > 1
+        else float("nan")
+    )
 
     fig = plt.figure(figsize=(7.2, 4.8), dpi=200)
     gs = fig.add_gridspec(2, 1, height_ratios=[3.2, 1.6], hspace=0.18)
@@ -1792,12 +1840,13 @@ def _write_raw_windowing_figure(runs: List[RunMetrics]) -> Optional[str]:
     offsets = np.arange(raw_samples.shape[1])[::-1] * spacing
 
     for ch in range(raw_samples.shape[1]):
-        ax.plot(raw_t, centered[:, ch] + offsets[ch], color=colors[ch % len(colors)], linewidth=1.0)
-    ax.axvspan(onset_s, end_s, color="#f3d36b", alpha=0.28, lw=0.0)
-    ax.axvline(onset_s, color="#8a5a00", linestyle="--", linewidth=1.0)
-    ax.axvline(end_s, color="#8a5a00", linestyle="--", linewidth=1.0)
+        ax.plot(plot_t, centered[:, ch] + offsets[ch], color=colors[ch % len(colors)], linewidth=0.85)
+    event_end_rel = end_s - onset_s
+    ax.axvspan(0.0, event_end_rel, color="#f3d36b", alpha=0.28, lw=0.0)
+    ax.axvline(0.0, color="#8a5a00", linestyle="--", linewidth=1.0)
+    ax.axvline(event_end_rel, color="#8a5a00", linestyle="--", linewidth=1.0)
     ax.text(
-        onset_s + 0.16,
+        min(0.16, event_end_rel + 0.03),
         offsets[0] + spacing * 0.48,
         f"{str(active_event.get('type') or '').replace('_', ' ').title()} event",
         fontsize=7.6,
@@ -1806,7 +1855,7 @@ def _write_raw_windowing_figure(runs: List[RunMetrics]) -> Optional[str]:
         color="#5a4300",
         bbox=dict(boxstyle="round,pad=0.18", facecolor="#fff6d7", edgecolor="none", alpha=0.95),
     )
-    ax.set_xlim(view_start, view_end)
+    ax.set_xlim(view_start - onset_s, view_end - onset_s)
     ax.set_yticks(offsets)
     ax.set_yticklabels(channel_names[: raw_samples.shape[1]])
     ax.set_ylabel("Muse 2 channel")
@@ -1814,44 +1863,54 @@ def _write_raw_windowing_figure(runs: List[RunMetrics]) -> Optional[str]:
     ax.text(0.0, 1.03, "(a) Raw recorded segment", transform=ax.transAxes, fontsize=9.5, fontweight="bold", ha="left", va="bottom")
     ax.tick_params(axis="x", labelbottom=False)
 
-    axw.axvspan(onset_s, end_s, color="#f3d36b", alpha=0.28, lw=0.0)
-    bar_h = 0.72
+    axw.axvspan(0.0, event_end_rel, color="#f3d36b", alpha=0.28, lw=0.0)
+    bar_h = 0.56
     y_positions = np.arange(idx.size)[::-1]
     for row, i in enumerate(idx):
         y = y_positions[row]
         color = "#4c78a8" if row != highlight_i else "#d95f02"
-        axw.broken_barh([(float(window_start[i]), float(window_end[i] - window_start[i]))], (y - bar_h / 2.0, bar_h), facecolors=color, edgecolors="white", linewidth=0.6, alpha=0.9)
+        start_rel = float(window_start[i] - onset_s)
+        width = float(window_end[i] - window_start[i])
+        edge = "#2f2f2f" if row == highlight_i else "white"
+        lw = 0.9 if row == highlight_i else 0.45
+        axw.broken_barh(
+            [(start_rel, width)],
+            (y - bar_h / 2.0, bar_h),
+            facecolors=color,
+            edgecolors=edge,
+            linewidth=lw,
+            alpha=0.86,
+        )
     bottom_i = int(idx[-1])
-    bottom_start = float(window_start[bottom_i])
-    bottom_end = float(window_end[bottom_i])
+    bottom_start = float(window_start[bottom_i] - onset_s)
+    bottom_end = float(window_end[bottom_i] - onset_s)
     axw.annotate("", xy=(bottom_start, -0.8), xytext=(bottom_end, -0.8), arrowprops=dict(arrowstyle="<->", linewidth=0.9, color="#333333"))
     axw.text(
         (bottom_start + bottom_end) / 2.0,
         -1.00,
-        "0.25 s window",
+        f"{window_len:.2f} s window",
         ha="center",
         va="top",
         fontsize=6.8,
         bbox=dict(boxstyle="round,pad=0.12", facecolor="white", edgecolor="none", alpha=0.92),
     )
     if idx.size > 1:
-        hop_start = float(window_start[idx[0]])
-        hop_end = float(window_start[idx[1]])
+        hop_start = float(window_start[idx[0]] - onset_s)
+        hop_end = float(window_start[idx[1]] - onset_s)
         hop_y = y_positions[1] + 0.35 if idx.size > 1 else y_positions[0] + 0.35
         axw.annotate("", xy=(hop_start, hop_y), xytext=(hop_end, hop_y), arrowprops=dict(arrowstyle="<->", linewidth=0.9, color="#333333"))
         axw.text(
             (hop_start + hop_end) / 2.0 - 0.018,
             hop_y - 0.34,
-            "0.05 s hop",
+            f"{hop_len:.2f} s hop",
             ha="center",
             va="top",
             fontsize=6.8,
             bbox=dict(boxstyle="round,pad=0.12", facecolor="white", edgecolor="none", alpha=0.92),
         )
-    axw.set_yticks(y_positions)
-    axw.set_yticklabels([f"W{n+1}" for n in range(idx.size)])
-    axw.set_xlabel("Session time (s)")
-    axw.set_ylabel("Windows")
+    axw.set_yticks([])
+    axw.set_xlabel("Time from event onset (s)")
+    axw.set_ylabel("Overlapping\nwindows")
     axw.set_ylim(-1.4, max(1.2, float(y_positions.max()) + 1.2))
     axw.grid(axis="x", linestyle=":", linewidth=0.6, alpha=0.6)
     axw.text(0.0, 1.03, "(b) Sliding windows", transform=axw.transAxes, fontsize=9.5, fontweight="bold", ha="left", va="bottom")
@@ -2612,8 +2671,9 @@ def _write_figures(runs: List[RunMetrics]) -> None:
                 safe_path = f"../{safe_path}"
             lines.append(f"\\includegraphics[width=\\linewidth]{{{safe_path}}}\n")
             lines.append(
-                "\\caption{Train/test composite loss by epoch for the featured recipe "
-                f"({source_label}). The curve is generated only from recorded per-epoch history.}}\n"
+                "\\caption{Additional training-dynamics validation for the featured recipe: "
+                f"train/test composite loss by epoch ({source_label}). The curve is generated "
+                "only from recorded per-epoch history and is not reconstructed from final metrics.}\n"
             )
             lines.append("\\label{fig:featured-loss-curve}\n")
             lines.append("\\end{figure}\n\n")
