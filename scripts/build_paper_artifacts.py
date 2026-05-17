@@ -1838,12 +1838,15 @@ def _write_raw_windowing_figure(runs: List[RunMetrics]) -> Optional[str]:
     plt.rcParams["path.simplify"] = False
     plt.rcParams["agg.path.chunksize"] = 0
 
-    fig = plt.figure(figsize=(7.2, 4.8), dpi=450)
+    fig = plt.figure(figsize=(7.2, 4.8), dpi=600)
     gs = fig.add_gridspec(2, 1, height_ratios=[3.2, 1.6], hspace=0.18)
     ax = fig.add_subplot(gs[0])
     axw = fig.add_subplot(gs[1], sharex=ax)
 
     plot_channels = min(raw_samples.shape[1], len(channel_names))
+    centered = raw_samples[:, :plot_channels] - np.median(
+        raw_samples[:, :plot_channels], axis=0, keepdims=True
+    )
     spacing = float(DEFAULT_PLOT_CHANNEL_SPACING_UV)
     fixed_ylim = tuple(float(v) for v in DEFAULT_PLOT_FIXED_YLIM)
     offsets = np.arange(plot_channels, dtype=float) * spacing
@@ -1852,7 +1855,7 @@ def _write_raw_windowing_figure(runs: List[RunMetrics]) -> Optional[str]:
     for ch in range(plot_channels):
         ax.plot(
             plot_t,
-            raw_samples[:, ch] + offsets[ch],
+            centered[:, ch] + offsets[ch],
             color=colors[ch % len(colors)],
             linewidth=0.9,
             antialiased=True,
@@ -1939,8 +1942,10 @@ def _write_raw_windowing_figure(runs: List[RunMetrics]) -> Optional[str]:
         axis.spines["right"].set_visible(False)
 
     out_path = FIG_DIR / "raw_eeg_windowing_example.png"
+    pdf_path = out_path.with_suffix(".pdf")
     fig.subplots_adjust(left=0.14, right=0.98, top=0.95, bottom=0.12, hspace=0.20)
     fig.savefig(out_path, bbox_inches="tight")
+    fig.savefig(pdf_path, bbox_inches="tight")
     plt.close(fig)
     return str(out_path.relative_to(REPO_ROOT))
 
