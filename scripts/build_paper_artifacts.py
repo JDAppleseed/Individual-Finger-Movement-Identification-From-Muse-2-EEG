@@ -1850,7 +1850,7 @@ def _write_raw_windowing_figure(runs: List[RunMetrics]) -> Optional[str]:
     spacing = float(DEFAULT_PLOT_CHANNEL_SPACING_UV)
     fixed_ylim = tuple(float(v) for v in DEFAULT_PLOT_FIXED_YLIM)
     offsets = np.arange(plot_channels, dtype=float) * spacing
-    colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["#1f77b4"])
+    colors = ["#1f77b4", "#d95f02", "#2ca02c", "#7f7f7f"]
 
     for ch in range(plot_channels):
         ax.plot(
