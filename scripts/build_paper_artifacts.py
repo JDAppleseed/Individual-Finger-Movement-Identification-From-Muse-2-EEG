@@ -1747,6 +1747,88 @@ def _write_featured_provenance_figure(runs: List[RunMetrics]) -> Optional[str]:
     return str(out_path.relative_to(REPO_ROOT))
 
 
+def _write_muse_montage_figure() -> str:
+    fig, ax = plt.subplots(figsize=(4.2, 4.7), dpi=350)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_xlim(-1.22, 1.22)
+    ax.set_ylim(-1.18, 1.20)
+
+    head = plt.Circle((0.0, -0.02), 1.0, fill=False, edgecolor="#222222", linewidth=1.3)
+    ax.add_patch(head)
+    ax.text(0.0, 1.10, "Nasion (front)", ha="center", va="center", fontsize=8.5)
+    ax.text(0.0, -1.12, "Inion (back)", ha="center", va="center", fontsize=8.5)
+
+    electrode_xy = {
+        "FP1": (-0.36, 0.74),
+        "FP2": (0.36, 0.74),
+        "AF7": (-0.78, 0.50),
+        "AF8": (0.78, 0.50),
+        "F7": (-0.83, 0.20),
+        "F3": (-0.36, 0.26),
+        "Fz": (0.0, 0.30),
+        "F4": (0.36, 0.26),
+        "F8": (0.83, 0.20),
+        "T3": (-0.90, -0.10),
+        "C3": (-0.36, -0.10),
+        "Cz": (0.0, -0.10),
+        "C4": (0.36, -0.10),
+        "T4": (0.90, -0.10),
+        "TP9": (-1.02, -0.38),
+        "TP10": (1.02, -0.38),
+        "T5": (-0.66, -0.58),
+        "P3": (-0.36, -0.56),
+        "Pz": (0.0, -0.56),
+        "P4": (0.36, -0.56),
+        "T6": (0.66, -0.58),
+        "O1": (-0.28, -0.84),
+        "O2": (0.28, -0.84),
+    }
+    muse_colors = {
+        "TP9": "#1f77b4",
+        "AF7": "#d95f02",
+        "AF8": "#2ca02c",
+        "TP10": "#7f7f7f",
+    }
+    central_sites = {"C3", "Cz", "C4"}
+
+    for label, (x, y) in electrode_xy.items():
+        is_muse = label in muse_colors
+        is_central = label in central_sites
+        radius = 0.145 if is_muse else 0.125
+        face = muse_colors.get(label, "#f2f2f2" if is_central else "white")
+        edge = "#222222" if is_muse else "#555555" if is_central else "#222222"
+        text_color = "white" if label == "TP10" else "black"
+        lw = 1.3 if is_muse else 0.9
+        circ = plt.Circle((x, y), radius, facecolor=face, edgecolor=edge, linewidth=lw)
+        ax.add_patch(circ)
+        ax.text(x, y, label, ha="center", va="center", fontsize=7.8, color=text_color)
+
+    ax.plot(
+        [electrode_xy["C3"][0], electrode_xy["Cz"][0], electrode_xy["C4"][0]],
+        [electrode_xy["C3"][1], electrode_xy["Cz"][1], electrode_xy["C4"][1]],
+        color="#777777",
+        linewidth=0.9,
+        linestyle="--",
+        zorder=0,
+    )
+    ax.text(
+        0.0,
+        -0.30,
+        "central motor sites\nnot sampled",
+        ha="center",
+        va="center",
+        fontsize=7.2,
+        color="#555555",
+    )
+    out_path = FIG_DIR / "muse_electrode_layout.png"
+    pdf_path = out_path.with_suffix(".pdf")
+    fig.savefig(out_path, bbox_inches="tight")
+    fig.savefig(pdf_path, bbox_inches="tight")
+    plt.close(fig)
+    return str(pdf_path.relative_to(REPO_ROOT))
+
+
 def _write_raw_windowing_figure(runs: List[RunMetrics]) -> Optional[str]:
     featured = _featured_run(runs)
     if featured is None:
@@ -2621,6 +2703,7 @@ def _write_figures(runs: List[RunMetrics]) -> None:
     featured = _featured_run(runs)
     _write_finger_accuracy_bar_chart(runs)
     _write_featured_provenance_figure(runs)
+    _write_muse_montage_figure()
     _write_raw_windowing_figure(runs)
     _write_featured_psd_figure(runs)
 
