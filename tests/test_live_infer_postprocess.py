@@ -365,6 +365,17 @@ def test_live_infer_defaults_match_best_live_profile():
     assert defaults["bad_channel_clipped_frac"] == pytest.approx(0.05)
     assert defaults["bad_window_clipped_frac"] == pytest.approx(0.10)
     assert defaults["bad_window_max_masked_channels"] == 1
+    assert defaults["live_logging_mode"] == "lean_decisive"
+    assert defaults["LIVE_EEG_PLOT_ENABLED"] is True
+    assert defaults["LIVE_EEG_PLOT_DISPLAY_FS"] == pytest.approx(64.0)
+    assert defaults["LIVE_EEG_PLOT_FPS"] == pytest.approx(20.0)
+    assert defaults["LIVE_EEG_PLOT_WINDOW_SEC"] == pytest.approx(5.0)
+    assert defaults["LIVE_EEG_PLOT_FIXED_SCALE_UV"] == pytest.approx(200.0)
+    assert defaults["LIVE_EEG_PLOT_CHANNEL_SPACING_UV"] == pytest.approx(120.0)
+    assert defaults["LIVE_PREDICTION_TEXT_ENABLED"] is False
+    assert defaults["LIVE_VIZ_ENABLED"] is False
+    assert defaults["mc_passes"] == 1
+    assert defaults["parity_capture_enabled"] is False
     assert defaults["serial_port"] is None
     assert defaults["serial_baud"] == 9600
     assert defaults["actuation_min_prob"] == pytest.approx(0.2)
@@ -405,6 +416,16 @@ def test_live_infer_defaults_match_best_live_profile():
     assert config_defaults["bad_channel_clipped_frac"] == pytest.approx(0.05)
     assert config_defaults["bad_window_clipped_frac"] == pytest.approx(0.10)
     assert config_defaults["bad_window_max_masked_channels"] == 1
+    assert config_defaults["live_logging_mode"] == "lean_decisive"
+    assert config_defaults["LIVE_EEG_PLOT_DISPLAY_FS"] == pytest.approx(64.0)
+    assert config_defaults["LIVE_EEG_PLOT_FPS"] == pytest.approx(20.0)
+    assert config_defaults["LIVE_EEG_PLOT_WINDOW_SEC"] == pytest.approx(5.0)
+    assert config_defaults["LIVE_EEG_PLOT_FIXED_SCALE_UV"] == pytest.approx(200.0)
+    assert config_defaults["LIVE_EEG_PLOT_CHANNEL_SPACING_UV"] == pytest.approx(120.0)
+    assert config_defaults["LIVE_PREDICTION_TEXT_ENABLED"] is False
+    assert config_defaults["LIVE_VIZ_ENABLED"] is False
+    assert config_defaults["mc_passes"] == 1
+    assert config_defaults["parity_capture_enabled"] is False
     assert config_defaults["serial_port"] is None
     assert config_defaults["serial_baud"] == 9600
     assert config_defaults["actuation_min_prob"] == pytest.approx(0.2)

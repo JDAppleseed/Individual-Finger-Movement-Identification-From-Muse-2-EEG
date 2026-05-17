@@ -179,7 +179,7 @@ def test_build_replay_runtime_config_maps_warn_latency_policy_to_ignore():
             "modulate_actuation_speed": False,
             "actuation_speed_gamma": 1.0,
             "use_inference_engine": False,
-            "mc_passes": 10,
+            "mc_passes": 1,
             "uncertainty_base_threshold": 0.75,
             "uncertainty_weight": 0.5,
             "live_quality_enabled": True,

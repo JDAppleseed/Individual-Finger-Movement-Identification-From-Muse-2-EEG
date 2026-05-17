@@ -31,7 +31,9 @@ If you prefer conda, activate your own Python 3.11/3.12 environment before launc
 - For `2-M16`, the UI should resolve `finger_action_model.pt` and `scaler.npz` under `processed/models/20260319_075520/`.
 - Do not assume the main session selector overrides a pinned Step 7 session.
 - Step 7b resolves the latest live output under that Step 7 session and prefers fresh `live_infer_<run_tag>` directories over bare or legacy names.
-- `Show Step 1-style live EEG plot` is enabled by default so Step 7 starts with the same 4-channel stream-health view used in Step 1. Disable it only when you explicitly want the leanest live loop.
+- `Show Step 1-style live EEG plot` is enabled by default and uses the Step 1 defaults: display FS `64.0`, redraw FPS `20.0`, 5 s window, fixed `[-200, 200] uV`, and `120 uV` channel spacing.
+- `live_logging_mode=lean_decisive` is the default. It keeps preflight evidence, raw shards, `predictions.jsonl`, the runtime manifest, segment breaks, and the prediction summary. `full_audit` adds high-volume `runtime_events.jsonl`, `window_audit.jsonl`, parity capture/replay, and distribution report artifacts.
+- Live inference must use `mc_passes=1`. MC dropout experiments belong outside Step 7 live deployment configs.
 
 ## Optional CLI Flow
 
@@ -71,10 +73,8 @@ python3 7_live_infer_and_actuate.py \
   --session-dir "$SESSION_DIR" \
   --out-dir "$OUT_DIR" \
   --lsl-source-id "$LSL_SOURCE_ID" \
-  --live-eeg-plot \
-  --parity-capture-enabled \
-  --parity-capture-max-windows 128 \
-  --parity-capture-flush-every 1
+  --live-logging-mode lean_decisive \
+  --live-eeg-plot
 ```
 
 ### 3. Expected Outputs
@@ -84,12 +84,18 @@ When `no_file_io=false`, these files must exist after the run:
 - `$OUT_DIR/live_infer.log`
 - `$OUT_DIR/live_runtime_manifest.json`
 - `$OUT_DIR/predictions.jsonl`
-- `$OUT_DIR/window_audit.jsonl`
+- `$OUT_DIR/raw/eeg_raw_shard_*.npy`
 - `$OUT_DIR/segment_breaks.jsonl`
 - `$OUT_DIR/live_prediction_summary.json`
+
+In `full_audit` mode, these additional files must also exist:
+
+- `$OUT_DIR/runtime_events.jsonl`
+- `$OUT_DIR/window_audit.jsonl`
 - `$OUT_DIR/live_input_distribution_report.json`
 - `$OUT_DIR/parity_capture/capture_manifest.json`
 - `$OUT_DIR/parity_capture/captured_windows.json`
+- `$OUT_DIR/parity_report.json`
 
 ### 4. Immediate Post-Run Check
 
@@ -107,6 +113,7 @@ payload = {
     "selected_source_id": manifest.get("stream_resolution", {}).get("selected_source_id"),
     "replay_cmd": manifest.get("finalization", {}).get("post_run_commands", {}).get("replay"),
     "audit_cmd": manifest.get("finalization", {}).get("post_run_commands", {}).get("audit"),
+    "live_logging_mode": manifest.get("runtime", {}).get("live_logging_mode"),
     "distribution_report_path": manifest.get("finalization", {}).get("distribution_report_path"),
     "distribution_report_write_error": manifest.get("finalization", {}).get("distribution_report_write_error"),
 }
@@ -121,9 +128,9 @@ Healthy output should show:
 - `required_output_errors=null`
 - `selected_source_id` matching the pinned headset id
 - `termination_reason=ok` or `termination_reason=interrupted`
-- `distribution_report_write_error=null`
+- In lean mode, `distribution_report_path=null` and `distribution_report_write_error=null` are expected.
 
-### 5. Replay
+### 5. Replay (`full_audit` only)
 
 ```bash
 python3 tools/replay_live_capture.py \
@@ -137,21 +144,18 @@ This must write `$OUT_DIR/parity_report.json`. The command returns nonzero if th
 ```bash
 python3 tools/audit_live_parity.py \
   --live-dir "$OUT_DIR" \
-  --parity-report "$OUT_DIR/parity_report.json" \
-  --distribution-report "$OUT_DIR/live_input_distribution_report.json" \
   --write-json \
   --write-md
 ```
 
-Healthy audit output should show:
+Healthy lean audit output should show:
 
 - `evidence.completeness=complete`
-- `evidence.accepted_window_parity_evidence=confirmed`
-- `evidence.distribution_evidence=confirmed`
+- `evidence.accepted_window_parity_evidence=not_required_lean`
+- `evidence.distribution_evidence=not_required_lean`
 - `blocking_errors` is empty
-- `dominant_limiter` is present and consistent with the run evidence
 
-The audit can still confirm pre-inference window/alignment loss. That does not invalidate parity capture if replay evidence is complete.
+For `full_audit`, pass `--parity-report "$OUT_DIR/parity_report.json"` and `--distribution-report "$OUT_DIR/live_input_distribution_report.json"` and require confirmed parity/distribution evidence.
 
 ## Immediate Failure Signatures
 
@@ -160,6 +164,7 @@ The audit can still confirm pre-inference window/alignment loss. That does not i
 - Startup error: `stream_contract_mismatch`
 - Startup error: `artifact_load_error`, `temperature_artifact_missing`, or `temperature_artifact_load_error`
 - Final manifest shows `required_outputs_ok=false`
-- Replay returns nonzero with `status=error` or `status=parity_failure`
+- `mc_passes` is not `1` in the frozen config or runtime manifest
+- `full_audit` replay returns nonzero with `status=error` or `status=parity_failure`
 - Audit returns nonzero with `blocking_errors`
-- Audit shows `accepted_window_parity_evidence=none` or `partial` after replay
+- `full_audit` audit shows `accepted_window_parity_evidence=none` or `partial` after replay

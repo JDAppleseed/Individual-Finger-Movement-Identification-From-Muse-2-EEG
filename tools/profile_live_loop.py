@@ -195,7 +195,7 @@ def main() -> int:
         default=False,
         help="Include Step 7 live-viz payload generation in the benchmark.",
     )
-    parser.add_argument("--mc-passes", type=int, default=10)
+    parser.add_argument("--mc-passes", type=int, default=1)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--window-index", type=int, default=0, help="Window index from the NPZ to profile.")
     parser.add_argument("--iterations", type=int, default=100)

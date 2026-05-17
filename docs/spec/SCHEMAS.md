@@ -119,6 +119,21 @@ Diagnostic summary:
     - `window_start`
     - `window_end`
     - `dataset_info` — JSON payload stored as a string array for cache validation / provenance
+- `training_history.json` — per-epoch Step 2 training history
+  - `schema_version` (int)
+  - `created_utc` (string)
+  - `epoch_count` (int)
+  - `history` (array), one row per epoch:
+    - `epoch` (int)
+    - `train.loss`, `test.loss` — composite losses using the same loss terms as training
+    - `train.loss_action`, `test.loss_action`
+    - `train.loss_finger_non_rest`, `test.loss_finger_non_rest`
+    - `train.loss_finger_rest`, `test.loss_finger_rest`
+    - `train.loss_applicability`, `test.loss_applicability`
+    - `train.action_acc`, `test.action_acc`
+    - `train.finger_acc_non_rest`, `test.finger_acc_non_rest`
+    - `duration_sec`
+- `loss_curve.png` — generated only from `training_history.json`; paper artifacts must not infer this curve from final-only metrics.
 
 ## 7) Calibration + Logs
 
@@ -135,6 +150,12 @@ Diagnostic summary:
 - `logs/calibration/<subject_id>_<experiment_hash>.json` — per-subject calibration stream
 - `logs/calibration/calibration_state_<subject>_<experiment>.json` — online threshold state
 - `logs/session_state_<subject_id>.json` — append/resume state (session_id, block_id, segment_id, total_elapsed_s, last_time_s, features_path, events_path, raw_path, created_utc, updated_utc)
+- `processed/live_infer*/live_runtime_manifest.json` — Step 7 runtime manifest
+  - `runtime.live_logging_mode`: `lean_decisive` or `full_audit`
+  - `runtime.mc_passes`: must be `1` for live inference
+  - `runtime.live_eeg_plot`: Step 1-style plot settings. Defaults are enabled, display FS `64.0`, redraw FPS `20.0`, 5 s window, fixed `[-200, 200] uV`, channel spacing `120 uV`.
+  - In `lean_decisive`, required evidence is raw shards, `predictions.jsonl`, `segment_breaks.jsonl`, `live_prediction_summary.json`, and this manifest. `runtime_events.jsonl`, `window_audit.jsonl`, parity capture/report, and distribution report are optional/disabled by default.
+  - In `full_audit`, runtime events, window audit, parity capture/report, and distribution report are required audit evidence.
 - `processed/live_infer*/predictions.jsonl` — Step 7 per-window live predictions
   - core fields:
     - `window_start_s`, `window_end_s`, `ts_utc`

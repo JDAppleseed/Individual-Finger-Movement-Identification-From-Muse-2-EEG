@@ -516,6 +516,8 @@ class RunMetrics:
     fig_finger_confusion: Optional[str]
     fig_reliability: Optional[str]
     fig_scatter: Optional[str]
+    fig_loss_curve: Optional[str]
+    loss_curve_source_label: Optional[str]
 
 
 def _metric_or_neg_inf(value: Optional[float]) -> float:
@@ -632,6 +634,141 @@ def _copy_figure(src: Path, dest_stem: str) -> str:
     dest = FIG_DIR / f"{dest_stem}{ext}"
     shutil.copy2(src, dest)
     return str(dest.relative_to(REPO_ROOT))
+
+
+def _history_has_real_epoch_losses(history_path: Path) -> bool:
+    if not history_path.exists():
+        return False
+    try:
+        payload = _load_json(history_path)
+        rows = payload.get("history") if isinstance(payload, dict) else None
+    except Exception:
+        return False
+    if not isinstance(rows, list) or not rows:
+        return False
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        train = row.get("train")
+        test = row.get("test")
+        if not isinstance(train, dict) or not isinstance(test, dict):
+            return False
+        try:
+            train_loss = float(train["loss"])
+            test_loss = float(test["loss"])
+        except Exception:
+            return False
+        if not math.isfinite(train_loss) or not math.isfinite(test_loss):
+            return False
+    return True
+
+
+def _real_loss_curve_for_run(run_dir: Path, metrics: Dict[str, Any]) -> Optional[Path]:
+    artifacts = metrics.get("artifacts", {}) if isinstance(metrics.get("artifacts"), dict) else {}
+    history_name = artifacts.get("training_history") or "training_history.json"
+    curve_name = artifacts.get("loss_curve") or "loss_curve.png"
+    history_path = Path(str(history_name))
+    curve_path = Path(str(curve_name))
+    if not history_path.is_absolute():
+        history_path = run_dir / history_path
+    if not curve_path.is_absolute():
+        curve_path = run_dir / curve_path
+    if _history_has_real_epoch_losses(history_path) and curve_path.exists():
+        return curve_path
+    return None
+
+
+def _featured_recipe_signature() -> Optional[Dict[str, Any]]:
+    manifest_path = next(PROJECTS_ROOT.glob("**/winning_model/winning_model_manifest.json"), None)
+    if manifest_path is None:
+        return None
+    train_config_path = manifest_path.parent / "model_run" / "train_config.json"
+    if not train_config_path.exists():
+        return None
+    cfg = _load_json(train_config_path)
+    keys = [
+        "seed",
+        "batch_size",
+        "epochs",
+        "learning_rate",
+        "calibration_size",
+        "loss_action_weight",
+        "rest_weight",
+        "action_weights",
+        "rest_balance_mode",
+        "active_finger_head",
+        "finger_applicability_head",
+        "rest_finger_loss_weight",
+        "applicability_loss_weight",
+        "window_preprocess",
+        "test_size",
+        "split_mode",
+        "aux_rest_session_policy",
+        "purge_seconds",
+        "strict_leakage",
+        "non_rest_only",
+        "npz_path",
+    ]
+    return {key: cfg.get(key) for key in keys}
+
+
+def _configs_match_featured_recipe(cfg: Dict[str, Any], signature: Dict[str, Any]) -> bool:
+    def _path_text(value: Any) -> str:
+        text = str(value or "")
+        if not text:
+            return ""
+        path = Path(text)
+        if path.is_absolute():
+            try:
+                return _repo_rel(path)
+            except Exception:
+                return str(path)
+        return text
+
+    for key, expected in signature.items():
+        actual = cfg.get(key)
+        if key.endswith("_path") or key == "npz_path":
+            if _path_text(actual) != _path_text(expected):
+                return False
+        elif actual != expected:
+            return False
+    return True
+
+
+def _featured_loss_curve_rerun_source(current_run_dir: Path) -> Optional[Path]:
+    signature = _featured_recipe_signature()
+    if signature is None:
+        return None
+    for metrics_path in sorted(PROJECTS_ROOT.rglob("processed/models/*/metrics.json")):
+        run_dir = metrics_path.parent
+        if run_dir.resolve() == current_run_dir.resolve():
+            continue
+        try:
+            metrics = _load_json(metrics_path)
+        except Exception:
+            continue
+        curve_path = _real_loss_curve_for_run(run_dir, metrics)
+        if curve_path is None:
+            continue
+        train_cfg_path = run_dir / "train_config.json"
+        if not train_cfg_path.exists():
+            continue
+        try:
+            cfg = _load_json(train_cfg_path)
+        except Exception:
+            continue
+        role = str(
+            metrics.get("selection_role")
+            or metrics.get("paper_source_role")
+            or cfg.get("selection_role")
+            or cfg.get("paper_source_role")
+            or ""
+        )
+        if role in {"featured_recipe_loss_curve_rerun", "featured_recipe_rerun"}:
+            return curve_path
+        if _configs_match_featured_recipe(cfg, signature):
+            return curve_path
+    return None
 
 
 def _find_report_figs(report_dir: Path, run_id: str) -> Dict[str, Optional[Path]]:
@@ -1217,6 +1354,19 @@ def _compute_run_metrics(metrics_path: Path) -> RunMetrics:
             train_cfg=train_cfg,
             dest_stem=f"{stem_base}__mc_scatter",
         )
+    loss_curve_source_label = None
+    loss_curve_source = _real_loss_curve_for_run(run_dir, metrics)
+    if loss_curve_source is not None:
+        loss_curve_source_label = "featured run recorded history"
+    elif _is_featured_manifest_parts(subj, session_dir_rel, run_id):
+        loss_curve_source = _featured_loss_curve_rerun_source(run_dir)
+        if loss_curve_source is not None:
+            loss_curve_source_label = "featured recipe rerun recorded history"
+    fig_loss_curve = (
+        _copy_figure(loss_curve_source, f"{stem_base}__loss_curve")
+        if loss_curve_source is not None
+        else None
+    )
 
     return RunMetrics(
         subject_id=subj,
@@ -1267,6 +1417,8 @@ def _compute_run_metrics(metrics_path: Path) -> RunMetrics:
         fig_finger_confusion=fig_finger,
         fig_reliability=fig_rel,
         fig_scatter=fig_scat,
+        fig_loss_curve=fig_loss_curve,
+        loss_curve_source_label=loss_curve_source_label,
     )
 
 
@@ -2393,7 +2545,15 @@ def _write_figures(runs: List[RunMetrics]) -> None:
     lines.append("% AUTO-GENERATED by scripts/build_paper_artifacts.py. DO NOT EDIT BY HAND.\n")
 
     for r in ([featured] if featured is not None else []):
-        if not any([r.fig_action_confusion, r.fig_finger_confusion, r.fig_reliability, r.fig_scatter]):
+        if not any(
+            [
+                r.fig_action_confusion,
+                r.fig_finger_confusion,
+                r.fig_reliability,
+                r.fig_scatter,
+                r.fig_loss_curve,
+            ]
+        ):
             continue
 
         # Grid using minipages (IEEE-friendly, no extra packages required).
@@ -2441,6 +2601,22 @@ def _write_figures(runs: List[RunMetrics]) -> None:
             lines.append(f"\\caption{{{fig_caption}}}\n")
             lines.append("\\label{fig:featured-evaluation}\n")
             lines.append("\\end{figure*}\n\n")
+
+        if r.fig_loss_curve:
+            source_label = _latex_escape(
+                str(r.loss_curve_source_label or "recorded training history")
+            )
+            lines.append("\\begin{figure}[t]\n\\centering\n")
+            safe_path = str(r.fig_loss_curve).replace("\\", "/")
+            if not safe_path.startswith("../"):
+                safe_path = f"../{safe_path}"
+            lines.append(f"\\includegraphics[width=\\linewidth]{{{safe_path}}}\n")
+            lines.append(
+                "\\caption{Train/test composite loss by epoch for the featured recipe "
+                f"({source_label}). The curve is generated only from recorded per-epoch history.}}\n"
+            )
+            lines.append("\\label{fig:featured-loss-curve}\n")
+            lines.append("\\end{figure}\n\n")
 
     (OUT_DIR / "figures.tex").write_text("".join(lines), encoding="utf-8")
 

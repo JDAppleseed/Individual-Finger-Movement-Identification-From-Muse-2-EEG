@@ -18,6 +18,7 @@ def default_step7_settings() -> dict[str, Any]:
         "scaler_path": str(ARTIFACT_DEFAULTS["scaler"]),
         "out_dir": None,
         "device": "auto",
+        "live_logging_mode": str(LIVE_INFER_RECIPE_DEFAULTS["live_logging_mode"]),
         "stream_name": "Muse2-EEG",
         "stream_type": "EEG",
         "lsl_source_id": None,
@@ -31,6 +32,15 @@ def default_step7_settings() -> dict[str, Any]:
             LIVE_INFER_RECIPE_DEFAULTS["LIVE_EEG_PLOT_DISPLAY_FS"]
         ),
         "LIVE_EEG_PLOT_FPS": float(LIVE_INFER_RECIPE_DEFAULTS["LIVE_EEG_PLOT_FPS"]),
+        "LIVE_EEG_PLOT_WINDOW_SEC": float(
+            LIVE_INFER_RECIPE_DEFAULTS["LIVE_EEG_PLOT_WINDOW_SEC"]
+        ),
+        "LIVE_EEG_PLOT_FIXED_SCALE_UV": float(
+            LIVE_INFER_RECIPE_DEFAULTS["LIVE_EEG_PLOT_FIXED_SCALE_UV"]
+        ),
+        "LIVE_EEG_PLOT_CHANNEL_SPACING_UV": float(
+            LIVE_INFER_RECIPE_DEFAULTS["LIVE_EEG_PLOT_CHANNEL_SPACING_UV"]
+        ),
         "LIVE_PREDICTION_TEXT_ENABLED": bool(
             LIVE_INFER_RECIPE_DEFAULTS["LIVE_PREDICTION_TEXT_ENABLED"]
         ),

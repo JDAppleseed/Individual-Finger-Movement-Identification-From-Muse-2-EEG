@@ -766,6 +766,9 @@ TOOLTIPS: Dict[str, str] = {
     "LIVE_EEG_PLOT_ENABLED": "Show the same live 4-channel EEG plot used in Step 1 while Step 7 is running.",
     "LIVE_EEG_PLOT_DISPLAY_FS": "Maximum sample rate forwarded to the Step 7 live EEG plot.",
     "LIVE_EEG_PLOT_FPS": "Step 7 live EEG plot redraw rate.",
+    "LIVE_EEG_PLOT_WINDOW_SEC": "Time span displayed by the Step 7 live EEG plot.",
+    "LIVE_EEG_PLOT_FIXED_SCALE_UV": "Symmetric fixed y-scale for the Step 7 live EEG plot.",
+    "LIVE_EEG_PLOT_CHANNEL_SPACING_UV": "Vertical channel spacing for the Step 7 live EEG plot.",
     "LIVE_PREDICTION_TEXT_ENABLED": (
         "Show lightweight live prediction text on the Step 7 page even without "
         "robot-hand hardware."
@@ -806,6 +809,7 @@ TOOLTIPS: Dict[str, str] = {
     "actuation_min_speed": "Minimum non-zero speed scalar allowed for actuated commands.",
     "bluetooth_target": "Bluetooth device name/address for actuation.",
     "no_file_io": "Disable file outputs during Step 7. Use only for non-decisive debug runs.",
+    "live_logging_mode": "Step 7 logging profile. lean_decisive keeps raw shards, predictions, manifest, summary, and preflight evidence; full_audit adds high-volume audit and parity streams.",
     "modulate_actuation_speed": "Modulate actuation speed from prediction confidence.",
     "actuation_speed_gamma": "Gamma curve for confidence-based actuation speed modulation.",
     "postprocess": "Enable live postprocessing before action and finger decisions are committed.",
@@ -821,8 +825,8 @@ TOOLTIPS: Dict[str, str] = {
     "hysteresis_margin": "Additional margin required to switch classes when hysteresis is enabled.",
     "finger_delta": "Minimum winning-finger margin used by postprocessing helpers.",
     "finger_mode": "Use raw or smoothed finger confidence for committed live decisions.",
-    "use_inference_engine": "Use utils.inference.InferenceEngine for MC-dropout mean probabilities and uncertainty-aware actuation gating.",
-    "mc_passes": "Monte Carlo dropout passes for live inference when the inference engine backend is enabled.",
+    "use_inference_engine": "Use utils.inference.InferenceEngine for deterministic live probabilities and uncertainty-aware actuation gating.",
+    "mc_passes": "Live inference pass count. Must stay 1 because MC dropout is disabled for Step 7 live inference.",
     "uncertainty_base_threshold": "Base action confidence threshold before uncertainty adjustment.",
     "uncertainty_weight": "Additional adaptive threshold weight applied to action uncertainty.",
     "rest_bias_correction_enabled": "Enable live REST-bias correction so finger probabilities are debiased using live REST windows.",
@@ -835,7 +839,7 @@ TOOLTIPS: Dict[str, str] = {
     "bad_channel_clipped_frac": "Mask a channel when its clipped-sample fraction exceeds this threshold.",
     "bad_window_clipped_frac": "Quality-gate a window when the total clipped fraction exceeds this threshold.",
     "bad_window_max_masked_channels": "Maximum bad-channel count that can be masked instead of dropping the live window.",
-    "parity_capture_enabled": "Save accepted live windows for replay parity checks. Leave enabled for decisive runs.",
+    "parity_capture_enabled": "Save accepted live windows for replay parity checks. Optional in lean_decisive; full_audit enables parity evidence.",
     "parity_capture_max_windows": "Maximum number of accepted windows retained for parity replay.",
     "parity_capture_flush_every": "Flush parity capture files after this many accepted windows.",
     "deployment_session_dir": "Optional offline session used only for decisive Step 7 preflight checks. Leave it equal to Step 7 session_dir unless you intentionally need a different reference.",
@@ -3356,8 +3360,11 @@ class MainWindow(QMainWindow):
         cb = infer_fields.get("use_inference_engine")
         if isinstance(cb, QCheckBox):
             enabled = cb.isChecked()
+        mc_widget = infer_fields.get("mc_passes")
+        if isinstance(mc_widget, QSpinBox):
+            mc_widget.setValue(1)
+            mc_widget.setEnabled(False)
         for key in (
-            "mc_passes",
             "uncertainty_base_threshold",
             "uncertainty_weight",
         ):
@@ -5477,21 +5484,29 @@ class MainWindow(QMainWindow):
                 "Select the inference runtime device. `auto` chooses the best available backend.",
             )
             self.fields[step_id]["device"] = device
+            self._add_choice_dropdown(
+                step_id,
+                form,
+                "live_logging_mode",
+                "Live logging mode",
+                defaults,
+                ["lean_decisive", "full_audit"],
+            )
             self._add_checkbox(
                 step_id,
                 form,
                 "use_inference_engine",
-                "Use MC-dropout inference engine",
+                "Use deterministic inference engine",
                 defaults,
             )
             self._add_spin(
                 step_id,
                 form,
                 "mc_passes",
-                "MC passes",
+                "Live inference passes",
                 defaults,
                 1,
-                100,
+                1,
             )
             infer_engine_widget = self.fields[step_id].get("use_inference_engine")
             if isinstance(infer_engine_widget, QCheckBox):
@@ -5546,6 +5561,36 @@ class MainWindow(QMainWindow):
                 defaults,
                 1,
                 60,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "LIVE_EEG_PLOT_WINDOW_SEC",
+                "Live EEG plot window (s)",
+                defaults,
+                1,
+                30,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "LIVE_EEG_PLOT_FIXED_SCALE_UV",
+                "Live EEG plot fixed scale (uV)",
+                defaults,
+                1,
+                1000,
+                is_float=True,
+            )
+            self._add_spin(
+                step_id,
+                form,
+                "LIVE_EEG_PLOT_CHANNEL_SPACING_UV",
+                "Live EEG plot channel spacing (uV)",
+                defaults,
+                1,
+                1000,
                 is_float=True,
             )
             self._add_checkbox(
@@ -7145,8 +7190,9 @@ class MainWindow(QMainWindow):
                 "target_fs": "Target FS",
                 "alignment_internal_max_gap_s": "Alignment internal max gap (s)",
                 "device": "Device",
-                "use_inference_engine": "Use MC-dropout inference engine",
-                "mc_passes": "MC passes",
+                "live_logging_mode": "Live logging mode",
+                "use_inference_engine": "Use deterministic inference engine",
+                "mc_passes": "Live inference passes",
                 "uncertainty_base_threshold": "Uncertainty base threshold",
                 "uncertainty_weight": "Uncertainty weight",
                 "allow_drop": "Allow drop",
@@ -7162,6 +7208,9 @@ class MainWindow(QMainWindow):
                 "LIVE_EEG_PLOT_ENABLED": "Show Step 1-style live EEG plot",
                 "LIVE_EEG_PLOT_DISPLAY_FS": "Live EEG plot display FS",
                 "LIVE_EEG_PLOT_FPS": "Live EEG plot FPS",
+                "LIVE_EEG_PLOT_WINDOW_SEC": "Live EEG plot window (s)",
+                "LIVE_EEG_PLOT_FIXED_SCALE_UV": "Live EEG plot fixed scale (uV)",
+                "LIVE_EEG_PLOT_CHANNEL_SPACING_UV": "Live EEG plot channel spacing (uV)",
                 "LIVE_PREDICTION_TEXT_ENABLED": "Show live prediction text",
                 "LIVE_PREDICTION_TEXT_FPS": "Live prediction text FPS",
                 "LIVE_VIZ_ENABLED": "Emit Step 7 live model views",
@@ -9897,6 +9946,7 @@ class MainWindow(QMainWindow):
             f"Require exactly 4 channels: {bool(launch.settings.get('REQUIRE_EXACTLY_4_CHANNELS', True))}",
             f"Alignment internal max gap (s): {launch.settings.get('alignment_internal_max_gap_s')}",
             f"Latency policy: {launch.settings.get('latency_policy')} @ {launch.settings.get('latency_threshold_ms')} ms",
+            f"Live logging mode: {launch.settings.get('live_logging_mode') or 'lean_decisive'}",
             f"Parity capture: enabled={bool(launch.settings.get('parity_capture_enabled'))} max_windows={launch.settings.get('parity_capture_max_windows')} flush_every={launch.settings.get('parity_capture_flush_every')}",
             f"no_file_io: {bool(launch.settings.get('no_file_io'))}",
             actuation_text,
@@ -10315,6 +10365,7 @@ class MainWindow(QMainWindow):
             f"Require exactly 4 channels: {bool(contract.get('require_exactly_4_channels', True))}",
             f"Alignment internal max gap (s): {contract.get('alignment_internal_max_gap_s')}",
             f"Latency policy: {contract.get('latency_policy')} @ {contract.get('latency_threshold_ms')} ms",
+            f"Live logging mode: {contract.get('live_logging_mode') or 'lean_decisive'}",
             f"Parity capture enabled: {bool(contract.get('parity_capture_enabled'))}",
             f"no_file_io: {bool(contract.get('no_file_io'))}",
             f"Stream contract ok: {stream_contract.get('contract_ok')}",
@@ -12360,6 +12411,7 @@ class MainWindow(QMainWindow):
         lines = [
             f"Live dir: {live_dir}",
             f"Evidence completeness: {evidence.get('completeness', 'unknown')}",
+            f"Live logging mode: {evidence.get('live_logging_mode', 'unknown')}",
             f"Decisive evidence complete: {bool(evidence.get('decisive_evidence_complete'))}",
             f"Accepted-window parity evidence: {evidence.get('accepted_window_parity_evidence', 'unknown')}",
             f"Accepted-window parity result: {evidence.get('accepted_window_parity_result', 'unknown')}",
@@ -12370,11 +12422,13 @@ class MainWindow(QMainWindow):
             f"Prediction summary: {live_dir / 'live_prediction_summary.json'}",
             f"Distribution report: {live_dir / 'live_input_distribution_report.json'}",
             f"Parity capture dir: {live_dir / 'parity_capture'}",
-            "Trust verdict: runtime completion alone is not decisive; require required_outputs_ok=true plus confirmed replay/audit evidence.",
-            "Legacy replay evidence is non-decisive if the audit reports legacy_partial or partial parity coverage.",
-            f"Replay command: {sys.executable} tools/replay_live_capture.py --capture-dir {live_dir / 'parity_capture'}",
-            f"Audit command: {sys.executable} tools/audit_live_parity.py --live-dir {live_dir} --parity-report {live_dir / 'parity_report.json'} --distribution-report {live_dir / 'live_input_distribution_report.json'} --write-json --write-md",
+            "Trust verdict: require required_outputs_ok=true and evidence.completeness=complete for the configured live logging mode.",
+            f"Audit command: {sys.executable} tools/audit_live_parity.py --live-dir {live_dir} --write-json --write-md",
         ]
+        if evidence.get("accepted_window_parity_evidence") not in {"not_required_lean", "none"}:
+            lines.append(
+                f"Replay command: {sys.executable} tools/replay_live_capture.py --capture-dir {live_dir / 'parity_capture'}"
+            )
         decisive_failures = evidence.get("decisive_failures") or []
         if decisive_failures:
             lines.extend(["", "Decisive evidence blockers:"])
@@ -12565,34 +12619,50 @@ class MainWindow(QMainWindow):
         if live_dir is None:
             return outputs
 
+        fields = self.fields.get("infer", {})
+        mode = "lean_decisive"
+        mode_widget = fields.get("live_logging_mode")
+        if isinstance(mode_widget, QComboBox):
+            mode = mode_widget.currentText().strip() or mode
+        parity_capture_enabled = False
+        parity_widget = fields.get("parity_capture_enabled")
+        if isinstance(parity_widget, QCheckBox):
+            parity_capture_enabled = bool(parity_widget.isChecked())
+        full_audit = mode == "full_audit"
+
         outputs.append(("Live dir", str(live_dir)))
         outputs.append(("Runtime manifest", str(live_dir / "live_runtime_manifest.json")))
         outputs.append(("Prediction log", str(live_dir / "predictions.jsonl")))
-        outputs.append(("Window audit", str(live_dir / "window_audit.jsonl")))
+        outputs.append(("Raw shards", str(live_dir / "raw")))
         outputs.append(("Segment breaks", str(live_dir / "segment_breaks.jsonl")))
         outputs.append(("Prediction summary", str(live_dir / "live_prediction_summary.json")))
-        outputs.append(
-            (
-                "Distribution report",
-                str(live_dir / "live_input_distribution_report.json"),
+        if full_audit:
+            outputs.append(("Runtime events", str(live_dir / "runtime_events.jsonl")))
+            outputs.append(("Window audit", str(live_dir / "window_audit.jsonl")))
+            outputs.append(
+                (
+                    "Distribution report",
+                    str(live_dir / "live_input_distribution_report.json"),
+                )
             )
-        )
-        outputs.append(("Parity capture", str(live_dir / "parity_capture")))
-        outputs.append(
-            ("Replay output: parity report", str(live_dir / "parity_report.json"))
-        )
-        outputs.append(
-            (
-                "Audit output: parity audit JSON",
-                str(live_dir / "live_parity_audit.json"),
+        if full_audit or parity_capture_enabled:
+            outputs.append(("Parity capture", str(live_dir / "parity_capture")))
+            outputs.append(
+                ("Replay output: parity report", str(live_dir / "parity_report.json"))
             )
-        )
-        outputs.append(
-            (
-                "Audit output: parity audit Markdown",
-                str(live_dir / "live_parity_audit.md"),
+        if full_audit:
+            outputs.append(
+                (
+                    "Audit output: parity audit JSON",
+                    str(live_dir / "live_parity_audit.json"),
+                )
             )
-        )
+            outputs.append(
+                (
+                    "Audit output: parity audit Markdown",
+                    str(live_dir / "live_parity_audit.md"),
+                )
+            )
         return outputs
 
     def _expected_step1b_outputs(self) -> list[tuple[str, str]]:

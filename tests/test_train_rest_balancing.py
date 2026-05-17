@@ -220,6 +220,42 @@ def test_active_finger_head_ignores_rest_finger_loss_and_reindexes_targets():
     assert float(loss.item()) > 0.0
 
 
+def test_active_finger_head_all_rest_batch_has_finite_zero_finger_loss():
+    mod = _load_train_module()
+    finger_logits = torch.tensor(
+        [[0.1, 1.2, -0.4, -0.5, -0.6], [0.4, -0.2, 0.1, 0.0, -0.3]],
+        dtype=torch.float32,
+    )
+    action_logits = torch.tensor([[2.0, -1.0, -1.2], [1.6, -0.4, -0.9]], dtype=torch.float32)
+    y_finger = torch.tensor([0, 0], dtype=torch.long)
+    y_action = torch.tensor([0, 0], dtype=torch.long)
+    loss_f = torch.nn.CrossEntropyLoss(ignore_index=-100)
+    loss_a = torch.nn.CrossEntropyLoss()
+
+    loss, loss_action, finger_non_rest, finger_rest, applicability_loss = mod._compute_batch_losses(
+        finger_logits=finger_logits,
+        action_logits=action_logits,
+        applicability_logits=None,
+        y_finger=y_finger,
+        y_action=y_action,
+        action_loss_fn=loss_a,
+        finger_loss_fn=loss_f,
+        applicability_loss_fn=None,
+        loss_action_weight=1.0,
+        rest_finger_loss_weight=0.0,
+        applicability_loss_weight=0.0,
+        active_finger_head=True,
+        finger_loss_ignore_index=-100,
+    )
+
+    assert torch.isfinite(loss)
+    assert torch.isfinite(finger_non_rest)
+    assert float(finger_non_rest.item()) == 0.0
+    assert float(finger_rest.item()) == 0.0
+    assert float(applicability_loss.item()) == 0.0
+    assert float(loss.item()) == float(loss_action.item())
+
+
 def test_applicability_loss_trains_on_all_windows_without_reintroducing_none():
     mod = _load_train_module()
     finger_logits = torch.tensor(
@@ -277,3 +313,53 @@ def test_applicability_loss_trains_on_all_windows_without_reintroducing_none():
     assert float(app0.item()) == 0.0
     assert float(app1.item()) > 0.0
     assert float(loss1.item()) > float(loss0.item())
+
+
+def test_training_history_artifacts_require_real_epoch_losses(tmp_path: Path):
+    mod = _load_train_module()
+    history = [
+        {
+            "epoch": 1,
+            "train": {
+                "loss": 1.2,
+                "loss_action": 0.8,
+                "loss_finger_non_rest": 0.3,
+                "loss_finger_rest": 0.0,
+                "loss_applicability": 0.2,
+            },
+            "test": {
+                "loss": 1.4,
+                "loss_action": 0.9,
+                "loss_finger_non_rest": 0.4,
+                "loss_finger_rest": 0.0,
+                "loss_applicability": 0.2,
+            },
+            "duration_sec": 0.1,
+        },
+        {
+            "epoch": 2,
+            "train": {
+                "loss": 1.0,
+                "loss_action": 0.7,
+                "loss_finger_non_rest": 0.2,
+                "loss_finger_rest": 0.0,
+                "loss_applicability": 0.2,
+            },
+            "test": {
+                "loss": 1.3,
+                "loss_action": 0.8,
+                "loss_finger_non_rest": 0.3,
+                "loss_finger_rest": 0.0,
+                "loss_applicability": 0.2,
+            },
+            "duration_sec": 0.1,
+        },
+    ]
+
+    artifacts = mod._write_training_history_artifacts(run_dir=tmp_path, history=history)
+
+    assert (tmp_path / "training_history.json").exists()
+    assert artifacts["training_history_sha256"]
+    assert artifacts["loss_curve"] == "loss_curve.png"
+    assert artifacts["loss_curve_sha256"]
+    assert (tmp_path / "loss_curve.png").exists()

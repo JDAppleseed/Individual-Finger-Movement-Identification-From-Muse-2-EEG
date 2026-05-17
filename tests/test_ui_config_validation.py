@@ -80,6 +80,16 @@ def test_inference_engine_validation():
     assert any("actuation_speed_gamma must be numeric." in err for err in result.errors)
 
 
+def test_live_infer_rejects_mc_dropout_passes():
+    result = validate_step_settings("infer", {"mc_passes": 2})
+    assert any("mc_passes must be 1 for live_infer" in err for err in result.errors)
+
+
+def test_live_infer_rejects_unknown_logging_mode():
+    result = validate_step_settings("infer", {"live_logging_mode": "verbose"})
+    assert any("live_logging_mode must be" in err for err in result.errors)
+
+
 def test_live_infer_rejects_bad_actuation_and_postprocess_values():
     result = validate_step_settings(
         "infer",

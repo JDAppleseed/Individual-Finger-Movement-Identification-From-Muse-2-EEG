@@ -133,6 +133,19 @@ from utils.stream_timebase import (
 
 logger = logging.getLogger("live_infer")
 
+LIVE_LOGGING_MODE_LEAN_DECISIVE = "lean_decisive"
+LIVE_LOGGING_MODE_FULL_AUDIT = "full_audit"
+LIVE_LOGGING_MODES = (LIVE_LOGGING_MODE_LEAN_DECISIVE, LIVE_LOGGING_MODE_FULL_AUDIT)
+
+
+def _normalize_live_logging_mode(value: Any) -> str:
+    mode = str(value or LIVE_LOGGING_MODE_LEAN_DECISIVE).strip().lower()
+    if mode not in LIVE_LOGGING_MODES:
+        raise ValueError(
+            f"live_logging_mode must be one of {', '.join(LIVE_LOGGING_MODES)}."
+        )
+    return mode
+
 
 # -------------------- Serial Actuation --------------------
 
@@ -1598,6 +1611,30 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         metavar="HZ",
         help="Step 7 live EEG plot redraw rate.",
     )
+    stream_group.add_argument(
+        "--live-eeg-plot-window-sec",
+        "--live_eeg_plot_window_sec",
+        dest="LIVE_EEG_PLOT_WINDOW_SEC",
+        type=float,
+        metavar="SECONDS",
+        help="Time span displayed by the Step 7 live EEG plot.",
+    )
+    stream_group.add_argument(
+        "--live-eeg-plot-fixed-scale-uv",
+        "--live_eeg_plot_fixed_scale_uv",
+        dest="LIVE_EEG_PLOT_FIXED_SCALE_UV",
+        type=float,
+        metavar="UV",
+        help="Symmetric fixed y-scale for the Step 7 live EEG plot.",
+    )
+    stream_group.add_argument(
+        "--live-eeg-plot-channel-spacing-uv",
+        "--live_eeg_plot_channel_spacing_uv",
+        dest="LIVE_EEG_PLOT_CHANNEL_SPACING_UV",
+        type=float,
+        metavar="UV",
+        help="Vertical channel spacing for the Step 7 live EEG plot.",
+    )
     pred_text_group = stream_group.add_mutually_exclusive_group()
     pred_text_group.add_argument(
         "--live-prediction-text",
@@ -1826,6 +1863,17 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         help="Maximum bad-channel count that can be masked instead of quality-gating the window.",
     )
     audit_group = p.add_argument_group("audit and parity")
+    audit_group.add_argument(
+        "--live-logging-mode",
+        "--live_logging_mode",
+        dest="live_logging_mode",
+        choices=list(LIVE_LOGGING_MODES),
+        help=(
+            "Live evidence profile. lean_decisive writes raw shards, predictions, "
+            "manifest, summary, and preflight evidence; full_audit also writes "
+            "runtime events, window audit, and parity artifacts."
+        ),
+    )
     parity_toggle = audit_group.add_mutually_exclusive_group()
     parity_toggle.add_argument(
         "--parity-capture-enabled",
@@ -1859,13 +1907,13 @@ def _build_arg_parser() -> tuple[argparse.ArgumentParser, dict]:
         "--use-inference-engine",
         dest="use_inference_engine",
         action="store_true",
-        help="Use utils.inference.InferenceEngine for MC-dropout mean probabilities and uncertainty.",
+        help="Use utils.inference.InferenceEngine for deterministic live probabilities and uncertainty.",
     )
     postprocess_group.add_argument(
         "--mc-passes",
         dest="mc_passes",
         type=int,
-        help="Monte Carlo dropout passes when --use-inference-engine is enabled.",
+        help="Live inference pass count. Must remain 1; MC dropout is disabled for Step 7 live runs.",
     )
     postprocess_group.add_argument(
         "--uncertainty-base-threshold",
@@ -2119,6 +2167,11 @@ def _collect_required_output_status(
     parity_report_path: Optional[Path],
     parity_capture: Optional[LiveParityCapture],
     parity_capture_required: bool,
+    raw_shards_required: bool = True,
+    window_audit_required: bool = True,
+    segment_break_required: bool = True,
+    distribution_report_required: bool = True,
+    parity_report_required: bool = True,
     cleanup_errors: Optional[list[str]] = None,
     summary_write_error: Optional[str] = None,
     distribution_report_write_error: Optional[str] = None,
@@ -2149,19 +2202,40 @@ def _collect_required_output_status(
     if no_file_io:
         return output_hashes, errors
 
+    if raw_shards_required:
+        raw_dir = Path(out_dir) / "raw"
+        raw_shards = sorted(raw_dir.glob("*.npy")) if raw_dir.exists() else []
+        output_hashes["raw_shard_count"] = str(len(raw_shards))
+        if not raw_dir.exists():
+            errors.append(f"raw_dir_missing: {raw_dir}")
+        elif not raw_shards:
+            errors.append(f"raw_shards_missing: {raw_dir}")
+
     required_outputs = [
         ("live_log", Path(out_dir) / "live_infer.log", output_hashes["live_log_sha256"]),
         ("prediction_log", pred_log_path, output_hashes["prediction_log_sha256"]),
-        ("window_audit", window_audit_path, output_hashes["window_audit_sha256"]),
-        ("segment_break", segment_break_path, output_hashes["segment_break_sha256"]),
         ("summary", summary_path, output_hashes["summary_sha256"]),
-        (
-            "distribution_report",
-            distribution_report_path,
-            output_hashes["distribution_report_sha256"],
-        ),
-        ("parity_report", parity_report_path, output_hashes["parity_report_sha256"]),
     ]
+    if window_audit_required:
+        required_outputs.append(
+            ("window_audit", window_audit_path, output_hashes["window_audit_sha256"])
+        )
+    if segment_break_required:
+        required_outputs.append(
+            ("segment_break", segment_break_path, output_hashes["segment_break_sha256"])
+        )
+    if distribution_report_required:
+        required_outputs.append(
+            (
+                "distribution_report",
+                distribution_report_path,
+                output_hashes["distribution_report_sha256"],
+            )
+        )
+    if parity_report_required:
+        required_outputs.append(
+            ("parity_report", parity_report_path, output_hashes["parity_report_sha256"])
+        )
     for label, path, sha_value in required_outputs:
         if path is None:
             errors.append(f"{label}_path_missing")
@@ -4246,6 +4320,19 @@ def main() -> int:
     config_path = Path(args.config).expanduser().resolve()
     config_payload, config_settings = _load_config_file(config_path)
     _apply_config_to_args(args, config_settings, defaults)
+    try:
+        args.live_logging_mode = _normalize_live_logging_mode(args.live_logging_mode)
+    except ValueError as exc:
+        print(str(exc))
+        return 2
+    try:
+        args.mc_passes = int(args.mc_passes)
+    except Exception:
+        print("mc_passes must be an integer.")
+        return 2
+    if int(args.mc_passes) != 1:
+        print("mc_passes must be 1 for Step 7 live inference; MC dropout is disabled.")
+        return 2
     effective_settings = dict(config_settings)
     effective_settings.update(
         {
@@ -4313,11 +4400,26 @@ def main() -> int:
     temperature_path = launch_plan.temperature_path
     no_file_io = bool(launch_plan.no_file_io)
     record_raw = bool(launch_plan.record_raw)
+    full_audit_logging = args.live_logging_mode == LIVE_LOGGING_MODE_FULL_AUDIT
+    runtime_events_enabled = bool(full_audit_logging and not no_file_io)
+    window_audit_enabled = bool(full_audit_logging and not no_file_io)
+    post_run_distribution_enabled = bool(full_audit_logging and not no_file_io)
+    parity_capture_active = bool(
+        (bool(args.parity_capture_enabled) or full_audit_logging) and not no_file_io
+    )
+    parity_report_enabled = bool(parity_capture_active)
+    prediction_log_detail = "full" if full_audit_logging else "core"
 
     if bool(args.parity_capture_enabled) and no_file_io:
         print(
             "Parity capture cannot be enabled when no_file_io is true. "
             "Disable no_file_io or disable parity capture."
+        )
+        return 2
+    if full_audit_logging and no_file_io:
+        print(
+            "live_logging_mode=full_audit cannot be used when no_file_io is true. "
+            "Use lean_decisive or enable file outputs."
         )
         return 2
     if int(args.parity_capture_max_windows) < 1:
@@ -4349,6 +4451,15 @@ def main() -> int:
         return 2
     if float(args.LIVE_EEG_PLOT_FPS) <= 0.0:
         print("LIVE_EEG_PLOT_FPS must be > 0.")
+        return 2
+    if float(args.LIVE_EEG_PLOT_WINDOW_SEC) <= 0.0:
+        print("LIVE_EEG_PLOT_WINDOW_SEC must be > 0.")
+        return 2
+    if float(args.LIVE_EEG_PLOT_FIXED_SCALE_UV) <= 0.0:
+        print("LIVE_EEG_PLOT_FIXED_SCALE_UV must be > 0.")
+        return 2
+    if float(args.LIVE_EEG_PLOT_CHANNEL_SPACING_UV) <= 0.0:
+        print("LIVE_EEG_PLOT_CHANNEL_SPACING_UV must be > 0.")
         return 2
     if (
         bool(args.LIVE_PREDICTION_TEXT_ENABLED)
@@ -4450,12 +4561,22 @@ def main() -> int:
     if not no_file_io:
         pred_log_path = args.pred_log or str(Path(out_dir) / "predictions.jsonl")
         runtime_manifest_path = Path(out_dir) / "live_runtime_manifest.json"
-        runtime_event_path = Path(out_dir) / "runtime_events.jsonl"
-        window_audit_path = Path(out_dir) / "window_audit.jsonl"
+        runtime_event_path = (
+            Path(out_dir) / "runtime_events.jsonl" if runtime_events_enabled else None
+        )
+        window_audit_path = (
+            Path(out_dir) / "window_audit.jsonl" if window_audit_enabled else None
+        )
         segment_break_path = Path(out_dir) / "segment_breaks.jsonl"
         summary_path = Path(out_dir) / "live_prediction_summary.json"
-        distribution_report_path = Path(out_dir) / "live_input_distribution_report.json"
-        parity_report_path = Path(out_dir) / "parity_report.json"
+        distribution_report_path = (
+            Path(out_dir) / "live_input_distribution_report.json"
+            if post_run_distribution_enabled
+            else None
+        )
+        parity_report_path = (
+            Path(out_dir) / "parity_report.json" if parity_report_enabled else None
+        )
 
     device = _select_device(args.device)
     logger.info("Using device=%s", device)
@@ -4557,8 +4678,14 @@ def main() -> int:
         "runtime": {
             "device": str(device),
             "inference_backend": None,
+            "live_logging_mode": str(args.live_logging_mode),
+            "prediction_log_detail": str(prediction_log_detail),
             "no_file_io": bool(no_file_io),
             "record_raw": bool(record_raw),
+            "runtime_events_enabled": bool(runtime_events_enabled),
+            "window_audit_enabled": bool(window_audit_enabled),
+            "post_run_distribution_report_enabled": bool(post_run_distribution_enabled),
+            "post_run_parity_report_enabled": bool(parity_report_enabled),
             "allow_drop": bool(args.allow_drop),
             "log_every_s": float(args.log_every),
             "mc_passes": int(args.mc_passes),
@@ -4586,9 +4713,17 @@ def main() -> int:
             "live_eeg_plot": {
                 "enabled": bool(live_eeg_plot_enabled),
                 "plot_display_fs": float(
-                    getattr(args, "LIVE_EEG_PLOT_DISPLAY_FS", 32.0)
+                    getattr(args, "LIVE_EEG_PLOT_DISPLAY_FS", 64.0)
                 ),
-                "plot_fps": float(getattr(args, "LIVE_EEG_PLOT_FPS", 12.0)),
+                "plot_fps": float(getattr(args, "LIVE_EEG_PLOT_FPS", 20.0)),
+                "plot_window_sec": float(getattr(args, "LIVE_EEG_PLOT_WINDOW_SEC", 5.0)),
+                "plot_fixed_ylim": [
+                    -float(getattr(args, "LIVE_EEG_PLOT_FIXED_SCALE_UV", 200.0)),
+                    float(getattr(args, "LIVE_EEG_PLOT_FIXED_SCALE_UV", 200.0)),
+                ],
+                "plot_channel_spacing_uv": float(
+                    getattr(args, "LIVE_EEG_PLOT_CHANNEL_SPACING_UV", 120.0)
+                ),
             },
             "live_prediction_text": {
                 "enabled": bool(live_prediction_text_enabled),
@@ -4627,7 +4762,7 @@ def main() -> int:
                 "actuation_speed_gamma": float(args.actuation_speed_gamma),
             },
             "parity_capture": {
-                "enabled": bool(args.parity_capture_enabled and not no_file_io),
+                "enabled": bool(parity_capture_active),
                 "max_windows": int(args.parity_capture_max_windows),
                 "flush_every": int(args.parity_capture_flush_every),
             },
@@ -4657,6 +4792,7 @@ def main() -> int:
         "outputs": {
             "log_path": None if no_file_io else str(Path(out_dir) / "live_infer.log"),
             "prediction_log_path": str(pred_log_path) if pred_log_path is not None else None,
+            "raw_dir": str(Path(out_dir) / "raw") if record_raw else None,
             "runtime_events_path": (
                 str(runtime_event_path) if runtime_event_path is not None else None
             ),
@@ -4667,10 +4803,10 @@ def main() -> int:
                 str(segment_break_path) if segment_break_path is not None else None
             ),
             "parity_capture_dir": (
-                str(Path(out_dir) / "parity_capture") if not no_file_io else None
+                str(Path(out_dir) / "parity_capture") if parity_capture_active else None
             ),
             "parity_report_path": (
-                str(Path(out_dir) / "parity_report.json") if not no_file_io else None
+                str(parity_report_path) if parity_report_path is not None else None
             ),
             "summary_path": str(summary_path) if summary_path is not None else None,
             "distribution_report_path": (
@@ -4712,10 +4848,12 @@ def main() -> int:
 
     if not no_file_io:
         assert pred_log_path is not None
-        assert window_audit_path is not None
         assert segment_break_path is not None
         pred_log = _open_required_text_output(Path(pred_log_path), "prediction_log")
-        window_audit_log = _open_required_text_output(window_audit_path, "window_audit_log")
+        if window_audit_path is not None:
+            window_audit_log = _open_required_text_output(
+                window_audit_path, "window_audit_log"
+            )
         segment_break_log = _open_required_text_output(
             segment_break_path, "segment_break_log"
         )
@@ -4887,8 +5025,16 @@ def main() -> int:
             channel_labels=plot_channel_labels,
             expected_channels=len(plot_channel_labels),
             title=f"Step 7: Live EEG {subject_id or '-'}",
-            plot_display_fs=float(getattr(args, "LIVE_EEG_PLOT_DISPLAY_FS", 32.0)),
-            plot_fps=float(getattr(args, "LIVE_EEG_PLOT_FPS", 12.0)),
+            plot_display_fs=float(getattr(args, "LIVE_EEG_PLOT_DISPLAY_FS", 64.0)),
+            plot_fps=float(getattr(args, "LIVE_EEG_PLOT_FPS", 20.0)),
+            plot_window_sec=float(getattr(args, "LIVE_EEG_PLOT_WINDOW_SEC", 5.0)),
+            plot_fixed_ylim=(
+                -float(getattr(args, "LIVE_EEG_PLOT_FIXED_SCALE_UV", 200.0)),
+                float(getattr(args, "LIVE_EEG_PLOT_FIXED_SCALE_UV", 200.0)),
+            ),
+            plot_channel_spacing_uv=float(
+                getattr(args, "LIVE_EEG_PLOT_CHANNEL_SPACING_UV", 120.0)
+            ),
         )
         live_eeg_plot_runtime.start()
         runtime_manifest["runtime"]["live_eeg_plot"] = {
@@ -4923,7 +5069,7 @@ def main() -> int:
     parity_capture = LiveParityCapture(
         root_dir=Path(out_dir),
         settings=ParityCaptureSettings(
-            enabled=bool(args.parity_capture_enabled and not no_file_io),
+            enabled=bool(parity_capture_active),
             max_windows=int(args.parity_capture_max_windows),
             flush_every=int(args.parity_capture_flush_every),
         ),
@@ -5987,6 +6133,22 @@ def main() -> int:
                             else None
                         ),
                     }
+                    if prediction_log_detail != "full":
+                        for debug_key in (
+                            "action_probs",
+                            "action_logits",
+                            "model_raw_finger_probs",
+                            "finger_logits",
+                            "finger_probs",
+                            "applicability_logit",
+                            "channel_rms_z",
+                            "channel_abs_p95_z",
+                            "channel_clipped_frac",
+                            "actuation_vote_finger_counts",
+                            "actuation_vote_action_counts",
+                            "actuation_vote_pair_counts",
+                        ):
+                            payload.pop(debug_key, None)
                     pred_log.write(json.dumps(payload) + "\n")
                     pred_log_count += 1
                     if pred_log_count % pred_log_flush_every == 0:
@@ -6236,12 +6398,16 @@ def main() -> int:
         replay_cmd = (
             f"{sys.executable} tools/replay_live_capture.py --capture-dir "
             f"{Path(out_dir) / 'parity_capture'}"
+            if parity_capture_active
+            else None
         )
         audit_cmd = (
             f"{sys.executable} tools/audit_live_parity.py --live-dir {out_dir} "
             f"--parity-report {Path(out_dir) / 'parity_report.json'} "
             f"--distribution-report {Path(out_dir) / 'live_input_distribution_report.json'} "
             "--write-json --write-md"
+            if full_audit_logging
+            else f"{sys.executable} tools/audit_live_parity.py --live-dir {out_dir} --write-json --write-md"
         )
         if (
             not no_file_io
@@ -6333,7 +6499,7 @@ def main() -> int:
                     device_name=str(device),
                     runtime_manifest_path=runtime_manifest_path,
                     summary_path=summary_path,
-                    parity_capture_enabled=bool(args.parity_capture_enabled),
+                    parity_capture_enabled=bool(parity_capture_active),
                 )
                 if written_report_path is not None:
                     parity_report_path = written_report_path
@@ -6385,7 +6551,12 @@ def main() -> int:
             segment_break_path=segment_break_path,
             summary_path=summary_path,
             parity_capture=parity_capture,
-            parity_capture_required=bool(args.parity_capture_enabled and not no_file_io),
+            parity_capture_required=bool(parity_capture_active),
+            raw_shards_required=bool(record_raw),
+            window_audit_required=bool(window_audit_enabled),
+            segment_break_required=bool(segment_break_path is not None),
+            distribution_report_required=bool(post_run_distribution_enabled),
+            parity_report_required=bool(parity_report_enabled),
             cleanup_errors=cleanup_errors,
             summary_write_error=summary_write_error,
             distribution_report_path=distribution_report_path,

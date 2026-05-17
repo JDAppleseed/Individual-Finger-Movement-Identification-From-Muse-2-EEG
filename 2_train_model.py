@@ -866,7 +866,10 @@ def _compute_batch_losses(
         finger_targets.masked_fill_(
             y_action == ACTION_REST, int(finger_loss_ignore_index)
         )
-        loss_finger_non_rest = finger_loss_fn(finger_logits, finger_targets)
+        if (finger_targets != int(finger_loss_ignore_index)).any():
+            loss_finger_non_rest = finger_loss_fn(finger_logits, finger_targets)
+        else:
+            loss_finger_non_rest = zero
         loss_finger_rest = zero
     else:
         mask_nr = y_action != ACTION_REST
@@ -906,6 +909,207 @@ def _compute_batch_losses(
         loss_finger_rest,
         loss_applicability,
     )
+
+
+def _empty_epoch_loss_sums() -> Dict[str, float]:
+    return {
+        "loss": 0.0,
+        "loss_action": 0.0,
+        "loss_finger_non_rest": 0.0,
+        "loss_finger_rest": 0.0,
+        "loss_applicability": 0.0,
+    }
+
+
+def _add_epoch_loss_sums(
+    sums: Dict[str, float],
+    *,
+    batch_size: int,
+    loss: torch.Tensor,
+    loss_action: torch.Tensor,
+    loss_finger_non_rest: torch.Tensor,
+    loss_finger_rest: torch.Tensor,
+    loss_applicability: torch.Tensor,
+) -> None:
+    scale = float(max(0, int(batch_size)))
+    sums["loss"] += float(loss.detach().float().item()) * scale
+    sums["loss_action"] += float(loss_action.detach().float().item()) * scale
+    sums["loss_finger_non_rest"] += (
+        float(loss_finger_non_rest.detach().float().item()) * scale
+    )
+    sums["loss_finger_rest"] += float(loss_finger_rest.detach().float().item()) * scale
+    sums["loss_applicability"] += (
+        float(loss_applicability.detach().float().item()) * scale
+    )
+
+
+def _finalize_epoch_metrics(
+    sums: Dict[str, float],
+    *,
+    sample_count: int,
+    correct_action: int,
+    total_action: int,
+    correct_finger: int,
+    total_finger: int,
+) -> Dict[str, Any]:
+    denom = float(max(1, int(sample_count)))
+    return {
+        "loss": float(sums["loss"] / denom),
+        "loss_action": float(sums["loss_action"] / denom),
+        "loss_finger_non_rest": float(sums["loss_finger_non_rest"] / denom),
+        "loss_finger_rest": float(sums["loss_finger_rest"] / denom),
+        "loss_applicability": float(sums["loss_applicability"] / denom),
+        "action_acc": float(correct_action / max(1, int(total_action))),
+        "finger_acc_non_rest": float(correct_finger / max(1, int(total_finger))),
+        "sample_count": int(sample_count),
+        "non_rest_count": int(total_finger),
+    }
+
+
+def _evaluate_loss_loader(
+    *,
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    amp_dtype: Optional[torch.dtype],
+    non_blocking_transfer: bool,
+    action_loss_fn: nn.Module,
+    finger_loss_fn: nn.Module,
+    applicability_loss_fn: Optional[nn.Module],
+    loss_action_weight: float,
+    rest_finger_loss_weight: float,
+    applicability_loss_weight: float,
+    active_finger_head: bool,
+    finger_loss_ignore_index: Optional[int],
+) -> Dict[str, Any]:
+    model.eval()
+    sums = _empty_epoch_loss_sums()
+    correct_action = 0
+    total_action = 0
+    correct_finger = 0
+    total_finger = 0
+    sample_count = 0
+    with torch.inference_mode():
+        for Xb, yfb, yab in loader:
+            Xb = Xb.to(device, non_blocking=non_blocking_transfer)
+            yfb = yfb.to(device, non_blocking=non_blocking_transfer)
+            yab = yab.to(device, non_blocking=non_blocking_transfer)
+            with _autocast_context(device, amp_dtype):
+                f_out, a_out, app_out = unpack_model_outputs(model(Xb))
+                (
+                    loss,
+                    loss_action,
+                    loss_finger_non_rest,
+                    loss_finger_rest,
+                    loss_applicability,
+                ) = _compute_batch_losses(
+                    finger_logits=f_out,
+                    action_logits=a_out,
+                    applicability_logits=app_out,
+                    y_finger=yfb,
+                    y_action=yab,
+                    action_loss_fn=action_loss_fn,
+                    finger_loss_fn=finger_loss_fn,
+                    applicability_loss_fn=applicability_loss_fn,
+                    loss_action_weight=float(loss_action_weight),
+                    rest_finger_loss_weight=float(rest_finger_loss_weight),
+                    applicability_loss_weight=float(applicability_loss_weight),
+                    active_finger_head=bool(active_finger_head),
+                    finger_loss_ignore_index=finger_loss_ignore_index,
+                )
+            batch_size = int(Xb.size(0))
+            sample_count += batch_size
+            _add_epoch_loss_sums(
+                sums,
+                batch_size=batch_size,
+                loss=loss,
+                loss_action=loss_action,
+                loss_finger_non_rest=loss_finger_non_rest,
+                loss_finger_rest=loss_finger_rest,
+                loss_applicability=loss_applicability,
+            )
+            preds_action = torch.argmax(a_out, dim=1)
+            correct_action += int((preds_action == yab).sum().item())
+            total_action += int(yab.numel())
+
+            mask_nr = yab != ACTION_REST
+            preds_finger = torch.argmax(f_out, dim=1)
+            if active_finger_head:
+                preds_finger = preds_finger + 1
+            correct_finger += int(((preds_finger == yfb) & mask_nr).sum().item())
+            total_finger += int(mask_nr.sum().item())
+    return _finalize_epoch_metrics(
+        sums,
+        sample_count=sample_count,
+        correct_action=correct_action,
+        total_action=total_action,
+        correct_finger=correct_finger,
+        total_finger=total_finger,
+    )
+
+
+def _write_loss_curve(history: List[Dict[str, Any]], output_path: Path) -> Optional[str]:
+    epochs: List[int] = []
+    train_losses: List[float] = []
+    test_losses: List[float] = []
+    for row in history:
+        try:
+            epochs.append(int(row["epoch"]))
+            train_loss = float(row["train"]["loss"])
+            test_loss = float(row["test"]["loss"])
+        except Exception:
+            return "training history is missing train/test loss for at least one epoch"
+        if not np.isfinite(train_loss) or not np.isfinite(test_loss):
+            return "training history contains non-finite train/test loss"
+        train_losses.append(train_loss)
+        test_losses.append(test_loss)
+    if not epochs:
+        return "training history is empty"
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(7.0, 4.2), dpi=160)
+        ax.plot(epochs, train_losses, marker="o", linewidth=1.8, label="Train")
+        ax.plot(epochs, test_losses, marker="o", linewidth=1.8, label="Test")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Composite loss")
+        ax.set_title("Train/Test Loss")
+        ax.grid(True, alpha=0.25)
+        ax.legend(frameon=False)
+        fig.tight_layout()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path)
+        plt.close(fig)
+    except Exception as exc:
+        return str(exc)
+    return None
+
+
+def _write_training_history_artifacts(
+    *,
+    run_dir: Path,
+    history: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    history_path = run_dir / "training_history.json"
+    loss_curve_path = run_dir / "loss_curve.png"
+    payload = {
+        "schema_version": 1,
+        "created_utc": now_utc_iso(),
+        "epoch_count": int(len(history)),
+        "history": history,
+    }
+    history_path.write_text(json.dumps(payload, indent=2))
+    loss_curve_error = _write_loss_curve(history, loss_curve_path)
+    return {
+        "training_history": str(history_path.name),
+        "training_history_sha256": sha256_file(history_path),
+        "loss_curve": str(loss_curve_path.name) if loss_curve_path.exists() else None,
+        "loss_curve_sha256": sha256_file(loss_curve_path),
+        "loss_curve_error": loss_curve_error,
+    }
 
 
 def _window_idx_leakage_check(
@@ -2032,10 +2236,12 @@ def main():
         _device_synchronize(device)
         training_start = time.perf_counter()
         epoch_durations: List[float] = []
+        training_history: List[Dict[str, Any]] = []
         for epoch in range(args.epochs):
             model.train()
             epoch_start = time.perf_counter()
             total_loss = torch.zeros((), device=device)
+            epoch_loss_sums = _empty_epoch_loss_sums()
             total_action = 0
             total_finger = torch.zeros((), device=device, dtype=torch.int64)
             correct_action = torch.zeros((), device=device, dtype=torch.int64)
@@ -2080,6 +2286,15 @@ def main():
                     opt.step()
 
                 total_loss += loss.detach() * Xb.size(0)
+                _add_epoch_loss_sums(
+                    epoch_loss_sums,
+                    batch_size=int(Xb.size(0)),
+                    loss=loss,
+                    loss_action=loss_action,
+                    loss_finger_non_rest=loss_finger_non_rest,
+                    loss_finger_rest=loss_finger_rest,
+                    loss_applicability=loss_applicability,
+                )
 
                 preds_action = torch.argmax(a_out, dim=1)
                 correct_action += (preds_action == yab).sum()
@@ -2096,16 +2311,53 @@ def main():
             action_acc = float(correct_action.item()) / max(1, total_action)
             total_finger_count = int(total_finger.item())
             finger_acc = float(correct_finger.item()) / max(1, total_finger_count)
-            epoch_durations.append(time.perf_counter() - epoch_start)
+            test_epoch_metrics = _evaluate_loss_loader(
+                model=model,
+                loader=test_loader,
+                device=device,
+                amp_dtype=amp_dtype,
+                non_blocking_transfer=non_blocking_transfer,
+                action_loss_fn=loss_a,
+                finger_loss_fn=loss_f,
+                applicability_loss_fn=applicability_loss_fn,
+                loss_action_weight=float(args.loss_action_weight),
+                rest_finger_loss_weight=float(args.rest_finger_loss_weight),
+                applicability_loss_weight=float(args.applicability_loss_weight),
+                active_finger_head=active_finger_head_enabled,
+                finger_loss_ignore_index=finger_loss_ignore_index,
+            )
+            epoch_duration = time.perf_counter() - epoch_start
+            epoch_durations.append(epoch_duration)
+            train_epoch_metrics = _finalize_epoch_metrics(
+                epoch_loss_sums,
+                sample_count=len(train_loader.dataset),
+                correct_action=int(correct_action.item()),
+                total_action=int(total_action),
+                correct_finger=int(correct_finger.item()),
+                total_finger=total_finger_count,
+            )
+            training_history.append(
+                {
+                    "epoch": int(epoch + 1),
+                    "train": train_epoch_metrics,
+                    "test": test_epoch_metrics,
+                    "duration_sec": float(epoch_duration),
+                }
+            )
 
             if (epoch + 1) % 10 == 0 or epoch == 0:
                 print(
                     f"Epoch {epoch + 1:03d}/{args.epochs} | loss={avg_loss:.4f} "
+                    f"test_loss={test_epoch_metrics['loss']:.4f} "
                     f"action_acc={action_acc:.3f} finger_acc={finger_acc:.3f}"
                 )
         _device_synchronize(device)
         training_sec = time.perf_counter() - training_start
         avg_epoch_sec = training_sec / max(1, args.epochs)
+        training_history_artifacts = _write_training_history_artifacts(
+            run_dir=run_dir,
+            history=training_history,
+        )
 
         # ===== SAVE MODEL =====
         model.eval()
@@ -2169,6 +2421,12 @@ def main():
             "save_scaler_path": str(save_scaler_path),
             "save_preds_path": str(save_preds_path),
             "save_temperature_path": str(save_temperature_path),
+            "save_training_history_path": str(run_dir / "training_history.json"),
+            "save_loss_curve_path": (
+                str(run_dir / "loss_curve.png")
+                if (run_dir / "loss_curve.png").exists()
+                else None
+            ),
             "timing": {
                 "normalization_sec": float(normalization_sec),
                 "training_sec": float(training_sec),
@@ -2334,6 +2592,27 @@ def main():
             "run_dir": safe_resolve(run_dir),
             "train": {
                 "avg_loss": float(avg_loss),
+                "loss": float(training_history[-1]["train"]["loss"]) if training_history else None,
+                "loss_action": (
+                    float(training_history[-1]["train"]["loss_action"])
+                    if training_history
+                    else None
+                ),
+                "loss_finger_non_rest": (
+                    float(training_history[-1]["train"]["loss_finger_non_rest"])
+                    if training_history
+                    else None
+                ),
+                "loss_finger_rest": (
+                    float(training_history[-1]["train"]["loss_finger_rest"])
+                    if training_history
+                    else None
+                ),
+                "loss_applicability": (
+                    float(training_history[-1]["train"]["loss_applicability"])
+                    if training_history
+                    else None
+                ),
                 "action_acc": float(action_acc),
                 "finger_acc": float(finger_acc),
                 "epochs": int(args.epochs),
@@ -2356,6 +2635,27 @@ def main():
                 "metrics": temperature_state.metrics or {},
             },
             "test": {
+                "loss": float(training_history[-1]["test"]["loss"]) if training_history else None,
+                "loss_action": (
+                    float(training_history[-1]["test"]["loss_action"])
+                    if training_history
+                    else None
+                ),
+                "loss_finger_non_rest": (
+                    float(training_history[-1]["test"]["loss_finger_non_rest"])
+                    if training_history
+                    else None
+                ),
+                "loss_finger_rest": (
+                    float(training_history[-1]["test"]["loss_finger_rest"])
+                    if training_history
+                    else None
+                ),
+                "loss_applicability": (
+                    float(training_history[-1]["test"]["loss_applicability"])
+                    if training_history
+                    else None
+                ),
                 "action_acc": float(test_action_acc),
                 "finger_acc_non_rest": test_finger_acc,
                 "n_test": int(len(y_action_test)),
@@ -2373,6 +2673,13 @@ def main():
                 "scaler": str(save_scaler_path.name),
                 "preds": str(save_preds_path.name),
                 "temperature_scaling": str(save_temperature_path.name),
+                "training_history": training_history_artifacts.get("training_history"),
+                "training_history_sha256": training_history_artifacts.get(
+                    "training_history_sha256"
+                ),
+                "loss_curve": training_history_artifacts.get("loss_curve"),
+                "loss_curve_sha256": training_history_artifacts.get("loss_curve_sha256"),
+                "loss_curve_error": training_history_artifacts.get("loss_curve_error"),
             },
         }
         try:

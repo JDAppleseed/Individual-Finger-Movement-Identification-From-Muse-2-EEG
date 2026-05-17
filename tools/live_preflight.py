@@ -396,6 +396,8 @@ def _build_step7_command(
     config_path: Path,
     launch_plan,
     source_id: str | None,
+    live_logging_mode: str,
+    parity_capture_enabled: bool,
 ) -> str:
     cmd = [
         sys.executable,
@@ -412,13 +414,15 @@ def _build_step7_command(
     cmd += ["--out-dir", str(launch_plan.out_dir)]
     if source_id:
         cmd += ["--lsl-source-id", str(source_id)]
-    cmd += [
-        "--parity-capture-enabled",
-        "--parity-capture-max-windows",
-        "128",
-        "--parity-capture-flush-every",
-        "1",
-    ]
+    cmd += ["--live-logging-mode", str(live_logging_mode)]
+    if bool(parity_capture_enabled):
+        cmd += [
+            "--parity-capture-enabled",
+            "--parity-capture-max-windows",
+            "128",
+            "--parity-capture-flush-every",
+            "1",
+        ]
     return _shell_join(cmd)
 
 
@@ -613,13 +617,25 @@ def run_live_preflight(
         errors.append(
             "No explicit live LSL source_id is pinned. Export LSL_SOURCE_ID or pass --lsl-source-id before the run."
         )
-    parity_capture_enabled = bool(
+    live_logging_mode = str(
+        settings.get(
+            "live_logging_mode",
+            live_defaults.get("live_logging_mode", "lean_decisive"),
+        )
+    ).strip()
+    full_audit_logging = live_logging_mode == "full_audit"
+    parity_capture_requested = bool(
         settings.get(
             "parity_capture_enabled",
             live_defaults.get("parity_capture_enabled", False),
         )
     )
-    if not parity_capture_enabled and not allow_no_parity_capture:
+    parity_capture_enabled = bool(parity_capture_requested or full_audit_logging)
+    if (
+        full_audit_logging
+        and not parity_capture_enabled
+        and not allow_no_parity_capture
+    ):
         errors.append(
             "parity_capture_enabled is not enabled in config. Enable it for the next decisive live run."
         )
@@ -853,28 +869,47 @@ def run_live_preflight(
                 config_path=config_path,
                 launch_plan=launch_plan,
                 source_id=source_pref.requested_source_id,
+                live_logging_mode=live_logging_mode,
+                parity_capture_enabled=parity_capture_requested,
             ),
-            "replay": _shell_join(
-                [
-                    sys.executable,
-                    str(REPO_ROOT / "tools" / "replay_live_capture.py"),
-                    "--capture-dir",
-                    str(launch_plan.out_dir / "parity_capture"),
-                ]
+            "replay": (
+                _shell_join(
+                    [
+                        sys.executable,
+                        str(REPO_ROOT / "tools" / "replay_live_capture.py"),
+                        "--capture-dir",
+                        str(launch_plan.out_dir / "parity_capture"),
+                    ]
+                )
+                if parity_capture_enabled
+                else None
             ),
-            "audit": _shell_join(
-                [
-                    sys.executable,
-                    str(REPO_ROOT / "tools" / "audit_live_parity.py"),
-                    "--live-dir",
-                    str(launch_plan.out_dir),
-                    "--parity-report",
-                    str(launch_plan.out_dir / "parity_report.json"),
-                    "--distribution-report",
-                    str(launch_plan.out_dir / "live_input_distribution_report.json"),
-                    "--write-json",
-                    "--write-md",
-                ]
+            "audit": (
+                _shell_join(
+                    [
+                        sys.executable,
+                        str(REPO_ROOT / "tools" / "audit_live_parity.py"),
+                        "--live-dir",
+                        str(launch_plan.out_dir),
+                        "--parity-report",
+                        str(launch_plan.out_dir / "parity_report.json"),
+                        "--distribution-report",
+                        str(launch_plan.out_dir / "live_input_distribution_report.json"),
+                        "--write-json",
+                        "--write-md",
+                    ]
+                )
+                if full_audit_logging
+                else _shell_join(
+                    [
+                        sys.executable,
+                        str(REPO_ROOT / "tools" / "audit_live_parity.py"),
+                        "--live-dir",
+                        str(launch_plan.out_dir),
+                        "--write-json",
+                        "--write-md",
+                    ]
+                )
             ),
         }
 
@@ -883,7 +918,9 @@ def run_live_preflight(
         "stream_type": settings.get("stream_type") or settings.get("LSL_STREAM_TYPE"),
         "requested_source_id": source_pref.requested_source_id,
         "source_id_source": source_pref.source,
+        "live_logging_mode": live_logging_mode,
         "parity_capture_enabled": parity_capture_enabled,
+        "parity_capture_requested": parity_capture_requested,
         "no_file_io": (
             getattr(launch_plan, "no_file_io", settings.get("no_file_io"))
             if launch_plan is not None
@@ -992,6 +1029,11 @@ def _print_live_preflight_report(report: dict[str, Any], *, stream=None) -> None
     )
     _print_kv("source_id_source", effective_contract.get("source_id_source"), stream=out)
     _print_kv(
+        "live_logging_mode",
+        effective_contract.get("live_logging_mode"),
+        stream=out,
+    )
+    _print_kv(
         "parity_capture_enabled",
         effective_contract.get("parity_capture_enabled"),
         stream=out,
@@ -1069,9 +1111,10 @@ def _print_live_preflight_report(report: dict[str, Any], *, stream=None) -> None
     if recommended_commands:
         print("\nRecommended commands", file=out)
         print("-" * 40, file=out)
-        print(recommended_commands.get("live"), file=out)
-        print(recommended_commands.get("replay"), file=out)
-        print(recommended_commands.get("audit"), file=out)
+        for key in ("live", "replay", "audit"):
+            command = recommended_commands.get(key)
+            if command:
+                print(command, file=out)
 
     if report.get("errors"):
         print("\nErrors", file=out)

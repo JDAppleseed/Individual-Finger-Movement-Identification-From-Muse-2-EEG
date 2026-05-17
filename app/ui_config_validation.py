@@ -145,6 +145,14 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         "lsl_acquirer_queue_max_chunks",
     ):
         _validate_int_min(settings, key, 1, errors)
+    if "mc_passes" in settings:
+        try:
+            if int(settings.get("mc_passes")) != 1:
+                errors.append(
+                    "mc_passes must be 1 for live_infer; MC dropout is disabled during live inference."
+                )
+        except Exception:
+            pass
     for key in ("actuation_cooldown_ms", "actuation_repeat_ms"):
         _validate_int_min(settings, key, 0, errors)
 
@@ -171,6 +179,9 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         "serial_max_hz",
         "LIVE_EEG_PLOT_DISPLAY_FS",
         "LIVE_EEG_PLOT_FPS",
+        "LIVE_EEG_PLOT_WINDOW_SEC",
+        "LIVE_EEG_PLOT_FIXED_SCALE_UV",
+        "LIVE_EEG_PLOT_CHANNEL_SPACING_UV",
         "LIVE_PREDICTION_TEXT_FPS",
         "live_buffer_sec",
         "live_max_window_lag_s",
@@ -182,6 +193,9 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         "serial_max_hz",
         "LIVE_EEG_PLOT_DISPLAY_FS",
         "LIVE_EEG_PLOT_FPS",
+        "LIVE_EEG_PLOT_WINDOW_SEC",
+        "LIVE_EEG_PLOT_FIXED_SCALE_UV",
+        "LIVE_EEG_PLOT_CHANNEL_SPACING_UV",
         "live_buffer_sec",
     ):
         if key in settings:
@@ -219,9 +233,16 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
             )
         elif value not in {"warn", "drop", "degrade"}:
             errors.append("latency_policy must be 'warn', 'drop', or 'degrade'.")
+    live_logging_mode = str(settings.get("live_logging_mode", "lean_decisive")).strip()
+    if live_logging_mode not in {"lean_decisive", "full_audit"}:
+        errors.append("live_logging_mode must be 'lean_decisive' or 'full_audit'.")
     if settings.get("no_file_io") and settings.get("parity_capture_enabled"):
         errors.append(
             "parity_capture_enabled cannot be true when no_file_io is enabled."
+        )
+    if settings.get("no_file_io") and live_logging_mode == "full_audit":
+        errors.append(
+            "live_logging_mode='full_audit' cannot be used when no_file_io is enabled."
         )
     if (
         not settings.get("session_dir")
@@ -234,9 +255,9 @@ def validate_live_infer(settings: Dict[str, Any]) -> ValidationResult:
         warnings.append(
             "Runtime requires session_dir or explicit model_path/scaler_path/out_dir unless Step 7 can infer the latest subject session from the config location or CLI overrides supply them."
         )
-    if not settings.get("parity_capture_enabled"):
+    if live_logging_mode == "full_audit" and not settings.get("parity_capture_enabled"):
         warnings.append(
-            "parity_capture_enabled is not enabled; accepted-window inference parity will remain unproven after the next live run."
+            "parity_capture_enabled is not enabled; full_audit mode enables parity capture at runtime for accepted-window evidence."
         )
     if not settings.get("REQUIRED_LSL_LABELS"):
         warnings.append(

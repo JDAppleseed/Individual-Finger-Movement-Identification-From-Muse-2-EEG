@@ -707,7 +707,7 @@ def test_live_preflight_probe_stream_requires_expected_channel_labels(
         )
 
 
-def test_run_live_preflight_fails_without_source_id_or_parity_capture(
+def test_run_live_preflight_fails_without_source_id_in_lean_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     mod = _load_module("tools/live_preflight.py", "live_preflight_report_failclosed")
@@ -748,7 +748,10 @@ def test_run_live_preflight_fails_without_source_id_or_parity_capture(
     )
 
     fake_live_mod = SimpleNamespace(
-        _build_arg_parser=lambda: (None, {"parity_capture_enabled": False}),
+        _build_arg_parser=lambda: (
+            None,
+            {"parity_capture_enabled": False, "live_logging_mode": "lean_decisive"},
+        ),
         _resolve_expected_channel_labels=lambda settings, deployment_run_dir: (
             ["TP9", "AF7", "AF8", "TP10"],
             "config.REQUIRED_LSL_LABELS",
@@ -777,9 +780,10 @@ def test_run_live_preflight_fails_without_source_id_or_parity_capture(
 
     assert report["ready"] is False
     assert any("No explicit live LSL source_id is pinned" in err for err in report["errors"])
-    assert any("parity_capture_enabled is not enabled" in err for err in report["errors"])
+    assert not any("parity_capture_enabled is not enabled" in err for err in report["errors"])
     assert report["effective_contract"]["requested_source_id"] is None
     assert report["effective_contract"]["parity_capture_enabled"] is False
+    assert report["effective_contract"]["live_logging_mode"] == "lean_decisive"
     assert report["report_version"] == 1
     assert report["launch_plan_resolution_succeeded"] is True
     assert report["launch_plan_contract_status"] == "ok"

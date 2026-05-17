@@ -99,10 +99,14 @@ EVAL_RECIPE_DEFAULTS: Dict[str, Any] = {
 }
 
 LIVE_INFER_RECIPE_DEFAULTS: Dict[str, Any] = {
+    "live_logging_mode": "lean_decisive",
     "LIVE_EEG_PLOT_ENABLED": True,
-    "LIVE_EEG_PLOT_DISPLAY_FS": 32.0,
-    "LIVE_EEG_PLOT_FPS": 12.0,
-    "LIVE_PREDICTION_TEXT_ENABLED": True,
+    "LIVE_EEG_PLOT_DISPLAY_FS": 64.0,
+    "LIVE_EEG_PLOT_FPS": 20.0,
+    "LIVE_EEG_PLOT_WINDOW_SEC": 5.0,
+    "LIVE_EEG_PLOT_FIXED_SCALE_UV": 200.0,
+    "LIVE_EEG_PLOT_CHANNEL_SPACING_UV": 120.0,
+    "LIVE_PREDICTION_TEXT_ENABLED": False,
     "LIVE_PREDICTION_TEXT_FPS": 5.0,
     "LIVE_VIZ_ENABLED": False,
     "LIVE_VIZ_FPS": 2.0,
@@ -158,10 +162,10 @@ LIVE_INFER_RECIPE_DEFAULTS: Dict[str, Any] = {
     "bad_window_clipped_frac": 0.10,
     "bad_window_max_masked_channels": 1,
     "use_inference_engine": False,
-    "mc_passes": 10,
+    "mc_passes": 1,
     "uncertainty_base_threshold": 0.75,
     "uncertainty_weight": 0.5,
-    "parity_capture_enabled": True,
+    "parity_capture_enabled": False,
     "parity_capture_max_windows": 128,
     "parity_capture_flush_every": 25,
 }

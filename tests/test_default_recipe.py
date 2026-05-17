@@ -83,8 +83,17 @@ def test_config_templates_match_canonical_recipe():
     assert infer["LSL_RESOLVE_TIMEOUT"] == 25.0
     assert infer["REQUIRED_LSL_LABELS"] == ["TP9", "AF7", "AF8", "TP10"]
     assert infer["REQUIRE_EXACTLY_4_CHANNELS"] is True
+    assert infer["live_logging_mode"] == "lean_decisive"
     assert infer["LIVE_EEG_PLOT_ENABLED"] is True
-    assert infer["parity_capture_enabled"] is True
+    assert infer["LIVE_EEG_PLOT_DISPLAY_FS"] == 64.0
+    assert infer["LIVE_EEG_PLOT_FPS"] == 20.0
+    assert infer["LIVE_EEG_PLOT_WINDOW_SEC"] == 5.0
+    assert infer["LIVE_EEG_PLOT_FIXED_SCALE_UV"] == 200.0
+    assert infer["LIVE_EEG_PLOT_CHANNEL_SPACING_UV"] == 120.0
+    assert infer["LIVE_PREDICTION_TEXT_ENABLED"] is False
+    assert infer["LIVE_VIZ_ENABLED"] is False
+    assert infer["mc_passes"] == 1
+    assert infer["parity_capture_enabled"] is False
     assert infer["parity_capture_max_windows"] == 128
     assert infer["parity_capture_flush_every"] == 25
     assert infer["force_no_serial"] is False

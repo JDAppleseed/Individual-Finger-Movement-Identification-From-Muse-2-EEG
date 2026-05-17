@@ -343,6 +343,8 @@ def audit_live_dir(
     runtime_manifest_path = live_dir / "live_runtime_manifest.json"
     window_audit_path = live_dir / "window_audit.jsonl"
     segment_break_path = live_dir / "segment_breaks.jsonl"
+    raw_dir = live_dir / "raw"
+    raw_shards = sorted(raw_dir.glob("*.npy")) if raw_dir.exists() else []
 
     predictions, prediction_parse_errors = _load_prediction_rows(predictions_path)
     blocking_errors: list[str] = []
@@ -415,6 +417,7 @@ def audit_live_dir(
 
     artifact_presence = {
         "predictions_jsonl": bool(predictions_path.exists()),
+        "raw_shards": bool(raw_shards),
         "live_prediction_summary_json": bool(summary_path.exists()),
         "live_runtime_manifest_json": bool(runtime_manifest_path.exists()),
         "window_audit_jsonl": bool(window_audit_path.exists()),
@@ -422,19 +425,47 @@ def audit_live_dir(
         "parity_report_json": bool(parity_report),
         "live_input_distribution_report_json": bool(distribution_report),
     }
-    any_evidence = any(artifact_presence.values())
-    modern_core_present = all(
-        artifact_presence[key]
-        for key in (
-            "predictions_jsonl",
-            "live_prediction_summary_json",
-            "live_runtime_manifest_json",
-            "window_audit_jsonl",
-            "segment_breaks_jsonl",
-            "parity_report_json",
-            "live_input_distribution_report_json",
-        )
+    runtime_section = (
+        runtime_manifest.get("runtime", {})
+        if isinstance(runtime_manifest.get("runtime"), dict)
+        else {}
     )
+    live_logging_mode = str(
+        runtime_section.get("live_logging_mode") or "full_audit"
+    ).strip()
+    lean_decisive_logging = live_logging_mode == "lean_decisive"
+    runtime_parity_capture = (
+        runtime_section.get("parity_capture", {})
+        if isinstance(runtime_section.get("parity_capture"), dict)
+        else {}
+    )
+    parity_required = bool(
+        (not lean_decisive_logging) or runtime_parity_capture.get("enabled")
+    )
+    raw_shards_required = bool(runtime_section.get("record_raw") or lean_decisive_logging)
+    window_audit_required = bool(
+        (not lean_decisive_logging) or runtime_section.get("window_audit_enabled")
+    )
+    distribution_required = bool(
+        (not lean_decisive_logging)
+        or runtime_section.get("post_run_distribution_report_enabled")
+    )
+    any_evidence = any(artifact_presence.values())
+    modern_core_keys = [
+        "predictions_jsonl",
+        "live_prediction_summary_json",
+        "live_runtime_manifest_json",
+        "segment_breaks_jsonl",
+    ]
+    if raw_shards_required:
+        modern_core_keys.append("raw_shards")
+    if window_audit_required:
+        modern_core_keys.append("window_audit_jsonl")
+    if parity_required:
+        modern_core_keys.append("parity_report_json")
+    if distribution_required:
+        modern_core_keys.append("live_input_distribution_report_json")
+    modern_core_present = all(artifact_presence[key] for key in modern_core_keys)
     parity = parity_report.get("parity", {}) if isinstance(parity_report, dict) else {}
     parity_evidence_status, parity_evidence_result = _parity_evidence_status(
         parity,
@@ -443,6 +474,11 @@ def audit_live_dir(
     distribution_evidence_status, distribution_match = _distribution_evidence_status(
         distribution_report
     )
+    if lean_decisive_logging and not artifact_presence["parity_report_json"]:
+        parity_evidence_status = "not_required_lean"
+        parity_evidence_result = "not_required"
+    if lean_decisive_logging and not artifact_presence["live_input_distribution_report_json"]:
+        distribution_evidence_status = "not_required_lean"
     (
         runtime_finalization_status,
         runtime_finalization,
@@ -456,15 +492,23 @@ def audit_live_dir(
         )
     elif runtime_finalization_status != "confirmed":
         evidence_limitations.extend(runtime_finalization_failures)
-    if not artifact_presence["window_audit_jsonl"]:
+    if raw_shards_required and not artifact_presence["raw_shards"]:
+        evidence_limitations.append(
+            "Missing raw shard files, so the decisive live input archive is incomplete."
+        )
+    if not artifact_presence["window_audit_jsonl"] and window_audit_required:
         evidence_limitations.append(
             "Missing window_audit.jsonl, so accepted-vs-dropped candidate-window evidence is incomplete."
+        )
+    elif lean_decisive_logging and not artifact_presence["window_audit_jsonl"]:
+        evidence_limitations.append(
+            "Lean decisive logging intentionally omits window_audit.jsonl."
         )
     if not artifact_presence["segment_breaks_jsonl"]:
         evidence_limitations.append(
             "Missing segment_breaks.jsonl, so segment reset evidence is incomplete."
         )
-    if not artifact_presence["parity_report_json"]:
+    if not artifact_presence["parity_report_json"] and parity_required:
         evidence_limitations.append(
             "Missing parity_report.json, so accepted-window inference parity remains unproven."
         )
@@ -472,7 +516,7 @@ def audit_live_dir(
         evidence_limitations.append(
             "Parity report is present but legacy, partial, or malformed, so accepted-window inference parity remains non-decisive."
         )
-    if not artifact_presence["live_input_distribution_report_json"]:
+    if not artifact_presence["live_input_distribution_report_json"] and distribution_required:
         evidence_limitations.append(
             "Missing live_input_distribution_report.json, so live-vs-offline distribution matching is not fully audited."
         )
@@ -486,14 +530,21 @@ def audit_live_dir(
         ("predictions_jsonl", "predictions.jsonl"),
         ("live_prediction_summary_json", "live_prediction_summary.json"),
         ("live_runtime_manifest_json", "live_runtime_manifest.json"),
-        ("window_audit_jsonl", "window_audit.jsonl"),
         ("segment_breaks_jsonl", "segment_breaks.jsonl"),
-        ("parity_report_json", "parity_report.json"),
-        (
-            "live_input_distribution_report_json",
-            "live_input_distribution_report.json",
-        ),
     ]
+    if raw_shards_required:
+        required_decisive_artifacts.append(("raw_shards", "raw/*.npy"))
+    if window_audit_required:
+        required_decisive_artifacts.append(("window_audit_jsonl", "window_audit.jsonl"))
+    if parity_required:
+        required_decisive_artifacts.append(("parity_report_json", "parity_report.json"))
+    if distribution_required:
+        required_decisive_artifacts.append(
+            (
+                "live_input_distribution_report_json",
+                "live_input_distribution_report.json",
+            )
+        )
     missing_decisive_artifacts = [
         label for key, label in required_decisive_artifacts if not artifact_presence[key]
     ]
@@ -504,12 +555,13 @@ def audit_live_dir(
         )
     if artifact_presence["live_runtime_manifest_json"] and runtime_finalization_status != "confirmed":
         decisive_failures.extend(runtime_finalization_failures)
-    if artifact_presence["parity_report_json"] and parity_evidence_status != "confirmed":
+    if parity_required and artifact_presence["parity_report_json"] and parity_evidence_status != "confirmed":
         decisive_failures.append(
             "Accepted-window parity evidence is partial or legacy, so replay parity is not decisive."
         )
     if (
-        artifact_presence["live_input_distribution_report_json"]
+        distribution_required
+        and artifact_presence["live_input_distribution_report_json"]
         and distribution_evidence_status != "confirmed"
     ):
         decisive_failures.append(
@@ -1080,6 +1132,8 @@ def audit_live_dir(
         },
         "evidence": {
             "completeness": evidence_completeness,
+            "live_logging_mode": live_logging_mode,
+            "lean_decisive_logging": bool(lean_decisive_logging),
             "accepted_window_parity_evidence": parity_evidence_status,
             "accepted_window_parity_result": parity_evidence_result,
             "distribution_evidence": distribution_evidence_status,

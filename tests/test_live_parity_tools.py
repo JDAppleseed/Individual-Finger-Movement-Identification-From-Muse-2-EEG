@@ -988,6 +988,69 @@ def test_audit_live_dir_missing_distribution_report_downgrades_completeness(tmp_
     )
 
 
+def test_audit_live_dir_accepts_lean_decisive_without_parity_or_window_audit(
+    tmp_path: Path,
+):
+    live_dir = tmp_path / "live_infer"
+    live_dir.mkdir()
+    (live_dir / "raw").mkdir()
+    (live_dir / "raw" / "eeg_raw_shard_000000.npy").write_bytes(b"raw")
+    (live_dir / "predictions.jsonl").write_text(
+        json.dumps(
+            {
+                "alignment_ok": True,
+                "window_start_s": 0.0,
+                "window_end_s": 0.25,
+                "committed_action_id": 0,
+                "committed_finger_id": 0,
+                "actuation_sent": False,
+            }
+        )
+        + "\n"
+    )
+    (live_dir / "segment_breaks.jsonl").write_text("")
+    write_json(
+        live_dir / "live_prediction_summary.json",
+        {
+            "candidate_window_count": 1,
+            "accepted_window_count": 1,
+            "dropped_window_reason_counts": {},
+            "segment_break_count": 0,
+            "segment_break_reason_counts": {},
+        },
+    )
+    write_json(
+        live_dir / "live_runtime_manifest.json",
+        {
+            "runtime": {
+                "live_logging_mode": "lean_decisive",
+                "window_audit_enabled": False,
+                "post_run_distribution_report_enabled": False,
+                "parity_capture": {"enabled": False},
+            },
+            "artifacts": {},
+            "finalization": {
+                "termination_reason": "ok",
+                "required_outputs_ok": True,
+            },
+        },
+    )
+
+    report = audit_live_dir(
+        live_dir=live_dir,
+        connector_logs=[],
+        parity_report_path=None,
+        distribution_report_path=None,
+    )
+
+    assert report["evidence"]["completeness"] == "complete"
+    assert report["evidence"]["live_logging_mode"] == "lean_decisive"
+    assert report["evidence"]["accepted_window_parity_evidence"] == "not_required_lean"
+    assert report["evidence"]["distribution_evidence"] == "not_required_lean"
+    assert report["evidence"]["decisive_evidence_complete"] is True
+    assert report["blocking_errors"] == []
+
+
 def test_audit_live_dir_with_distribution_report_is_eligible_for_complete_completeness(
     tmp_path: Path,
 ):
