@@ -21,6 +21,7 @@ logs/
 reports/
 data/raw/
 data/processed/
+ablation_runs/
 # Canonical user project/session outputs (not version-controlled)
 Projects/
 
