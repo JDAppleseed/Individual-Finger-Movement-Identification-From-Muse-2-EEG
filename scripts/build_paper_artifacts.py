@@ -1748,22 +1748,26 @@ def _write_featured_provenance_figure(runs: List[RunMetrics]) -> Optional[str]:
 
 
 def _write_muse_montage_figure() -> str:
-    fig, ax = plt.subplots(figsize=(4.2, 4.7), dpi=350)
+    fig, ax = plt.subplots(figsize=(4.35, 4.75), dpi=350)
     ax.set_aspect("equal")
     ax.axis("off")
-    ax.set_xlim(-1.22, 1.22)
-    ax.set_ylim(-1.18, 1.20)
+    ax.set_xlim(-1.24, 1.24)
+    ax.set_ylim(-1.18, 1.22)
 
-    head = plt.Circle((0.0, -0.02), 1.0, fill=False, edgecolor="#222222", linewidth=1.3)
+    head = plt.Circle((0.0, -0.02), 1.0, facecolor="#fbfbfb", edgecolor="#222222", linewidth=1.3)
     ax.add_patch(head)
+    ax.plot([-0.06, 0.0, 0.06], [0.98, 1.08, 0.98], color="#222222", linewidth=1.0)
+    ax.plot([-1.00, -1.08, -1.00], [0.13, -0.02, -0.17], color="#555555", linewidth=0.9)
+    ax.plot([1.00, 1.08, 1.00], [0.13, -0.02, -0.17], color="#555555", linewidth=0.9)
     ax.text(0.0, 1.10, "Nasion (front)", ha="center", va="center", fontsize=8.5)
     ax.text(0.0, -1.12, "Inion (back)", ha="center", va="center", fontsize=8.5)
 
     electrode_xy = {
-        "FP1": (-0.36, 0.74),
-        "FP2": (0.36, 0.74),
-        "AF7": (-0.78, 0.50),
-        "AF8": (0.78, 0.50),
+        "Fp1": (-0.34, 0.70),
+        "Fpz": (0.0, 0.80),
+        "Fp2": (0.34, 0.70),
+        "AF7": (-0.78, 0.48),
+        "AF8": (0.78, 0.48),
         "F7": (-0.83, 0.20),
         "F3": (-0.36, 0.26),
         "Fz": (0.0, 0.30),
@@ -1791,18 +1795,30 @@ def _write_muse_montage_figure() -> str:
         "TP10": "#7f7f7f",
     }
     central_sites = {"C3", "Cz", "C4"}
+    reference_sites = {"Fpz"}
 
     for label, (x, y) in electrode_xy.items():
         is_muse = label in muse_colors
         is_central = label in central_sites
-        radius = 0.145 if is_muse else 0.125
-        face = muse_colors.get(label, "#f2f2f2" if is_central else "white")
-        edge = "#222222" if is_muse else "#555555" if is_central else "#222222"
-        text_color = "white" if label == "TP10" else "black"
-        lw = 1.3 if is_muse else 0.9
+        is_reference = label in reference_sites
+        radius = 0.135 if is_muse else 0.112 if is_reference else 0.092
+        face = muse_colors.get(label, "#ffe8a3" if is_reference else "#f2f2f2" if is_central else "white")
+        edge = "#222222" if is_muse else "#9b6a00" if is_reference else "#555555" if is_central else "#222222"
+        text_color = "white" if is_muse else "#4a3200" if is_reference else "black"
+        lw = 1.35 if is_muse else 1.15 if is_reference else 0.8
         circ = plt.Circle((x, y), radius, facecolor=face, edgecolor=edge, linewidth=lw)
         ax.add_patch(circ)
-        ax.text(x, y, label, ha="center", va="center", fontsize=7.8, color=text_color)
+        ax.text(x, y, label, ha="center", va="center", fontsize=7.2 if not is_muse else 7.7, color=text_color)
+
+    ax.text(
+        electrode_xy["Fpz"][0],
+        electrode_xy["Fpz"][1] - 0.18,
+        "reference",
+        ha="center",
+        va="center",
+        fontsize=6.6,
+        color="#6f4f00",
+    )
 
     ax.plot(
         [electrode_xy["C3"][0], electrode_xy["Cz"][0], electrode_xy["C4"][0]],
@@ -1811,15 +1827,6 @@ def _write_muse_montage_figure() -> str:
         linewidth=0.9,
         linestyle="--",
         zorder=0,
-    )
-    ax.text(
-        0.0,
-        -0.30,
-        "central motor sites\nnot sampled",
-        ha="center",
-        va="center",
-        fontsize=7.2,
-        color="#555555",
     )
     out_path = FIG_DIR / "muse_electrode_layout.png"
     pdf_path = out_path.with_suffix(".pdf")
