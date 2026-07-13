@@ -6,6 +6,7 @@
 *.fdb_latexmk
 
 .DS_Store
+docs/model_information.txt
 /.venv/
 /.venv_codex/
 .direnv/
