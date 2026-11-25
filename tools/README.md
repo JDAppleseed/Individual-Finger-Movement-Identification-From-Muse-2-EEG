@@ -27,3 +27,10 @@ See [workflow/layout](../docs/repository_layout.md) for artifact ownership and
 prediction and its fitting-only scaler, checks final signal separation, and writes
 `docs/research/finalization_20261125/full_prediction_audit.json`. It does not retrain
 or replace baseline artifacts.
+
+`evaluate_full_dataset.py --preset 1-M16_november --output output/full-corpus.json`
+runs an explicitly labeled full-subject diagnostic, including fitting/calibration
+windows. Five historical/current presets are in
+`configs/baselines/full_dataset_evaluations.json`. Use `--npz` and `--run-dir`
+for another corpus/checkpoint. This does not replace Step 3 saved-holdout metrics
+or the separate pseudo-live command replay.

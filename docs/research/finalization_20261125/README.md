@@ -179,3 +179,49 @@ No raw recordings, baseline model artifacts, or historical reports were deleted
 or rewritten by this audit. The private manuscript and website draft retain the
 same November metrics. This is a targeted logic audit, not a claim that every
 archived script or live hardware behavior has been certified.
+
+## Full-subject corpus evaluation
+
+Full-corpus evaluation is available again as a separate diagnostic. It evaluates
+all finite windows for one subject, including fitting and calibration data, using
+the saved model, preprocessing, and temperatures. It performs no retraining,
+random re-splitting, smoothing, or command gating.
+
+| Model | Windows | Action | Finger on true movement | Joint | REST recall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1-M16 march5 | 13,188 | 86.93% | 88.21% | 79.65% | 97.45% |
+| 2-M16 march19 | 12,447 | 89.23% | 85.71% | 85.40% | 96.55% |
+| 1-M16 november | 14,672 | 85.35% | 86.06% | 77.19% | 95.86% |
+| 2-M16 november | 14,673 | 88.24% | 85.61% | 85.50% | 91.98% |
+| 3-M16 november | 7,998 | 77.81% | 66.24% | 64.80% | 89.86% |
+
+These full-corpus results measure fit across the available recording corpus. They
+are separate from held-out evaluation and gated command replay. Historical models
+use their original corpora; November models use the expanded vetted corpora.
+Their denominators and preprocessing differ, so these are not controlled model
+comparisons. Missing original replay artifacts mean the May command-policy
+headline is preserved as historical evidence, not claimed as reproduced by this
+new classifier-only evaluation.
+
+## Preserved published headlines
+
+The published March 2-M16 saved-test figures remain **89.79% action**, **85.96%
+finger on non-rest windows**, and **84.66% joint**. The March 1-M16 report remains
+**83.94% action**, **80.61% finger**, and **92.11% REST recall** on its original
+saved test split. The May full-corpus command summary remains **95.37% would-send
+precision**, **91.11% event hit rate**, **86.42% committed joint accuracy**, and
+**0.25% false REST actuation**. These historical values and their metric meanings
+are preserved; the new evaluation does not overwrite them.
+
+Run a full-corpus diagnostic without changing any saved holdout:
+
+```bash
+./run_py tools/evaluate_full_dataset.py --preset 1-M16_november --output output/full-corpus-1-M16.json
+```
+
+Other presets: `2-M16_november`, `3-M16_november`, `1-M16_march5`, and
+`2-M16_march19`. For another dataset/model, supply `--npz PATH --run-dir PATH`
+and optionally `--subject-id ID` instead of `--preset`. Existing report files
+are never overwritten. Aggregate results are in [full_corpus/](full_corpus/);
+original public headlines are pinned in [historical_headlines.json](historical_headlines.json).
+The existing `tools/pseudo_live_replay.py` remains the separate command-replay path.

@@ -1,0 +1,111 @@
+{
+  "scope": "full_subject_corpus_including_training_and_calibration",
+  "independent_holdout": false,
+  "evaluation": "unsmoothed_classifier; not command replay",
+  "subject_ids": [
+    "1-M16 500"
+  ],
+  "dataset": "Projects/1-M16/subjects/1-M16 500/sessions/1-M16 500_20260216_123857_01/processed/eeg_windows.npz",
+  "run": "Projects/1-M16/subjects/1-M16 500/sessions/1-M16 500_20260216_123857_01/processed/models/20260305_052744",
+  "dataset_sha256": "7dc561349c3c948babddf569c5c7733e63458e459b7110e1682fb75a2dce2ee5",
+  "artifact_sha256": {
+    "finger_action_model.pt": "d89b9b3be5226c3bc1959abf85d60befb72207cfdd7281c5e9d8f19b74b27cb9",
+    "scaler.npz": "e4455ea20a6fed38f84a183f13a6cb4e29990e1a01f7b3d65c2766630906f120"
+  },
+  "selected_windows": 13188,
+  "evaluated_windows": 13188,
+  "excluded_nonfinite_windows": 0,
+  "sessions": {
+    "1-M16 500_20260216_123857_01": 13188
+  },
+  "action_counts": [
+    353,
+    6298,
+    6537
+  ],
+  "metrics": {
+    "raw_non_rest_none_count": 0,
+    "raw_non_rest_none_rate": 0.0,
+    "raw_rest_non_none_count": 329,
+    "raw_rest_non_none_rate": 0.024946921443736732,
+    "committed_non_rest_none_count": 0,
+    "committed_non_rest_none_rate": 0.0,
+    "committed_rest_non_none_count": 0,
+    "committed_rest_non_none_rate": 0.0,
+    "sent_non_rest_none_count": null,
+    "sent_non_rest_none_rate": null,
+    "sent_rest_non_none_count": null,
+    "sent_rest_non_none_rate": null,
+    "applicability_fp_rate_on_true_rest": null,
+    "applicability_fn_rate_on_true_non_rest": null,
+    "action_applicability_disagreement_rate": null,
+    "deployment_pair_invariant_ok": true,
+    "raw_valid_pair_rate": 0.9750530785562632,
+    "raw_invalid_pair_rate": 0.024946921443736732,
+    "action_acc": 0.8692750985744616,
+    "action_f1_macro": 0.9060034453687976,
+    "action_f1_weighted": 0.8688836906645474,
+    "joint_acc": 0.7964816499848347,
+    "joint_acc_non_rest": 0.7915855083755357,
+    "finger_acc_non_rest": 0.8821192052980132,
+    "finger_metrics_by_class_non_rest": {
+      "THUMB": {
+        "finger_id": 1,
+        "support": 3561,
+        "predicted_count": 3652,
+        "correct": 3529,
+        "accuracy": 0.9910137601797248,
+        "precision": 0.9663198247535597,
+        "recall": 0.9910137601797248,
+        "f1": 0.9785110217662554
+      },
+      "INDEX": {
+        "finger_id": 2,
+        "support": 2591,
+        "predicted_count": 2462,
+        "correct": 2294,
+        "accuracy": 0.8853724430721729,
+        "precision": 0.9317627944760357,
+        "recall": 0.8853724430721729,
+        "f1": 0.9079754601226993
+      },
+      "MIDDLE": {
+        "finger_id": 3,
+        "support": 2248,
+        "predicted_count": 2462,
+        "correct": 2045,
+        "accuracy": 0.9096975088967971,
+        "precision": 0.830625507717303,
+        "recall": 0.9096975088967971,
+        "f1": 0.8683651804670913
+      },
+      "RING": {
+        "finger_id": 4,
+        "support": 2606,
+        "predicted_count": 2652,
+        "correct": 2112,
+        "accuracy": 0.8104374520337683,
+        "precision": 0.7963800904977375,
+        "recall": 0.8104374520337683,
+        "f1": 0.803347280334728
+      },
+      "PINKY": {
+        "finger_id": 5,
+        "support": 1829,
+        "predicted_count": 1607,
+        "correct": 1342,
+        "accuracy": 0.7337342810278841,
+        "precision": 0.835096453018046,
+        "recall": 0.7337342810278841,
+        "f1": 0.7811408614668219
+      }
+    },
+    "finger_acc_overall": 0.8845920533818623,
+    "rest_tpr": 0.9745042492917847,
+    "rest_fpr": 0.0,
+    "rest_precision": 1.0,
+    "rest_f1": 0.987087517934003,
+    "action_ece": 0.013490708397398025,
+    "finger_ece_non_rest": 0.00706015760256804
+  }
+}

@@ -1,0 +1,115 @@
+{
+  "scope": "full_subject_corpus_including_training_and_calibration",
+  "independent_holdout": false,
+  "evaluation": "unsmoothed_classifier; not command replay",
+  "subject_ids": [
+    "2-M16"
+  ],
+  "dataset": "Projects/2-M16/subjects/2-M16/sessions/combined_20260428_with_fixed_session/processed/eeg_windows.npz",
+  "run": "Projects/2-M16/subjects/2-M16/sessions/combined_20260428_with_fixed_session/processed/models/20261125_cnn_lstm_baseline_seed43",
+  "dataset_sha256": "09e24247d067fb7d7dee2a588b9e845e760c7a8cd6320660e8433a52d957920e",
+  "artifact_sha256": {
+    "finger_action_model.pt": "3bd03e86c5bcdd8d657f746526b8442bbe1dc561c0123cce045126cf5011f146",
+    "scaler.npz": "57006fd778f22c1e421ab3a8c5c1ecd488f42411572256a6ec3e28786bedb3e7",
+    "temperature_scaling.json": "dd6b35ecd1fe30d63b48c5c78278e10bc231e9bc4c2ce86a2e1c70b7e8266dd9"
+  },
+  "selected_windows": 14673,
+  "evaluated_windows": 14673,
+  "excluded_nonfinite_windows": 0,
+  "sessions": {
+    "2-M16_20260216_150056_01": 9744,
+    "2-M16_20260315_145838_01": 1059,
+    "2-M16_20260317_190134": 1644,
+    "2-M16_20260428_161659_01": 2226
+  },
+  "action_counts": [
+    4339,
+    4959,
+    5375
+  ],
+  "metrics": {
+    "raw_non_rest_none_count": 0,
+    "raw_non_rest_none_rate": 0.0,
+    "raw_rest_non_none_count": 4779,
+    "raw_rest_non_none_rate": 0.3257002657943161,
+    "committed_non_rest_none_count": 0,
+    "committed_non_rest_none_rate": 0.0,
+    "committed_rest_non_none_count": 0,
+    "committed_rest_non_none_rate": 0.0,
+    "sent_non_rest_none_count": null,
+    "sent_non_rest_none_rate": null,
+    "sent_rest_non_none_count": null,
+    "sent_rest_non_none_rate": null,
+    "applicability_fp_rate_on_true_rest": 0.23692094952754092,
+    "applicability_fn_rate_on_true_non_rest": 0.05293206889878072,
+    "action_applicability_disagreement_rate": 0.06276835003066858,
+    "deployment_pair_invariant_ok": true,
+    "raw_valid_pair_rate": 0.6742997342056839,
+    "raw_invalid_pair_rate": 0.3257002657943161,
+    "action_acc": 0.8823689770326449,
+    "action_f1_macro": 0.8818890504315761,
+    "action_f1_weighted": 0.8824862622596698,
+    "joint_acc": 0.8550398691474136,
+    "joint_acc_non_rest": 0.8278498161408941,
+    "finger_acc_non_rest": 0.8561060576736985,
+    "finger_metrics_by_class_non_rest": {
+      "THUMB": {
+        "finger_id": 1,
+        "support": 2308,
+        "predicted_count": 2201,
+        "correct": 2201,
+        "accuracy": 0.9536395147313691,
+        "precision": 1.0,
+        "recall": 0.9536395147313691,
+        "f1": 0.9762696828565093
+      },
+      "INDEX": {
+        "finger_id": 2,
+        "support": 1796,
+        "predicted_count": 1675,
+        "correct": 1538,
+        "accuracy": 0.856347438752784,
+        "precision": 0.9182089552238806,
+        "recall": 0.856347438752784,
+        "f1": 0.8861999423797176
+      },
+      "MIDDLE": {
+        "finger_id": 3,
+        "support": 2106,
+        "predicted_count": 1824,
+        "correct": 1704,
+        "accuracy": 0.8091168091168092,
+        "precision": 0.9342105263157895,
+        "recall": 0.8091168091168092,
+        "f1": 0.8671755725190841
+      },
+      "RING": {
+        "finger_id": 4,
+        "support": 1985,
+        "predicted_count": 1946,
+        "correct": 1675,
+        "accuracy": 0.8438287153652393,
+        "precision": 0.8607399794450155,
+        "recall": 0.8438287153652393,
+        "f1": 0.8522004578987535
+      },
+      "PINKY": {
+        "finger_id": 5,
+        "support": 2139,
+        "predicted_count": 1900,
+        "correct": 1729,
+        "accuracy": 0.8083216456287985,
+        "precision": 0.91,
+        "recall": 0.8083216456287985,
+        "f1": 0.856152512998267
+      }
+    },
+    "finger_acc_overall": 0.8749403666598514,
+    "rest_tpr": 0.9197971882922332,
+    "rest_fpr": 0.07625314495838978,
+    "rest_precision": 0.8351119481062984,
+    "rest_f1": 0.8754112744022812,
+    "action_ece": 0.05103603289356946,
+    "finger_ece_non_rest": 0.021329063320150644
+  }
+}

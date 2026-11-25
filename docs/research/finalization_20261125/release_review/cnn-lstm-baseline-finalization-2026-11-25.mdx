@@ -28,6 +28,39 @@ These are unsmoothed classification results with temperature scaling only where 
 
 The initial 1-M16 split incorrectly withheld its only remaining movement-session REST event for calibration. Correcting fitting coverage restored REST recall from 0% to 68.20%; doubling the REST weight raised it modestly to 71.13% in a diagnostic run. The weight-1 run remains the common-recipe comparison. Its calibration has no REST, so action/applicability temperatures use identity scaling. No new model is promoted. 3-M16 retains weak finger separation and session-confounded class coverage. The expanded 2-M16 dataset uses a different holdout from the March reference. No new run replaces the historical deployment checkpoint.
 
+## Full-subject corpus evaluation
+
+Full-corpus evaluation is available again as a separate diagnostic. It evaluates
+all finite windows for one subject, including fitting and calibration data, using
+the saved model, preprocessing, and temperatures. It performs no retraining,
+random re-splitting, smoothing, or command gating.
+
+| Model | Windows | Action | Finger on true movement | Joint | REST recall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1-M16 march5 | 13,188 | 86.93% | 88.21% | 79.65% | 97.45% |
+| 2-M16 march19 | 12,447 | 89.23% | 85.71% | 85.40% | 96.55% |
+| 1-M16 november | 14,672 | 85.35% | 86.06% | 77.19% | 95.86% |
+| 2-M16 november | 14,673 | 88.24% | 85.61% | 85.50% | 91.98% |
+| 3-M16 november | 7,998 | 77.81% | 66.24% | 64.80% | 89.86% |
+
+These full-corpus results measure fit across the available recording corpus. They
+are separate from held-out evaluation and gated command replay. Historical models
+use their original corpora; November models use the expanded vetted corpora.
+Their denominators and preprocessing differ, so these are not controlled model
+comparisons. Missing original replay artifacts mean the May command-policy
+headline is preserved as historical evidence, not claimed as reproduced by this
+new classifier-only evaluation.
+
+## Preserved published headlines
+
+The published March 2-M16 saved-test figures remain **89.79% action**, **85.96%
+finger on non-rest windows**, and **84.66% joint**. The March 1-M16 report remains
+**83.94% action**, **80.61% finger**, and **92.11% REST recall** on its original
+saved test split. The May full-corpus command summary remains **95.37% would-send
+precision**, **91.11% event hit rate**, **86.42% committed joint accuracy**, and
+**0.25% false REST actuation**. These historical values and their metric meanings
+are preserved; the new evaluation does not overwrite them.
+
 ## Historical evidence and next steps
 
 The May command-policy summary used the full March development corpus, including fitting/calibration data. Its original replay outputs were not recovered, so those numbers remain historical summaries rather than newly reproduced held-out performance.

@@ -1,0 +1,27 @@
+[
+  {
+    "name": "1-M16_november",
+    "dataset": "Projects/1-M16/subjects/1-M16 500/sessions/combined_20260927_full/processed/eeg_windows.npz",
+    "run": "Projects/1-M16/subjects/1-M16 500/sessions/combined_20260927_full/processed/models/20261125_cnn_lstm_baseline_seed43_coverage"
+  },
+  {
+    "name": "2-M16_november",
+    "dataset": "Projects/2-M16/subjects/2-M16/sessions/combined_20260428_with_fixed_session/processed/eeg_windows.npz",
+    "run": "Projects/2-M16/subjects/2-M16/sessions/combined_20260428_with_fixed_session/processed/models/20261125_cnn_lstm_baseline_seed43"
+  },
+  {
+    "name": "3-M16_november",
+    "dataset": "Projects/3-M16/subjects/3-M16/sessions/combined_20260927_full/processed/eeg_windows.npz",
+    "run": "Projects/3-M16/subjects/3-M16/sessions/combined_20260927_full/processed/models/20261125_cnn_lstm_baseline_seed43"
+  },
+  {
+    "name": "1-M16_march5",
+    "dataset": "Projects/1-M16/subjects/1-M16 500/sessions/1-M16 500_20260216_123857_01/processed/eeg_windows.npz",
+    "run": "Projects/1-M16/subjects/1-M16 500/sessions/1-M16 500_20260216_123857_01/processed/models/20260305_052744"
+  },
+  {
+    "name": "2-M16_march19",
+    "dataset": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/eeg_windows.npz",
+    "run": "Projects/2-M16/subjects/2-M16/winning_model/model_run"
+  }
+]

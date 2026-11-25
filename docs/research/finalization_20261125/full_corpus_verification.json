@@ -1,0 +1,33 @@
+{
+  "full_pytest_suite": {
+    "passed": 428,
+    "failed": 0
+  },
+  "full_corpus_runs": [
+    {
+      "report": "1-M16_november.json",
+      "windows": 14672
+    },
+    {
+      "report": "3-M16_november.json",
+      "windows": 7998
+    },
+    {
+      "report": "2-M16_november.json",
+      "windows": 14673
+    },
+    {
+      "report": "1-M16_march5.json",
+      "windows": 13188
+    },
+    {
+      "report": "2-M16_march19.json",
+      "windows": 12447
+    }
+  ],
+  "total_evaluated_windows": 62978,
+  "preset_reproduction_exact": true,
+  "no_retraining": true,
+  "holdout_reports_unchanged": true,
+  "historical_headline_values_preserved": true
+}
