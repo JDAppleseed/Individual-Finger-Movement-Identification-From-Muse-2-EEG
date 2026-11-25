@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from sklearn.model_selection import train_test_split
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+from utils.saved_folds import assert_signal_disjoint
 from utils.default_recipe import ARTIFACT_DEFAULTS, TRAIN_RECIPE_DEFAULTS
 from utils.sequence_data import (
     load_sequence_npz,
@@ -507,7 +508,7 @@ def _fit_temperature(
     criterion = nn.CrossEntropyLoss()
     nll_before = float(criterion(logits_t, labels_t).item())
 
-    log_temp = torch.nn.Parameter(torch.zeros((), dtype=torch.float32, device=device))
+    log_temp = torch.nn.Parameter(torch.zeros((), dtype=torch.float32, device=fit_device))
     opt = torch.optim.LBFGS(
         [log_temp],
         lr=0.1,
@@ -555,7 +556,7 @@ def _fit_binary_temperature(
     criterion = nn.BCEWithLogitsLoss()
     nll_before = float(criterion(logits_t, labels_t).item())
 
-    log_temp = torch.nn.Parameter(torch.zeros((), dtype=torch.float32, device=device))
+    log_temp = torch.nn.Parameter(torch.zeros((), dtype=torch.float32, device=fit_device))
     opt = torch.optim.LBFGS(
         [log_temp],
         lr=0.1,
@@ -2052,13 +2053,17 @@ def main():
                     f"(requested={calibration_size:.3f})"
                 )
 
+        assert_signal_disjoint(meta, fit=train_fit_idx, calibration=calib_idx, test=test_idx)
+
         # Save exact global indices before fitting for independently auditable folds.
         np.savez_compressed(
             run_dir / "split_indices.npz",
-            train=np.asarray(train_idx, dtype=np.int64),
-            fit=np.asarray(train_fit_idx, dtype=np.int64),
-            calibration=np.asarray(calib_idx, dtype=np.int64),
-            test=np.asarray(test_idx, dtype=np.int64),
+            train=global_indices[train_idx],
+            fit=global_indices[train_fit_idx],
+            calibration=global_indices[calib_idx],
+            test=global_indices[test_idx],
+            index_space=np.array("source_npz"),
+            dataset_sha256=np.array(sha256_file(npz_path)),
         )
         (run_dir / "split_coverage.json").write_text(json.dumps(split_coverage(
             meta, y_action, fit=train_fit_idx, calibration=calib_idx, test=test_idx
@@ -2692,10 +2697,10 @@ def main():
         # Save *test-set* meta (aligned to prediction rows)
         n_expected = len(y_action)
         test_window_start = take_meta(
-            meta, ["window_start", "start_s", "onset_s"], test_idx, n_expected, np.float32
+            meta, ["window_start", "start_s", "onset_s"], test_idx, n_expected, np.float64
         )
         test_window_end = take_meta(
-            meta, ["window_end", "end_s", "offset_s"], test_idx, n_expected, np.float32
+            meta, ["window_end", "end_s", "offset_s"], test_idx, n_expected, np.float64
         )
         test_trial_id = take_meta(
             meta, ["trial_id", "trial", "event_trial_id"], test_idx, n_expected, np.int64

@@ -118,3 +118,64 @@ See [workflow/layout](../../repository_layout.md),
 [rewrite requirements](../../maintenance/REWRITE_REQUIREMENTS.md). Proposed
 trimming requires the owner's approval. The manuscript and website release copy
 are prepared for review; publication is separate from pushing the repository work.
+
+## Training, evaluation, and data-handling re-audit — November 25
+
+The follow-up audit reproduced **all 7,321 held-out predictions**, including the
+applicability probabilities, from the three saved November models. Action and
+finger argmax predictions match exactly; maximum probability differences are
+below 1.5e-6. Each scaler matches statistics recomputed exclusively from its
+fitting fold exactly. Fitting, calibration, and test folds share no raw signal.
+See [full verification evidence](full_prediction_audit.json) and run
+`./run_py tools/audit_saved_baselines.py` to reproduce it. The November comparison
+numbers are unchanged, including corrected 1-M16 REST recall of **68.20%**.
+
+Confirmed problems corrected in the surrounding pipeline:
+
+- Step 3 generated additional random test splits for an already fitted model.
+  Those could include training rows and cannot estimate independent multi-seed
+  performance. This report is disabled; independent seeds require retraining.
+- Cache rejection or absence triggered a new split. Evaluation now resolves the
+  saved training holdout, verifies dataset SHA256, validates every cached label,
+  and performs fresh inference. It stops if original membership is unknown.
+  Deepchecks also requires saved fitting membership instead of using the test
+  complement (which includes calibration and purged rows).
+- Filtered training saved local fold positions as though they were source-file
+  positions. New fold artifacts store original NPZ indices, an explicit coordinate
+  marker, and the dataset hash. A one-epoch synthetic integration run verified
+  subject filtering plus removal of a non-finite row, followed by successful
+  evaluation without a prediction cache. These synthetic metrics are not research
+  results. Legacy local folds require evidence of an unchanged identity mapping.
+- Appending locked REST rows after splitting could reintroduce overlapping signal.
+  The completed outer split now purges actual interval overlaps, and training
+  checks the completed fit/calibration/test folds before fitting. An incompatible
+  locked-REST calibration split fails rather than silently leaking signal.
+- Temperature fitting placed the optimized parameter on the requested accelerator
+  while fitting logits on CPU. Both now use CPU; current CPU runs are unaffected.
+- Label loading flattened matrices and truncated fractional labels. It now rejects
+  malformed labels. New extraction and prediction timestamps retain float64
+  precision. Existing datasets are preserved. Evaluation also matches training's
+  channel-layout conversion and tracks original indices through filtering.
+- Smoothed evaluation did not forward applicability probabilities or report the
+  resulting gates. Gate diagnostics are now recorded separately from classifier
+  labels, matching live command gating semantics. The redundant action-only
+  override that bypassed postprocessing decisions is removed.
+- REST diagnostics merged identical event numbers across sessions and recommended
+  pruning/relabeling based on prediction errors. Events are now session-scoped,
+  and flags request independent signal/label review. Model errors alone must not
+  justify exclusion or relabeling. Full-corpus replay and auxiliary REST summaries
+  explicitly identify their inclusion of training data.
+
+The fixed 60-epoch recipe saves the final epoch; it does not automatically select
+an epoch using test accuracy. Test metrics are nevertheless exposed during
+training, and the existing holdouts have been inspected repeatedly. They are
+research/development evidence, not untouched confirmation sets. The weight-2
+1-M16 experiment remains diagnostic, not a promoted model. Prospective session
+validation and acquisition/artifact controls remain necessary for generalization
+claims. Historical outcome-informed pruning is documented rather than undone or
+reclassified as independent validation.
+
+No raw recordings, baseline model artifacts, or historical reports were deleted
+or rewritten by this audit. The private manuscript and website draft retain the
+same November metrics. This is a targeted logic audit, not a claim that every
+archived script or live hardware behavior has been certified.

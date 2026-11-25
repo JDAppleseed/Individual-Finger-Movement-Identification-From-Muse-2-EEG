@@ -123,3 +123,19 @@ def test_cache_rejects_sha256_mismatch():
     )
     assert ok is False
     assert "npz_sha256_mismatch" in reasons
+
+
+def test_cache_checks_all_labels_even_when_spotcheck_disabled():
+    from utils.eval_utils import validate_cached_predictions_with_dataset_info
+    payload = _base_payload()
+    payload['y_action_test'][1] = 2
+    ok, reasons = validate_cached_predictions_with_dataset_info(**payload, spotcheck_k=0)
+    assert not ok and 'spotcheck_label_mismatch' in reasons
+
+
+@pytest.mark.parametrize('bad', [np.nan, np.inf, -0.1, 1.1])
+def test_cache_rejects_invalid_probability_values(bad):
+    from utils.eval_utils import validate_cached_predictions_with_dataset_info
+    payload = _base_payload()
+    payload['action_probs'][0, 0] = bad
+    assert not validate_cached_predictions_with_dataset_info(**payload)[0]

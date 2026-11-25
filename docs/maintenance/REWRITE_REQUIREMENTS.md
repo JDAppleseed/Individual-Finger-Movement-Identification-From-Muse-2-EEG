@@ -66,3 +66,11 @@ Do not erase these limitations during migration or relabel old tests as untouche
 Measure end-to-end physical latency separately from model computation and
 successful-event replay detection delay. Treat future physiological artifact
 controls and acquisition-protocol documentation as research requirements.
+
+Carry forward the November data-handling audit invariants: source-global fold
+indices with dataset hashes; exact fitting/calibration/test membership; final
+raw-signal interval checks after all REST policies; fresh inference on the saved
+holdout; no randomized re-splitting of a fitted model; session-scoped event IDs;
+and independent evidence for any label correction or exclusion. Command gates
+must remain distinct from classifier labels. Reproduce all held-out predictions
+and fitting-only scaler statistics before replacing the existing pipeline.

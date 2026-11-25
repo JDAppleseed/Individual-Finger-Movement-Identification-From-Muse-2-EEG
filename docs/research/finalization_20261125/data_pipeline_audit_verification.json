@@ -1,0 +1,31 @@
+{
+  "date": "2026-11-25",
+  "full_pytest_suite": {
+    "passed": 425,
+    "failed": 0
+  },
+  "compiled_python_files": 191,
+  "baseline_artifact_hashes_unchanged": true,
+  "all_7321_holdout_argmax_predictions_match": true,
+  "fitting_only_scalers_match_exactly": true,
+  "fit_calibration_test_signal_disjoint": true,
+  "integration_checks": [
+    "Step 3 saved 1-M16 holdout with smoothing: exit 0; raw metrics unchanged",
+    "One-epoch synthetic training with subject filter and NaN removal: source-global folds verified",
+    "Step 3 filtered synthetic fixture without prediction cache: exit 0; 80 original holdout rows"
+  ],
+  "deepchecks_full_html_suite_run": false,
+  "live_hardware_test": false,
+  "files_deleted": 0,
+  "code_sha256": {
+    "1b_extract_windows.py": "62edcd7917ab68619050f3718db46752d6737408c2107f268f0a29da76d3804e",
+    "2_train_model.py": "2a212184573251cbc01d0ea3d6b6b33408991d4104ec80f897721d0d4bdd0783",
+    "3_evaluate_model.py": "4a66e3dcf94c7877aeeceb6aed817e4571ea5a99654a66a567b7f7712f3cca08",
+    "3b_deepchecks_evaluate.py": "b52d9fba1aa2f7b0eb630eb74ac798dd9c86afbf3c28a81f8cbd1aa15219c6f3",
+    "utils/saved_folds.py": "beb5e5af9f92e0886aecde4caea2903c7cc7865d36b9b12a030cceba85986634",
+    "utils/splitting.py": "4e790d4693e1db5b213b48a52be5d58b2dd0720e6195ef52fac3a90096d77cb2",
+    "utils/sequence_data.py": "034fb68fa9d0bfc17d2dd8cc224dde6754c78c873fdd1ca40f05e36efa785a9e",
+    "utils/eval_utils.py": "b9cf017d73067a831162774820cef2900d109924a5d688435994989210372d45",
+    "tools/audit_saved_baselines.py": "2165643c74aeca64306a3a6cc26dd42f5aa597bb60b875b9261ef1c6f90e6a46"
+  }
+}

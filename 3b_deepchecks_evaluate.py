@@ -3,6 +3,7 @@ STEP 3b — Deepchecks Evaluation (SDS-aligned)
 Deterministic model behavior (Dropout OFF)
 """
 
+from utils.saved_folds import load_saved_folds
 import argparse
 import contextlib
 import json
@@ -688,6 +689,8 @@ print(
 )
 
 X, y_action, y_finger, meta = load_sequence_npz(str(npz_path), mmap_mode="r")
+source_n = len(y_action)
+meta["_source_index"] = np.arange(source_n, dtype=np.int64)
 try:
     X = _ensure_X_shape(X, meta if isinstance(meta, dict) else {})
 except ValueError as exc:
@@ -768,33 +771,13 @@ _print_label_summary("Filtered", y_action, y_finger)
 # ===== SAME SPLIT =========
 # =========================
 
-split_plan = compose_split_indices(
-    y_action,
-    y_finger,
-    meta=meta,
-    random_state=int(split_seed),
-    split_mode=split_mode,
-    purge_seconds=purge_seconds,
-    hop_seconds=hop_seconds,
-    test_size=test_size,
-    allow_fallback=False,
-    aux_rest_session_policy=str(train_cfg.get("aux_rest_session_policy", "none")),
-)
-train_idx = np.asarray(split_plan["train_idx"], dtype=np.int64)
-test_idx = np.asarray(split_plan["test_idx"], dtype=np.int64)
-if train_idx is None or test_idx is None:
-    print("⚠️ Unable to create a split with multiple classes. Aborting Deepchecks.")
-    raise SystemExit(2)
 try:
-    if split_mode == "holdout_session":
-        if not meta or "session_id" not in meta:
-            raise ValueError("split_mode=holdout_session requires session_id in meta.")
-        groups = np.asarray(meta["session_id"]).reshape(-1)
-    else:
-        groups = infer_groups(meta, len(y_action))
-    assert_no_group_overlap(groups, train_idx, test_idx)
-except Exception as exc:
-    print(f"❌ Leakage guard tripped: {exc}")
+    saved_folds = load_saved_folds(run_dir, npz_path, meta["_source_index"], source_n)
+    if "fit" not in saved_folds:
+        raise ValueError("Deepchecks needs saved fitting membership; test complement is not the fitting fold")
+    train_idx, test_idx = saved_folds["fit"], saved_folds["test"]
+except ValueError as exc:
+    print(f"❌ {exc}")
     raise SystemExit(2)
 X_train = X[train_idx]
 X_test = X[test_idx]

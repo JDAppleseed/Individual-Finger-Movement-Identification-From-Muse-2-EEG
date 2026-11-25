@@ -13,7 +13,7 @@ def _load_eval_module():
     return module
 
 
-def test_rest_event_breakdown_flags_relabel_and_prune_cases():
+def test_rest_event_breakdown_flags_review_without_outcome_driven_pruning():
     mod = _load_eval_module()
     y_action_true = np.array([0] * 10, dtype=np.int64)
     y_finger_true = np.array([0] * 10, dtype=np.int64)
@@ -73,9 +73,9 @@ def test_rest_event_breakdown_flags_relabel_and_prune_cases():
     assert [row["event_id"] for row in breakdown] == [1, 2]
     assert len(flags) == 2
     flag_by_event = {row["event_id"]: row for row in flags}
-    assert flag_by_event[1]["recommended_action"] == "relabel"
+    assert flag_by_event[1]["recommended_action"] == "independent_signal_and_label_review"
     assert flag_by_event[1]["dominant_non_rest_pair"] == "OPEN+THUMB"
-    assert flag_by_event[2]["recommended_action"] == "prune"
+    assert flag_by_event[2]["recommended_action"] == "independent_signal_and_label_review"
     assert flag_by_event[2]["rest_tpr"] < 0.20
 
 

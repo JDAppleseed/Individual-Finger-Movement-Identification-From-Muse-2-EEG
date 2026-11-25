@@ -15,6 +15,12 @@ def validate_cached_predictions(
     n_fingers: int,
     n_samples: Optional[int] = None,
 ) -> bool:
+    test_idx = np.asarray(test_idx)
+    if test_idx.ndim != 1 or test_idx.dtype.kind not in "iu":
+        return False
+    for probabilities in (action_probs, finger_probs):
+        if not np.isfinite(probabilities).all() or np.any(probabilities < 0) or np.any(probabilities > 1):
+            return False
     if action_probs.shape != (len(test_idx), n_actions):
         return False
     if finger_probs.shape != (len(test_idx), n_fingers):
@@ -136,17 +142,9 @@ def validate_cached_predictions_with_dataset_info(
     if reasons:
         return False, reasons
 
-    if spotcheck_k > 0 and len(test_idx) > 0:
-        rng = np.random.default_rng(rng_seed)
-        sample_count = min(int(spotcheck_k), len(test_idx))
-        positions = rng.choice(len(test_idx), size=sample_count, replace=False)
-        for pos in positions:
-            idx = int(test_idx[pos])
-            if (
-                y_action_test[pos] != y_action_current[idx]
-                or y_finger_test[pos] != y_finger_current[idx]
-            ):
-                reasons.append("spotcheck_label_mismatch")
-                break
+    # Every label must agree; random spot checks can miss corrupted ordering.
+    if (not np.array_equal(y_action_test, y_action_current[test_idx])
+            or not np.array_equal(y_finger_test, y_finger_current[test_idx])):
+        reasons.append("spotcheck_label_mismatch")
 
     return len(reasons) == 0, reasons

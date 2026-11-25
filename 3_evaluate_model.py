@@ -33,6 +33,7 @@ from sklearn.metrics import confusion_matrix, accuracy_score, f1_score
 from sklearn.model_selection import StratifiedShuffleSplit
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+from utils.saved_folds import load_saved_folds
 from utils.label_schema import (
     ACTION_REST,
     ACTION_NAMES,
@@ -69,7 +70,6 @@ ACTION_LABELS = sorted(ACTION_NAMES.keys())
 ACTION_TICK_LABELS = [ACTION_NAMES[label] for label in ACTION_LABELS]
 FINGER_LABELS = sorted(FINGER_NAMES.keys())
 FINGER_TICK_LABELS = [FINGER_NAMES[label] for label in FINGER_LABELS]
-REPEATED_SPLIT_SEEDS = (7, 21, 42, 84, 168)
 
 # Pipeline handoff: Step 3 reads Step 2 artifacts from one run directory and writes
 # calibrated metrics/plots/manifests back into that same run-scoped report path.
@@ -470,7 +470,7 @@ def expected_calibration_error(conf, preds, labels, n_bins=10):
 
 
 def apply_postprocess_sequence(
-    action_probs, finger_probs, order, settings, trial_ids=None
+    action_probs, finger_probs, order, settings, trial_ids=None, applicability_probs=None, diagnostics=None
 ):
     """
     Apply stateful postprocess across a sequence order.
@@ -497,7 +497,14 @@ def apply_postprocess_sequence(
             finger_probs[sample_idx],
             settings,
             state,
+            finger_applicable_prob=(float(applicability_probs[sample_idx])
+                                    if applicability_probs is not None else None),
         )
+        if diagnostics is not None:
+            diagnostics.setdefault("applicability_gate_passed", []).append(
+                bool(post.get("applicability_gate_ok", True)))
+            diagnostics.setdefault("finger_gate_passed", []).append(
+                bool(post.get("finger_gate_ok", True)))
         committed_action[out_idx] = int(post["committed_action_id"])
         committed_finger[out_idx] = int(post["committed_finger_id"])
 
@@ -1175,22 +1182,22 @@ def _build_rest_event_breakdown(
     event_id = np.asarray(meta["event_id"])[indices].astype(np.int64)
     session_id = np.asarray(meta["session_id"])[indices].astype("U")
     window_start = (
-        np.asarray(meta["window_start"])[indices].astype(np.float32)
+        np.asarray(meta["window_start"])[indices].astype(np.float64)
         if "window_start" in meta
         else None
     )
     window_end = (
-        np.asarray(meta["window_end"])[indices].astype(np.float32)
+        np.asarray(meta["window_end"])[indices].astype(np.float64)
         if "window_end" in meta
         else None
     )
 
     rest_mask = np.asarray(y_action_true, dtype=np.int64) == ACTION_REST
-    rest_event_ids = np.unique(event_id[rest_mask]) if np.any(rest_mask) else np.array([], dtype=np.int64)
+    rest_event_ids = sorted(set(zip(session_id[rest_mask].tolist(), event_id[rest_mask].tolist())))
     breakdown: List[Dict[str, Any]] = []
     flags: List[Dict[str, Any]] = []
-    for eid in rest_event_ids.tolist():
-        event_mask = rest_mask & (event_id == int(eid))
+    for sid, eid in rest_event_ids:
+        event_mask = rest_mask & (event_id == int(eid)) & (session_id == sid)
         if not np.any(event_mask):
             continue
         event_action_preds = action_preds[event_mask]
@@ -1235,7 +1242,8 @@ def _build_rest_event_breakdown(
                     "rest_tpr": rest_tpr,
                     "dominant_non_rest_pair": dominant_pair,
                     "dominant_non_rest_pair_share": dominant_pair_share,
-                    "recommended_action": "relabel" if dominant_pair_share >= 0.80 else "prune",
+                    "recommended_action": "independent_signal_and_label_review",
+                    "exclusion_policy": "Do not prune or relabel from model error alone.",
                     "reason": (
                         f"dominant_non_rest_pair={dominant_pair}"
                         if dominant_pair_share >= 0.80
@@ -1539,7 +1547,8 @@ def main():
         if not run_dir_override.exists():
             print(f"Run dir not found: {run_dir_override}")
             return 2
-        legacy_session_dir = _session_dir_from_run_dir(run_dir_override)
+        legacy_session_dir = (resolve_session_dir(args.session_dir) if args.session_dir
+                              else _session_dir_from_run_dir(run_dir_override))
         if legacy_session_dir is None:
             print(
                 "Could not infer session dir from --run-dir; "
@@ -1815,7 +1824,17 @@ def main():
     # ===== LOAD DATA =========
     # =========================
     X, y_action, y_finger, meta = load_sequence_npz(str(npz_path), mmap_mode="r")
+    # Match the training layout conversion before normalizing/inference.
+    channels = len(np.asarray(meta["channel_names"])) if "channel_names" in meta else None
+    if channels:
+        if X.shape[2] != channels:
+            if X.shape[1] != channels:
+                raise ValueError("EEG shape does not match channel_names")
+            X = np.transpose(X, (0, 2, 1))
+    elif X.shape[1] <= 16 and X.shape[2] > 16:
+        X = np.transpose(X, (0, 2, 1))
     n_total = int(len(y_action))
+    meta["_source_index"] = np.arange(n_total, dtype=np.int64)
     manifest["dataset"]["n_total"] = n_total
     if args.subject_id is not None and args.subject_id.strip() != "":
         subject_id_filter = args.subject_id.strip()
@@ -1844,6 +1863,11 @@ def main():
         manifest["filters"]["subject_id"] = subject_id_filter
     else:
         manifest["filters"]["subject_filtered"] = False
+
+    finite_mask = np.isfinite(X).all(axis=(1, 2))
+    if not finite_mask.all():
+        X, y_action, y_finger = X[finite_mask], y_action[finite_mask], y_finger[finite_mask]
+        meta = mask_meta(meta, finite_mask)
 
     if isinstance(X, np.memmap) and X.dtype != np.float32:
         print(f"ℹ️ X dtype is {X.dtype}; casting to float32 per batch.")
@@ -1953,7 +1977,7 @@ def main():
     # =========================
     # ===== TEST SPLIT =========
     # =========================
-    cached = _load_predictions_if_present(pred_npz_path)
+    cached = None  # Inference is always recomputed; folds are resolved separately.
     cache_rejected_reasons: Optional[List[str]] = None
     temperature_state = load_temperature_scaling(temperature_path)
     applicability_probs = None
@@ -2029,170 +2053,30 @@ def main():
 
     cached_used = False
     split_attempts = 0
-    if cached is not None:
-        action_probs = np.asarray(cached["action_probs"])
-        finger_probs = np.asarray(cached["finger_probs"])
-        applicability_probs = (
-            np.asarray(cached["applicability_probs"])
-            if "applicability_probs" in cached
-            else None
-        )
-        y_action_test = np.asarray(cached["y_action"])
-        y_finger_test = np.asarray(cached["y_finger"])
-        test_idx = resolve_cached_test_indices(cached)
-        if test_idx is None:
-            cache_rejected_reasons = ["missing_test_indices"]
-            cached = None
-        else:
-            test_idx = np.asarray(test_idx).astype(np.int64)
+    try:
+        saved_folds = load_saved_folds(model_path.parent, npz_path,
+                                      meta["_source_index"], n_total)
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        manifest["abort_reason"] = str(exc)
+        _maybe_write_manifest()
+        return 2
+    test_idx = saved_folds["test"]
+    train_idx = saved_folds.get("fit", np.array([], dtype=np.int64))
+    manifest["split"]["source"] = "saved_training_holdout"
+    manifest["split"]["fit_membership_known"] = "fit" in saved_folds
+    # Recompute from current artifacts: old caches are not bound to model/scaler
+    # hashes. Their dataset identity may establish folds, never fresh metrics.
 
-        if cached is not None:
-            all_idx = np.arange(len(y_action), dtype=np.int64)
-            test_mask = np.zeros(len(y_action), dtype=bool)
-            test_mask[test_idx] = True
-            train_idx = all_idx[~test_mask]
+    y_action_test = y_action[test_idx]
+    y_finger_test = y_finger[test_idx]
 
-            dataset_info_cache = _parse_dataset_info(cached)
-            cache_ok, reject_reasons = validate_cached_predictions_with_dataset_info(
-                action_probs=action_probs,
-                finger_probs=finger_probs,
-                y_action_test=y_action_test,
-                y_finger_test=y_finger_test,
-                test_idx=test_idx,
-                n_actions=model_n_actions,
-                n_fingers=model_n_fingers,
-                n_samples_current=len(y_action),
-                dataset_info_cache=dataset_info_cache,
-                dataset_info_current=dataset_info_current,
-                y_action_current=y_action,
-                y_finger_current=y_finger,
-                spotcheck_k=10,
-                rng_seed=0,
-            )
+    predictions = _slice_eval_predictions(test_idx)
+    if predictions is None:
+        return 2
+    action_probs, finger_probs, applicability_probs = predictions
 
-            if cache_ok and temperature_state is not None:
-                cached_action_temp = cached.get("action_temperature")
-                cached_finger_temp = cached.get("finger_temperature")
-                cached_applicability_temp = cached.get("applicability_temperature")
-                if cached_action_temp is None or cached_finger_temp is None:
-                    cache_ok = False
-                    reject_reasons.append("cache_missing_temperature_scaling")
-                else:
-                    try:
-                        action_temp_val = float(np.asarray(cached_action_temp).reshape(-1)[0])
-                        finger_temp_val = float(np.asarray(cached_finger_temp).reshape(-1)[0])
-                    except Exception:
-                        cache_ok = False
-                        reject_reasons.append("cache_temperature_scaling_invalid")
-                    else:
-                        if (
-                            abs(action_temp_val - float(temperature_state.action_temperature)) > 1e-6
-                            or abs(finger_temp_val - float(temperature_state.finger_temperature)) > 1e-6
-                        ):
-                            cache_ok = False
-                            reject_reasons.append("cache_temperature_scaling_mismatch")
-                        elif model_has_applicability_head:
-                            if cached_applicability_temp is None:
-                                cache_ok = False
-                                reject_reasons.append(
-                                    "cache_missing_applicability_temperature_scaling"
-                                )
-                            elif applicability_probs is None:
-                                cache_ok = False
-                                reject_reasons.append("cache_missing_applicability_probs")
-                            else:
-                                try:
-                                    applicability_temp_val = float(
-                                        np.asarray(cached_applicability_temp)
-                                        .reshape(-1)[0]
-                                    )
-                                except Exception:
-                                    cache_ok = False
-                                    reject_reasons.append(
-                                        "cache_applicability_temperature_invalid"
-                                    )
-                                else:
-                                    if (
-                                        abs(
-                                            applicability_temp_val
-                                            - float(
-                                                temperature_state.applicability_temperature
-                                            )
-                                        )
-                                        > 1e-6
-                                    ):
-                                        cache_ok = False
-                                        reject_reasons.append(
-                                            "cache_applicability_temperature_mismatch"
-                                        )
-
-            if (
-                cache_ok
-                and aux_rest_plan.get("enabled")
-                and aux_rest_session_policy == "auto_train_only"
-            ):
-                if np.any(np.isin(test_idx, aux_idx)):
-                    cache_ok = False
-                    reject_reasons.append("cache_includes_aux_rest_test_indices")
-
-            if not cache_ok:
-                print(
-                    "⚠️ Cached predictions rejected; recomputing. "
-                    f"Reasons: {reject_reasons}"
-                )
-                cache_rejected_reasons = reject_reasons
-                cached = None
-            else:
-                cached_used = True
-                print(f"✅ Using cached predictions: {pred_npz_path}")
-
-    if cached is None:
-        train_idx, test_idx, split_attempts, split_plan = _split_with_checks(
-            y_action,
-            y_finger,
-            meta=meta if meta else {},
-            seed=split_seed,
-            test_size=float(test_size),
-            split_mode=str(split_mode),
-            purge_seconds=float(purge_seconds),
-            hop_seconds=hop_seconds,
-            aux_rest_session_policy=aux_rest_session_policy,
-        )
-        if train_idx is None or test_idx is None:
-            print(
-                "⚠️ Unable to create a split with multiple classes. Aborting evaluation."
-            )
-            manifest["abort_reason"] = "split_failed"
-            _maybe_write_manifest()
-            return 2
-        train_idx = np.asarray(train_idx, dtype=np.int64)
-        test_idx = np.asarray(test_idx, dtype=np.int64)
-
-        if (
-            split_plan is not None
-            and aux_rest_session_policy == "train_mixed_rest_test_aux_rest"
-        ):
-            manifest["split"]["auxiliary_rest_sessions"]["aux_train_count"] = int(
-                len(split_plan.get("aux_train_idx", []))
-            )
-            manifest["split"]["auxiliary_rest_sessions"]["aux_test_count"] = int(
-                len(split_plan.get("aux_test_idx", []))
-            )
-            print(
-                "Quiet-rest holdout composition: "
-                f"aux_train={len(split_plan.get('aux_train_idx', []))} "
-                f"aux_test={len(split_plan.get('aux_test_idx', []))}"
-            )
-
-        y_action_test = y_action[test_idx]
-        y_finger_test = y_finger[test_idx]
-
-        predictions = _slice_eval_predictions(test_idx)
-        if predictions is None:
-            return 2
-        action_probs, finger_probs, applicability_probs = predictions
-
-        print("✅ Ran deterministic inference (no cached predictions file found).")
+    print("✅ Ran fresh deterministic inference on the saved training holdout.")
 
     manifest["paths"]["pred_npz"]["used"] = cached_used
     if cached_used:
@@ -2259,6 +2143,7 @@ def main():
                 else np.array([], dtype=np.int64)
             )
             aux_rest_benchmark = {
+                "scope": "full_auxiliary_data_including_training_rows; not independent holdout",
                 "n_windows": int(len(aux_idx)),
                 "n_rest_events": int(len(np.unique(aux_event_ids))) if aux_event_ids.size else None,
                 "sessions": sorted(set(aux_session_ids.tolist())) if aux_session_ids.size else [],
@@ -2283,7 +2168,7 @@ def main():
                 ),
             }
             print(
-                "\n🧪 Auxiliary REST benchmark: "
+                "\n🧪 Auxiliary REST diagnostic (includes training data): "
                 f"Action Acc {aux_rest_benchmark['action_acc'] * 100:.2f}% | "
                 f"REST TPR {aux_rest_tpr * 100:.2f}% | "
                 f"REST Precision {aux_rest_precision * 100:.2f}%"
@@ -2602,16 +2487,16 @@ def main():
 
         order, segment_ids_for_probs = _session_temporal_segments(meta, test_idx)
 
+        smoothing_gates = {}
         smoothed_action, smoothed_finger = apply_postprocess_sequence(
-            action_probs, finger_probs, order, settings, trial_ids=segment_ids_for_probs
+            action_probs, finger_probs, order, settings, trial_ids=segment_ids_for_probs,
+            applicability_probs=applicability_probs, diagnostics=smoothing_gates
         )
 
-        # If you want "smooth action only", override finger smoothing here
-        if args.smooth_action_only:
-            smoothed_finger = decode_finger_predictions_for_actions(
-                smoothed_action, finger_probs[order]
-            )
-
+        manifest["smoothed_gate_diagnostics"] = {
+            key + "_rate": float(np.mean(values)) for key, values in smoothing_gates.items()
+        }
+        # Committed labels describe the classifier; gates govern command emission.
         action_acc_s = accuracy_score(y_action_test[order], smoothed_action)
         action_f1_macro_s = f1_score(
             y_action_test[order], smoothed_action, average="macro", zero_division=0
@@ -2914,7 +2799,8 @@ def main():
     rest_event_breakdown: List[Dict[str, Any]] = []
     candidate_event_flags: List[Dict[str, Any]] = []
     repeated_split_summary = {
-        "seeds": list(REPEATED_SPLIT_SEEDS),
+        "status": "disabled_requires_independently_trained_models",
+        "seeds": [],
         "per_seed": [],
         "mean": {},
         "std": {},
@@ -2938,6 +2824,7 @@ def main():
         )
         core_metrics = core_metrics_payload["metrics"]
         core_full_session_replay = {
+            "scope": "full_core_data_including_training_rows; not independent holdout",
             "n_windows": int(len(split_idx)),
             "sessions": sorted(
                 set(np.asarray(meta["session_id"])[split_idx].astype("U").tolist())
@@ -2993,108 +2880,8 @@ def main():
                     f"reason={flag['reason']}"
                 )
 
-        repeated_metric_keys = [
-            "action_acc",
-            "joint_acc",
-            "finger_acc_non_rest",
-            "rest_tpr",
-            "rest_precision",
-            "applicability_fp_rate_on_true_rest",
-            "applicability_fn_rate_on_true_non_rest",
-            "committed_non_rest_none_rate",
-        ]
-        repeated_values: Dict[str, List[float]] = {
-            key: [] for key in repeated_metric_keys
-        }
-        for repeat_seed in REPEATED_SPLIT_SEEDS:
-            if int(repeat_seed) == int(split_seed):
-                metrics_payload = {
-                    "metrics": {
-                        key: manifest["metrics"].get(key)
-                        for key in repeated_metric_keys
-                    }
-                }
-                test_count = int(len(test_idx))
-            else:
-                rep_train_idx, rep_test_global, _, _ = _split_with_checks(
-                    y_action,
-                    y_finger,
-                    meta=meta if meta else {},
-                    seed=int(repeat_seed),
-                    test_size=float(test_size),
-                    split_mode=str(split_mode),
-                    purge_seconds=float(purge_seconds),
-                    hop_seconds=hop_seconds,
-                    aux_rest_session_policy=aux_rest_session_policy,
-                )
-                if rep_test_global is None:
-                    repeated_split_summary["per_seed"].append(
-                        {"seed": int(repeat_seed), "status": "split_failed"}
-                    )
-                    continue
-                rep_test_global = np.asarray(rep_test_global, dtype=np.int64)
-                rep_predictions = _slice_eval_predictions(rep_test_global)
-                if rep_predictions is None:
-                    repeated_split_summary["per_seed"].append(
-                        {"seed": int(repeat_seed), "status": "inference_failed"}
-                    )
-                    continue
-                (
-                    rep_action_probs,
-                    rep_finger_probs,
-                    rep_applicability_probs,
-                ) = rep_predictions
-                metrics_payload = _compute_prediction_metrics(
-                    action_probs=rep_action_probs,
-                    finger_probs=rep_finger_probs,
-                    applicability_probs=rep_applicability_probs,
-                    y_action_true=y_action[rep_test_global],
-                    y_finger_true=y_finger[rep_test_global],
-                    threshold_applicability=float(args.threshold_applicability),
-                    n_bins=N_BINS,
-                )
-                test_count = int(len(rep_test_global))
-            metric_entry = {
-                key: (
-                    float(metrics_payload["metrics"][key])
-                    if metrics_payload["metrics"].get(key) is not None
-                    else None
-                )
-                for key in repeated_metric_keys
-            }
-            repeated_split_summary["per_seed"].append(
-                {
-                    "seed": int(repeat_seed),
-                    "status": "ok",
-                    "test_n": test_count,
-                    "metrics": metric_entry,
-                }
-            )
-            for key in repeated_metric_keys:
-                value = metric_entry.get(key)
-                if value is not None:
-                    repeated_values[key].append(float(value))
-
-        repeated_split_summary["mean"] = {
-            key: float(np.mean(values)) if values else None
-            for key, values in repeated_values.items()
-        }
-        repeated_split_summary["std"] = {
-            key: float(np.std(values)) if values else None
-            for key, values in repeated_values.items()
-        }
-        rest_tpr_mean = repeated_split_summary["mean"].get("rest_tpr")
-        rest_tpr_std = repeated_split_summary["std"].get("rest_tpr")
-        joint_acc_mean = repeated_split_summary["mean"].get("joint_acc")
-        joint_acc_std = repeated_split_summary["std"].get("joint_acc")
-        if rest_tpr_mean is not None and joint_acc_mean is not None:
-            print(
-                "\n🔁 Repeated split summary: "
-                f"REST TPR mean/std {rest_tpr_mean * 100:.2f}% / "
-                f"{(rest_tpr_std or 0.0) * 100:.2f}% | "
-                f"Joint Acc mean/std {joint_acc_mean * 100:.2f}% / "
-                f"{(joint_acc_std or 0.0) * 100:.2f}%"
-            )
+        # A new split of a fixed model includes fitted rows, not independent tests.
+        # Multi-seed estimates require separately trained models and saved folds.
     else:
         print("⚠️ Core-session replay skipped: failed to load evaluation model.")
 

@@ -57,10 +57,14 @@ _JSONISH_KEYS = {"config", "dataset_info"}
 
 
 def _as_1d_int64(x, name: str) -> np.ndarray:
-    arr = np.asarray(x, dtype=np.int64).reshape(-1)
+    arr = np.asarray(x)
     if arr.ndim != 1:
-        raise ValueError(f"{name} must be 1D after reshape; got shape {arr.shape}")
-    return arr
+        raise ValueError(f"{name} must be 1D; got shape {arr.shape}")
+    if arr.dtype.kind not in "iuf" or not np.isfinite(arr).all():
+        raise ValueError(f"{name} must contain finite integer labels")
+    if np.any(arr < 0) or np.any(arr >= 2**63) or np.any(arr != np.floor(arr)):
+        raise ValueError(f"{name} must contain nonnegative integer labels")
+    return arr.astype(np.int64)
 
 
 def _normalize_string_array(arr: np.ndarray) -> np.ndarray:
@@ -112,64 +116,65 @@ def load_sequence_npz(
     if not path.exists():
         raise FileNotFoundError(f"Sequence window file not found: {path}")
 
-    data = np.load(path, allow_pickle=True, mmap_mode=mmap_mode)
-    keys = set(data.files)
+    with np.load(path, allow_pickle=True, mmap_mode=mmap_mode) as data:
+        keys = set(data.files)
 
-    missing = [k for k in _REQUIRED_KEYS if k not in keys]
-    if missing:
-        raise KeyError(
-            f"Missing required keys in NPZ {path}: {missing}. Available keys: {sorted(keys)}"
-        )
+        missing = [k for k in _REQUIRED_KEYS if k not in keys]
+        if missing:
+            raise KeyError(
+                f"Missing required keys in NPZ {path}: {missing}. Available keys: {sorted(keys)}"
+            )
 
-    X = data["X"]
-    if mmap_mode is None:
-        # When not memmapping, force float32 for torch friendliness.
-        if not isinstance(X, np.ndarray):
-            X = np.asarray(X)
-        if X.dtype != np.float32:
-            X = X.astype(np.float32)
+        X = data["X"]
+        if mmap_mode is None:
+            # When not memmapping, force float32 for torch friendliness.
+            if not isinstance(X, np.ndarray):
+                X = np.asarray(X)
+            if X.dtype != np.float32:
+                X = X.astype(np.float32)
 
-    # Labels: strict 1D int64
-    y_action = _as_1d_int64(data["y_action"], "y_action")
-    y_finger = _as_1d_int64(data["y_finger"], "y_finger")
+        # Labels: strict 1D int64
+        y_action = _as_1d_int64(data["y_action"], "y_action")
+        y_finger = _as_1d_int64(data["y_finger"], "y_finger")
 
-    # Validate X shape (don’t transpose here; Step 2 has ensure_X_shape)
-    X_arr = X if isinstance(X, np.ndarray) else np.asarray(X)
-    if X_arr.ndim != 3:
-        raise ValueError(
-            f"Expected X to be 3D (N,T,C) or (N,C,T) in {path}, got shape {X_arr.shape}"
-        )
+        # Validate X shape (don’t transpose here; Step 2 has ensure_X_shape)
+        X_arr = X if isinstance(X, np.ndarray) else np.asarray(X)
+        if X_arr.ndim != 3:
+            raise ValueError(
+                f"Expected X to be 3D (N,T,C) or (N,C,T) in {path}, got shape {X_arr.shape}"
+            )
 
-    n = int(X_arr.shape[0])
-    if len(y_action) != n or len(y_finger) != n:
-        raise ValueError(
-            f"Dataset length mismatch in {path}: X has N={n}, "
-            f"y_action={len(y_action)}, y_finger={len(y_finger)}"
-        )
+        n = int(X_arr.shape[0])
+        if len(y_action) != n or len(y_finger) != n:
+            raise ValueError(
+                f"Dataset length mismatch in {path}: X has N={n}, "
+                f"y_action={len(y_action)}, y_finger={len(y_finger)}"
+            )
 
-    # Meta: keep everything except X/y arrays
-    meta: Dict[str, Any] = {}
-    for k in data.files:
-        if k in _REQUIRED_KEYS:
-            continue
-        v = data[k]
+        # Meta: keep everything except X/y arrays
+        meta: Dict[str, Any] = {}
+        for k in data.files:
+            if k in _REQUIRED_KEYS:
+                continue
+            v = data[k]
 
-        # Normalize known string-ish arrays
-        if k in _STRING_META_KEYS:
-            v = _normalize_string_array(v)
-        else:
-            # Preserve scalars as python types when convenient
-            v = _maybe_scalar(v)
+            # Normalize known string-ish arrays
+            if k in _STRING_META_KEYS:
+                v = _normalize_string_array(v)
+            else:
+                # Preserve scalars as python types when convenient
+                v = _maybe_scalar(v)
 
-        meta[k] = v
+            meta[k] = v
 
-    # If some expected keys are missing, that's okay; Step 2 handles optional meta.
-    # But ensure subject_id/expt/session are in a predictable dtype if present.
-    for k in ("subject_id", "experiment_hash", "session_id"):
-        if k in meta and isinstance(meta[k], np.ndarray):
-            meta[k] = meta[k].astype("U")
+        # If some expected keys are missing, that's okay; Step 2 handles optional meta.
+        # But ensure subject_id/expt/session are in a predictable dtype if present.
+        for k in ("subject_id", "experiment_hash", "session_id"):
+            if k in meta and isinstance(meta[k], np.ndarray):
+                meta[k] = meta[k].astype("U")
 
-    return X, y_action, y_finger, meta
+        return X, y_action, y_finger, meta
+
 
 
 def split_indices(

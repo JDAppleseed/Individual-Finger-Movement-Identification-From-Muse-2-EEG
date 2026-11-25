@@ -22,3 +22,8 @@ operator-invoked diagnostics and experiments; they do not run automatically.
 
 See [workflow/layout](../docs/repository_layout.md) for artifact ownership and
 [trimming review](../docs/maintenance/REMOVAL_REVIEW.md) before removing anything.
+
+`audit_saved_baselines.py` independently reproduces every saved November holdout
+prediction and its fitting-only scaler, checks final signal separation, and writes
+`docs/research/finalization_20261125/full_prediction_audit.json`. It does not retrain
+or replace baseline artifacts.
