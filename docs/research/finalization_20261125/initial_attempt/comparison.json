@@ -1,0 +1,132 @@
+{
+  "protocol": "CNN-LSTM; seed 43; 60 epochs; no smoothing; event holdout; 250 ms purge; independent calibration",
+  "deployment_status": "offline research only; March 19 deployment reference unchanged",
+  "subjects": [
+    {
+      "subject": "1-M16",
+      "dataset_sha256": "71fc56aecf145ad9cd5c956b838f33581ea2d9b3ad66e4f482f7fcbb36145e7a",
+      "run": "Projects/1-M16/subjects/1-M16 500/sessions/combined_20260927_full/processed/models/20261125_cnn_lstm_baseline_seed43",
+      "fold_counts": {
+        "fit": 10689,
+        "calibration": 1163,
+        "test": 2815
+      },
+      "cached_prediction_check": {
+        "windows": 32,
+        "max_absolute_error": 2.384185791015625e-07
+      },
+      "test_action_counts": [
+        239,
+        1260,
+        1316
+      ],
+      "test_event_count": 120,
+      "test_rest_event_count": 2,
+      "fold_audit": "no shared event groups or overlapping signal intervals",
+      "action_accuracy": 0.6941385435168739,
+      "active_finger_accuracy": 0.8218167701863354,
+      "joint_accuracy": 0.5872113676731794,
+      "rest_recall": 0.0,
+      "event_majority_joint_accuracy": 0.6666666666666666,
+      "per_finger_recall": {
+        "1": 0.9911242603550295,
+        "2": 0.8923357664233577,
+        "3": 0.934560327198364,
+        "4": 0.45726495726495725,
+        "5": 0.7265822784810126
+      },
+      "hashes": {
+        "finger_action_model.pt": "348b2e6543f859955962f28761d42fd78f4c99bfd52a0544a882b488d16d0bae",
+        "scaler.npz": "7c14d16a8b1439b8a1928f77d65badcadf913aad09f2547eb518e7ce2a414ec7",
+        "temperature_scaling.json": "62762d2a5bdad8476d3586151f8bd39c0e0dc352444d046dc622defb0a0ea44e",
+        "train_config.json": "081adddd7a4c91bff7ad70a65b158e8cd6e835d6d235f2eef607d829b3bae16e",
+        "split_indices.npz": "a1664e19da3fb2bb96a36012949adf3cfb01d3d89f6d82ac3af8878869931efd",
+        "test_predictions.npz": "9c7f2c75a8430655a7cd8525ba354d9cedff50683643acc743e2c64bc429f665"
+      }
+    },
+    {
+      "subject": "2-M16",
+      "dataset_sha256": "09e24247d067fb7d7dee2a588b9e845e760c7a8cd6320660e8433a52d957920e",
+      "run": "Projects/2-M16/subjects/2-M16/sessions/combined_20260428_with_fixed_session/processed/models/20261125_cnn_lstm_baseline_seed43",
+      "fold_counts": {
+        "fit": 10647,
+        "calibration": 1124,
+        "test": 2837
+      },
+      "cached_prediction_check": {
+        "windows": 32,
+        "max_absolute_error": 8.493661880493164e-07
+      },
+      "test_action_counts": [
+        702,
+        1114,
+        1021
+      ],
+      "test_event_count": 126,
+      "test_rest_event_count": 8,
+      "fold_audit": "no shared event groups or overlapping signal intervals",
+      "action_accuracy": 0.7920338385618612,
+      "active_finger_accuracy": 0.7915690866510539,
+      "joint_accuracy": 0.760662671836447,
+      "rest_recall": 0.7635327635327636,
+      "event_majority_joint_accuracy": 0.8571428571428571,
+      "per_finger_recall": {
+        "1": 0.9498997995991983,
+        "2": 0.7580071174377224,
+        "3": 0.7234927234927235,
+        "4": 0.7602179836512262,
+        "5": 0.7416173570019724
+      },
+      "hashes": {
+        "finger_action_model.pt": "3bd03e86c5bcdd8d657f746526b8442bbe1dc561c0123cce045126cf5011f146",
+        "scaler.npz": "57006fd778f22c1e421ab3a8c5c1ecd488f42411572256a6ec3e28786bedb3e7",
+        "temperature_scaling.json": "dd6b35ecd1fe30d63b48c5c78278e10bc231e9bc4c2ce86a2e1c70b7e8266dd9",
+        "train_config.json": "e53d95f13c86c35db0f27a9ac396af79ee0b81ad82cc3458524b12e086a5ef89",
+        "split_indices.npz": "2289b9e8ae3ed68d1c396c202d325c778fb3409780af463beb4445eb7a5384ac",
+        "test_predictions.npz": "e77fe999448b668f19cf3f2e1a92ee63cc5a896614e98fe503cbe5a0b8740c2f"
+      }
+    },
+    {
+      "subject": "3-M16",
+      "dataset_sha256": "0751b379d143c355ad596da3a74eb5cb91a99499165041267983585c612d0983",
+      "run": "Projects/3-M16/subjects/3-M16/sessions/combined_20260927_full/processed/models/20261125_cnn_lstm_baseline_seed43",
+      "fold_counts": {
+        "fit": 5708,
+        "calibration": 621,
+        "test": 1669
+      },
+      "cached_prediction_check": {
+        "windows": 32,
+        "max_absolute_error": 4.172325134277344e-07
+      },
+      "test_action_counts": [
+        603,
+        555,
+        511
+      ],
+      "test_event_count": 63,
+      "test_rest_event_count": 2,
+      "fold_audit": "no shared event groups or overlapping signal intervals",
+      "action_accuracy": 0.6908328340323547,
+      "active_finger_accuracy": 0.5712945590994372,
+      "joint_accuracy": 0.5512282804074295,
+      "rest_recall": 0.7379767827529021,
+      "event_majority_joint_accuracy": 0.5238095238095238,
+      "per_finger_recall": {
+        "1": 0.8326693227091634,
+        "2": 0.23255813953488372,
+        "3": 0.49162011173184356,
+        "4": 0.7914893617021277,
+        "5": 0.37554585152838427
+      },
+      "hashes": {
+        "finger_action_model.pt": "183df10ba13efe38d1d506b2818008c8c2ae4911f87c181174dac3176bb46139",
+        "scaler.npz": "6695ba1e6caa7bd24b19dbc2bc9509b28579f55fb62d015f556ff5f539b548b4",
+        "temperature_scaling.json": "0eace4118d1328708f2e2e4737269e06d9c5e18539c1dfb45033faa30f225238",
+        "train_config.json": "efd8b950fc30f61d5a88675841021221dace7502215fef233eb980ec41ab45ad",
+        "split_indices.npz": "2f7be577165b222a8ad446da1f0f66165cf3e1fac2945005927ed247586c8d3b",
+        "test_predictions.npz": "8cf487c1cc0655c6ad527908b3fac8e97c6daec7006ca35ab933211f5426fa2f"
+      }
+    }
+  ]
+}

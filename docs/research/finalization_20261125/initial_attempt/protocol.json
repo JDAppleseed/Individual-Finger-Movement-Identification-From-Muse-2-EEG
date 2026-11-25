@@ -1,0 +1,37 @@
+{
+  "date": "2026-11-25",
+  "architecture": "CNNLSTMFingerActionNet",
+  "seed": 43,
+  "epochs": 60,
+  "batch_size": 64,
+  "learning_rate": 0.001,
+  "test_size": 0.2,
+  "calibration_size": 0.1,
+  "outer_purge_seconds": 0.25,
+  "calibration_purge": "maximum observed window duration",
+  "rest_weight": 1.0,
+  "action_loss_weight": 1.0,
+  "data_scope": "separate within-subject models; no pooled-subject training",
+  "selection": "fixed recipe; final epoch; no test-driven model selection",
+  "limitations": [
+    "single seed",
+    "retrospective previously inspected data",
+    "historically pruned 2-M16 REST events retained as exclusions",
+    "3-M16 finger/session confounding",
+    "no new live validation"
+  ],
+  "environment": {
+    "python": "3.11.14",
+    "numpy": "1.26.4",
+    "sklearn": "1.7.2",
+    "torch": "2.10.0",
+    "device": "cpu"
+  },
+  "source_sha256": {
+    "2_train_model.py": "6621f3ed85b50b7f0004a9c3a2e746737845f399966f34269743609b4d525b39",
+    "models/cnn_lstm_finger_action_net.py": "31822a352ac4d0724423958bf927ab3c7a98d6d592f8704bda7ab0f17e9178e4",
+    "utils/default_recipe.py": "78c4bc253ad4a90f0904ba75583bfb9c97f2fadbd7717514bce711247da5e654",
+    "utils/runtime_utils.py": "7ab1d0a3bed987ce061483d8e733acefb66e44484c0f4d2bc9426e965c72f192",
+    "utils/splitting.py": "56e1a572c00b0bf91f41a8c462d34ba5525795949df5e529280444d48914acdc"
+  }
+}

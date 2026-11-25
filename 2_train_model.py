@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from sklearn.model_selection import train_test_split
 
 from models.cnn_lstm_finger_action_net import CNNLSTMFingerActionNet
+from utils.saved_folds import assert_signal_disjoint
 from utils.default_recipe import ARTIFACT_DEFAULTS, TRAIN_RECIPE_DEFAULTS
 from utils.sequence_data import (
     load_sequence_npz,
@@ -56,6 +57,7 @@ from utils.splitting import (
     resolve_auxiliary_rest_sessions,
 )
 from utils.session_layout import SessionLayout, resolve_session_dir
+from utils.calibration_split import preserve_fit_coverage, split_coverage
 
 # Pipeline handoff: Step 2 consumes Step 1b NPZ windows, then writes model/scaler
 # and split metadata that Step 3/3b/3c/4 reuse from the same run directory.
@@ -454,54 +456,35 @@ def _split_calibration_indices(
     y_finger_train = y_finger[train_idx]
     train_meta = _subset_meta(meta, train_idx, len(y_action)) if meta else {}
 
-    try:
-        fit_local, calib_local = split_indices(
-            y_action_train,
-            y_finger_train,
-            meta=train_meta if train_meta else None,
-            test_size=float(calibration_size),
-            random_state=int(random_state),
-            split_mode=str(split_mode),
-            purge_seconds=0.0,
-            hop_seconds=None,
-            allow_fallback=True,
-        )
-        fit_idx = train_idx[np.asarray(fit_local, dtype=np.int64)]
-        calib_idx = train_idx[np.asarray(calib_local, dtype=np.int64)]
-        if len(fit_idx) and len(calib_idx):
-            return _rebalance_calibration_split(
-                train_idx,
-                fit_idx,
-                calib_idx,
-                y_action,
-                calibration_size=calibration_size,
-            )
-    except Exception:
-        pass
-
-    try:
-        fit_local, calib_local = train_test_split(
-            np.arange(len(train_idx), dtype=np.int64),
-            test_size=float(calibration_size),
-            random_state=int(random_state),
-            stratify=_calibration_stratify_labels(y_action_train, y_finger_train),
-        )
-    except ValueError:
-        fit_local, calib_local = train_test_split(
-            np.arange(len(train_idx), dtype=np.int64),
-            test_size=float(calibration_size),
-            random_state=int(random_state),
-            stratify=None,
-        )
-    fit_idx = train_idx[np.asarray(fit_local, dtype=np.int64)]
-    calib_idx = train_idx[np.asarray(calib_local, dtype=np.int64)]
-    return _rebalance_calibration_split(
-        train_idx,
-        fit_idx,
-        calib_idx,
-        y_action,
-        calibration_size=calibration_size,
+    # Calibration must preserve the event/session boundary just like the outer
+    # test split. Never rebalance individual windows or fall back to random rows.
+    starts = np.asarray(train_meta.get("window_start", []), dtype=float)
+    ends = np.asarray(train_meta.get("window_end", []), dtype=float)
+    if len(starts) != len(train_idx) or len(ends) != len(train_idx):
+        raise ValueError("Calibration requires window_start/window_end metadata.")
+    durations = ends - starts
+    if not np.isfinite(durations).all() or np.any(durations <= 0):
+        raise ValueError("Calibration requires finite, positive window durations.")
+    fit_local, calib_local = split_indices(
+        y_action_train,
+        y_finger_train,
+        meta=train_meta,
+        test_size=float(calibration_size),
+        random_state=int(random_state),
+        split_mode=str(split_mode),
+        purge_seconds=0.0,
+        hop_seconds=None,
+        allow_fallback=False,
     )
+    sessions = np.asarray(train_meta.get("session_id", np.full(len(train_idx), "GLOBAL")))
+    groups = sessions if str(split_mode) == "holdout_session" else infer_groups(train_meta, len(train_idx))
+    fit_local, calib_local = preserve_fit_coverage(
+        calibration=calib_local, groups=groups, sessions=sessions,
+        actions=y_action_train, starts=starts, purge_seconds=float(np.max(durations)),
+        by_session=str(split_mode) != "holdout_session",
+    )
+    assert_no_group_overlap(groups, fit_local, calib_local)
+    return train_idx[fit_local], train_idx[calib_local]
 
 
 def _fit_temperature(
@@ -510,13 +493,14 @@ def _fit_temperature(
     *,
     device: torch.device,
     max_iter: int = 50,
-) -> Tuple[float, Dict[str, Optional[float]]]:
+) -> Tuple[float, Dict[str, Any]]:
     logits = np.asarray(logits, dtype=np.float32)
     labels = np.asarray(labels, dtype=np.int64).reshape(-1)
     if logits.ndim != 2 or len(logits) != len(labels) or len(labels) == 0:
         return 1.0, {"nll_before": None, "nll_after": None}
-    if len(np.unique(labels)) < 2:
-        return 1.0, {"nll_before": None, "nll_after": None}
+    if len(np.unique(labels)) < logits.shape[1]:
+        return 1.0, {"nll_before": None, "nll_after": None,
+                     "skipped_reason": "missing_calibration_classes"}
 
     fit_device = torch.device("cpu")
     logits_t = torch.tensor(logits, dtype=torch.float32, device=fit_device)
@@ -524,7 +508,7 @@ def _fit_temperature(
     criterion = nn.CrossEntropyLoss()
     nll_before = float(criterion(logits_t, labels_t).item())
 
-    log_temp = torch.nn.Parameter(torch.zeros((), dtype=torch.float32, device=device))
+    log_temp = torch.nn.Parameter(torch.zeros((), dtype=torch.float32, device=fit_device))
     opt = torch.optim.LBFGS(
         [log_temp],
         lr=0.1,
@@ -557,13 +541,14 @@ def _fit_binary_temperature(
     *,
     device: torch.device,
     max_iter: int = 50,
-) -> Tuple[float, Dict[str, Optional[float]]]:
+) -> Tuple[float, Dict[str, Any]]:
     logits = np.asarray(logits, dtype=np.float32).reshape(-1)
     labels = np.asarray(labels, dtype=np.int64).reshape(-1)
     if logits.shape != labels.shape or logits.size == 0:
         return 1.0, {"nll_before": None, "nll_after": None}
     if len(np.unique(labels)) < 2:
-        return 1.0, {"nll_before": None, "nll_after": None}
+        return 1.0, {"nll_before": None, "nll_after": None,
+                     "skipped_reason": "missing_calibration_classes"}
 
     fit_device = torch.device("cpu")
     logits_t = torch.tensor(logits, dtype=torch.float32, device=fit_device)
@@ -571,7 +556,7 @@ def _fit_binary_temperature(
     criterion = nn.BCEWithLogitsLoss()
     nll_before = float(criterion(logits_t, labels_t).item())
 
-    log_temp = torch.nn.Parameter(torch.zeros((), dtype=torch.float32, device=device))
+    log_temp = torch.nn.Parameter(torch.zeros((), dtype=torch.float32, device=fit_device))
     opt = torch.optim.LBFGS(
         [log_temp],
         lr=0.1,
@@ -2068,6 +2053,22 @@ def main():
                     f"(requested={calibration_size:.3f})"
                 )
 
+        assert_signal_disjoint(meta, fit=train_fit_idx, calibration=calib_idx, test=test_idx)
+
+        # Save exact global indices before fitting for independently auditable folds.
+        np.savez_compressed(
+            run_dir / "split_indices.npz",
+            train=global_indices[train_idx],
+            fit=global_indices[train_fit_idx],
+            calibration=global_indices[calib_idx],
+            test=global_indices[test_idx],
+            index_space=np.array("source_npz"),
+            dataset_sha256=np.array(sha256_file(npz_path)),
+        )
+        (run_dir / "split_coverage.json").write_text(json.dumps(split_coverage(
+            meta, y_action, fit=train_fit_idx, calibration=calib_idx, test=test_idx
+        ), indent=2) + "\n")
+
         # ===== SLICE =====
         X_train, X_test = X[train_fit_idx], X[test_idx]
         y_action_train, y_action_test = y_action[train_fit_idx], y_action[test_idx]
@@ -2696,10 +2697,10 @@ def main():
         # Save *test-set* meta (aligned to prediction rows)
         n_expected = len(y_action)
         test_window_start = take_meta(
-            meta, ["window_start", "start_s", "onset_s"], test_idx, n_expected, np.float32
+            meta, ["window_start", "start_s", "onset_s"], test_idx, n_expected, np.float64
         )
         test_window_end = take_meta(
-            meta, ["window_end", "end_s", "offset_s"], test_idx, n_expected, np.float32
+            meta, ["window_end", "end_s", "offset_s"], test_idx, n_expected, np.float64
         )
         test_trial_id = take_meta(
             meta, ["trial_id", "trial", "event_trial_id"], test_idx, n_expected, np.int64

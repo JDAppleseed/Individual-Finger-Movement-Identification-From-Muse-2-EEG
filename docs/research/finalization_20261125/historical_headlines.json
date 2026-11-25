@@ -1,0 +1,35 @@
+{
+  "captured_date": "2026-11-25",
+  "source": "https://alphahand.org/results",
+  "status": "preserved published historical values; not replaced by new full-corpus diagnostics",
+  "metrics": [
+    {
+      "subject": "2-M16",
+      "run": "20260319_075520",
+      "scope": "saved_test_split",
+      "windows": 2301,
+      "action_accuracy_percent": 89.79,
+      "finger_accuracy_non_rest_percent": 85.96,
+      "joint_accuracy_percent": 84.66
+    },
+    {
+      "subject": "1-M16",
+      "run": "20260305_052744",
+      "scope": "saved_test_split",
+      "windows": 2652,
+      "action_accuracy_percent": 83.94,
+      "finger_accuracy_non_rest_percent": 80.61,
+      "rest_recall_percent": 92.11
+    },
+    {
+      "subject": "2-M16",
+      "scope": "published_full_corpus_command_replay_summary",
+      "windows": 12447,
+      "would_send_precision_percent": 95.37,
+      "event_hit_rate_percent": 91.11,
+      "false_rest_actuation_percent": 0.25,
+      "committed_joint_accuracy_percent": 86.42,
+      "original_replay_outputs_recovered": false
+    }
+  ]
+}

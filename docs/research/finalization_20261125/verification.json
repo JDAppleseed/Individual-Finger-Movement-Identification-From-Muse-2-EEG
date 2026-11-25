@@ -1,0 +1,28 @@
+{
+  "date": "2026-11-25",
+  "full_pytest_suite": {
+    "passed": 403,
+    "failed": 0
+  },
+  "final_focused_tests": {
+    "passed": 18,
+    "failed": 0
+  },
+  "compiled_python_files": 188,
+  "reference_dataset_rebuild": "exact match",
+  "march_snapshot_git_head_match": true,
+  "shadow_launch_plans_validated": 4,
+  "saved_model_prediction_checks": "32 windows per subject; maximum error below 1e-6",
+  "fold_audits": "all fit/calibration/test pairs have no event or source-signal overlap",
+  "manuscript": {
+    "pages": 12,
+    "latex_warnings": 0,
+    "rendered_visual_review": true,
+    "status": "private review draft"
+  },
+  "live_hardware_test": false,
+  "files_deleted": 0,
+  "website_deployed": false,
+  "coverage_regression": "corrected; original results preserved in initial_attempt/",
+  "rest_weight_sensitivity": "same folds, weights 1.0 and 2.0; diagnostic only"
+}

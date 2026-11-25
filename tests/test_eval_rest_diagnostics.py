@@ -13,7 +13,7 @@ def _load_eval_module():
     return module
 
 
-def test_rest_event_breakdown_flags_relabel_and_prune_cases():
+def test_rest_event_breakdown_flags_review_without_outcome_driven_pruning():
     mod = _load_eval_module()
     y_action_true = np.array([0] * 10, dtype=np.int64)
     y_finger_true = np.array([0] * 10, dtype=np.int64)
@@ -73,9 +73,9 @@ def test_rest_event_breakdown_flags_relabel_and_prune_cases():
     assert [row["event_id"] for row in breakdown] == [1, 2]
     assert len(flags) == 2
     flag_by_event = {row["event_id"]: row for row in flags}
-    assert flag_by_event[1]["recommended_action"] == "relabel"
+    assert flag_by_event[1]["recommended_action"] == "independent_signal_and_label_review"
     assert flag_by_event[1]["dominant_non_rest_pair"] == "OPEN+THUMB"
-    assert flag_by_event[2]["recommended_action"] == "prune"
+    assert flag_by_event[2]["recommended_action"] == "independent_signal_and_label_review"
     assert flag_by_event[2]["rest_tpr"] < 0.20
 
 
@@ -222,3 +222,32 @@ def test_primary_benchmark_surfaces_applicability_and_committed_rest_metrics():
     assert metrics["action_applicability_disagreement_rate"] == 0.05
     assert metrics["committed_rest_non_none_rate"] == 0.0
     assert metrics["finger_metrics_by_class_non_rest"]["THUMB"]["accuracy"] == 1.0
+
+
+def test_temporal_order_keeps_sessions_with_overlapping_clocks_separate():
+    mod = _load_eval_module()
+    meta = {
+        'window_start': np.array([2., 1., 1., 2., 0.]),
+        'session_id': np.array(['A', 'B', 'A', 'B', 'unused']),
+    }
+    indices = np.array([0, 1, 2, 3])
+    np.testing.assert_array_equal(mod._session_temporal_order(meta, indices), [2, 0, 1, 3])
+    np.testing.assert_array_equal(
+        mod._session_temporal_order({'window_start': meta['window_start']}, indices),
+        [1, 2, 0, 3],
+    )
+
+
+def test_temporal_segments_reset_gaps_and_sessions_without_label_metadata():
+    mod = _load_eval_module()
+    meta = {
+        'window_start': np.array([1.00, 1.05, 2.00, 1.00, 1.05]),
+        'session_id': np.array(['A', 'A', 'A', 'B', 'B']),
+        'step_sec': np.array(.05),
+        'trial_id': np.zeros(5, dtype=int),
+    }
+    order, segments = mod._session_temporal_segments(meta, np.arange(5))
+    np.testing.assert_array_equal(order, np.arange(5))
+    np.testing.assert_array_equal(segments, [0, 0, 1, 2, 2])
+    meta['trial_id'] = np.arange(5)
+    np.testing.assert_array_equal(mod._session_temporal_segments(meta, np.arange(5))[1], segments)

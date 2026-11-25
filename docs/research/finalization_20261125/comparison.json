@@ -1,0 +1,291 @@
+{
+  "protocol": "CNN-LSTM; seed 43; 60 epochs; no smoothing; event holdout; 250 ms purge; fitting coverage protected; independent calibration where class support exists",
+  "deployment_status": "offline research only; March 19 deployment reference unchanged",
+  "subjects": [
+    {
+      "subject": "1-M16",
+      "dataset_sha256": "71fc56aecf145ad9cd5c956b838f33581ea2d9b3ad66e4f482f7fcbb36145e7a",
+      "run": "Projects/1-M16/subjects/1-M16 500/sessions/combined_20260927_full/processed/models/20261125_cnn_lstm_baseline_seed43_coverage",
+      "fold_counts": {
+        "fit": 10803,
+        "calibration": 1049,
+        "test": 2815
+      },
+      "cached_prediction_check": {
+        "windows": 32,
+        "max_absolute_error": 3.2782554626464844e-07
+      },
+      "source_action_counts": {
+        "fit": {
+          "1-M16 500_20260216_123857_01": [
+            114,
+            4527,
+            4678
+          ],
+          "1-M16 500_20260927_100950": [
+            537,
+            0,
+            0
+          ],
+          "1-M16 500_20260927_100950_01": [
+            947,
+            0,
+            0
+          ]
+        },
+        "calibration": {
+          "1-M16 500_20260216_123857_01": [
+            0,
+            511,
+            538
+          ],
+          "1-M16 500_20260927_100950": [
+            0,
+            0,
+            0
+          ],
+          "1-M16 500_20260927_100950_01": [
+            0,
+            0,
+            0
+          ]
+        },
+        "test": {
+          "1-M16 500_20260216_123857_01": [
+            239,
+            1260,
+            1316
+          ],
+          "1-M16 500_20260927_100950": [
+            0,
+            0,
+            0
+          ],
+          "1-M16 500_20260927_100950_01": [
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "test_action_counts": [
+        239,
+        1260,
+        1316
+      ],
+      "test_event_count": 120,
+      "test_rest_event_count": 2,
+      "fold_audit": "no shared event groups or overlapping signal intervals",
+      "action_accuracy": 0.7936056838365897,
+      "active_finger_accuracy": 0.8260869565217391,
+      "joint_accuracy": 0.6959147424511545,
+      "rest_recall": 0.6820083682008368,
+      "event_majority_joint_accuracy": 0.7583333333333333,
+      "per_finger_recall": {
+        "1": 0.985207100591716,
+        "2": 0.8886861313868614,
+        "3": 0.7832310838445807,
+        "4": 0.5555555555555556,
+        "5": 0.8405063291139241
+      },
+      "hashes": {
+        "finger_action_model.pt": "23e00b65563a246d661809ba227982775c53032e4d1354c5382043ccc4f53bd1",
+        "scaler.npz": "6da1d5d166c64abfcf04354cd513c06d37cf00aee349ce5b215ec1152a413931",
+        "temperature_scaling.json": "ef6158a92ea23a0cca0d5985aada5c14e5dbecf29c8bfe39c3eaf116c19d6d75",
+        "train_config.json": "f0989ad966d521b8c3d33de8c5c537c10d39657a161291a2c4c874e3af9a7ba9",
+        "split_indices.npz": "c513c2833be1af92c7db725e5896d74a5a225309b98ad5f5e39bb4f939a24940",
+        "test_predictions.npz": "79e90a666d02ab08fb2bb05b019d362a31608dc7ffaad8cf422e6e4d739a995c"
+      }
+    },
+    {
+      "subject": "2-M16",
+      "dataset_sha256": "09e24247d067fb7d7dee2a588b9e845e760c7a8cd6320660e8433a52d957920e",
+      "run": "Projects/2-M16/subjects/2-M16/sessions/combined_20260428_with_fixed_session/processed/models/20261125_cnn_lstm_baseline_seed43",
+      "fold_counts": {
+        "fit": 10647,
+        "calibration": 1124,
+        "test": 2837
+      },
+      "cached_prediction_check": {
+        "windows": 32,
+        "max_absolute_error": 8.493661880493164e-07
+      },
+      "source_action_counts": {
+        "fit": {
+          "2-M16_20260216_150056_01": [
+            205,
+            3149,
+            3613
+          ],
+          "2-M16_20260315_145838_01": [
+            1059,
+            0,
+            0
+          ],
+          "2-M16_20260317_190134": [
+            754,
+            131,
+            220
+          ],
+          "2-M16_20260428_161659_01": [
+            1339,
+            101,
+            76
+          ]
+        },
+        "calibration": {
+          "2-M16_20260216_150056_01": [
+            0,
+            403,
+            400
+          ],
+          "2-M16_20260315_145838_01": [
+            0,
+            0,
+            0
+          ],
+          "2-M16_20260317_190134": [
+            92,
+            45,
+            0
+          ],
+          "2-M16_20260428_161659_01": [
+            155,
+            0,
+            29
+          ]
+        },
+        "test": {
+          "2-M16_20260216_150056_01": [
+            0,
+            1055,
+            919
+          ],
+          "2-M16_20260315_145838_01": [
+            0,
+            0,
+            0
+          ],
+          "2-M16_20260317_190134": [
+            294,
+            31,
+            77
+          ],
+          "2-M16_20260428_161659_01": [
+            408,
+            28,
+            25
+          ]
+        }
+      },
+      "test_action_counts": [
+        702,
+        1114,
+        1021
+      ],
+      "test_event_count": 126,
+      "test_rest_event_count": 8,
+      "fold_audit": "no shared event groups or overlapping signal intervals",
+      "action_accuracy": 0.7920338385618612,
+      "active_finger_accuracy": 0.7915690866510539,
+      "joint_accuracy": 0.760662671836447,
+      "rest_recall": 0.7635327635327636,
+      "event_majority_joint_accuracy": 0.8571428571428571,
+      "per_finger_recall": {
+        "1": 0.9498997995991983,
+        "2": 0.7580071174377224,
+        "3": 0.7234927234927235,
+        "4": 0.7602179836512262,
+        "5": 0.7416173570019724
+      },
+      "hashes": {
+        "finger_action_model.pt": "3bd03e86c5bcdd8d657f746526b8442bbe1dc561c0123cce045126cf5011f146",
+        "scaler.npz": "57006fd778f22c1e421ab3a8c5c1ecd488f42411572256a6ec3e28786bedb3e7",
+        "temperature_scaling.json": "dd6b35ecd1fe30d63b48c5c78278e10bc231e9bc4c2ce86a2e1c70b7e8266dd9",
+        "train_config.json": "e53d95f13c86c35db0f27a9ac396af79ee0b81ad82cc3458524b12e086a5ef89",
+        "split_indices.npz": "2289b9e8ae3ed68d1c396c202d325c778fb3409780af463beb4445eb7a5384ac",
+        "test_predictions.npz": "e77fe999448b668f19cf3f2e1a92ee63cc5a896614e98fe503cbe5a0b8740c2f"
+      }
+    },
+    {
+      "subject": "3-M16",
+      "dataset_sha256": "0751b379d143c355ad596da3a74eb5cb91a99499165041267983585c612d0983",
+      "run": "Projects/3-M16/subjects/3-M16/sessions/combined_20260927_full/processed/models/20261125_cnn_lstm_baseline_seed43",
+      "fold_counts": {
+        "fit": 5708,
+        "calibration": 621,
+        "test": 1669
+      },
+      "cached_prediction_check": {
+        "windows": 32,
+        "max_absolute_error": 4.172325134277344e-07
+      },
+      "source_action_counts": {
+        "fit": {
+          "3-M16_20260927_100950_01": [
+            1787,
+            1118,
+            1244
+          ],
+          "3-M16_20260927_100950_02": [
+            0,
+            793,
+            766
+          ]
+        },
+        "calibration": {
+          "3-M16_20260927_100950_01": [
+            214,
+            127,
+            142
+          ],
+          "3-M16_20260927_100950_02": [
+            0,
+            68,
+            70
+          ]
+        },
+        "test": {
+          "3-M16_20260927_100950_01": [
+            603,
+            288,
+            314
+          ],
+          "3-M16_20260927_100950_02": [
+            0,
+            267,
+            197
+          ]
+        }
+      },
+      "test_action_counts": [
+        603,
+        555,
+        511
+      ],
+      "test_event_count": 63,
+      "test_rest_event_count": 2,
+      "fold_audit": "no shared event groups or overlapping signal intervals",
+      "action_accuracy": 0.6908328340323547,
+      "active_finger_accuracy": 0.5712945590994372,
+      "joint_accuracy": 0.5512282804074295,
+      "rest_recall": 0.7379767827529021,
+      "event_majority_joint_accuracy": 0.5238095238095238,
+      "per_finger_recall": {
+        "1": 0.8326693227091634,
+        "2": 0.23255813953488372,
+        "3": 0.49162011173184356,
+        "4": 0.7914893617021277,
+        "5": 0.37554585152838427
+      },
+      "hashes": {
+        "finger_action_model.pt": "183df10ba13efe38d1d506b2818008c8c2ae4911f87c181174dac3176bb46139",
+        "scaler.npz": "6695ba1e6caa7bd24b19dbc2bc9509b28579f55fb62d015f556ff5f539b548b4",
+        "temperature_scaling.json": "0eace4118d1328708f2e2e4737269e06d9c5e18539c1dfb45033faa30f225238",
+        "train_config.json": "efd8b950fc30f61d5a88675841021221dace7502215fef233eb980ec41ab45ad",
+        "split_indices.npz": "2f7be577165b222a8ad446da1f0f66165cf3e1fac2945005927ed247586c8d3b",
+        "test_predictions.npz": "8cf487c1cc0655c6ad527908b3fac8e97c6daec7006ca35ab933211f5426fa2f"
+      }
+    }
+  ]
+}

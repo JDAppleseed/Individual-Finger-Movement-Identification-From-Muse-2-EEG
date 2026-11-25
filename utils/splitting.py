@@ -54,10 +54,14 @@ _IDENTIFIER_KEYS = {
 
 
 def _as_1d_int64(x, name: str) -> np.ndarray:
-    arr = np.asarray(x, dtype=np.int64).reshape(-1)
+    arr = np.asarray(x)
     if arr.ndim != 1:
-        raise ValueError(f"{name} must be 1D after reshape; got shape {arr.shape}")
-    return arr
+        raise ValueError(f"{name} must be 1D; got shape {arr.shape}")
+    if arr.dtype.kind not in "iuf" or not np.isfinite(arr).all():
+        raise ValueError(f"{name} must contain finite integer labels")
+    if np.any(arr < 0) or np.any(arr >= 2**63) or np.any(arr != np.floor(arr)):
+        raise ValueError(f"{name} must contain nonnegative integer labels")
+    return arr.astype(np.int64)
 
 
 def _get_meta_array(meta: Optional[Dict[str, Any]], keys, n: int) -> Optional[np.ndarray]:
@@ -361,7 +365,7 @@ def _subset_meta(meta: Optional[Dict[str, Any]], idx: np.ndarray, n_expected: in
     return out
 
 
-def compose_split_indices(
+def _compose_split_indices_unchecked(
     y_action: np.ndarray,
     y_finger: np.ndarray,
     meta: Optional[Dict[str, Any]] = None,
@@ -801,3 +805,48 @@ def assert_identifier_not_in_X(meta: Optional[Dict[str, Any]], X_keys_or_columns
         raise RuntimeError(
             f"Identifier fields present in features: {overlap}. Remove identifier columns before training/evaluation."
         )
+
+
+# Apply the signal-overlap guard after auxiliary REST rows have been added.
+# Earlier purging of just the main subset cannot protect these appended rows.
+
+
+def compose_split_indices(*args, **kwargs):
+    result = _compose_split_indices_unchecked(*args, **kwargs)
+    meta = kwargs.get('meta', args[2] if len(args) > 2 else None) or {}
+    if 'window_start' not in meta or 'window_end' not in meta:
+        return result
+    starts = np.asarray(meta['window_start'], dtype=float)
+    ends = np.asarray(meta['window_end'], dtype=float)
+    if (starts.ndim != 1 or ends.shape != starts.shape
+            or not np.isfinite(starts).all() or not np.isfinite(ends).all()
+            or np.any(ends <= starts)):
+        raise ValueError('Invalid signal intervals in split metadata')
+    sessions = np.asarray(meta.get('session_id', np.full(len(starts), 'GLOBAL'))).astype(str)
+    train, test = result['train_idx'], result['test_idx']
+    keep = np.ones(len(train), dtype=bool)
+    for sid in np.unique(sessions[test]):
+        test_rows = test[sessions[test] == sid]
+        order = np.argsort(starts[test_rows])
+        test_starts = starts[test_rows][order]
+        max_ends = np.maximum.accumulate(ends[test_rows][order])
+        positions = np.flatnonzero(sessions[train] == sid)
+        rows = train[positions]
+        before_end = np.searchsorted(test_starts, ends[rows], side='left') - 1
+        overlap = (before_end >= 0) & (max_ends[np.maximum(before_end, 0)] > starts[rows])
+        purge_seconds = float(kwargs.get('purge_seconds', 0.0))
+        if purge_seconds > 0:
+            nearest = np.searchsorted(test_starts, starts[rows])
+            right = test_starts[np.minimum(nearest, len(test_starts) - 1)]
+            left = test_starts[np.maximum(nearest - 1, 0)]
+            overlap |= np.minimum(np.abs(right - starts[rows]), np.abs(left - starts[rows])) <= purge_seconds
+        keep[positions[overlap]] = False
+    retained = train[keep]
+    for key in ('train_idx', 'train_locked_idx', 'core_train_idx', 'aux_train_idx'):
+        result[key] = result[key][np.isin(result[key], retained)]
+    local = result['main_train_local']
+    result['main_train_local'] = local[np.isin(result['main_split_idx'][local], retained)]
+    result['signal_overlap_purged_n'] = int((~keep).sum())
+    if not len(retained):
+        raise ValueError('No fitting rows remain after signal-overlap purging')
+    return result
