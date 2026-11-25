@@ -1,14 +1,14 @@
 {
   "date": "2026-11-25",
   "full_pytest_suite": {
-    "passed": 400,
+    "passed": 403,
     "failed": 0
   },
   "final_focused_tests": {
-    "passed": 16,
+    "passed": 18,
     "failed": 0
   },
-  "compiled_python_files": 186,
+  "compiled_python_files": 188,
   "reference_dataset_rebuild": "exact match",
   "march_snapshot_git_head_match": true,
   "shadow_launch_plans_validated": 4,
@@ -22,5 +22,7 @@
   },
   "live_hardware_test": false,
   "files_deleted": 0,
-  "website_deployed": false
+  "website_deployed": false,
+  "coverage_regression": "corrected; original results preserved in initial_attempt/",
+  "rest_weight_sensitivity": "same folds, weights 1.0 and 2.0; diagnostic only"
 }

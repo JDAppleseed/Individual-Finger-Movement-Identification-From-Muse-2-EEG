@@ -1,0 +1,239 @@
+[
+  {
+    "subject": "1-M16",
+    "dataset": "Projects/1-M16/subjects/1-M16 500/sessions/combined_20260927_full/processed/eeg_windows.npz",
+    "sha256": "71fc56aecf145ad9cd5c956b838f33581ea2d9b3ad66e4f482f7fcbb36145e7a",
+    "windows": 14672,
+    "channels": [
+      "TP9",
+      "AF7",
+      "AF8",
+      "TP10"
+    ],
+    "fs": 256,
+    "sources": [
+      {
+        "session": "1-M16 500_20260216_123857_01",
+        "windows": 13188,
+        "source_dataset_sha256": "7dc561349c3c948babddf569c5c7733e63458e459b7110e1682fb75a2dce2ee5",
+        "excluded_source_windows": 0,
+        "source_content_match": true,
+        "action_counts": [
+          353,
+          6298,
+          6537
+        ],
+        "finger_counts": [
+          353,
+          3561,
+          2591,
+          2248,
+          2606,
+          1829
+        ]
+      },
+      {
+        "session": "1-M16 500_20260927_100950",
+        "windows": 537,
+        "source_dataset_sha256": "79b2ae184ee4d2b444faab98b43551bb8b56d961c5adc28f74df6d80a37bb1ff",
+        "excluded_source_windows": 0,
+        "source_content_match": true,
+        "action_counts": [
+          537,
+          0,
+          0
+        ],
+        "finger_counts": [
+          537,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "session": "1-M16 500_20260927_100950_01",
+        "windows": 947,
+        "source_dataset_sha256": "cadb6b7a1967d036d8c253858cc8830a2d47e038a126287b52b4304afa13b7b4",
+        "excluded_source_windows": 0,
+        "source_content_match": true,
+        "action_counts": [
+          947,
+          0,
+          0
+        ],
+        "finger_counts": [
+          947,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    ],
+    "outer_train_n": 11852,
+    "outer_test_n": 2815,
+    "run": "Projects/1-M16/subjects/1-M16 500/sessions/combined_20260927_full/processed/models/20261125_cnn_lstm_baseline_seed43",
+    "scope": "retrospective within-subject event holdout; not unseen-session validation"
+  },
+  {
+    "subject": "2-M16",
+    "dataset": "Projects/2-M16/subjects/2-M16/sessions/combined_20260428_with_fixed_session/processed/eeg_windows.npz",
+    "sha256": "09e24247d067fb7d7dee2a588b9e845e760c7a8cd6320660e8433a52d957920e",
+    "windows": 14673,
+    "channels": [
+      "TP9",
+      "AF7",
+      "AF8",
+      "TP10"
+    ],
+    "fs": 256,
+    "sources": [
+      {
+        "session": "2-M16_20260216_150056_01",
+        "windows": 9744,
+        "source_dataset_sha256": "f53c1f59078f8e55fafbfff56d9f23d4909cfaeb668a5f03361caf59be996c61",
+        "excluded_source_windows": 522,
+        "source_content_match": true,
+        "action_counts": [
+          205,
+          4607,
+          4932
+        ],
+        "finger_counts": [
+          205,
+          2201,
+          1651,
+          1932,
+          1822,
+          1933
+        ]
+      },
+      {
+        "session": "2-M16_20260315_145838_01",
+        "windows": 1059,
+        "source_dataset_sha256": "2259862b5ce3d126bb2bdaea23a01bbbc4031a07e6d13664e5696d5a8b92c425",
+        "excluded_source_windows": 0,
+        "source_content_match": true,
+        "action_counts": [
+          1059,
+          0,
+          0
+        ],
+        "finger_counts": [
+          1059,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "session": "2-M16_20260317_190134",
+        "windows": 1644,
+        "source_dataset_sha256": "284e0f22cfdb2d6ed78f6fb00e787ca46b1d48235801e85a0f14bbaf51b9d5fc",
+        "excluded_source_windows": 0,
+        "source_content_match": true,
+        "action_counts": [
+          1140,
+          207,
+          297
+        ],
+        "finger_counts": [
+          1140,
+          51,
+          91,
+          119,
+          100,
+          143
+        ]
+      },
+      {
+        "session": "2-M16_20260428_161659_01",
+        "windows": 2226,
+        "source_dataset_sha256": "f623f07f83a956d60c77201230b27fca0ee26213aa7c03de51987416da66b2e0",
+        "excluded_source_windows": 0,
+        "source_content_match": true,
+        "action_counts": [
+          1935,
+          145,
+          146
+        ],
+        "finger_counts": [
+          1935,
+          56,
+          54,
+          55,
+          63,
+          63
+        ]
+      }
+    ],
+    "outer_train_n": 11786,
+    "outer_test_n": 2837,
+    "run": "Projects/2-M16/subjects/2-M16/sessions/combined_20260428_with_fixed_session/processed/models/20261125_cnn_lstm_baseline_seed43",
+    "scope": "retrospective within-subject event holdout; not unseen-session validation"
+  },
+  {
+    "subject": "3-M16",
+    "dataset": "Projects/3-M16/subjects/3-M16/sessions/combined_20260927_full/processed/eeg_windows.npz",
+    "sha256": "0751b379d143c355ad596da3a74eb5cb91a99499165041267983585c612d0983",
+    "windows": 7998,
+    "channels": [
+      "TP9",
+      "AF7",
+      "AF8",
+      "TP10"
+    ],
+    "fs": 256,
+    "sources": [
+      {
+        "session": "3-M16_20260927_100950_01",
+        "windows": 5837,
+        "source_dataset_sha256": "f7eccb9a9b6ec43f5afc3a72b5bde2abb9c93641a489d03cd691d7b5ae7317f5",
+        "excluded_source_windows": 0,
+        "source_content_match": true,
+        "action_counts": [
+          2604,
+          1533,
+          1700
+        ],
+        "finger_counts": [
+          2604,
+          1311,
+          845,
+          1077,
+          0,
+          0
+        ]
+      },
+      {
+        "session": "3-M16_20260927_100950_02",
+        "windows": 2161,
+        "source_dataset_sha256": "da617b0a5c3e69d1d7bae3ff4d4c3395d88b25b36609f04052e2f55566856519",
+        "excluded_source_windows": 0,
+        "source_content_match": true,
+        "action_counts": [
+          0,
+          1128,
+          1033
+        ],
+        "finger_counts": [
+          0,
+          0,
+          0,
+          0,
+          1156,
+          1005
+        ]
+      }
+    ],
+    "outer_train_n": 6329,
+    "outer_test_n": 1669,
+    "run": "Projects/3-M16/subjects/3-M16/sessions/combined_20260927_full/processed/models/20261125_cnn_lstm_baseline_seed43",
+    "scope": "retrospective within-subject event holdout; not unseen-session validation"
+  }
+]

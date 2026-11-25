@@ -1,11 +1,11 @@
 # CNN-LSTM comparison
 
-Fixed 60-epoch recipe, seed 43, separate subject models, unsmoothed calibrated predictions.
+Fixed 60-epoch recipe, seed 43, separate subject models, unsmoothed predictions with available calibration (identity where classes are missing).
 Retrospective event holdouts; no unseen-session or live-actuation claim.
 
 | Subject | Fit | Calibration | Test | Action | Active finger | Joint | REST recall | Event joint |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1-M16 | 10689 | 1163 | 2815 | 69.41% | 82.18% | 58.72% | 0.00% | 66.67% |
+| 1-M16 | 10803 | 1049 | 2815 | 79.36% | 82.61% | 69.59% | 68.20% | 75.83% |
 | 2-M16 | 10647 | 1124 | 2837 | 79.20% | 79.16% | 76.07% | 76.35% | 85.71% |
 | 3-M16 | 5708 | 621 | 1669 | 69.08% | 57.13% | 55.12% | 73.80% | 52.38% |
 
@@ -16,7 +16,7 @@ Event joint uses the majority joint label within each held-out source event.
 
 | Subject | Thumb | Index | Middle | Ring | Pinky |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 1-M16 | 99.11% | 89.23% | 93.46% | 45.73% | 72.66% |
+| 1-M16 | 98.52% | 88.87% | 78.32% | 55.56% | 84.05% |
 | 2-M16 | 94.99% | 75.80% | 72.35% | 76.02% | 74.16% |
 | 3-M16 | 83.27% | 23.26% | 49.16% | 79.15% | 37.55% |
 

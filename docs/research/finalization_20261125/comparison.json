@@ -1,19 +1,72 @@
 {
-  "protocol": "CNN-LSTM; seed 43; 60 epochs; no smoothing; event holdout; 250 ms purge; independent calibration",
+  "protocol": "CNN-LSTM; seed 43; 60 epochs; no smoothing; event holdout; 250 ms purge; fitting coverage protected; independent calibration where class support exists",
   "deployment_status": "offline research only; March 19 deployment reference unchanged",
   "subjects": [
     {
       "subject": "1-M16",
       "dataset_sha256": "71fc56aecf145ad9cd5c956b838f33581ea2d9b3ad66e4f482f7fcbb36145e7a",
-      "run": "Projects/1-M16/subjects/1-M16 500/sessions/combined_20260927_full/processed/models/20261125_cnn_lstm_baseline_seed43",
+      "run": "Projects/1-M16/subjects/1-M16 500/sessions/combined_20260927_full/processed/models/20261125_cnn_lstm_baseline_seed43_coverage",
       "fold_counts": {
-        "fit": 10689,
-        "calibration": 1163,
+        "fit": 10803,
+        "calibration": 1049,
         "test": 2815
       },
       "cached_prediction_check": {
         "windows": 32,
-        "max_absolute_error": 2.384185791015625e-07
+        "max_absolute_error": 3.2782554626464844e-07
+      },
+      "source_action_counts": {
+        "fit": {
+          "1-M16 500_20260216_123857_01": [
+            114,
+            4527,
+            4678
+          ],
+          "1-M16 500_20260927_100950": [
+            537,
+            0,
+            0
+          ],
+          "1-M16 500_20260927_100950_01": [
+            947,
+            0,
+            0
+          ]
+        },
+        "calibration": {
+          "1-M16 500_20260216_123857_01": [
+            0,
+            511,
+            538
+          ],
+          "1-M16 500_20260927_100950": [
+            0,
+            0,
+            0
+          ],
+          "1-M16 500_20260927_100950_01": [
+            0,
+            0,
+            0
+          ]
+        },
+        "test": {
+          "1-M16 500_20260216_123857_01": [
+            239,
+            1260,
+            1316
+          ],
+          "1-M16 500_20260927_100950": [
+            0,
+            0,
+            0
+          ],
+          "1-M16 500_20260927_100950_01": [
+            0,
+            0,
+            0
+          ]
+        }
       },
       "test_action_counts": [
         239,
@@ -23,25 +76,25 @@
       "test_event_count": 120,
       "test_rest_event_count": 2,
       "fold_audit": "no shared event groups or overlapping signal intervals",
-      "action_accuracy": 0.6941385435168739,
-      "active_finger_accuracy": 0.8218167701863354,
-      "joint_accuracy": 0.5872113676731794,
-      "rest_recall": 0.0,
-      "event_majority_joint_accuracy": 0.6666666666666666,
+      "action_accuracy": 0.7936056838365897,
+      "active_finger_accuracy": 0.8260869565217391,
+      "joint_accuracy": 0.6959147424511545,
+      "rest_recall": 0.6820083682008368,
+      "event_majority_joint_accuracy": 0.7583333333333333,
       "per_finger_recall": {
-        "1": 0.9911242603550295,
-        "2": 0.8923357664233577,
-        "3": 0.934560327198364,
-        "4": 0.45726495726495725,
-        "5": 0.7265822784810126
+        "1": 0.985207100591716,
+        "2": 0.8886861313868614,
+        "3": 0.7832310838445807,
+        "4": 0.5555555555555556,
+        "5": 0.8405063291139241
       },
       "hashes": {
-        "finger_action_model.pt": "348b2e6543f859955962f28761d42fd78f4c99bfd52a0544a882b488d16d0bae",
-        "scaler.npz": "7c14d16a8b1439b8a1928f77d65badcadf913aad09f2547eb518e7ce2a414ec7",
-        "temperature_scaling.json": "62762d2a5bdad8476d3586151f8bd39c0e0dc352444d046dc622defb0a0ea44e",
-        "train_config.json": "081adddd7a4c91bff7ad70a65b158e8cd6e835d6d235f2eef607d829b3bae16e",
-        "split_indices.npz": "a1664e19da3fb2bb96a36012949adf3cfb01d3d89f6d82ac3af8878869931efd",
-        "test_predictions.npz": "9c7f2c75a8430655a7cd8525ba354d9cedff50683643acc743e2c64bc429f665"
+        "finger_action_model.pt": "23e00b65563a246d661809ba227982775c53032e4d1354c5382043ccc4f53bd1",
+        "scaler.npz": "6da1d5d166c64abfcf04354cd513c06d37cf00aee349ce5b215ec1152a413931",
+        "temperature_scaling.json": "ef6158a92ea23a0cca0d5985aada5c14e5dbecf29c8bfe39c3eaf116c19d6d75",
+        "train_config.json": "f0989ad966d521b8c3d33de8c5c537c10d39657a161291a2c4c874e3af9a7ba9",
+        "split_indices.npz": "c513c2833be1af92c7db725e5896d74a5a225309b98ad5f5e39bb4f939a24940",
+        "test_predictions.npz": "79e90a666d02ab08fb2bb05b019d362a31608dc7ffaad8cf422e6e4d739a995c"
       }
     },
     {
@@ -56,6 +109,74 @@
       "cached_prediction_check": {
         "windows": 32,
         "max_absolute_error": 8.493661880493164e-07
+      },
+      "source_action_counts": {
+        "fit": {
+          "2-M16_20260216_150056_01": [
+            205,
+            3149,
+            3613
+          ],
+          "2-M16_20260315_145838_01": [
+            1059,
+            0,
+            0
+          ],
+          "2-M16_20260317_190134": [
+            754,
+            131,
+            220
+          ],
+          "2-M16_20260428_161659_01": [
+            1339,
+            101,
+            76
+          ]
+        },
+        "calibration": {
+          "2-M16_20260216_150056_01": [
+            0,
+            403,
+            400
+          ],
+          "2-M16_20260315_145838_01": [
+            0,
+            0,
+            0
+          ],
+          "2-M16_20260317_190134": [
+            92,
+            45,
+            0
+          ],
+          "2-M16_20260428_161659_01": [
+            155,
+            0,
+            29
+          ]
+        },
+        "test": {
+          "2-M16_20260216_150056_01": [
+            0,
+            1055,
+            919
+          ],
+          "2-M16_20260315_145838_01": [
+            0,
+            0,
+            0
+          ],
+          "2-M16_20260317_190134": [
+            294,
+            31,
+            77
+          ],
+          "2-M16_20260428_161659_01": [
+            408,
+            28,
+            25
+          ]
+        }
       },
       "test_action_counts": [
         702,
@@ -98,6 +219,44 @@
       "cached_prediction_check": {
         "windows": 32,
         "max_absolute_error": 4.172325134277344e-07
+      },
+      "source_action_counts": {
+        "fit": {
+          "3-M16_20260927_100950_01": [
+            1787,
+            1118,
+            1244
+          ],
+          "3-M16_20260927_100950_02": [
+            0,
+            793,
+            766
+          ]
+        },
+        "calibration": {
+          "3-M16_20260927_100950_01": [
+            214,
+            127,
+            142
+          ],
+          "3-M16_20260927_100950_02": [
+            0,
+            68,
+            70
+          ]
+        },
+        "test": {
+          "3-M16_20260927_100950_01": [
+            603,
+            288,
+            314
+          ],
+          "3-M16_20260927_100950_02": [
+            0,
+            267,
+            197
+          ]
+        }
       },
       "test_action_counts": [
         603,

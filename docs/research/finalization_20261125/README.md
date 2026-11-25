@@ -51,12 +51,16 @@ Each subject is trained separately using the original CNN-LSTM family, 60 epochs
 seed 43, batch size 64, learning rate 0.001, REST/action weights 1.0, 20% nominal
 event-group test holdout, 10% calibration allocation from the training pool, and
 a 250 ms outer purge. Auxiliary REST-only sessions remain fitting-only. The
-calibration purge uses the maximum observed window duration. The recipe is fixed
-before results; no epoch or threshold is selected from test performance.
+calibration purge uses the maximum observed window duration. After diagnosing the initial 1-M16 coverage failure, the fitting-coverage guard
+was added and only 1-M16 was retrained. The 2-M16/3-M16 folds are unchanged, and
+their original run provenance is retained under `initial_attempt/protocol.json`.
+For 1-M16, all 114 remaining movement-session REST windows stay in fitting; action
+and applicability temperature fitting is skipped because calibration has no REST.
+The 60-epoch recipe remains fixed; no epoch or threshold is selected from test performance.
 
 `protocol.json` records environment and source hashes. `comparison.json` records
-fold counts, metrics, and artifact hashes. Metrics use unsmoothed calibrated
-argmax predictions; REST maps to finger NONE. Finger accuracy is measured on true
+fold counts, metrics, and artifact hashes. Metrics use unsmoothed argmax predictions with available calibration
+(identity temperatures where calibration lacks a class); REST maps to finger NONE. Finger accuracy is measured on true
 movement windows, with predicted REST counting as an error. Joint accuracy requires
 both labels to match. These are not command-gated or hardware-actuation metrics.
 
@@ -88,9 +92,11 @@ repeat observations. No hardware observation was performed during finalization.
 ## Interpretation and release boundaries
 
 See [the generated comparison](COMPARISON.md) for current aggregate and per-finger
-results. Joint accuracy is 58.72%, 76.07%, and 55.12% for 1-M16, 2-M16, and 3-M16.
-The 1-M16 retrain has zero held-out REST recall and is not promoted. The other
-research runs also remain unpromoted. Identical CNN-LSTM architecture does not
+results. Joint accuracy is 69.59%, 76.07%, and 55.12% for 1-M16, 2-M16, and 3-M16.
+The corrected 1-M16 retrain has 68.20% held-out REST recall and remains unpromoted.
+The initial 0% result came from a calibration coverage error, now preserved in
+`initial_attempt/`. See [the REST diagnosis](REST_DIAGNOSIS.md) for the correction
+and controlled weight-2 comparison. The other research runs also remain unpromoted. Identical CNN-LSTM architecture does not
 guarantee identical performance after changing the fitting/calibration allocation.
 
 The comparison is retrospective, single-seed, and within-subject. It is not a

@@ -5,6 +5,8 @@ operator-invoked diagnostics and experiments; they do not run automatically.
 
 - **Current comparison:** `finalize_cnn_baselines.py` audits the newest combined
   datasets, trains the fixed CNN-LSTM recipe, and checks saved folds/results.
+  `check_1m16_rest_coverage.py` reconstructs the coverage regression and fixed-fold
+  REST-weight sensitivity diagnosis.
 - **Reference validation:** `build_2m16_reference_dataset.py`, `smoke_inference.py`.
 - **Streaming and live diagnostics:** `live_preflight.py`, `lsl_sanity_probe.py`,
   `audit_live_parity.py`, `analyze_live_raw_inputs.py`, `analyze_live_predictions.py`,

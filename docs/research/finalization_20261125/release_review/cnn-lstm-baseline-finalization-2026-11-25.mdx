@@ -20,13 +20,13 @@ Models are trained separately with the same 60-epoch CNN-LSTM recipe and seed 43
 
 | Subject | Action | Active finger | Joint | REST recall |
 | --- | ---: | ---: | ---: | ---: |
-| 1-M16 | 69.41% | 82.18% | 58.72% | 0.00% |
+| 1-M16 | 79.36% | 82.61% | 69.59% | 68.20% |
 | 2-M16 | 79.20% | 79.16% | 76.07% | 76.35% |
 | 3-M16 | 69.08% | 57.13% | 55.12% | 73.80% |
 
-These are unsmoothed calibrated classification results on retrospective within-subject event holdouts. Finger accuracy conditions on true movement, counting predicted REST as an error. They are not hardware-command metrics or unseen-session results.
+These are unsmoothed classification results with temperature scaling only where calibration class coverage permits on retrospective within-subject event holdouts. Finger accuracy conditions on true movement, counting predicted REST as an error. They are not hardware-command metrics or unseen-session results.
 
-The 1-M16 retrain has zero REST recall and is not a deployment candidate. 3-M16 retains weak finger separation and session-confounded class coverage. The expanded 2-M16 dataset uses a different holdout from the March reference. No new run replaces the historical deployment checkpoint.
+The initial 1-M16 split incorrectly withheld its only remaining movement-session REST event for calibration. Correcting fitting coverage restored REST recall from 0% to 68.20%; doubling the REST weight raised it modestly to 71.13% in a diagnostic run. The weight-1 run remains the common-recipe comparison. Its calibration has no REST, so action/applicability temperatures use identity scaling. No new model is promoted. 3-M16 retains weak finger separation and session-confounded class coverage. The expanded 2-M16 dataset uses a different holdout from the March reference. No new run replaces the historical deployment checkpoint.
 
 ## Historical evidence and next steps
 

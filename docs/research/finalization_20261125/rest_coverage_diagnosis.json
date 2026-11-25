@@ -1,0 +1,334 @@
+{
+  "scope": "retrospective diagnostic; weights are not selected on these test scores",
+  "dataset_windows": 14672,
+  "dataset_rest_windows": 1837,
+  "identical_corrected_folds": true,
+  "unchanged_outer_test": true,
+  "published_reference": {
+    "run": "20260305_052744",
+    "rest_correct": 105,
+    "rest_total": 114,
+    "rest_recall": 0.9210526315789473,
+    "rest_weight": 1.0,
+    "seed": 45,
+    "source": "https://alphahand.org/reports/1-m16-500/report"
+  },
+  "results": [
+    {
+      "variant": "initial_missing_core_rest",
+      "run": "Projects/1-M16/subjects/1-M16 500/sessions/combined_20260927_full/processed/models/20261125_cnn_lstm_baseline_seed43",
+      "rest_weight": 1.0,
+      "action_accuracy": 0.6941385435168739,
+      "active_finger_accuracy": 0.8218167701863354,
+      "joint_accuracy": 0.5872113676731794,
+      "rest_recall": 0.0,
+      "rest_correct": 0,
+      "rest_total": 239,
+      "movement_recall": 1.0,
+      "rest_events": {
+        "0": {
+          "windows": 119,
+          "correct": 0
+        },
+        "2": {
+          "windows": 120,
+          "correct": 0
+        }
+      },
+      "folds": {
+        "fit": {
+          "1-M16 500_20260216_123857_01": [
+            0,
+            4527,
+            4678
+          ],
+          "1-M16 500_20260927_100950": [
+            537,
+            0,
+            0
+          ],
+          "1-M16 500_20260927_100950_01": [
+            947,
+            0,
+            0
+          ]
+        },
+        "calibration": {
+          "1-M16 500_20260216_123857_01": [
+            114,
+            511,
+            538
+          ],
+          "1-M16 500_20260927_100950": [
+            0,
+            0,
+            0
+          ],
+          "1-M16 500_20260927_100950_01": [
+            0,
+            0,
+            0
+          ]
+        },
+        "test": {
+          "1-M16 500_20260216_123857_01": [
+            239,
+            1260,
+            1316
+          ],
+          "1-M16 500_20260927_100950": [
+            0,
+            0,
+            0
+          ],
+          "1-M16 500_20260927_100950_01": [
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "temperatures": {
+        "action_temperature": 4.8647074699401855,
+        "finger_temperature": 1.2967923879623413,
+        "applicability_temperature": 5.206845760345459,
+        "fit_sample_count": 1163,
+        "fit_non_rest_count": 1049,
+        "has_applicability_temperature": true,
+        "source": "fit_on_holdout",
+        "metrics": {
+          "action": {
+            "nll_before": 1.5386989116668701,
+            "nll_after": 0.8353024125099182
+          },
+          "finger": {
+            "nll_before": 0.5387387275695801,
+            "nll_after": 0.5203779935836792
+          },
+          "applicability": {
+            "nll_before": 1.1450791358947754,
+            "nll_after": 0.329585999250412
+          }
+        }
+      },
+      "hashes": {
+        "finger_action_model.pt": "348b2e6543f859955962f28761d42fd78f4c99bfd52a0544a882b488d16d0bae",
+        "scaler.npz": "7c14d16a8b1439b8a1928f77d65badcadf913aad09f2547eb518e7ce2a414ec7",
+        "split_indices.npz": "a1664e19da3fb2bb96a36012949adf3cfb01d3d89f6d82ac3af8878869931efd",
+        "test_predictions.npz": "9c7f2c75a8430655a7cd8525ba354d9cedff50683643acc743e2c64bc429f665"
+      }
+    },
+    {
+      "variant": "coverage_fixed_rest100",
+      "run": "Projects/1-M16/subjects/1-M16 500/sessions/combined_20260927_full/processed/models/20261125_cnn_lstm_baseline_seed43_coverage",
+      "rest_weight": 1.0,
+      "action_accuracy": 0.7936056838365897,
+      "active_finger_accuracy": 0.8260869565217391,
+      "joint_accuracy": 0.6959147424511545,
+      "rest_recall": 0.6820083682008368,
+      "rest_correct": 163,
+      "rest_total": 239,
+      "movement_recall": 0.999611801242236,
+      "rest_events": {
+        "0": {
+          "windows": 119,
+          "correct": 118
+        },
+        "2": {
+          "windows": 120,
+          "correct": 45
+        }
+      },
+      "folds": {
+        "fit": {
+          "1-M16 500_20260216_123857_01": [
+            114,
+            4527,
+            4678
+          ],
+          "1-M16 500_20260927_100950": [
+            537,
+            0,
+            0
+          ],
+          "1-M16 500_20260927_100950_01": [
+            947,
+            0,
+            0
+          ]
+        },
+        "calibration": {
+          "1-M16 500_20260216_123857_01": [
+            0,
+            511,
+            538
+          ],
+          "1-M16 500_20260927_100950": [
+            0,
+            0,
+            0
+          ],
+          "1-M16 500_20260927_100950_01": [
+            0,
+            0,
+            0
+          ]
+        },
+        "test": {
+          "1-M16 500_20260216_123857_01": [
+            239,
+            1260,
+            1316
+          ],
+          "1-M16 500_20260927_100950": [
+            0,
+            0,
+            0
+          ],
+          "1-M16 500_20260927_100950_01": [
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "temperatures": {
+        "action_temperature": 1.0,
+        "finger_temperature": 1.2087461948394775,
+        "applicability_temperature": 1.0,
+        "fit_sample_count": 1049,
+        "fit_non_rest_count": 1049,
+        "has_applicability_temperature": true,
+        "source": "fit_on_holdout",
+        "metrics": {
+          "action": {
+            "nll_before": null,
+            "nll_after": null,
+            "skipped_reason": "missing_calibration_classes"
+          },
+          "finger": {
+            "nll_before": 0.4726293683052063,
+            "nll_after": 0.46370428800582886
+          },
+          "applicability": {
+            "nll_before": null,
+            "nll_after": null,
+            "skipped_reason": "missing_calibration_classes"
+          }
+        }
+      },
+      "hashes": {
+        "finger_action_model.pt": "23e00b65563a246d661809ba227982775c53032e4d1354c5382043ccc4f53bd1",
+        "scaler.npz": "6da1d5d166c64abfcf04354cd513c06d37cf00aee349ce5b215ec1152a413931",
+        "split_indices.npz": "c513c2833be1af92c7db725e5896d74a5a225309b98ad5f5e39bb4f939a24940",
+        "test_predictions.npz": "79e90a666d02ab08fb2bb05b019d362a31608dc7ffaad8cf422e6e4d739a995c"
+      }
+    },
+    {
+      "variant": "coverage_fixed_rest200",
+      "run": "Projects/1-M16/subjects/1-M16 500/sessions/combined_20260927_full/processed/models/20261125_cnn_lstm_coverage_rest200_seed43",
+      "rest_weight": 2.0,
+      "action_accuracy": 0.808525754884547,
+      "active_finger_accuracy": 0.8307453416149069,
+      "joint_accuracy": 0.7065719360568383,
+      "rest_recall": 0.7112970711297071,
+      "rest_correct": 170,
+      "rest_total": 239,
+      "movement_recall": 1.0,
+      "rest_events": {
+        "0": {
+          "windows": 119,
+          "correct": 118
+        },
+        "2": {
+          "windows": 120,
+          "correct": 52
+        }
+      },
+      "folds": {
+        "fit": {
+          "1-M16 500_20260216_123857_01": [
+            114,
+            4527,
+            4678
+          ],
+          "1-M16 500_20260927_100950": [
+            537,
+            0,
+            0
+          ],
+          "1-M16 500_20260927_100950_01": [
+            947,
+            0,
+            0
+          ]
+        },
+        "calibration": {
+          "1-M16 500_20260216_123857_01": [
+            0,
+            511,
+            538
+          ],
+          "1-M16 500_20260927_100950": [
+            0,
+            0,
+            0
+          ],
+          "1-M16 500_20260927_100950_01": [
+            0,
+            0,
+            0
+          ]
+        },
+        "test": {
+          "1-M16 500_20260216_123857_01": [
+            239,
+            1260,
+            1316
+          ],
+          "1-M16 500_20260927_100950": [
+            0,
+            0,
+            0
+          ],
+          "1-M16 500_20260927_100950_01": [
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "temperatures": {
+        "action_temperature": 1.0,
+        "finger_temperature": 1.210808515548706,
+        "applicability_temperature": 1.0,
+        "fit_sample_count": 1049,
+        "fit_non_rest_count": 1049,
+        "has_applicability_temperature": true,
+        "source": "fit_on_holdout",
+        "metrics": {
+          "action": {
+            "nll_before": null,
+            "nll_after": null,
+            "skipped_reason": "missing_calibration_classes"
+          },
+          "finger": {
+            "nll_before": 0.4578041732311249,
+            "nll_after": 0.4487358331680298
+          },
+          "applicability": {
+            "nll_before": null,
+            "nll_after": null,
+            "skipped_reason": "missing_calibration_classes"
+          }
+        }
+      },
+      "hashes": {
+        "finger_action_model.pt": "2ab3fda31957cd7f330742cb3738014b952077fca70416640180691a2611b588",
+        "scaler.npz": "6da1d5d166c64abfcf04354cd513c06d37cf00aee349ce5b215ec1152a413931",
+        "split_indices.npz": "c513c2833be1af92c7db725e5896d74a5a225309b98ad5f5e39bb4f939a24940",
+        "test_predictions.npz": "6f3d5ced3c059150e075bd8260de1386af3cd0cc1d5a48ba5d07c9fae9c3d60a"
+      }
+    }
+  ]
+}

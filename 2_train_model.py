@@ -56,6 +56,7 @@ from utils.splitting import (
     resolve_auxiliary_rest_sessions,
 )
 from utils.session_layout import SessionLayout, resolve_session_dir
+from utils.calibration_split import preserve_fit_coverage, split_coverage
 
 # Pipeline handoff: Step 2 consumes Step 1b NPZ windows, then writes model/scaler
 # and split metadata that Step 3/3b/3c/4 reuse from the same run directory.
@@ -470,15 +471,18 @@ def _split_calibration_indices(
         test_size=float(calibration_size),
         random_state=int(random_state),
         split_mode=str(split_mode),
-        purge_seconds=float(np.max(durations)),
+        purge_seconds=0.0,
         hop_seconds=None,
         allow_fallback=False,
     )
-    if not len(fit_local) or not len(calib_local):
-        raise ValueError("Calibration split is empty after temporal purging.")
-    groups = infer_groups(train_meta, len(train_idx))
-    if str(split_mode) != "holdout_session":
-        assert_no_group_overlap(groups, fit_local, calib_local)
+    sessions = np.asarray(train_meta.get("session_id", np.full(len(train_idx), "GLOBAL")))
+    groups = sessions if str(split_mode) == "holdout_session" else infer_groups(train_meta, len(train_idx))
+    fit_local, calib_local = preserve_fit_coverage(
+        calibration=calib_local, groups=groups, sessions=sessions,
+        actions=y_action_train, starts=starts, purge_seconds=float(np.max(durations)),
+        by_session=str(split_mode) != "holdout_session",
+    )
+    assert_no_group_overlap(groups, fit_local, calib_local)
     return train_idx[fit_local], train_idx[calib_local]
 
 
@@ -488,13 +492,14 @@ def _fit_temperature(
     *,
     device: torch.device,
     max_iter: int = 50,
-) -> Tuple[float, Dict[str, Optional[float]]]:
+) -> Tuple[float, Dict[str, Any]]:
     logits = np.asarray(logits, dtype=np.float32)
     labels = np.asarray(labels, dtype=np.int64).reshape(-1)
     if logits.ndim != 2 or len(logits) != len(labels) or len(labels) == 0:
         return 1.0, {"nll_before": None, "nll_after": None}
-    if len(np.unique(labels)) < 2:
-        return 1.0, {"nll_before": None, "nll_after": None}
+    if len(np.unique(labels)) < logits.shape[1]:
+        return 1.0, {"nll_before": None, "nll_after": None,
+                     "skipped_reason": "missing_calibration_classes"}
 
     fit_device = torch.device("cpu")
     logits_t = torch.tensor(logits, dtype=torch.float32, device=fit_device)
@@ -535,13 +540,14 @@ def _fit_binary_temperature(
     *,
     device: torch.device,
     max_iter: int = 50,
-) -> Tuple[float, Dict[str, Optional[float]]]:
+) -> Tuple[float, Dict[str, Any]]:
     logits = np.asarray(logits, dtype=np.float32).reshape(-1)
     labels = np.asarray(labels, dtype=np.int64).reshape(-1)
     if logits.shape != labels.shape or logits.size == 0:
         return 1.0, {"nll_before": None, "nll_after": None}
     if len(np.unique(labels)) < 2:
-        return 1.0, {"nll_before": None, "nll_after": None}
+        return 1.0, {"nll_before": None, "nll_after": None,
+                     "skipped_reason": "missing_calibration_classes"}
 
     fit_device = torch.device("cpu")
     logits_t = torch.tensor(logits, dtype=torch.float32, device=fit_device)
@@ -2054,6 +2060,9 @@ def main():
             calibration=np.asarray(calib_idx, dtype=np.int64),
             test=np.asarray(test_idx, dtype=np.int64),
         )
+        (run_dir / "split_coverage.json").write_text(json.dumps(split_coverage(
+            meta, y_action, fit=train_fit_idx, calibration=calib_idx, test=test_idx
+        ), indent=2) + "\n")
 
         # ===== SLICE =====
         X_train, X_test = X[train_fit_idx], X[test_idx]

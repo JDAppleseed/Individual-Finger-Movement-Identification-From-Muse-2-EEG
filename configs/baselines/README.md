@@ -6,7 +6,7 @@ logging is enabled. They never promote models automatically.
 | Preset | Purpose |
 | --- | --- |
 | `2-M16_march19_shadow.json` | Preserved public deployment reference, pinned to `winning_model/model_run` |
-| `1-M16_november_research_shadow.json` | New fixed-recipe research run; zero held-out REST recall; not a deployment candidate |
+| `1-M16_november_research_shadow.json` | New fixed-recipe research run; coverage-corrected fitting; sparse REST evidence; no deployment promotion |
 | `2-M16_november_research_shadow.json` | New expanded-corpus research run; no new-session validation |
 | `3-M16_november_research_shadow.json` | New research run; weak finger separation and session confounding |
 
@@ -19,3 +19,7 @@ inside the selected session. Use a fresh `--out-dir` for repeated observations.
 normalizer, temperature, and split hashes are in
 `docs/research/finalization_20261125/comparison.json`. The original winning config
 is preserved independently; nothing here changes its historical command policy.
+
+`1-M16_march5_reference_manifest.json` also pins the published 1-M16 offline
+reference with 105/114 correct REST test windows. Its dataset, split, preprocessing,
+and six-class finger head differ from the November common-recipe experiment.

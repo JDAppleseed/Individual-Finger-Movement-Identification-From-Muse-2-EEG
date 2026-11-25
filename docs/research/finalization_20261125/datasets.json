@@ -75,7 +75,7 @@
     ],
     "outer_train_n": 11852,
     "outer_test_n": 2815,
-    "run": "Projects/1-M16/subjects/1-M16 500/sessions/combined_20260927_full/processed/models/20261125_cnn_lstm_baseline_seed43",
+    "run": "Projects/1-M16/subjects/1-M16 500/sessions/combined_20260927_full/processed/models/20261125_cnn_lstm_baseline_seed43_coverage",
     "scope": "retrospective within-subject event holdout; not unseen-session validation"
   },
   {

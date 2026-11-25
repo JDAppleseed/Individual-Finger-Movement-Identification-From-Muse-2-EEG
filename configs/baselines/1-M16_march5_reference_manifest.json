@@ -1,0 +1,14 @@
+{
+  "status": "published historical offline reference; not a new live certification",
+  "subject": "1-M16",
+  "run": "20260305_052744",
+  "published_rest_recall": 0.9210526315789473,
+  "rest_test_event": 1,
+  "files": {
+    "Projects/1-M16/subjects/1-M16 500/sessions/1-M16 500_20260216_123857_01/processed/models/20260305_052744/finger_action_model.pt": "d89b9b3be5226c3bc1959abf85d60befb72207cfdd7281c5e9d8f19b74b27cb9",
+    "Projects/1-M16/subjects/1-M16 500/sessions/1-M16 500_20260216_123857_01/processed/models/20260305_052744/metrics.json": "86c442d91a9e97f58c4ee4ebbaaa14f64a5e2ae47e401cbcfda3c574ec2a9d99",
+    "Projects/1-M16/subjects/1-M16 500/sessions/1-M16 500_20260216_123857_01/processed/models/20260305_052744/scaler.npz": "e4455ea20a6fed38f84a183f13a6cb4e29990e1a01f7b3d65c2766630906f120",
+    "Projects/1-M16/subjects/1-M16 500/sessions/1-M16 500_20260216_123857_01/processed/models/20260305_052744/test_predictions.npz": "78cc0ee284e7c4e65644c7da34975df8e385a86300dfd6238ab89a68bbbe49d7",
+    "Projects/1-M16/subjects/1-M16 500/sessions/1-M16 500_20260216_123857_01/processed/models/20260305_052744/train_config.json": "8b3352229a978fab38b40dd679e170ab0416949908a181c5d89d2f5e8183cf7e"
+  }
+}

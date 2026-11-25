@@ -38,6 +38,44 @@ def test_calibration_refuses_random_window_fallback():
             calibration_size=.2, random_state=43, split_mode='group_trial')
 
 
+def test_calibration_cannot_take_only_same_session_rest_event(monkeypatch):
+    train = module('2_train_model.py')
+    n = 30
+    actions = np.repeat([0, 1, 2], 10)
+    events = np.repeat([10, 20, 30], 10)
+    starts = np.arange(n, dtype=float)
+    meta = dict(event_id=events, session_id=np.full(n, 'movement'),
+                window_start=starts, window_end=starts + .25)
+    # Reproduce the failure: all available core REST assigned to calibration.
+    monkeypatch.setattr(train, 'split_indices', lambda *a, **kw:
+        (np.arange(10, 30), np.arange(10)))
+    fit, calibration = train._split_calibration_indices(
+        np.arange(n), actions, np.where(actions == 0, 0, 1), meta,
+        calibration_size=.1, random_state=43, split_mode='group_trial')
+    assert np.sum(actions[fit] == 0) == 10
+    assert len(calibration) == 0  # Prefer fitting over an invalid calibration claim.
+    assert np.array_equal(fit, np.arange(n))
+
+
+def test_fit_coverage_survives_temporal_purging():
+    from utils.calibration_split import preserve_fit_coverage
+    fit, calibration = preserve_fit_coverage(
+        calibration=np.array([1, 2, 4]), groups=np.array([0, 1, 1, 2, 3]),
+        sessions=np.full(5, 'one'), actions=np.array([0, 1, 1, 2, 2]),
+        starts=np.array([0., .1, .2, 3., 6.]), purge_seconds=.25)
+    assert 0 in fit
+    assert np.array_equal(calibration, [4])
+
+
+def test_partial_class_calibration_uses_identity_temperature():
+    import torch
+    train = module('2_train_model.py')
+    temperature, metrics = train._fit_temperature(
+        np.ones((8, 3)), np.array([1, 2] * 4), device=torch.device('cpu'))
+    assert temperature == 1.
+    assert metrics['skipped_reason'] == 'missing_calibration_classes'
+
+
 @pytest.mark.parametrize('nested', [True, False])
 def test_live_rejects_archived_ensemble_config(tmp_path, nested):
     live = module('7_live_infer_and_actuate.py')

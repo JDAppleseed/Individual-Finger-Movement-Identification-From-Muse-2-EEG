@@ -15,7 +15,10 @@ as a frozen reference and migrate only behaviors backed by contracts and fixture
 3. **Learning:** the CNN-LSTM with action, active-finger, and applicability heads;
    saved centering/detrending and channel normalizer; fitting-only preprocessing;
    group-separated fitting/calibration/test folds, temporal purging, and saved
-   indices. Never fall back silently to randomly split overlapping windows.
+   indices. Audit per-session/per-class coverage as well as leakage: a grouped
+   calibration split must not consume the only fitting event for a class. Skip
+   unsupported temperature fitting explicitly instead of claiming calibrated
+   confidence for missing classes. Never fall back silently to randomly split overlapping windows.
 4. **Evaluation:** raw predictions, optional explicitly named postprocessing,
    session/gap state resets, per-finger results, REST errors, event summaries, and
    denominator-specific command metrics. Distinguish full-corpus replay, event

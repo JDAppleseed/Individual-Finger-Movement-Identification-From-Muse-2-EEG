@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from utils.sequence_data import load_sequence_npz
 from utils.splitting import compose_split_indices, infer_groups
+from utils.calibration_split import split_coverage
 
 SESSIONS = {
     '1-M16': 'Projects/1-M16/subjects/1-M16 500/sessions/combined_20260927_full',
@@ -27,6 +28,7 @@ SESSIONS = {
     '3-M16': 'Projects/3-M16/subjects/3-M16/sessions/combined_20260927_full',
 }
 RUN = '20261125_cnn_lstm_baseline_seed43'
+RUN_IDS = {subject: RUN + ('_coverage' if subject == '1-M16' else '') for subject in SESSIONS}
 REPORTS = ROOT / 'docs/research/finalization_20261125'
 
 
@@ -91,7 +93,7 @@ def audit():
         rows.append(dict(subject=subject, dataset=str(path.relative_to(ROOT)),
             sha256=sha(path), windows=n, channels=labels, fs=256,
             sources=source_rows, outer_train_n=len(plan['train_idx']),
-            outer_test_n=len(plan['test_idx']), run=f'{session}/processed/models/{RUN}',
+            outer_test_n=len(plan['test_idx']), run=f'{session}/processed/models/{RUN_IDS[subject]}',
             scope='retrospective within-subject event holdout; not unseen-session validation'))
     save('datasets.json', rows)
     import platform
@@ -112,7 +114,9 @@ def audit():
             sklearn=sklearn.__version__, torch=torch.__version__, device='cpu'),
         source_sha256={name: sha(ROOT / name) for name in [
             '2_train_model.py', 'models/cnn_lstm_finger_action_net.py',
-            'utils/default_recipe.py', 'utils/runtime_utils.py', 'utils/splitting.py']}))
+            'utils/default_recipe.py', 'utils/runtime_utils.py', 'utils/splitting.py', 'utils/calibration_split.py']},
+        retained_run_provenance={'2-M16': 'initial_attempt/protocol.json', '3-M16': 'initial_attempt/protocol.json'},
+        coverage_policy='Preserve fitting action coverage per source by moving whole calibration groups; use identity temperatures for missing calibration classes.'))
     return rows
 
 
@@ -148,7 +152,12 @@ def summarize(rows):
         X, a, f, meta = load_sequence_npz(ROOT / row['dataset'])
         with np.load(run / 'split_indices.npz') as z:
             folds = {k: z[k] for k in ['fit', 'calibration', 'test']}
+            outer_train = z['train']
         sessions = np.asarray(meta['session_id']).astype(str)
+        required = set(zip(sessions[outer_train].tolist(), a[outer_train].tolist()))
+        fitted = set(zip(sessions[folds['fit']].tolist(), a[folds['fit']].tolist()))
+        if required - fitted:
+            raise ValueError(f'{row["subject"]}: fitting lost source/action coverage: {required - fitted}')
         groups = np.array([f'{sid}:{gid}' for sid, gid in zip(sessions, infer_groups(meta, len(a)))])
         start, end = np.asarray(meta['window_start']), np.asarray(meta['window_end'])
         for left, right in [('fit', 'calibration'), ('fit', 'test'), ('calibration', 'test')]:
@@ -193,6 +202,7 @@ def summarize(rows):
         results.append(dict(subject=row['subject'], dataset_sha256=row['sha256'],
             run=row['run'], fold_counts={k: len(v) for k, v in folds.items()},
             cached_prediction_check=dict(windows=32, max_absolute_error=max_error),
+            source_action_counts=split_coverage(meta, a, **folds),
             test_action_counts=np.bincount(ya, minlength=3).tolist(),
             test_event_count=len(event_correct),
             test_rest_event_count=len(np.unique(groups[indices][~active])),
@@ -205,7 +215,7 @@ def summarize(rows):
             per_finger_recall={str(k): float(np.mean(pf[yf == k] == k)) for k in range(1, 6)},
             hashes={name: sha(run / name) for name in ['finger_action_model.pt', 'scaler.npz',
                 'temperature_scaling.json', 'train_config.json', 'split_indices.npz', 'test_predictions.npz']}))
-    save('comparison.json', dict(protocol='CNN-LSTM; seed 43; 60 epochs; no smoothing; event holdout; 250 ms purge; independent calibration',
+    save('comparison.json', dict(protocol='CNN-LSTM; seed 43; 60 epochs; no smoothing; event holdout; 250 ms purge; fitting coverage protected; independent calibration where class support exists',
         deployment_status='offline research only; March 19 deployment reference unchanged', subjects=results))
     print(json.dumps(results, indent=2))
 
@@ -213,6 +223,7 @@ def summarize(rows):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('stage', choices=['audit', 'train', 'summarize'])
+    parser.add_argument('--subject', choices=list(SESSIONS), help='Train only this subject; audit and summary always cover all subjects.')
     args = parser.parse_args()
     if args.stage == 'audit':
         print(json.dumps(audit(), indent=2))
@@ -221,6 +232,8 @@ def main():
     for row in rows:
         if sha(ROOT / row['dataset']) != row['sha256']:
             raise ValueError('Dataset changed since audit; review and audit again.')
+    if args.stage == 'train' and args.subject:
+        rows = [row for row in rows if row['subject'] == args.subject]
     (train if args.stage == 'train' else summarize)(rows)
 
 

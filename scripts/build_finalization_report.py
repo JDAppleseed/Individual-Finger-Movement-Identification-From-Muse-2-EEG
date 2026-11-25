@@ -17,7 +17,7 @@ def main():
     rows = payload['subjects']
     headers = ['Subject', 'Fit', 'Calibration', 'Test', 'Action', 'Active finger', 'Joint', 'REST recall', 'Event joint']
     lines = ['# CNN-LSTM comparison', '',
-        'Fixed 60-epoch recipe, seed 43, separate subject models, unsmoothed calibrated predictions.',
+        'Fixed 60-epoch recipe, seed 43, separate subject models, unsmoothed predictions with available calibration (identity where classes are missing).',
         'Retrospective event holdouts; no unseen-session or live-actuation claim.', '',
         '| ' + ' | '.join(headers) + ' |', '| ' + ' | '.join(['---'] * len(headers)) + ' |']
     metrics = ['action_accuracy', 'active_finger_accuracy', 'joint_accuracy', 'rest_recall', 'event_majority_joint_accuracy']
@@ -62,14 +62,14 @@ def main():
             r'On November 25, 2026, the live workflow returned to the CNN+LSTM-only path. A fixed 60-epoch, seed-43 recipe was trained separately on the latest combined datasets: 14,672 windows for 1-M16, 14,673 for 2-M16 (including the corrected April sitting), and 7,998 for 3-M16. The historical March deployment snapshot was preserved.',
             r'The outer split uses event groups with a 250 ms purge and a nominal 20\% test allocation. A nominal 10\% of the remaining eligible training pool is allocated to calibration. Calibration preserves groups and purges by maximum window duration; auxiliary REST-only sessions stay in fitting. Saved fitting/calibration/test indices passed pairwise event and raw-signal interval separation checks. No random-window fallback or individual-window calibration rebalancing is used.',
             r'\begin{table}[t]\centering\small',
-            r'\caption{November CNN+LSTM results (\%). Unsmoothed calibrated predictions; each subject has its own event holdout.}',
+            r'\caption{November CNN+LSTM results (\%). Unsmoothed predictions; each subject has its own event holdout.}',
             r'\label{tab:november-cnn}',
             r'\begin{tabular}{lrrrr}\toprule Subject & Action & Finger & Joint & REST \\\midrule']
         for row in rows:
             tex.append(row['subject'] + ' & ' + ' & '.join(f'{row[k] * 100:.2f}' for k in metrics[:4]) + r' \\')
         tex += [r'\bottomrule\end{tabular}\end{table}',
             r'Finger accuracy conditions on true movement and counts predicted REST as an error. These are classification metrics, not gated-command or hardware results. The dataset and outer test indices for 1-M16/3-M16 match their earlier initial comparison, but calibration and fitting allocation changed. The 2-M16 expanded corpus uses a different holdout and cannot be compared as a controlled delta to the March checkpoint.',
-            r'This single-seed retrospective comparison does not establish unseen-session transfer. Historical 2-M16 REST exclusions remain, 1-M16 has sparse movement-session REST evidence, and 3-M16 finger coverage is confounded with source session. Structural data vetting does not establish physiological specificity. Ensemble results below are retained as archived exploratory work, not the current runtime method.']
+            r'The corrected 1-M16 split retains its only remaining movement-session REST event in fitting. Calibration contains no REST, so action and applicability temperatures remain at identity; only the finger temperature is fit. A diagnostic doubling of the REST loss weight raises REST recall from 68.20\% to 71.13\% on the same two held-out REST events, without being selected as a new default. This single-seed retrospective comparison does not establish unseen-session transfer. Historical 2-M16 REST exclusions remain, 1-M16 has sparse movement-session REST evidence, and 3-M16 finger coverage is confounded with source session. Structural data vetting does not establish physiological specificity. Ensemble results below are retained as archived exploratory work, not the current runtime method.']
         (paper / 'finalization_20261125.tex').write_text('\n\n'.join(tex) + '\n')
 
 

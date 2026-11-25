@@ -28,10 +28,16 @@
     "device": "cpu"
   },
   "source_sha256": {
-    "2_train_model.py": "6621f3ed85b50b7f0004a9c3a2e746737845f399966f34269743609b4d525b39",
+    "2_train_model.py": "1eada25bbd148d5b81b6339425b7cd1aa846838430a111a5c614d5bcb3e2eeb2",
     "models/cnn_lstm_finger_action_net.py": "31822a352ac4d0724423958bf927ab3c7a98d6d592f8704bda7ab0f17e9178e4",
     "utils/default_recipe.py": "78c4bc253ad4a90f0904ba75583bfb9c97f2fadbd7717514bce711247da5e654",
     "utils/runtime_utils.py": "7ab1d0a3bed987ce061483d8e733acefb66e44484c0f4d2bc9426e965c72f192",
-    "utils/splitting.py": "56e1a572c00b0bf91f41a8c462d34ba5525795949df5e529280444d48914acdc"
-  }
+    "utils/splitting.py": "56e1a572c00b0bf91f41a8c462d34ba5525795949df5e529280444d48914acdc",
+    "utils/calibration_split.py": "3125ef90bc3cf3722589a5a35b52a0809da7abfd43735f1a078fd8738ce3e119"
+  },
+  "retained_run_provenance": {
+    "2-M16": "initial_attempt/protocol.json",
+    "3-M16": "initial_attempt/protocol.json"
+  },
+  "coverage_policy": "Preserve fitting action coverage per source by moving whole calibration groups; use identity temperatures for missing calibration classes."
 }
