@@ -1,0 +1,37 @@
+---
+title: "CNN-LSTM baseline restoration and repository finalization"
+date: "2026-11-25"
+summary: "AlphaHand restores its CNN-LSTM live path, audits the latest combined datasets, and reports a fixed-recipe three-subject comparison before a separate lightweight rewrite."
+---
+
+## What changed
+
+The active live inference path uses CNN-LSTM again. The original March 19 2-M16 weights, scaler, temperatures, and deployment policy remain the historical reference. Feature ensembles are retained as offline research, with no live promotion.
+
+The repository now documents the recording-to-report workflow, pins reference artifacts, separates baseline presets from research evidence, and lists removal candidates for owner review. Nothing on that removal list has been deleted. A later rewrite will start in a separate folder.
+
+## Latest combined datasets
+
+The comparison uses 14,672 windows from three recordings for 1-M16, 14,673 from four recordings for 2-M16, and 7,998 from two recordings for 3-M16. The 2-M16 corpus includes the corrected April sitting and retains its previously documented 522-window REST exclusion. Source signal and labels match the selected combined windows.
+
+Models are trained separately with the same 60-epoch CNN-LSTM recipe and seed 43. Fitting, calibration, and test event groups are separated and checked for overlapping source signal. The calibration code no longer moves individual windows across event groups or falls back to a random-window split.
+
+## Current offline comparison
+
+| Subject | Action | Active finger | Joint | REST recall |
+| --- | ---: | ---: | ---: | ---: |
+| 1-M16 | 69.41% | 82.18% | 58.72% | 0.00% |
+| 2-M16 | 79.20% | 79.16% | 76.07% | 76.35% |
+| 3-M16 | 69.08% | 57.13% | 55.12% | 73.80% |
+
+These are unsmoothed calibrated classification results on retrospective within-subject event holdouts. Finger accuracy conditions on true movement, counting predicted REST as an error. They are not hardware-command metrics or unseen-session results.
+
+The 1-M16 retrain has zero REST recall and is not a deployment candidate. 3-M16 retains weak finger separation and session-confounded class coverage. The expanded 2-M16 dataset uses a different holdout from the March reference. No new run replaces the historical deployment checkpoint.
+
+## Historical evidence and next steps
+
+The May command-policy summary used the full March development corpus, including fitting/calibration data. Its original replay outputs were not recovered, so those numbers remain historical summaries rather than newly reproduced held-out performance.
+
+The next phase must preserve raw recording/timebase integrity, event-aware splits, saved preprocessing, offline/live parity, command suppression, and immutable provenance. Prospective new-session recording and physical command validation remain necessary before claiming improved live utility.
+
+See the [repository finalization record](https://github.com/JDAppleseed/Individual-Finger-Movement-Identification-From-Muse-2-EEG/tree/restore/cnn-lstm-baseline-20261125/docs/research/finalization_20261125) for data hashes, fold counts, per-finger results, and reproducible commands.

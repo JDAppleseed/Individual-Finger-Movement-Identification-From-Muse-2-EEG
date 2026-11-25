@@ -1,0 +1,267 @@
+[
+  {
+    "path": "__pycache__",
+    "bytes": 1709974,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "visualization/__pycache__",
+    "bytes": 64309,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "tools/__pycache__",
+    "bytes": 607667,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "app/__pycache__",
+    "bytes": 112829,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "tests/__pycache__",
+    "bytes": 3161377,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "output/repo_finalize_20261125/backup/__pycache__",
+    "bytes": 321615,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "output/repo_finalize_20261125/backup/tests/__pycache__",
+    "bytes": 14677,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "utils/__pycache__",
+    "bytes": 959831,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "models/__pycache__",
+    "bytes": 27431,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "scripts/__pycache__",
+    "bytes": 426336,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "muse_streaming/__pycache__",
+    "bytes": 338904,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": ".pytest_cache",
+    "bytes": 49452,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": ".DS_Store",
+    "bytes": 18436,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "paper/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "visualization/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "tools/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "hardware/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "hardware/arduino/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "app/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": ".pytest_cache/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/.DS_Store",
+    "bytes": 10244,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/1-M16/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/1-M16/subjects/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/1-M16/subjects/1-M16 500/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/1-M16/subjects/1-M16 500/sessions/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/1-M16/subjects/1-M16 500/sessions/1-M16 500_20260216_123857_01/.DS_Store",
+    "bytes": 8196,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/1-M16/subjects/1-M16 500/sessions/combined_20260927_full/processed/reports/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/3-M16/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/3-M16/subjects/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/2-M16/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/2-M16/subjects/.DS_Store",
+    "bytes": 8196,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/2-M16/subjects/2-M16/.DS_Store",
+    "bytes": 10244,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/2-M16/subjects/2-M16/sessions/.DS_Store",
+    "bytes": 8196,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/2-M16/subjects/2-M16/sessions/2-M16_20260216_150056_01/.DS_Store",
+    "bytes": 8196,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/2-M16/subjects/2-M16/sessions/2-M16_20260216_150056_01/processed/.DS_Store",
+    "bytes": 8196,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/models/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/2-M16/subjects/2-M16/sessions/combined_20260319_081200_pruned_rest_events_0_1_2/processed/reports/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "tests/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "output/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "utils/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "docs/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "third_party/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "logs/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "muse_streaming/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "reports/.DS_Store",
+    "bytes": 6148,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "tmp/pdfs",
+    "bytes": 8044391,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "alphahand-overleaf.zip",
+    "bytes": 1292431,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "output",
+    "bytes": 4832117,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "logs",
+    "bytes": 392744341,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Projects/2-M16/subjects/2-M16/archive",
+    "bytes": 1128016870,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "ablation_runs",
+    "bytes": 67298866,
+    "status": "pending user approval; do not delete"
+  },
+  {
+    "path": "Screenshot 2026-04-16 at 9.27.01\u202fPM.png",
+    "bytes": 1574628,
+    "status": "pending user approval; do not delete"
+  }
+]

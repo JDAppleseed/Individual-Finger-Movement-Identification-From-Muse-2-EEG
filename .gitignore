@@ -201,6 +201,9 @@ calibration_state*.json
 *.pdf
 
 # Private manuscript/paper materials (local only)
+output/
+tmp/
+alphahand-overleaf.zip
 paper/
 paper_artifacts/
 paper_figures/

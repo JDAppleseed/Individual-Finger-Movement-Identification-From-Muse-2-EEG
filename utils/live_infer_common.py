@@ -810,6 +810,7 @@ def replay_ordered_windows(
     postprocess_settings: PostprocessSettings,
     runtime_config: ReplayRuntimeConfig,
     temperature_state: Optional[TemperatureScalingState] = None,
+    window_predictor: Any = None,
 ) -> dict[str, Any]:
     if runtime_config.deterministic:
         _set_deterministic_seed(0)
@@ -887,16 +888,20 @@ def replay_ordered_windows(
                 runtime_config.bad_window_max_masked_channels
             ),
         )
-        inference_result = predict_window(
-            X[idx],
-            scaler=scaler,
-            model=model,
-            device=device,
-            inference_engine=inference_engine,
-            direct_engine=direct_engine,
-            temperature_state=temperature_state,
-            prepared_window=quality.prepared_window,
-        )
+        if window_predictor is not None:
+            inference_result = window_predictor.predict_window(
+                X[idx], prepared_window=quality.prepared_window)
+        else:
+            inference_result = predict_window(
+                X[idx],
+                scaler=scaler,
+                model=model,
+                device=device,
+                inference_engine=inference_engine,
+                direct_engine=direct_engine,
+                temperature_state=temperature_state,
+                prepared_window=quality.prepared_window,
+            )
         action_probs = np.asarray(inference_result["action_probs"], dtype=float)
         finger_probs = np.asarray(inference_result["finger_probs"], dtype=float)
         action_logits = inference_result.get("action_logits")

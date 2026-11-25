@@ -837,6 +837,8 @@ def load_json(path: str) -> dict:
 
 def _load_config_file(path: Path) -> tuple[dict, dict]:
     payload, settings = load_step7_config(path)
+    if settings.get("ensemble_manifest") or payload.get("ensemble_manifest"):
+        raise ValueError("Step 7 uses the CNN-LSTM baseline. Ensemble presets are archived experiments; select a CNN-LSTM config.")
     return payload, settings
 
 

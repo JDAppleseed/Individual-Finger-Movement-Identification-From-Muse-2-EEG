@@ -1,0 +1,13 @@
+{
+  "status": "historical CNN-LSTM reference; no new live validation",
+  "subject": "2-M16",
+  "run": "20260319_075520",
+  "files": {
+    "Projects/2-M16/subjects/2-M16/winning_model/model_run/finger_action_model.pt": "dc8683313460c8de14eec28862344f51486e8cc032b260ab45d56442487616a6",
+    "Projects/2-M16/subjects/2-M16/winning_model/model_run/metrics.json": "033418996a8361b1588080920e8d66d07086917e3a482cbb0072f33f674eca1d",
+    "Projects/2-M16/subjects/2-M16/winning_model/model_run/scaler.npz": "325b219e2043d76fde485638118c26da8bf573cc491bae2aeeb2761549999628",
+    "Projects/2-M16/subjects/2-M16/winning_model/model_run/temperature_scaling.json": "fe36aad46ff904eae120123c7cd8e61d0b9b99bd814ef6bd23920d9401d18a02",
+    "Projects/2-M16/subjects/2-M16/winning_model/model_run/test_predictions.npz": "8fcaf59e6a1d25c644889547c22e612db37bc66344dfad47e6fefd0d00be88b9",
+    "Projects/2-M16/subjects/2-M16/winning_model/model_run/train_config.json": "f92f2a5f36c7ddaf830664adadcd7342149a8f316d45d918a444083b51e84a3e"
+  }
+}

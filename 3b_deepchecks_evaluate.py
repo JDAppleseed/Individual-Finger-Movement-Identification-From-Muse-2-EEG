@@ -37,7 +37,12 @@ from utils.runtime_utils import (
     apply_channel_normalizer as apply_saved_channel_normalizer,
     load_normalizer,
 )
-from utils.splitting import infer_groups, assert_no_group_overlap, assert_identifier_not_in_X
+from utils.splitting import (
+    infer_groups,
+    assert_no_group_overlap,
+    assert_identifier_not_in_X,
+    compose_split_indices,
+)
 from utils.session_layout import SessionLayout, resolve_latest_run_dir, resolve_session_dir
 
 # Pipeline handoff: this is a diagnostic companion to Step 3; it reuses the same
@@ -763,16 +768,20 @@ _print_label_summary("Filtered", y_action, y_finger)
 # ===== SAME SPLIT =========
 # =========================
 
-train_idx, test_idx = _split_with_checks(
+split_plan = compose_split_indices(
     y_action,
     y_finger,
     meta=meta,
-    seed=int(split_seed),
+    random_state=int(split_seed),
     split_mode=split_mode,
     purge_seconds=purge_seconds,
     hop_seconds=hop_seconds,
     test_size=test_size,
+    allow_fallback=False,
+    aux_rest_session_policy=str(train_cfg.get("aux_rest_session_policy", "none")),
 )
+train_idx = np.asarray(split_plan["train_idx"], dtype=np.int64)
+test_idx = np.asarray(split_plan["test_idx"], dtype=np.int64)
 if train_idx is None or test_idx is None:
     print("⚠️ Unable to create a split with multiple classes. Aborting Deepchecks.")
     raise SystemExit(2)

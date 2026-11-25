@@ -454,54 +454,32 @@ def _split_calibration_indices(
     y_finger_train = y_finger[train_idx]
     train_meta = _subset_meta(meta, train_idx, len(y_action)) if meta else {}
 
-    try:
-        fit_local, calib_local = split_indices(
-            y_action_train,
-            y_finger_train,
-            meta=train_meta if train_meta else None,
-            test_size=float(calibration_size),
-            random_state=int(random_state),
-            split_mode=str(split_mode),
-            purge_seconds=0.0,
-            hop_seconds=None,
-            allow_fallback=True,
-        )
-        fit_idx = train_idx[np.asarray(fit_local, dtype=np.int64)]
-        calib_idx = train_idx[np.asarray(calib_local, dtype=np.int64)]
-        if len(fit_idx) and len(calib_idx):
-            return _rebalance_calibration_split(
-                train_idx,
-                fit_idx,
-                calib_idx,
-                y_action,
-                calibration_size=calibration_size,
-            )
-    except Exception:
-        pass
-
-    try:
-        fit_local, calib_local = train_test_split(
-            np.arange(len(train_idx), dtype=np.int64),
-            test_size=float(calibration_size),
-            random_state=int(random_state),
-            stratify=_calibration_stratify_labels(y_action_train, y_finger_train),
-        )
-    except ValueError:
-        fit_local, calib_local = train_test_split(
-            np.arange(len(train_idx), dtype=np.int64),
-            test_size=float(calibration_size),
-            random_state=int(random_state),
-            stratify=None,
-        )
-    fit_idx = train_idx[np.asarray(fit_local, dtype=np.int64)]
-    calib_idx = train_idx[np.asarray(calib_local, dtype=np.int64)]
-    return _rebalance_calibration_split(
-        train_idx,
-        fit_idx,
-        calib_idx,
-        y_action,
-        calibration_size=calibration_size,
+    # Calibration must preserve the event/session boundary just like the outer
+    # test split. Never rebalance individual windows or fall back to random rows.
+    starts = np.asarray(train_meta.get("window_start", []), dtype=float)
+    ends = np.asarray(train_meta.get("window_end", []), dtype=float)
+    if len(starts) != len(train_idx) or len(ends) != len(train_idx):
+        raise ValueError("Calibration requires window_start/window_end metadata.")
+    durations = ends - starts
+    if not np.isfinite(durations).all() or np.any(durations <= 0):
+        raise ValueError("Calibration requires finite, positive window durations.")
+    fit_local, calib_local = split_indices(
+        y_action_train,
+        y_finger_train,
+        meta=train_meta,
+        test_size=float(calibration_size),
+        random_state=int(random_state),
+        split_mode=str(split_mode),
+        purge_seconds=float(np.max(durations)),
+        hop_seconds=None,
+        allow_fallback=False,
     )
+    if not len(fit_local) or not len(calib_local):
+        raise ValueError("Calibration split is empty after temporal purging.")
+    groups = infer_groups(train_meta, len(train_idx))
+    if str(split_mode) != "holdout_session":
+        assert_no_group_overlap(groups, fit_local, calib_local)
+    return train_idx[fit_local], train_idx[calib_local]
 
 
 def _fit_temperature(
@@ -2067,6 +2045,15 @@ def main():
                     f"Temperature scaling split: fit={len(train_fit_idx)} calib={len(calib_idx)} "
                     f"(requested={calibration_size:.3f})"
                 )
+
+        # Save exact global indices before fitting for independently auditable folds.
+        np.savez_compressed(
+            run_dir / "split_indices.npz",
+            train=np.asarray(train_idx, dtype=np.int64),
+            fit=np.asarray(train_fit_idx, dtype=np.int64),
+            calibration=np.asarray(calib_idx, dtype=np.int64),
+            test=np.asarray(test_idx, dtype=np.int64),
+        )
 
         # ===== SLICE =====
         X_train, X_test = X[train_fit_idx], X[test_idx]

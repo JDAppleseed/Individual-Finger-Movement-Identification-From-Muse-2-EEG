@@ -8,6 +8,13 @@ The included `2-M16` bundle is a reference dataset and model snapshot. It is a s
 
 ## Start Here
 
+The current cleanup restores the CNN-LSTM live path and preserves the March 19
+reference checkpoint. Start with the [November finalization record](docs/research/finalization_20261125/README.md)
+for the latest vetted datasets and subject comparisons, or the
+[documentation index](docs/README.md) for the workflow, proposed trimming, and
+requirements for the later rewrite. Ensemble studies remain archived experiments.
+
+
 Set up Python:
 
 ```bash

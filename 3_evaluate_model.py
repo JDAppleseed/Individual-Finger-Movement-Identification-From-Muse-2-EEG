@@ -1248,6 +1248,42 @@ def _build_rest_event_breakdown(
     return breakdown, flags
 
 
+def _session_temporal_order(meta, indices):
+    """Keep independent recordings contiguous when their relative clocks overlap."""
+    indices = np.asarray(indices, dtype=np.int64)
+    if "window_start" not in meta:
+        return np.arange(len(indices), dtype=np.int64)
+    starts = np.asarray(meta["window_start"])[indices]
+    if "session_id" in meta:
+        sessions = np.asarray(meta["session_id"])[indices].astype("U")
+        return np.lexsort((starts, sessions)).astype(np.int64)
+    return np.argsort(starts, kind="stable").astype(np.int64)
+
+
+def _session_temporal_segments(meta, indices):
+    """Reset state using observable gaps, without requiring event/trial labels."""
+    indices = np.asarray(indices, dtype=np.int64)
+    order = _session_temporal_order(meta, indices)
+    segments = np.arange(len(indices), dtype=np.int64)
+    if "window_start" not in meta or not len(indices):
+        return order, segments
+    starts = np.asarray(meta["window_start"], dtype=float)[indices]
+    sessions = np.asarray(meta.get("session_id", np.full(len(meta["window_start"]), "GLOBAL")))[indices]
+    hop = float(np.asarray(meta.get("step_sec", 0.05)).reshape(-1)[0])
+    if not np.isfinite(hop) or hop <= 0:
+        raise ValueError("step_sec must be positive for temporal smoothing")
+    segment = 0
+    previous = None
+    for i in order:
+        if previous is not None:
+            delta = starts[i] - starts[previous]
+            if sessions[i] != sessions[previous] or not np.isfinite(delta) or delta <= 0 or delta > hop * 1.5:
+                segment += 1
+        segments[i] = segment
+        previous = i
+    return order, segments
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -1679,6 +1715,7 @@ def main():
             "test_idx_sha256": None,
         },
         "postprocess": {
+            "smoothing_reset_policy": "session_or_time_gap_1.5_hops",
             "smooth": bool(args.smooth),
             "smooth_method": args.smooth_method,
             "smooth_window": int(args.smooth_window),
@@ -2563,26 +2600,10 @@ def main():
             finger_mode="raw" if args.smooth_action_only else "smooth",
         )
 
-        order = np.arange(len(action_probs), dtype=np.int64)
-        if "window_start" in meta:
-            try:
-                starts = np.asarray(meta["window_start"])[test_idx]
-                order = np.argsort(starts).astype(np.int64)
-            except Exception:
-                order = np.arange(len(action_probs), dtype=np.int64)
-
-        # ===== Reset by trial_id (requested) =====
-        trial_ids_for_probs = None
-        if "trial_id" in meta:
-            try:
-                trial_ids_for_probs = np.asarray(meta["trial_id"])[test_idx].astype(
-                    np.int64
-                )
-            except Exception:
-                trial_ids_for_probs = None
+        order, segment_ids_for_probs = _session_temporal_segments(meta, test_idx)
 
         smoothed_action, smoothed_finger = apply_postprocess_sequence(
-            action_probs, finger_probs, order, settings, trial_ids=trial_ids_for_probs
+            action_probs, finger_probs, order, settings, trial_ids=segment_ids_for_probs
         )
 
         # If you want "smooth action only", override finger smoothing here
