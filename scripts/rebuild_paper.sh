@@ -21,6 +21,8 @@ if [ -f docs/research/finalization_20261125/comparison.json ]; then
 fi
 
 ./run_py scripts/build_subject_release_paper.py
+./run_py scripts/build_concise_paper_figures.py
+./run_py scripts/build_paper_support_analysis.py
 
 echo "[paper] Recompiling research_paper.tex"
 cd "$REPO_ROOT/paper"
