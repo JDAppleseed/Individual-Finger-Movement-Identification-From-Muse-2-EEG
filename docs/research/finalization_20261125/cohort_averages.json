@@ -1,0 +1,35 @@
+{
+  "subject_macro": {
+    "action_accuracy": 0.7588241188102685,
+    "active_finger_accuracy": 0.7296502007574102,
+    "joint_accuracy": 0.6692685648983435,
+    "rest_recall": 0.7278393048288342
+  },
+  "pooled": {
+    "action_accuracy": 0.7695669990438465,
+    "active_finger_accuracy": 0.7663146962091051,
+    "joint_accuracy": 0.6880207621909575,
+    "rest_recall": 0.7409326424870466
+  },
+  "pooled_counts": {
+    "action_accuracy": [
+      5634,
+      7321
+    ],
+    "active_finger_accuracy": [
+      4427,
+      5777
+    ],
+    "joint_accuracy": [
+      5037,
+      7321
+    ],
+    "rest_recall": [
+      1144,
+      1544
+    ]
+  },
+  "subjects": 3,
+  "total_corpus_windows": 37343,
+  "total_holdout_windows": 7321
+}

@@ -20,6 +20,8 @@ if [ -f docs/research/finalization_20261125/comparison.json ]; then
   ./run_py scripts/build_finalization_report.py
 fi
 
+./run_py scripts/build_subject_release_paper.py
+
 echo "[paper] Recompiling research_paper.tex"
 cd "$REPO_ROOT/paper"
 latexmk -pdf -interaction=nonstopmode research_paper.tex
